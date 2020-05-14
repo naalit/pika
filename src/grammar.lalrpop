@@ -1,0 +1,35 @@
+use std::str::FromStr;
+use string_interner::Sym;
+use crate::term::*;
+
+grammar;
+
+pub Term: Term = {
+    Fun,
+    Arrow,
+    <f:Atom> <x:Atom> => Term::App(Box::new(f), Box::new(x)),
+    Atom,
+};
+
+Arrow: Term = {
+    "fn" <a:Atom> "->" <b:Term> => Term::Arrow(Box::new(a), Box::new(b)),
+}
+
+Fun: Term = {
+    "fn" <x:Var> "=>" <b:Term> => Term::Fun(x, Box::new(b)),
+}
+
+Atom: Term = {
+    Builtin => Term::Builtin(<>),
+    "Type" => Term::Type,
+    <i:Int> => Term::I32(i),
+    <v:Var> => Term::Var(v),
+    "(" <Term> ")",
+}
+
+Builtin: Builtin = {
+    "Int" => Builtin::Int,
+}
+
+Var: Sym = <s:r"[A-Za-z_][A-Za-z_0-9]*"> => INTERN.write().unwrap().get_or_intern(s);
+Int: i32 = <s:r"[0-9]+"> => i32::from_str(s).unwrap();
