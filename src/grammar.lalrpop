@@ -1,25 +1,44 @@
 use std::str::FromStr;
 use string_interner::Sym;
 use crate::term::*;
+use crate::error::{Spanned, Span};
 
 grammar;
 
-pub Term: Term = {
-    Fun,
-    Arrow,
-    <f:Atom> <x:Atom> => Term::App(Box::new(f), Box::new(x)),
-    Atom,
+pub STerm: Spanned<Term> = Spanned<Term>;
+
+Spanned<T>: Spanned<T> = {
+    <l:@L> <t:T> <r:@R> => Spanned::new(t, Span(l, r)),
 };
 
+Term: Term = {
+    Let,
+    Fun,
+    <x:Spanned<BelowAnn>> ":" <t:STerm> => Term::Ann(x, t),
+    BelowAnn,
+};
+
+BelowAnn: Term = {
+    Arrow,
+    <f:Spanned<Atom>> <x:Spanned<Atom>> => Term::App(f, x),
+    Atom,
+}
+
+Let: Term = {
+    "let" <x:Var> "=" <t:STerm> "in" <u:STerm> => Term::Let(x, t, u),
+}
+
 Arrow: Term = {
-    "fn" <a:Atom> "->" <b:Term> => Term::Arrow(Box::new(a), Box::new(b)),
+    "fn" <a:Spanned<Atom>> "->" <b:Spanned<BelowAnn>> => Term::Arrow(a, b),
 }
 
 Fun: Term = {
-    "fn" <x:Var> "=>" <b:Term> => Term::Fun(x, Box::new(b)),
+    "fn" <x:Var> "=>" <b:STerm> => Term::Fun(x, b),
 }
 
 Atom: Term = {
+    "()" => Term::Unit,
+    "(" <a:STerm> "," <b:STerm> ")" => Term::Pair(a, b),
     Builtin => Term::Builtin(<>),
     "Type" => Term::Type,
     <i:Int> => Term::I32(i),
