@@ -254,7 +254,6 @@ dependencies = [
  "lazy_static",
  "regex",
  "rustyline",
- "string-interner",
 ]
 
 [[package]]
@@ -542,15 +541,6 @@ name = "siphasher"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa8f3741c7372e75519bd9346068370c9cdaabcc1f9599cbcf2a2719352286b7"
-
-[[package]]
-name = "string-interner"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd710eadff449a1531351b0e43eb81ea404336fa2f56c777427ab0e32a4cf183"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "string_cache"

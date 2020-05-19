@@ -1,10 +1,10 @@
-use codespan_reporting::files::SimpleFiles;
 use codespan_reporting::diagnostic::{Diagnostic, Label};
-use codespan_reporting::term::{Config, emit};
+use codespan_reporting::files::SimpleFiles;
 use codespan_reporting::term::termcolor;
+use codespan_reporting::term::{emit, Config};
+use lalrpop_util::{lexer::Token, ParseError};
 use std::ops::Range;
-use lalrpop_util::{ParseError, lexer::Token};
-use std::sync::{RwLock, Arc};
+use std::sync::{Arc, RwLock};
 
 pub type FileId = usize;
 
@@ -29,6 +29,11 @@ struct SpannedInner<T>(T, Span);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spanned<T>(Arc<SpannedInner<T>>);
 impl<T> Spanned<T> {
+    pub fn try_unwrap(self) -> Result<T, Self> {
+        Arc::try_unwrap(self.0)
+            .map(|SpannedInner(x, _)| x)
+            .map_err(Spanned)
+    }
     pub fn empty(x: T) -> Self {
         Spanned::new(x, Span(0, 0))
     }
@@ -38,7 +43,7 @@ impl<T> Spanned<T> {
     pub fn span(&self) -> Span {
         (self.0).1
     }
-    pub fn copy_span(&self, x: T) -> Self {
+    pub fn copy_span<U>(&self, x: U) -> Spanned<U> {
         Spanned::new(x, self.span())
     }
 }
@@ -70,13 +75,32 @@ impl Error {
             .with_labels(vec![Label::secondary(file, span).with_message(secondary)]);
         Error(d)
     }
+    pub fn with_label(mut self, file: FileId, span: Span, msg: String) -> Self {
+        self.0
+            .labels
+            .push(Label::secondary(file, span).with_message(msg));
+        self
+    }
 
     pub fn from_lalrpop<T>(e: ParseError<usize, Token, T>, file: usize) -> Self {
         let (message, span) = match e {
-            ParseError::InvalidToken { location } => ("Invalid token".to_string(), location..location),
-            ParseError::UnrecognizedEOF { location, expected } => (format!("Unexpected EOF, expected one of {:?}", expected), location..location),
-            ParseError::UnrecognizedToken { token: (start, Token(_, s), end), expected } => (format!("Unexpected token {}, expected one of {:?}", s, expected), start..end),
-            ParseError::ExtraToken { token: (start, Token(_, s), end) } => (format!("Unexpected token {}, expected EOF", s), start..end),
+            ParseError::InvalidToken { location } => {
+                ("Invalid token".to_string(), location..location)
+            }
+            ParseError::UnrecognizedEOF { location, expected } => (
+                format!("Unexpected EOF, expected one of {:?}", expected),
+                location..location,
+            ),
+            ParseError::UnrecognizedToken {
+                token: (start, Token(_, s), end),
+                expected,
+            } => (
+                format!("Unexpected token {}, expected one of {:?}", s, expected),
+                start..end,
+            ),
+            ParseError::ExtraToken {
+                token: (start, Token(_, s), end),
+            } => (format!("Unexpected token {}, expected EOF", s), start..end),
             ParseError::User { .. } => panic!("We don't give user errors!"),
         };
         Error::new(file, format!("Parse error: {}", message), span, message)

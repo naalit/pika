@@ -1,48 +1,43 @@
 use std::str::FromStr;
-use string_interner::Sym;
-use crate::term::*;
+use crate::common::*;
+use crate::term::Builtin;
 use crate::error::{Spanned, Span};
 
 grammar;
 
-pub STerm: Spanned<Term> = Spanned<Term>;
+pub STerm: Spanned<ParseTree<'input>> = Spanned<Term>;
 
 Spanned<T>: Spanned<T> = {
     <l:@L> <t:T> <r:@R> => Spanned::new(t, Span(l, r)),
 };
 
-Term: Term = {
+Term: ParseTree<'input> = {
     Let,
     Fun,
-    <x:Spanned<BelowAnn>> ":" <t:STerm> => Term::Ann(x, t),
-    BelowAnn,
-};
-
-BelowAnn: Term = {
-    Arrow,
-    <f:Spanned<Atom>> <x:Spanned<Atom>> => Term::App(f, x),
+    Binder,
+    <f:Spanned<Atom>> <x:Spanned<Atom>> => ParseTree::App(f, x),
     Atom,
 }
 
-Let: Term = {
-    "let" <x:Var> "=" <t:STerm> "in" <u:STerm> => Term::Let(x, t, u),
+Binder: ParseTree<'input> = {
+    <x:Var> ":" <t:STerm> => ParseTree::Binder(x, t),
 }
 
-Arrow: Term = {
-    "fn" <a:Spanned<Atom>> "->" <b:Spanned<BelowAnn>> => Term::Arrow(a, b),
+Let: ParseTree<'input> = {
+    "let" <x:Var> "=" <t:STerm> "in" <u:STerm> => ParseTree::Let(x, t, u),
 }
 
-Fun: Term = {
-    "fn" <x:Var> "=>" <b:STerm> => Term::Fun(x, b),
+Fun: ParseTree<'input> = {
+    "fn" <a:Spanned<Atom>> "=>" <b:STerm> => ParseTree::Fun(a, b),
 }
 
-Atom: Term = {
-    "()" => Term::Unit,
-    "(" <a:STerm> "," <b:STerm> ")" => Term::Pair(a, b),
-    Builtin => Term::Builtin(<>),
-    "Type" => Term::Type,
-    <i:Int> => Term::I32(i),
-    <v:Var> => Term::Var(v),
+Atom: ParseTree<'input> = {
+    "()" => ParseTree::Unit,
+    "(" <a:STerm> "," <b:STerm> ")" => ParseTree::Pair(a, b),
+    Builtin => ParseTree::Builtin(<>),
+    "Type" => ParseTree::Type,
+    <i:Int> => ParseTree::I32(i),
+    <v:Var> => ParseTree::Var(v),
     "(" <Term> ")",
 }
 
@@ -50,5 +45,5 @@ Builtin: Builtin = {
     "Int" => Builtin::Int,
 }
 
-Var: Sym = <s:r"[A-Za-z_][A-Za-z_0-9]*"> => INTERN.write().unwrap().get_or_intern(s);
+Var: &'input str = r"[A-Za-z_][A-Za-z_0-9]*";
 Int: i32 = <s:r"[0-9]+"> => i32::from_str(s).unwrap();
