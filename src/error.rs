@@ -11,8 +11,8 @@ pub type FileId = usize;
 lazy_static::lazy_static! {
     pub static ref FILES: RwLock<SimpleFiles<String, String>> = RwLock::new(SimpleFiles::new());
 
-    pub static ref CONFIG: Config = Default::default();
-    pub static ref WRITER: RwLock<termcolor::StandardStream> = RwLock::new(termcolor::StandardStream::stderr(termcolor::ColorChoice::Always));
+    static ref CONFIG: Config = Default::default();
+    static ref WRITER: RwLock<termcolor::StandardStream> = RwLock::new(termcolor::StandardStream::stderr(termcolor::ColorChoice::Always));
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Hash, Eq)]
@@ -24,11 +24,12 @@ impl Into<Range<usize>> for Span {
 }
 #[derive(Clone, Debug, PartialEq)]
 struct SpannedInner<T>(T, Span);
-/// Stores an Arc internally, and DerefMut calls Arc::make_mut()
-/// i.e. behaves like a Box but with cheap cloning
+/// Stores an `Arc` internally, and DerefMut calls `Arc::make_mut()`
+/// i.e. behaves like a `Box` but with cheap cloning
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spanned<T>(Arc<SpannedInner<T>>);
 impl<T> Spanned<T> {
+    /// Calls `Arc::try_unwrap()``
     pub fn try_unwrap(self) -> Result<T, Self> {
         Arc::try_unwrap(self.0)
             .map(|SpannedInner(x, _)| x)
@@ -47,6 +48,18 @@ impl<T> Spanned<T> {
         Spanned::new(x, self.span())
     }
 }
+impl<T: Clone> Spanned<T> {
+    /// Like `try_unwrap()`, but never fails since it calls `Arc::make_mut()`, essentially cloning the value if unwrapping fails
+    pub fn force_unwrap(mut self) -> T {
+        drop(std::sync::Arc::make_mut(&mut self.0));
+        self.try_unwrap().ok().unwrap()
+    }
+
+    /// Clones the underlying value, replacing the span with a new one
+    pub fn with_span(&self, span: Span) -> Self {
+        Spanned::new((self.0).0.clone(), span)
+    }
+}
 impl<T> std::ops::Deref for Spanned<T> {
     type Target = T;
     fn deref(&self) -> &T {
@@ -59,11 +72,19 @@ impl<T: std::clone::Clone> std::ops::DerefMut for Spanned<T> {
     }
 }
 
-// pub type Result<T> = std::result::Result<T, Error>;
-
+/// An error that can be emitted to the console, with messages and a source location
 #[derive(Debug, Clone)]
 pub struct Error(Diagnostic<usize>);
 impl Error {
+    /// Formats like this:
+    /// ```text
+    ///  error: <primary>
+    ///   ┌─ <input>:1:17
+    ///   │
+    /// 1 │ let x = 32 + 54
+    ///   │         -- <secondary>
+    ///   │
+    /// ```
     pub fn new(
         file: FileId,
         primary: impl Into<String>,
@@ -75,6 +96,8 @@ impl Error {
             .with_labels(vec![Label::secondary(file, span).with_message(secondary)]);
         Error(d)
     }
+
+    /// Add a label to the `Error`
     pub fn with_label(mut self, file: FileId, span: Span, msg: String) -> Self {
         self.0
             .labels
@@ -106,6 +129,7 @@ impl Error {
         Error::new(file, format!("Parse error: {}", message), span, message)
     }
 
+    /// Writes the error to the console
     pub fn write(&self) -> std::io::Result<()> {
         emit(
             &mut *WRITER.write().unwrap(),

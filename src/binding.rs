@@ -1,30 +1,61 @@
+use crate::error::{Error, FileId, Spanned};
+use crate::term::*;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+/// An index into the pool of interned strings held by a `Bindings` object
+///
+/// It's the size of a u32 but is optimized for things like `Option<Sym>` (because it has a `NonZeroU32` inside)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Sym(NonZeroU32);
+impl Sym {
+    /// Gets the number corresponding to this symbol, so we can show the user that two symbols with the same name are distinct
+    pub fn num(self) -> u32 {
+        self.0.get()
+    }
+}
 
+/// They used a variable that wasn't in scope
 #[derive(Clone, Debug)]
-pub struct NameError(String);
+pub struct NameError(Spanned<String>);
+impl NameError {
+    pub fn to_error(&self, file: FileId) -> Error {
+        Error::new(
+            file,
+            format!("Error: variable not found: {}", *self.0),
+            self.0.span(),
+            "not found",
+        )
+    }
+}
 
 /// Implements globally-unique binding - every bound variable is unique, and we can freshen them if we copy it
-/// That means we don't ever have to worry about capture-avoidance outside of this module
+/// That means we don't ever have to worry about capture-avoidance outside of this module and `Value::cloned()`
 #[derive(Default, Debug, Clone)]
 pub struct Bindings {
     /// It's possible this is a memory problem (storing each string twice), but if so we'll deal with it then
     strings: HashMap<String, usize>,
     string_pool: Vec<String>,
-    /// For every Sym(i), the corresponding string lives at string_pool[bindings[i - 1] as usize]
-    /// -1 b/c it's a NonZeroU32, and it stores u32's for memory friendliness
+    /// For every `Sym(i)`, the corresponding string lives at `string_pool[bindings[i - 1] as usize]`
+    /// `-1` because it's a `NonZeroU32`, and it stores `u32`s for memory friendliness
     bindings: Vec<u32>,
 }
 impl Bindings {
+    /// Creates a new symbol with the same name as `s`, but a fresh value
+    pub fn fresh(&mut self, s: Sym) -> Sym {
+        let pool_idx = *self.bindings.get(s.0.get() as usize - 1).expect("Symbol passed to fresh() too large, did you create it with a different Bindings instance?");
+        let u = self.bindings.len();
+        self.bindings.push(pool_idx as u32);
+        Sym(NonZeroU32::new(u as u32 + 1).expect("unreachable"))
+    }
+
+    /// Creates a `Bindings` object and resolves all names in `t`, returning the Bindings and the generated `Term`
     pub fn resolve_names<'p>(t: STree<'p>) -> Result<(Self, STerm), NameError> {
         let s = Bindings::default();
         let mut env = NEnv::new(s);
         let t = t
             .resolve_names(&mut env)
-            .map_err(|x| NameError(x.to_string()))?;
+            .map_err(|x| NameError(x.copy_span(x.to_string())))?;
         let s = env.bindings;
         Ok((s, t))
     }
@@ -52,15 +83,15 @@ impl Bindings {
     }
 }
 
-use crate::error::Spanned;
-use crate::term::*;
-
 /// The AST before name resolution
+///
+/// This is what the parser generates. All names are stored as string slices
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseTree<'p> {
     Unit,                               // ()
+    The(STree<'p>, STree<'p>),          // the T x
     Let(&'p str, STree<'p>, STree<'p>), // let x = y in z
-    Binder(&'p str, STree<'p>),         // x: T
+    Binder(&'p str, Option<STree<'p>>), // x: T
     Var(&'p str),                       // a
     I32(i32),                           // 3
     Type,                               // Type
@@ -71,11 +102,11 @@ pub enum ParseTree<'p> {
 }
 type STree<'p> = Spanned<ParseTree<'p>>;
 
-/// Implements scoping with a Vec instead of a HashMap. We search from the back.
+/// Implements scoping with a Vec instead of a HashMap. We search from the back, so we can use it like a stack.
 struct NEnv<'p> {
     symbols: Vec<(&'p str, Sym)>,
     /// Stores the length of `symbols` where we left off in the enclosing scope
-    /// That way, we don't have to do anything extra when we add to `symbols`, and we can just `resize()` it when we `pop()`
+    /// That way, we don't have to do anything extra when we add to `symbols`, and we can just `resize()` it when we `pop()` the scope
     scopes: Vec<usize>,
     bindings: Bindings,
 }
@@ -111,16 +142,17 @@ impl<'p> NEnv<'p> {
 }
 
 impl<'p> STree<'p> {
-    fn resolve_names(self, env: &mut NEnv<'p>) -> Result<STerm, &'p str> {
+    fn resolve_names(self, env: &mut NEnv<'p>) -> Result<STerm, Spanned<&'p str>> {
         use ParseTree::*;
         let span = self.span();
         Ok(Spanned::new(
-            match self.try_unwrap().unwrap() {
+            match self.force_unwrap() {
                 Unit => Term::Unit,
                 Type => Term::Type,
                 Builtin(b) => Term::Builtin(b),
                 I32(i) => Term::I32(i),
-                Var(x) => Term::Var(env.get(x).ok_or(x)?),
+                Var(x) => Term::Var(env.get(x).ok_or(Spanned::new(x, span))?),
+                The(t, u) => Term::The(t.resolve_names(env)?, u.resolve_names(env)?),
                 Let(v, t, u) => {
                     env.push();
                     // Not recursive (yet, at least)
@@ -133,7 +165,7 @@ impl<'p> STree<'p> {
                 }
                 Binder(x, t) => {
                     // Binders aren't recursive in their types
-                    let t = t.resolve_names(env)?;
+                    let t = t.map(|t| t.resolve_names(env)).transpose()?;
                     Term::Binder(env.create(x), t)
                 }
                 Fun(arg, body) => {
@@ -146,13 +178,11 @@ impl<'p> STree<'p> {
                 }
                 App(f, x) => Term::App(f.resolve_names(env)?, x.resolve_names(env)?),
                 Pair(x, y) => {
-                    // Pairs can be dependent, so we need a scope
-                    env.push();
+                    // Pairs can be dependent, so we can have binders
+                    // But, pairs don't have an isolated scope, their definitions leak out
                     let x = x.resolve_names(env)?;
                     let y = y.resolve_names(env)?;
-                    let p = Term::Pair(x, y);
-                    env.pop();
-                    p
+                    Term::Pair(x, y)
                 }
             },
             span,

@@ -14,21 +14,31 @@ Spanned<T>: Spanned<T> = {
 Term: ParseTree<'input> = {
     Let,
     Fun,
+    The,
     Binder,
     <f:Spanned<Atom>> <x:Spanned<Atom>> => ParseTree::App(f, x),
     Atom,
 }
 
+The: ParseTree<'input> = {
+    "the" <t:Spanned<Atom>> <u:Spanned<Atom>> => ParseTree::The(t, u),
+}
+
 Binder: ParseTree<'input> = {
-    <x:Var> ":" <t:STerm> => ParseTree::Binder(x, t),
+    <x:Var> ":" <t:STerm?> => ParseTree::Binder(x, t),
 }
 
 Let: ParseTree<'input> = {
     "let" <x:Var> "=" <t:STerm> "in" <u:STerm> => ParseTree::Let(x, t, u),
 }
 
+Pat: ParseTree<'input> = {
+    Binder,
+    Atom,
+}
+
 Fun: ParseTree<'input> = {
-    "fn" <a:Spanned<Atom>> "=>" <b:STerm> => ParseTree::Fun(a, b),
+    "fn" <a:Spanned<Pat>> "=>" <b:STerm> => ParseTree::Fun(a, b),
 }
 
 Atom: ParseTree<'input> = {

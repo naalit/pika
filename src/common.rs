@@ -1,7 +1,7 @@
 pub use crate::binding::{Bindings, ParseTree, Sym};
 use std::fmt;
 
-/// std::fmt::Display, but with context (Bindings)
+/// `std::fmt::Display`, but with context (`Bindings`)
 pub trait CDisplay {
     fn fmt(&self, f: &mut fmt::Formatter, b: &Bindings) -> fmt::Result;
 }
