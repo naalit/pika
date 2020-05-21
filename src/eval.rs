@@ -167,6 +167,7 @@ impl Value {
                     Value::Fun(args, body) => {
                         args.do_match(&x, ctx);
                         body.update(ctx);
+                        *self = body.cloned(ctx);
                     }
                     // Still not a function
                     _ => (),
@@ -184,16 +185,16 @@ impl CDisplay for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter, b: &Bindings) -> std::fmt::Result {
         match self {
             Value::Unit => write!(f, "()"),
-            Value::Binder(x, None) => write!(f, "({}:)", b.resolve(*x)),
-            Value::Binder(x, Some(t)) => write!(f, "{}: {}", b.resolve(*x), WithContext(b, &**t)),
-            Value::Var(s) => write!(f, "{}", b.resolve(*s)),
+            Value::Binder(x, None) => write!(f, "({}{}:)", b.resolve(*x), x.num()),
+            Value::Binder(x, Some(t)) => write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t)),
+            Value::Var(s) => write!(f, "{}{}", b.resolve(*s), s.num()),
             Value::I32(i) => write!(f, "{}", i),
             Value::Type => write!(f, "Type"),
             Value::Builtin(b) => write!(f, "{:?}", b),
             Value::Fun(x, y) => {
                 write!(f, "fn {} => {}", WithContext(b, &**x), WithContext(b, &**y))
             }
-            Value::App(x, y) => write!(f, "{}({})", WithContext(b, &**x), WithContext(b, &**y)),
+            Value::App(x, y) => write!(f, "({})({})", WithContext(b, &**x), WithContext(b, &**y)),
             Value::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
         }
     }

@@ -10,7 +10,7 @@ use lalrpop_util::*;
 lalrpop_mod!(pub grammar);
 
 fn main() {
-    // A simpl REPL
+    // A simple REPL
     let config = rustyline::Config::builder().auto_add_history(true).build();
     let mut rl = rustyline::Editor::<()>::with_config(config);
     let parser = grammar::STermParser::new();
