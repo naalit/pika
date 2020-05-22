@@ -42,7 +42,7 @@ impl CDisplay for Term {
             Term::I32(i) => write!(f, "{}", i),
             Term::Type => write!(f, "Type"),
             Term::Builtin(b) => write!(f, "{:?}", b),
-            Term::Fun(x, y) => write!(f, "fn {} => {}", WithContext(b, &**x), WithContext(b, &**y)),
+            Term::Fun(x, y) => write!(f, "fun {} => {}", WithContext(b, &**x), WithContext(b, &**y)),
             Term::App(x, y) => write!(f, "{}({})", WithContext(b, &**x), WithContext(b, &**y)),
             Term::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
         }

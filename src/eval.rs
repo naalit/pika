@@ -192,7 +192,7 @@ impl CDisplay for Value {
             Value::Type => write!(f, "Type"),
             Value::Builtin(b) => write!(f, "{:?}", b),
             Value::Fun(x, y) => {
-                write!(f, "fn {} => {}", WithContext(b, &**x), WithContext(b, &**y))
+                write!(f, "fun {} => {}", WithContext(b, &**x), WithContext(b, &**y))
             }
             Value::App(x, y) => write!(f, "({})({})", WithContext(b, &**x), WithContext(b, &**y)),
             Value::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),

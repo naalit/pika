@@ -2,8 +2,13 @@ use std::str::FromStr;
 use crate::common::*;
 use crate::term::Builtin;
 use crate::error::{Spanned, Span};
+use lalrpop_util::ParseError;
 
 grammar;
+
+extern {
+    type Error = Spanned<String>;
+}
 
 pub STerm: Spanned<ParseTree<'input>> = Spanned<Term>;
 
@@ -16,7 +21,11 @@ Term: ParseTree<'input> = {
     Fun,
     The,
     Binder,
-    <f:Spanned<Atom>> <x:Spanned<Atom>> => ParseTree::App(f, x),
+    App,
+}
+
+App: ParseTree<'input> = {
+    <f:Spanned<App>> <x:Spanned<Atom>> => ParseTree::App(f, x),
     Atom,
 }
 
@@ -32,13 +41,38 @@ Let: ParseTree<'input> = {
     "let" <x:Var> "=" <t:STerm> "in" <u:STerm> => ParseTree::Let(x, t, u),
 }
 
-Pat: ParseTree<'input> = {
-    Binder,
-    Atom,
+Binder2: Option<Spanned<ParseTree<'input>>> = {
+    ":" <STerm?>,
+}
+/// a b c : T --> (a:T) (b:T) (c:T)
+MultiBinder: Vec<Spanned<ParseTree<'input>>> = {
+    <v:Spanned<Atom>+> <t:Binder2?> =>? if let Some(t) = t {
+        let mut r = Vec::new();
+        for i in v {
+            let span = i.span();
+            if let ParseTree::Var(i) = i.force_unwrap() {
+                r.push(Spanned::new(ParseTree::Binder(i, t.clone()), span));
+            } else {
+                return Err(ParseError::User {
+                    error: Spanned::new(": can only be used with binders".to_string(), span),
+                });
+            }
+        }
+        Ok(r)
+    } else {
+        Ok(v)
+    },
+}
+
+SpanToo<T>: (T, Span) = {
+    <l:@L> <t:T> <r:@R> => (t, Span(l, r)),
 }
 
 Fun: ParseTree<'input> = {
-    "fn" <a:Spanned<Pat>> "=>" <b:STerm> => ParseTree::Fun(a, b),
+    "fun" <a:MultiBinder> "=>" <b:SpanToo<Term>> => {
+        let (b, bs) = b;
+        a.into_iter().rfold(b, |b, a| ParseTree::Fun(a, Spanned::new(b, bs)))
+    },
 }
 
 Atom: ParseTree<'input> = {
@@ -46,8 +80,8 @@ Atom: ParseTree<'input> = {
     "(" <a:STerm> "," <b:STerm> ")" => ParseTree::Pair(a, b),
     Builtin => ParseTree::Builtin(<>),
     "Type" => ParseTree::Type,
-    <i:Int> => ParseTree::I32(i),
-    <v:Var> => ParseTree::Var(v),
+    Int => ParseTree::I32(<>),
+    Var => ParseTree::Var(<>),
     "(" <Term> ")",
 }
 

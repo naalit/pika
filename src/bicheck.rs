@@ -41,6 +41,8 @@ pub enum TypeError {
     NotSubtype(Spanned<Value>, Value),
     /// `NotSubtype` with flipped span information
     NotSubtypeF(Value, Spanned<Value>),
+    /// Something that isn't a type was used as a type
+    NotType(Spanned<Value>),
     /// We couldn't find a type for the given variable
     /// Currently, this only occurs when using bindings without a type, where we couldn't infer the type
     NotFound(Spanned<Sym>),
@@ -62,6 +64,12 @@ impl TypeError {
                 format!("Type error: Not a function type: '{}", WithContext(b, &*t)),
                 t.span(),
                 "Not a function",
+            ),
+            TypeError::NotType(t) => Error::new(
+                file,
+                format!("Type error: Not a type: '{}", WithContext(b, &*t)),
+                t.span(),
+                "This was used as a type",
             ),
             TypeError::NotSubtype(sub, sup) => Error::new(
                 file,
@@ -105,6 +113,9 @@ impl CDisplay for TypeError {
             ),
             TypeError::NotFunction(t) => {
                 write!(f, "Not a function type: '{}'", WithContext(b, &**t))
+            }
+            TypeError::NotType(t) => {
+                write!(f, "Not a type: '{}'", WithContext(b, &**t))
             }
             TypeError::NotSubtype(sub, sup) => write!(
                 f,
@@ -192,9 +203,11 @@ pub fn check(term: &STerm, typ: &Value, env: &mut TEnv) -> Result<(), TypeError>
     println!("check ({}) :: ({})", WithContext(&env.ctx.bindings, &**term), WithContext(&env.ctx.bindings, typ));
 
     match (&**term, typ) {
+        (Term::Binder(_, Some(t)), _) => check(t, typ, env),
+
         (_, Value::Type) => {
             let t = term.reduce(&mut env.ctx);
-            if t.is_type() { Ok(()) } else { Err(TypeError::NotSubtype(term.copy_span(t), Value::Type)) }
+            if t.is_type() { Ok(()) } else { Err(TypeError::NotType(term.copy_span(t))) }
         }
 
         (Term::Unit, Value::Unit) => Ok(()),
@@ -208,7 +221,6 @@ pub fn check(term: &STerm, typ: &Value, env: &mut TEnv) -> Result<(), TypeError>
         // As far as we know, it could be any type
         (Term::Binder(_, None), _) if typ.subtype_of(&Value::Type, env) => Ok(()),
 
-        (Term::Binder(_, Some(t)), _) => check(t, typ, env),
         (Term::Fun(x, b), Value::Fun(y, to)) => {
             // Make sure it's well typed before reducing it
             check(x, &Value::Type, env)?;

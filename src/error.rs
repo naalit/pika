@@ -88,7 +88,7 @@ impl Error {
     pub fn new(
         file: FileId,
         primary: impl Into<String>,
-        span: impl Into<Range<usize>>,
+        span: Span,
         secondary: impl Into<String>,
     ) -> Self {
         let d = Diagnostic::error()
@@ -105,26 +105,26 @@ impl Error {
         self
     }
 
-    pub fn from_lalrpop<T>(e: ParseError<usize, Token, T>, file: usize) -> Self {
+    pub fn from_lalrpop(e: ParseError<usize, Token, Spanned<String>>, file: usize) -> Self {
         let (message, span) = match e {
             ParseError::InvalidToken { location } => {
-                ("Invalid token".to_string(), location..location)
+                ("Invalid token".to_string(), Span(location, location))
             }
             ParseError::UnrecognizedEOF { location, expected } => (
                 format!("Unexpected EOF, expected one of {:?}", expected),
-                location..location,
+                Span(location, location),
             ),
             ParseError::UnrecognizedToken {
                 token: (start, Token(_, s), end),
                 expected,
             } => (
                 format!("Unexpected token {}, expected one of {:?}", s, expected),
-                start..end,
+                Span(start, end),
             ),
             ParseError::ExtraToken {
                 token: (start, Token(_, s), end),
-            } => (format!("Unexpected token {}, expected EOF", s), start..end),
-            ParseError::User { .. } => panic!("We don't give user errors!"),
+            } => (format!("Unexpected token {}, expected EOF", s), Span(start, end)),
+            ParseError::User { error } => (error.to_string(), error.span())
         };
         Error::new(file, format!("Parse error: {}", message), span, message)
     }
