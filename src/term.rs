@@ -1,20 +1,23 @@
 use crate::common::*;
+use crate::error::Spanned;
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum Builtin {
     Int,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Def(pub Spanned<Sym>, pub STerm);
+
 /// A spanned term. Most terms will have this type
-pub type STerm = crate::error::Spanned<Term>;
+pub type STerm = Spanned<Term>;
 
 /// A `Term` represents a type or term `before` reduction.
 /// We do type checking on `Term`s, and when we want to use it as a type we `reduce()` it to a `Value`
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Term {
     Unit,                       // ()
     The(STerm, STerm),          // the T x
-    Let(Sym, STerm, STerm),     // let x = y in z
     Binder(Sym, Option<STerm>), // x: T
     Var(Sym),                   // a
     I32(i32),                   // 3
@@ -28,13 +31,6 @@ impl CDisplay for Term {
     fn fmt(&self, f: &mut std::fmt::Formatter, b: &Bindings) -> std::fmt::Result {
         match self {
             Term::Unit => write!(f, "()"),
-            Term::Let(s, x, y) => write!(
-                f,
-                "let {} = {} in {}",
-                b.resolve(*s),
-                WithContext(b, &**x),
-                WithContext(b, &**y)
-            ),
             Term::The(t, u) => write!(f, "the {} {}", WithContext(b, &**t), WithContext(b, &**u)),
             Term::Binder(x, None) => write!(f, "({}{}:)", b.resolve(*x), x.num()),
             Term::Binder(x, Some(t)) => write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t)),

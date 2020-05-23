@@ -17,6 +17,7 @@ lalrpop-util = "*"
 regex = "1"
 codespan-reporting = "*"
 rustyline = "*"
+salsa = "*"
 
 [build-dependencies]
 lalrpop = { version = "*", features = ["lexer"]}

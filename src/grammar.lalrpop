@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use crate::common::*;
-use crate::term::Builtin;
+use crate::term::*;
+use crate::binding::ParseDef;
 use crate::error::{Spanned, Span};
 use lalrpop_util::ParseError;
 
@@ -10,14 +11,46 @@ extern {
     type Error = Spanned<String>;
 }
 
-pub STerm: Spanned<ParseTree<'input>> = Spanned<Term>;
+match {
+    r"[ \t\r]*" => {},
+    r"#[^\n\r]*[\n\r]*" => {},
+    _
+}
+
+Lines<T>: Vec<T> = {
+    "\n"* <v:(<T> "\n"+)*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            let mut v = v;
+            v.push(e);
+            v
+        }
+    }
+}
+
+pub Defs: Vec<ParseDef<'input>> = Lines<Def>;
+
+Def: ParseDef<'input> = {
+    <l:Spanned<Var>> ":" <t:STerm> "=" <r:STerm> => {
+        let span = Span(t.span().0, r.span().1);
+        ParseDef(l, Spanned::new(ParseTree::The(t, r), span))
+    },
+    <l:Spanned<Var>> ":" "=" <r:STerm> => ParseDef(l, r),
+}
+
+NotFun: ParseTree<'input> = {
+    The,
+    Binder,
+    App,
+}
+
+STerm: Spanned<ParseTree<'input>> = Spanned<Term>;
 
 Spanned<T>: Spanned<T> = {
     <l:@L> <t:T> <r:@R> => Spanned::new(t, Span(l, r)),
 };
 
 Term: ParseTree<'input> = {
-    Let,
     Fun,
     The,
     Binder,
@@ -35,10 +68,6 @@ The: ParseTree<'input> = {
 
 Binder: ParseTree<'input> = {
     <x:Var> ":" <t:STerm?> => ParseTree::Binder(x, t),
-}
-
-Let: ParseTree<'input> = {
-    "let" <x:Var> "=" <t:STerm> "in" <u:STerm> => ParseTree::Let(x, t, u),
 }
 
 Binder2: Option<Spanned<ParseTree<'input>>> = {

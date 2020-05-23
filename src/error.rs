@@ -1,5 +1,5 @@
 use codespan_reporting::diagnostic::{Diagnostic, Label};
-use codespan_reporting::files::SimpleFiles;
+use codespan_reporting::files::{SimpleFile, Files as FilesT};
 use codespan_reporting::term::termcolor;
 use codespan_reporting::term::{emit, Config};
 use lalrpop_util::{lexer::Token, ParseError};
@@ -8,8 +8,57 @@ use std::sync::{Arc, RwLock};
 
 pub type FileId = usize;
 
+pub struct Files {
+    files: Vec<SimpleFile<String, String>>,
+}
+
+impl Files {
+    pub fn new() -> Files {
+        Files { files: Vec::new() }
+    }
+
+    pub fn add(&mut self, name: String, source: String) -> FileId {
+        let file_id = self.files.len();
+        self.files.push(SimpleFile::new(name, source));
+        file_id
+    }
+
+    /// Get the file corresponding to the given id.
+    pub fn get(&self, file_id: FileId) -> Option<&SimpleFile<String, String>> {
+        self.files.get(file_id)
+    }
+
+    pub fn set_source(&mut self, file_id: FileId, source: String) {
+        let f = self.files.get_mut(file_id).unwrap();
+        let name = f.name().to_string();
+        *f = SimpleFile::new(name, source);
+    }
+}
+
+impl<'a> FilesT<'a> for Files {
+    type FileId = FileId;
+    type Name = &'a str;
+    type Source = &'a str;
+
+    fn name(&self, file_id: usize) -> Option<&str> {
+        Some(self.get(file_id)?.name().as_ref())
+    }
+
+    fn source(&self, file_id: usize) -> Option<&str> {
+        Some(self.get(file_id)?.source().as_ref())
+    }
+
+    fn line_index(&self, file_id: usize, byte_index: usize) -> Option<usize> {
+        self.get(file_id)?.line_index((), byte_index)
+    }
+
+    fn line_range(&self, file_id: usize, line_index: usize) -> Option<Range<usize>> {
+        self.get(file_id)?.line_range((), line_index)
+    }
+}
+
 lazy_static::lazy_static! {
-    pub static ref FILES: RwLock<SimpleFiles<String, String>> = RwLock::new(SimpleFiles::new());
+    pub static ref FILES: RwLock<Files> = RwLock::new(Files::new());
 
     static ref CONFIG: Config = Default::default();
     static ref WRITER: RwLock<termcolor::StandardStream> = RwLock::new(termcolor::StandardStream::stderr(termcolor::ColorChoice::Always));
@@ -22,11 +71,11 @@ impl Into<Range<usize>> for Span {
         self.0..self.1
     }
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SpannedInner<T>(T, Span);
 /// Stores an `Arc` internally, and DerefMut calls `Arc::make_mut()`
 /// i.e. behaves like a `Box` but with cheap cloning
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Spanned<T>(Arc<SpannedInner<T>>);
 impl<T> Spanned<T> {
     /// Calls `Arc::try_unwrap()``
@@ -75,6 +124,22 @@ impl<T: std::clone::Clone> std::ops::DerefMut for Spanned<T> {
 /// An error that can be emitted to the console, with messages and a source location
 #[derive(Debug, Clone)]
 pub struct Error(Diagnostic<usize>);
+impl PartialEq for Error {
+    fn eq(&self, other: &Error) -> bool {
+        self.0.message == other.0.message
+        && self.0.labels.iter().zip(other.0.labels.iter()).fold(true, |acc, (a, b)| {
+            acc
+            && a.style == b.style
+            && a.file_id == b.file_id
+            && a.range == b.range
+            && a.message == b.message
+        })
+        && self.0.notes == other.0.notes
+        && self.0.code == other.0.code
+        && self.0.severity == other.0.severity
+    }
+}
+impl Eq for Error {}
 impl Error {
     /// Formats like this:
     /// ```text

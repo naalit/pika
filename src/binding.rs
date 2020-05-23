@@ -3,15 +3,56 @@ use crate::term::*;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+/// Represents an interned string directly
+///
+/// Same size properties as Sym
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RawSym(NonZeroU32);
+impl RawSym {
+    fn new(idx: usize) -> Self {
+        RawSym(NonZeroU32::new(
+            idx as u32 + 1
+        ).expect("unreachable"))
+    }
+    fn idx(self) -> usize {
+        self.0.get() as usize - 1
+    }
+}
+
 /// An index into the pool of interned strings held by a `Bindings` object
 ///
 /// It's the size of a u32 but is optimized for things like `Option<Sym>` (because it has a `NonZeroU32` inside)
+/// The 18 least significant bits represent the raw symbol (interned string), the top 14 the instance of that symbol
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Sym(NonZeroU32);
 impl Sym {
+    fn from_parts(raw: RawSym, num: u32) -> Self {
+        let idx = raw.idx();
+        if idx >= 1 << 18 {
+            panic!("Too many unique identifiers!");
+        }
+        if num >= 1 << 14 {
+            panic!("Too many instances of identifier {}!", idx);
+        }
+        Sym(NonZeroU32::new(
+            (num << 18)
+            | idx as u32
+            + 1
+        ).expect("unreachable"))
+    }
+    fn with_num(self, num: u32) -> Self {
+        Sym::from_parts(self.raw(), num)
+    }
+
     /// Gets the number corresponding to this symbol, so we can show the user that two symbols with the same name are distinct
     pub fn num(self) -> u32 {
-        self.0.get()
+        (self.0.get() - 1) >> 18
+    }
+
+    pub fn raw(self) -> RawSym {
+        RawSym(NonZeroU32::new(
+            ((self.0.get() - 1) & ((1 << 18) - 1)) + 1
+        ).expect("unreachable"))
     }
 }
 
@@ -31,57 +72,74 @@ impl NameError {
 
 /// Implements globally-unique binding - every bound variable is unique, and we can freshen them if we copy it
 /// That means we don't ever have to worry about capture-avoidance outside of this module and `Value::cloned()`
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Bindings {
     /// It's possible this is a memory problem (storing each string twice), but if so we'll deal with it then
-    strings: HashMap<String, usize>,
+    strings: HashMap<String, RawSym>,
     string_pool: Vec<String>,
-    /// For every `Sym(i)`, the corresponding string lives at `string_pool[bindings[i - 1] as usize]`
-    /// `-1` because it's a `NonZeroU32`, and it stores `u32`s for memory friendliness
-    bindings: Vec<u32>,
+    nums: HashMap<RawSym, u32>,
 }
 impl Bindings {
-    /// Creates a new symbol with the same name as `s`, but a fresh value
-    pub fn fresh(&mut self, s: Sym) -> Sym {
-        let pool_idx = *self.bindings.get(s.0.get() as usize - 1).expect("Symbol passed to fresh() too large, did you create it with a different Bindings instance?");
-        let u = self.bindings.len();
-        self.bindings.push(pool_idx as u32);
-        Sym(NonZeroU32::new(u as u32 + 1).expect("unreachable"))
+    /// Don't do this if you're holding symbols somewhere!
+    pub fn reset(&mut self) {
+        *self = Default::default();
     }
 
-    /// Creates a `Bindings` object and resolves all names in `t`, returning the Bindings and the generated `Term`
-    pub fn resolve_names<'p>(t: STree<'p>) -> Result<(Self, STerm), NameError> {
-        let s = Bindings::default();
-        let mut env = NEnv::new(s);
+    pub fn raw(&mut self, s: String) -> RawSym {
+        self.strings.get(&s).cloned().unwrap_or_else(|| {
+            let i = RawSym::new(self.string_pool.len());
+            self.strings.insert(s.clone(), i);
+            self.string_pool.push(s);
+            i
+        })
+    }
+
+    /// Creates a new symbol with the same name as `s`, but a fresh value
+    pub fn fresh(&mut self, s: Sym) -> Sym {
+        let u = self.nums.get_mut(&s.raw()).expect("Symbol not in Bindings!");
+        *u += 1;
+        s.with_num(*u - 1)
+    }
+
+    pub fn resolve_defs<'p>(&mut self, t: Vec<ParseDef<'p>>) -> Vec<Result<Def, NameError>> {
+        let mut env = NEnv::new(self);
+        t
+            .into_iter()
+            .map(|ParseDef(lhs, rhs)| {
+                let rhs = rhs.resolve_names(&mut env).map_err(|x| NameError(x.copy_span(x.to_string())))?;
+                let lhs = lhs.copy_span(env.create(&lhs));
+                Ok(Def(lhs, rhs))
+            })
+            .collect()
+    }
+
+    pub fn resolve_names<'p>(&mut self, t: STree<'p>) -> Result<STerm, NameError> {
+        let mut env = NEnv::new(self);
         let t = t
             .resolve_names(&mut env)
             .map_err(|x| NameError(x.copy_span(x.to_string())))?;
-        let s = env.bindings;
-        Ok((s, t))
+        Ok(t)
     }
 
     /// Create a new symbol. It's guaranteed to be unique to all other symbols created with create()
     pub fn create(&mut self, s: String) -> Sym {
-        let i = self.strings.get(&s).cloned().unwrap_or_else(|| {
-            let i = self.string_pool.len();
-            self.strings.insert(s.clone(), i);
-            self.string_pool.push(s);
-            i
-        });
-        let u = self.bindings.len();
-        self.bindings.push(i as u32);
-        Sym(NonZeroU32::new(u as u32 + 1).expect("unreachable"))
+        let raw = self.raw(s);
+        let u = self.nums.entry(raw).or_insert(0);
+        *u += 1;
+        Sym::from_parts(raw, *u - 1)
     }
 
     /// This doesn't return an Option, because only the Bindings can create symbols, and it adds them to `self.bindings`
     /// Therefore, if you pass a symbol created by another Bindings instance, this may panic
     pub fn resolve(&self, s: Sym) -> &str {
-        let pool_idx = *self.bindings.get(s.0.get() as usize - 1).expect("Symbol passed to resolve() too large, did you create it with a different Bindings instance?");
         self.string_pool
-            .get(pool_idx as usize)
-            .expect("unreachable")
+            .get(s.raw().idx())
+            .expect("String referred to by symbol not in Bindings interned string table!")
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseDef<'p>(pub Spanned<&'p str>, pub Spanned<ParseTree<'p>>);
 
 /// The AST before name resolution
 ///
@@ -90,7 +148,6 @@ impl Bindings {
 pub enum ParseTree<'p> {
     Unit,                               // ()
     The(STree<'p>, STree<'p>),          // the T x
-    Let(&'p str, STree<'p>, STree<'p>), // let x = y in z
     Binder(&'p str, Option<STree<'p>>), // x: T
     Var(&'p str),                       // a
     I32(i32),                           // 3
@@ -103,15 +160,15 @@ pub enum ParseTree<'p> {
 type STree<'p> = Spanned<ParseTree<'p>>;
 
 /// Implements scoping with a Vec instead of a HashMap. We search from the back, so we can use it like a stack.
-struct NEnv<'p> {
+struct NEnv<'p, 'b> {
     symbols: Vec<(&'p str, Sym)>,
     /// Stores the length of `symbols` where we left off in the enclosing scope
     /// That way, we don't have to do anything extra when we add to `symbols`, and we can just `resize()` it when we `pop()` the scope
     scopes: Vec<usize>,
-    bindings: Bindings,
+    bindings: &'b mut Bindings,
 }
-impl<'p> NEnv<'p> {
-    fn new(bindings: Bindings) -> Self {
+impl<'p, 'b> NEnv<'p, 'b> {
+    fn new(bindings: &'b mut Bindings) -> Self {
         NEnv {
             symbols: Vec::new(),
             scopes: Vec::new(),
@@ -142,7 +199,7 @@ impl<'p> NEnv<'p> {
 }
 
 impl<'p> STree<'p> {
-    fn resolve_names(self, env: &mut NEnv<'p>) -> Result<STerm, Spanned<&'p str>> {
+    fn resolve_names<'b>(self, env: &mut NEnv<'p, 'b>) -> Result<STerm, Spanned<&'p str>> {
         use ParseTree::*;
         let span = self.span();
         Ok(Spanned::new(
@@ -153,16 +210,6 @@ impl<'p> STree<'p> {
                 I32(i) => Term::I32(i),
                 Var(x) => Term::Var(env.get(x).ok_or(Spanned::new(x, span))?),
                 The(t, u) => Term::The(t.resolve_names(env)?, u.resolve_names(env)?),
-                Let(v, t, u) => {
-                    env.push();
-                    // Not recursive (yet, at least)
-                    let t = t.resolve_names(env)?;
-                    let v = env.create(v);
-                    let u = u.resolve_names(env)?;
-                    let l = Term::Let(v, t, u);
-                    env.pop();
-                    l
-                }
                 Binder(x, t) => {
                     // Binders aren't recursive in their types
                     let t = t.map(|t| t.resolve_names(env)).transpose()?;

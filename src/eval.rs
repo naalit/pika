@@ -1,47 +1,17 @@
 use crate::common::*;
 use crate::term::*;
-use std::collections::HashMap;
-
-/// An evaluation context for `Value`s
-pub struct Context {
-    pub vals: HashMap<Sym, Value>,
-    pub bindings: Bindings,
-}
-impl Context {
-    /// Destroys `self` and returns the `Bindings` object
-    pub fn unbind(self) -> Bindings {
-        self.bindings
-    }
-    pub fn new(bindings: Bindings) -> Self {
-        Context {
-            vals: HashMap::new(),
-            bindings,
-        }
-    }
-
-    /// Get a value from the environment, and call `cloned()` on it, returning the owned value
-    pub fn get_cloned(&mut self, k: Sym) -> Option<Value> {
-        if let Some(x) = self.vals.remove(&k) {
-            let v = x.cloned(self);
-            self.vals.insert(k, x);
-            Some(v)
-        } else {
-            None
-        }
-    }
-}
 
 impl Term {
     /// Evaluate a `Term` into its `Value` representation (i.e. normal form), given a context
     ///
     /// Note that this function can accept, and reduce, ill-typed terms, so always typecheck a `Term` before reducing it
-    pub fn reduce(&self, ctx: &mut Context) -> Value {
+    pub fn reduce(&self, ctx: &mut FileContext) -> Value {
         match self {
             Term::Unit => Value::Unit,
             Term::I32(i) => Value::I32(*i),
             Term::Type => Value::Type,
             Term::Builtin(b) => Value::Builtin(*b),
-            Term::Var(s) => match ctx.get_cloned(*s) {
+            Term::Var(s) => match ctx.val_cloned(*s) {
                 Some(x) => x,
                 // Free variable
                 None => Value::Var(*s),
@@ -49,11 +19,6 @@ impl Term {
             Term::Binder(s, t) => Value::Binder(*s, t.as_ref().map(|t| Box::new(t.reduce(ctx)))),
             Term::The(_, t) => t.reduce(ctx),
             Term::Pair(x, y) => Value::Pair(Box::new(x.reduce(ctx)), Box::new(y.reduce(ctx))),
-            Term::Let(name, val, body) => {
-                let val = val.reduce(ctx);
-                ctx.vals.insert(*name, val);
-                body.reduce(ctx)
-            }
             Term::Fun(x, y) => Value::Fun(Box::new(x.reduce(ctx)), Box::new(y.reduce(ctx))),
             Term::App(f, x) => {
                 let f = f.reduce(ctx);
@@ -76,6 +41,7 @@ type BVal = Box<Value>;
 /// A term in normal form
 ///
 /// Unlike `Term`s, values don't store source `Span`s. For that reason and others, errors should usually be found *before* reducing a `Term` to a `Value`.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Value {
     Unit,                      // ()
     Binder(Sym, Option<BVal>), // x: T
@@ -91,7 +57,7 @@ pub enum Value {
 impl Value {
     /// Adds substitutions created by matching `other` with `self` (`self` is the pattern) to `ctx`
     /// Does not check if it's a valid match, that's the typechecker's job
-    pub fn do_match(&self, other: &Value, ctx: &mut Context) {
+    pub fn do_match(&self, other: &Value, ctx: &mut FileContext) {
         use Value::*;
         match (self, other) {
             (Binder(s, _), _) => {
@@ -113,11 +79,11 @@ impl Value {
 
     /// Clones `self`. Unlike a normal clone, we freshen any bound variables (but not free variables)
     /// This means that other code doesn't have to worry about capture-avoidance, we do it here for free
-    pub fn cloned(&self, ctx: &mut Context) -> Self {
+    pub fn cloned(&self, ctx: &mut FileContext) -> Self {
         use Value::*;
         match self {
             Var(s) => {
-                if let Some(x) = ctx.get_cloned(*s) {
+                if let Some(x) = ctx.val_cloned(*s) {
                     x
                 } else {
                     // Free variable
@@ -152,10 +118,10 @@ impl Value {
 
     /// If this `Value` contains any free variables, we check to see if they have a value in the environment yet
     /// If they do, we perform the substitution, in place
-    pub fn update(&mut self, ctx: &mut Context) {
+    pub fn update(&mut self, ctx: &mut FileContext) {
         match self {
             Value::Var(x) => {
-                if let Some(new) = ctx.get_cloned(*x) {
+                if let Some(new) = ctx.val_cloned(*x) {
                     *self = new
                 }
             }
