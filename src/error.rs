@@ -1,5 +1,5 @@
 use codespan_reporting::diagnostic::{Diagnostic, Label};
-use codespan_reporting::files::{SimpleFile, Files as FilesT};
+use codespan_reporting::files::{Files as FilesT, SimpleFile};
 use codespan_reporting::term::termcolor;
 use codespan_reporting::term::{emit, Config};
 use lalrpop_util::{lexer::Token, ParseError};
@@ -127,16 +127,20 @@ pub struct Error(Diagnostic<usize>);
 impl PartialEq for Error {
     fn eq(&self, other: &Error) -> bool {
         self.0.message == other.0.message
-        && self.0.labels.iter().zip(other.0.labels.iter()).fold(true, |acc, (a, b)| {
-            acc
-            && a.style == b.style
-            && a.file_id == b.file_id
-            && a.range == b.range
-            && a.message == b.message
-        })
-        && self.0.notes == other.0.notes
-        && self.0.code == other.0.code
-        && self.0.severity == other.0.severity
+            && self
+                .0
+                .labels
+                .iter()
+                .zip(other.0.labels.iter())
+                .fold(true, |acc, (a, b)| {
+                    acc && a.style == b.style
+                        && a.file_id == b.file_id
+                        && a.range == b.range
+                        && a.message == b.message
+                })
+            && self.0.notes == other.0.notes
+            && self.0.code == other.0.code
+            && self.0.severity == other.0.severity
     }
 }
 impl Eq for Error {}
@@ -188,8 +192,11 @@ impl Error {
             ),
             ParseError::ExtraToken {
                 token: (start, Token(_, s), end),
-            } => (format!("Unexpected token {}, expected EOF", s), Span(start, end)),
-            ParseError::User { error } => (error.to_string(), error.span())
+            } => (
+                format!("Unexpected token {}, expected EOF", s),
+                Span(start, end),
+            ),
+            ParseError::User { error } => (error.to_string(), error.span()),
         };
         Error::new(file, format!("Parse error: {}", message), span, message)
     }

@@ -1,6 +1,5 @@
 use crate::error::{Error, FileId, Spanned};
 use crate::term::*;
-use crate::query::TempEnv;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
@@ -11,9 +10,7 @@ use std::num::NonZeroU32;
 pub struct RawSym(NonZeroU32);
 impl RawSym {
     fn new(idx: usize) -> Self {
-        RawSym(NonZeroU32::new(
-            idx as u32 + 1
-        ).expect("unreachable"))
+        RawSym(NonZeroU32::new(idx as u32 + 1).expect("unreachable"))
     }
     fn idx(self) -> usize {
         self.0.get() as usize - 1
@@ -35,11 +32,7 @@ impl Sym {
         if num >= 1 << 14 {
             panic!("Too many instances of identifier {}!", idx);
         }
-        Sym(NonZeroU32::new(
-            (num << 18)
-            | idx as u32
-            + 1
-        ).expect("unreachable"))
+        Sym(NonZeroU32::new((num << 18) | idx as u32 + 1).expect("unreachable"))
     }
     fn with_num(self, num: u32) -> Self {
         Sym::from_parts(self.raw(), num)
@@ -50,10 +43,10 @@ impl Sym {
         (self.0.get() - 1) >> 18
     }
 
+    /// Gets the raw symbol corresponding to this symbol
+    /// This can be used for comparing identifiers directly, as in record labels
     pub fn raw(self) -> RawSym {
-        RawSym(NonZeroU32::new(
-            ((self.0.get() - 1) & ((1 << 18) - 1)) + 1
-        ).expect("unreachable"))
+        RawSym(NonZeroU32::new(((self.0.get() - 1) & ((1 << 18) - 1)) + 1).expect("unreachable"))
     }
 }
 
@@ -86,6 +79,7 @@ impl Bindings {
         *self = Default::default();
     }
 
+    /// Interns a string (or gets it if it's already interned), returning the RawSym to it
     pub fn raw(&mut self, s: String) -> RawSym {
         self.strings.get(&s).cloned().unwrap_or_else(|| {
             let i = RawSym::new(self.string_pool.len());
@@ -97,29 +91,25 @@ impl Bindings {
 
     /// Creates a new symbol with the same name as `s`, but a fresh value
     pub fn fresh(&mut self, s: Sym) -> Sym {
-        let u = self.nums.get_mut(&s.raw()).expect("Symbol not in Bindings!");
+        let u = self
+            .nums
+            .get_mut(&s.raw())
+            .expect("Symbol not in Bindings!");
         *u += 1;
         s.with_num(*u - 1)
     }
 
     pub fn resolve_defs<'p>(&mut self, t: Vec<ParseDef<'p>>) -> Vec<Result<Def, NameError>> {
         let mut env = NEnv::new(self);
-        t
-            .into_iter()
+        t.into_iter()
             .map(|ParseDef(lhs, rhs)| {
-                let rhs = rhs.resolve_names(&mut env).map_err(|x| NameError(x.copy_span(x.to_string())))?;
+                let rhs = rhs
+                    .resolve_names(&mut env)
+                    .map_err(|x| NameError(x.copy_span(x.to_string())))?;
                 let lhs = lhs.copy_span(env.create(&lhs));
                 Ok(Def(lhs, rhs))
             })
             .collect()
-    }
-
-    pub fn resolve_names<'p>(&mut self, t: STree<'p>) -> Result<STerm, NameError> {
-        let mut env = NEnv::new(self);
-        let t = t
-            .resolve_names(&mut env)
-            .map_err(|x| NameError(x.copy_span(x.to_string())))?;
-        Ok(t)
     }
 
     /// Create a new symbol. It's guaranteed to be unique to all other symbols created with create()

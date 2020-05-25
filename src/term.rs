@@ -33,12 +33,19 @@ impl CDisplay for Term {
             Term::Unit => write!(f, "()"),
             Term::The(t, u) => write!(f, "the {} {}", WithContext(b, &**t), WithContext(b, &**u)),
             Term::Binder(x, None) => write!(f, "({}{}:)", b.resolve(*x), x.num()),
-            Term::Binder(x, Some(t)) => write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t)),
+            Term::Binder(x, Some(t)) => {
+                write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t))
+            }
             Term::Var(s) => write!(f, "{}{}", b.resolve(*s), s.num()),
             Term::I32(i) => write!(f, "{}", i),
             Term::Type => write!(f, "Type"),
             Term::Builtin(b) => write!(f, "{:?}", b),
-            Term::Fun(x, y) => write!(f, "fun {} => {}", WithContext(b, &**x), WithContext(b, &**y)),
+            Term::Fun(x, y) => write!(
+                f,
+                "fun {} => {}",
+                WithContext(b, &**x),
+                WithContext(b, &**y)
+            ),
             Term::App(x, y) => write!(f, "{}({})", WithContext(b, &**x), WithContext(b, &**y)),
             Term::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
         }

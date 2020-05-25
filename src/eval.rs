@@ -16,9 +16,13 @@ impl Term {
                 // Free variable
                 None => Value::Var(*s),
             },
-            Term::Binder(s, t) => Value::Binder(*s, t.as_ref().map(|t| Box::new(t.reduce(db, env)))),
+            Term::Binder(s, t) => {
+                Value::Binder(*s, t.as_ref().map(|t| Box::new(t.reduce(db, env))))
+            }
             Term::The(_, t) => t.reduce(db, env),
-            Term::Pair(x, y) => Value::Pair(Box::new(x.reduce(db, env)), Box::new(y.reduce(db, env))),
+            Term::Pair(x, y) => {
+                Value::Pair(Box::new(x.reduce(db, env)), Box::new(y.reduce(db, env)))
+            }
             Term::Fun(x, y) => Value::Fun(Box::new(x.reduce(db, env)), Box::new(y.reduce(db, env))),
             Term::App(f, x) => {
                 let f = f.reduce(db, env);
@@ -81,22 +85,6 @@ impl Value {
         }
     }
 
-    pub fn basic_clone(&self) -> Self {
-        use Value::*;
-        match self {
-            Var(s) => Var(*s),
-            Unit => Unit,
-            Type => Type,
-            I32(i) => I32(*i),
-            Builtin(b) => Builtin(*b),
-            App(f, x) => App(Box::new(f.basic_clone()), Box::new(x.basic_clone())),
-            Binder(s, t) => Binder(*s, t.as_ref().map(|t| Box::new(t.basic_clone()))),
-            // All these allow bound variables, so we have to make sure they're done in order
-            Fun(f, x) => Fun(Box::new(f.basic_clone()), Box::new(x.basic_clone())),
-            Pair(x, y) => Pair(Box::new(x.basic_clone()), Box::new(y.basic_clone())),
-        }
-    }
-
     /// Clones `self`. Unlike a normal clone, we freshen any bound variables (but not free variables)
     /// This means that other code doesn't have to worry about capture-avoidance, we do it here for free
     pub fn cloned(&self, env: &mut TempEnv) -> Self {
@@ -122,7 +110,13 @@ impl Value {
                 #[cfg(feature = "logging")]
                 {
                     let b = &env.bindings();
-                    println!("Renaming {}{} to {}{}", b.resolve(*s), s.num(), b.resolve(fresh), fresh.num());
+                    println!(
+                        "Renaming {}{} to {}{}",
+                        b.resolve(*s),
+                        s.num(),
+                        b.resolve(fresh),
+                        fresh.num()
+                    );
                 }
                 env.set_val(*s, Var(fresh));
                 Binder(fresh, t.as_ref().map(|t| Box::new(t.cloned(env))))
@@ -179,14 +173,19 @@ impl CDisplay for Value {
         match self {
             Value::Unit => write!(f, "()"),
             Value::Binder(x, None) => write!(f, "({}{}:)", b.resolve(*x), x.num()),
-            Value::Binder(x, Some(t)) => write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t)),
+            Value::Binder(x, Some(t)) => {
+                write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t))
+            }
             Value::Var(s) => write!(f, "{}{}", b.resolve(*s), s.num()),
             Value::I32(i) => write!(f, "{}", i),
             Value::Type => write!(f, "Type"),
             Value::Builtin(b) => write!(f, "{:?}", b),
-            Value::Fun(x, y) => {
-                write!(f, "fun {} => {}", WithContext(b, &**x), WithContext(b, &**y))
-            }
+            Value::Fun(x, y) => write!(
+                f,
+                "fun {} => {}",
+                WithContext(b, &**x),
+                WithContext(b, &**y)
+            ),
             Value::App(x, y) => write!(f, "({})({})", WithContext(b, &**x), WithContext(b, &**y)),
             Value::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
         }

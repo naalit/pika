@@ -6,7 +6,6 @@ mod term;
 use common::*;
 mod eval;
 mod query;
-use query::*;
 use rustyline as rl;
 
 use lalrpop_util::*;
@@ -23,7 +22,10 @@ impl rl::hint::Hinter for Helper {}
 impl rl::highlight::Highlighter for Helper {}
 
 impl rl::validate::Validator for Helper {
-    fn validate(&self, ctx: &mut rl::validate::ValidationContext) -> rl::Result<rl::validate::ValidationResult> {
+    fn validate(
+        &self,
+        ctx: &mut rl::validate::ValidationContext,
+    ) -> rl::Result<rl::validate::ValidationResult> {
         if ctx.input().trim().is_empty() {
             Ok(rl::validate::ValidationResult::Incomplete)
         } else {
@@ -73,7 +75,13 @@ fn main() {
                             let val = db.val(file, **s).unwrap();
                             let b = db.bindings();
                             let b = b.read().unwrap();
-                            println!("{}{} : {} = {}", b.resolve(**s), s.num(), WithContext(&b, &*ty), WithContext(&b, &*val));
+                            println!(
+                                "{}{} : {} = {}",
+                                b.resolve(**s),
+                                s.num(),
+                                WithContext(&b, &*ty),
+                                WithContext(&b, &*val)
+                            );
                         }
                     }
                 }
