@@ -112,34 +112,37 @@ impl CDisplay for TypeError {
 }
 
 /// Attempt to synthesize a type for 't'
-pub fn synth(t: &STerm, ctx: &mut FileContext) -> Result<Value, TypeError> {
-    #[cfg(feature = "logging")]
-    println!("synth ({})", WithContext(&ctx.bindings, &**t));
+pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value, TypeError> {
+    {
+        #[cfg(feature = "logging")]
+        println!("synth ({})", WithContext(&env.bindings(), &**t));
+    }
 
     match &**t {
         Term::Type | Term::Builtin(Builtin::Int) => Ok(Value::Type),
-        Term::Var(x) => ctx
-            .ty_cloned(*x)
+        Term::Var(x) => db.typ(env.file, *x)
+            .or_else(|| env.ty(*x))
+            .map(|x| x.cloned(&mut env.child()))
             .ok_or_else(|| TypeError::NotFound(t.copy_span(*x))),
         Term::I32(_) => Ok(Value::Builtin(Builtin::Int)),
         Term::Unit => Ok(Value::Unit),
         Term::Pair(x, y) => {
             // TODO this doesn't cover dependent pairs
             Ok(Value::Pair(
-                Box::new(synth(x, ctx)?),
-                Box::new(synth(y, ctx)?),
+                Box::new(synth(x, db, env)?),
+                Box::new(synth(y, db, env)?),
             ))
         }
         Term::App(f, x) => {
-            let a = synth(f, ctx)?;
+            let a = synth(f, db, env)?;
             match &a {
                 Value::Fun(from, to) => {
-                    check(x, &from, ctx)?;
+                    check(x, &from, db, env)?;
                     // Stick the value in in case it's dependent
-                    let mut to = to.cloned(ctx);
-                    let x = x.reduce(ctx);
-                    from.do_match(&x, ctx);
-                    to.update(ctx);
+                    let mut to = to.cloned(&mut env.child());
+                    let x = x.reduce(db, env);
+                    from.do_match(&x, env);
+                    to.update(env);
                     Ok(to)
                 }
                 _ => Err(TypeError::NotFunction(f.copy_span(a))),
@@ -147,34 +150,37 @@ pub fn synth(t: &STerm, ctx: &mut FileContext) -> Result<Value, TypeError> {
         }
         Term::Fun(x, y) => {
             // Make sure it's well typed before reducing it
-            check(x, &Value::Type, ctx)?;
-            let x = x.reduce(ctx);
+            check(x, &Value::Type, db, env)?;
+            let x = x.reduce(db, env);
             // Match it with itself to apply the types
-            x.match_types(&x, ctx);
-            Ok(Value::Fun(Box::new(x), Box::new(synth(y, ctx)?)))
+            x.match_types(&x, env);
+            Ok(Value::Fun(Box::new(x), Box::new(synth(y, db, env)?)))
         }
         Term::The(t, u) => {
             // Make sure it's well typed before reducing it
-            check(t, &Value::Type, ctx)?;
-            let t = t.reduce(ctx);
-            check(u, &t, ctx)?;
+            check(t, &Value::Type, db, env)?;
+            let t = t.reduce(db, env);
+            check(u, &t, db, env)?;
             Ok(t)
         }
-        Term::Binder(_, Some(t)) => synth(t, ctx),
+        Term::Binder(_, Some(t)) => synth(t, db, env),
         _ => Err(TypeError::Synth(t.clone())),
     }
 }
 
 /// Checks the given term against the given type
-pub fn check(term: &STerm, typ: &Value, ctx: &mut FileContext) -> Result<(), TypeError> {
+pub fn check(term: &STerm, typ: &Value, db: &impl MainGroup, env: &mut TempEnv) -> Result<(), TypeError> {
     #[cfg(feature = "logging")]
-    println!("check ({}) :: ({})", WithContext(&ctx.bindings, &**term), WithContext(&ctx.bindings, typ));
+    {
+        let b = &env.bindings();
+        println!("check ({}) :: ({})", WithContext(b, &**term), WithContext(b, typ));
+    }
 
     match (&**term, typ) {
-        (Term::Binder(_, Some(t)), _) => check(t, typ, ctx),
+        (Term::Binder(_, Some(t)), _) => check(t, typ, db, env),
 
         (_, Value::Type) => {
-            let t = term.reduce(ctx);
+            let t = term.reduce(db, env);
             if t.is_type() { Ok(()) } else { Err(TypeError::NotType(term.copy_span(t))) }
         }
 
@@ -182,37 +188,37 @@ pub fn check(term: &STerm, typ: &Value, ctx: &mut FileContext) -> Result<(), Typ
 
         (Term::Pair(x, y), Value::Pair(tx, ty)) => {
             // TODO dependent pairs don't really work
-            check(x, tx, ctx)?;
-            check(y, ty, ctx)
+            check(x, tx, db, env)?;
+            check(y, ty, db, env)
         }
 
         // As far as we know, it could be any type
-        (Term::Binder(_, None), _) if typ.subtype_of(&Value::Type, ctx) => Ok(()),
+        (Term::Binder(_, None), _) if typ.subtype_of(&Value::Type, &mut env.child()) => Ok(()),
 
         (Term::Fun(x, b), Value::Fun(y, to)) => {
             // Make sure it's well typed before reducing it
-            check(x, &Value::Type, ctx)?;
-            let xr = x.reduce(ctx);
+            check(x, &Value::Type, db, env)?;
+            let xr = x.reduce(db, env);
             // Because patterns are types, match checking amounts to subtype checking
-            if y.subtype_of(&xr, ctx) {
-                xr.match_types(y, ctx);
-                check(b, to, ctx)
+            if y.subtype_of(&xr, &mut env.child()) {
+                xr.match_types(y, env);
+                check(b, to, db, env)
             } else {
                 Err(TypeError::NotSubtypeF(
-                    y.cloned(ctx),
+                    y.cloned(&mut env.child()),
                     x.copy_span(xr),
                 ))
             }
         }
         (_, _) => {
-            let t = synth(term, ctx)?;
+            let t = synth(term, db, env)?;
             // Is it guaranteed to be a `typ`?
-            if t.subtype_of(&typ, ctx) {
+            if t.subtype_of(&typ, &mut env.child()) {
                 Ok(())
             } else {
                 Err(TypeError::NotSubtype(
                     term.copy_span(t),
-                    typ.cloned(ctx),
+                    typ.cloned(&mut env.child()),
                 ))
             }
         }
@@ -221,46 +227,52 @@ pub fn check(term: &STerm, typ: &Value, ctx: &mut FileContext) -> Result<(), Typ
 
 impl Value {
     /// Like do_match(), but fills in the types instead of values
-    fn match_types(&self, other: &Value, ctx: &mut FileContext) {
+    fn match_types(&self, other: &Value, env: &mut TempEnv) {
         use Value::*;
         match (self, other) {
             // Since we match it against itself to apply binder types
             (Binder(na, _), Binder(nb, t)) if na == nb => {
                 if let Some(t) = t {
                     #[cfg(feature = "logging")]
-                    println!("ctx: {} : {}", WithContext(&ctx.bindings, self), WithContext(&ctx.bindings, &**t));
+                    {
+                        let b = &env.bindings();
+                        println!("env: {} : {}", WithContext(b, self), WithContext(b, &**t));
+                    }
 
-                    let t = t.cloned(ctx);
-                    ctx.tys.insert(*na, t);
+                    let t = t.cloned(&mut env.child());
+                    env.set_ty(*na, t);
                 }
             }
             // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
             (_, Binder(x, t)) => {
-                self.do_match(&Var(*x), ctx);
+                self.do_match(&Var(*x), env);
                 if let Some(t) = t {
-                    self.match_types(t, ctx);
+                    self.match_types(t, env);
                 }
             }
             (Binder(s, _), _) => {
                 #[cfg(feature = "logging")]
-                println!("ctx: {} : {}", WithContext(&ctx.bindings, self), WithContext(&ctx.bindings, other));
+                {
+                    let b = &env.bindings();
+                    println!("type: {} : {}", WithContext(b, self), WithContext(b, other));
+                }
 
-                let other = other.cloned(ctx);
-                ctx.tys.insert(*s, other);
+                let other = other.cloned(&mut env.child());
+                env.set_ty(*s, other);
             }
             (Var(x), _) => {
-                if let Some(x) = ctx.val_cloned(*x) {
-                    x.match_types(other, ctx);
+                if let Some(x) = env.val(*x) {
+                    x.match_types(other, env);
                 }
             }
             (Pair(ax, ay), Pair(bx, by)) => {
-                ax.match_types(bx, ctx);
-                ay.match_types(by, ctx);
+                ax.match_types(bx, env);
+                ay.match_types(by, env);
             }
             // We will allow this for now, and see if it causes any problems
             (App(af, ax), App(bf, bx)) => {
-                af.match_types(bf, ctx);
-                ax.match_types(bx, ctx);
+                af.match_types(bf, env);
+                ax.match_types(bx, env);
             }
             _ => (),
         }
@@ -280,36 +292,75 @@ impl Value {
     }
 
     /// Is this a subtype of Type?
-    fn is_type_type(&self, ctx: &FileContext) -> bool {
+    fn is_type_type(&self) -> bool {
         match self {
             Value::Type => true,
-            Value::Var(x) => ctx.tys.get(x).map_or(false, |x| x.is_type_type(ctx)),
-            Value::Pair(x, y) => x.is_type_type(ctx) && y.is_type_type(ctx),
-            Value::Fun(_, x) => x.is_type_type(ctx),
+            //Value::Var(x) => db, file.tys.get(x).map_or(false, |x| x.is_type_type(db, file)),
+            Value::Pair(x, y) => x.is_type_type() && y.is_type_type(),
+            Value::Fun(_, x) => x.is_type_type(),
             Value::Binder(_, None) => true,
-            Value::Binder(_, Some(t)) => t.is_type_type(ctx),
+            Value::Binder(_, Some(t)) => t.is_type_type(),
             _ => false,
+        }
+    }
+
+    /// Perform alpha-conversion to make self = other if they're alpha-equivalent
+    fn alpha_match(&self, other: &Value, env: &mut TempEnv) {
+        use Value::*;
+        match (self, other) {
+            (Binder(na, _), Binder(nb, _)) if na == nb => {
+                env.set_val(*na, Value::Var(*nb));
+            }
+            // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
+            // (_, Binder(x, t)) => {
+            //     //self.do_match(&Var(*x), db, file);
+            //     if let Some(t) = t {
+            //         self.alpha_match(t, db, file);
+            //     }
+            // }
+            // (Binder(s, _), _) => {
+            //     // #[cfg(feature = "logging")]
+            //     // println!("db, file: {} : {}", WithContext(&db.ctx().bindings, self), WithContext(&db.ctx().bindings, other));
+            //
+            //     let other = other.cloned(db, file);
+            //     db.set_ty(*s, other);
+            // }
+            // (Var(x), _) => {
+            //     if let Some(x) = db.val(file, *x) {
+            //         x.match_types(other, db, file);
+            //     }
+            // }
+            (Pair(ax, ay), Pair(bx, by)) => {
+                ax.alpha_match(bx, env);
+                ay.alpha_match(by, env);
+            }
+            // We will allow this for now, and see if it causes any problems
+            (App(af, ax), App(bf, bx)) => {
+                af.alpha_match(bf, env);
+                ax.alpha_match(bx, env);
+            }
+            _ => (),
         }
     }
 
     /// <=; every `self` is also a `sup`
     /// Not that this is *the* way to check type equality
-    pub fn subtype_of(&self, sup: &Value, ctx: &mut FileContext) -> bool {
+    pub fn subtype_of(&self, sup: &Value, env: &mut TempEnv) -> bool {
         if !self.is_type() {
             return false;
         }
         match (self, sup) {
             (Value::Builtin(b), Value::Builtin(c)) if b == c => true,
             (Value::Unit, Value::Unit) => true,
-            (Value::Var(x), _) if ctx.vals.contains_key(x) => ctx.val_cloned(*x).unwrap().subtype_of(sup, ctx),
-            (_, Value::Var(x)) if ctx.vals.contains_key(x) => self.subtype_of(&ctx.val_cloned(*x).unwrap(), ctx),
-            (Value::Pair(ax, ay), Value::Pair(bx, by)) => ax.subtype_of(bx, ctx) && ay.subtype_of(by, ctx),
+            (Value::Var(x), _) if env.vals.contains_key(x) => env.val(*x).unwrap().cloned(env).subtype_of(sup, env),
+            (_, Value::Var(x)) if env.vals.contains_key(x) => self.subtype_of(&env.val(*x).unwrap().cloned(env), env),
+            (Value::Pair(ax, ay), Value::Pair(bx, by)) => ax.subtype_of(bx, env) && ay.subtype_of(by, env),
             // (Type -> (Type, Type)) <= ((Type, Type) -> Type)
             (Value::Fun(ax, ay), Value::Fun(bx, by)) => {
-                if bx.subtype_of(ax, ctx) {
+                if bx.subtype_of(ax, env) {
                     // Either way works, we have to check alpha equality
-                    ax.match_types(bx, ctx);
-                    ay.subtype_of(by, ctx)
+                    ax.alpha_match(bx, env);
+                    ay.subtype_of(by, env)
                 } else {
                     false
                 }
@@ -317,10 +368,10 @@ impl Value {
             // Two variables that haven't been resolved yet, but refer to the same definition
             (Value::Var(x), Value::Var(y)) if y == x => true,
             (_, Value::Binder(_, None)) => true,
-            (Value::Binder(_, Some(t)), _) => t.subtype_of(sup, ctx),
-            (_, Value::Binder(_, Some(t))) => self.subtype_of(t, ctx),
+            (Value::Binder(_, Some(t)), _) => t.subtype_of(sup, env),
+            (_, Value::Binder(_, Some(t))) => self.subtype_of(t, env),
             // (Type, Type) <= Type
-            (_, Value::Type) if self.is_type_type(ctx) => true,
+            (_, Value::Type) if self.is_type_type() => true,
             _ => false,
         }
     }

@@ -1,5 +1,6 @@
 use crate::error::{Error, FileId, Spanned};
 use crate::term::*;
+use crate::query::TempEnv;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 

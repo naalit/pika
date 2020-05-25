@@ -71,8 +71,9 @@ fn main() {
                         seen_symbols.insert(**s);
                         if let Some(ty) = db.typ(file, **s) {
                             let val = db.val(file, **s).unwrap();
-                            let b = &db.ctx().bindings;
-                            println!("{}{} : {} = {}", b.resolve(**s), s.num(), WithContext(b, &*ty), WithContext(b, &*val));
+                            let b = db.bindings();
+                            let b = b.read().unwrap();
+                            println!("{}{} : {} = {}", b.resolve(**s), s.num(), WithContext(&b, &*ty), WithContext(&b, &*val));
                         }
                     }
                 }
