@@ -1,4 +1,4 @@
-pub use crate::binding::{Bindings, ParseTree, Sym};
+pub use crate::binding::{Bindings, ParseTree, Sym, RawSym};
 pub use crate::error::{Error, FileId};
 pub use crate::query::*;
 use std::fmt;

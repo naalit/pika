@@ -127,6 +127,12 @@ impl Bindings {
             .get(s.raw().idx())
             .expect("String referred to by symbol not in Bindings interned string table!")
     }
+
+    pub fn resolve_raw(&self, s: RawSym) -> &str {
+        self.string_pool
+            .get(s.idx())
+            .expect("String referred to by symbol not in Bindings interned string table!")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +153,8 @@ pub enum ParseTree<'p> {
     Fun(STree<'p>, STree<'p>),          // fn a => x
     App(STree<'p>, STree<'p>),          // f x
     Pair(STree<'p>, STree<'p>),         // x, y
+    Struct(Vec<(Spanned<&'p str>, STree<'p>)>),  // struct { x := 3 }
+    Project(STree<'p>, Spanned<&'p str>),   // r.m
 }
 type STree<'p> = Spanned<ParseTree<'p>>;
 
@@ -222,6 +230,19 @@ impl<'p> STree<'p> {
                     let y = y.resolve_names(env)?;
                     Term::Pair(x, y)
                 }
+                Struct(iv) => {
+                    env.push();
+                    let mut rv = Vec::new();
+                    for (name, val) in iv {
+                        let val = val.resolve_names(env)?;
+                        // Still not recursive
+                        let name = name.copy_span(env.create(*name));
+                        rv.push((name, val));
+                    }
+                    env.pop();
+                    Term::Struct(rv)
+                }
+                Project(r, m) => Term::Project(r.resolve_names(env)?, m.copy_span(env.bindings.raw(m.to_string()))),
             },
             span,
         ))

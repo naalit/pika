@@ -7,6 +7,7 @@ use crate::error::{Spanned, Span};
 
 pub type LexResult<'i> = Result<(usize, Tok<'i>, usize), Spanned<LexError>>;
 
+#[derive(Clone, Debug)]
 pub enum LexError {
     Tabs,
     InvalidToken,
@@ -31,6 +32,7 @@ pub enum Tok<'i> {
     POpen,          // "("
     PClose,         // ")"
     Comma,          // ","
+    Dot,            // "."
     Indent,
     Dedent,
 }
@@ -52,6 +54,7 @@ pub struct Lexer<'i> {
     chars: std::iter::Peekable<std::str::Chars<'i>>,
     input: &'i str,
     was_newline: bool,
+    was_dedent: bool,
     indent: Vec<usize>,
     last: usize,
     pos: usize,
@@ -63,6 +66,7 @@ impl<'i> Lexer<'i> {
             chars: input.chars().peekable(),
             input,
             was_newline: false,
+            was_dedent: false,
             indent: Vec::new(),
             last: 0,
             pos: 0,
@@ -84,7 +88,6 @@ impl<'i> Lexer<'i> {
     }
 
     fn handle_indent(&mut self) -> Option<Tok<'i>> {
-        self.was_newline = false;
         for i in self.indent.clone() {
             for _ in 0..i {
                 if self.peek() != Some(' ') {
@@ -98,13 +101,26 @@ impl<'i> Lexer<'i> {
                             todo!("give an error");
                         }
                         return self.handle_indent();
+                    } else if self.peek() == Some('#') {
+                        // Skip line comments
+                        // eat \r here, it's always got a \n after it
+                        while self.peek().map_or(false, |x| x != '\n') {
+                            self.next();
+                        }
+                        return self.handle_indent();
                     }
 
                     self.indent.pop();
+                    self.was_dedent = true;
                     return Some(Tok::Dedent);
+                } else {
+                    self.next();
                 }
             }
         }
+
+        self.was_newline = false;
+
         if self.peek() == Some(' ') {
             self.indent.push(0);
             while self.peek() == Some(' ') {
@@ -113,6 +129,7 @@ impl<'i> Lexer<'i> {
             }
             return Some(Tok::Indent);
         }
+
         None
     }
 
@@ -178,6 +195,10 @@ impl<'i> Lexer<'i> {
                 self.next();
                 Tok::Comma
             }
+            '.' => {
+                self.next();
+                Tok::Dot
+            }
             ':' => {
                 self.next();
                 Tok::Colon
@@ -217,6 +238,12 @@ impl<'i> std::iter::Iterator for Lexer<'i> {
     type Item = LexResult<'i>;
 
     fn next(&mut self) -> Option<LexResult<'i>> {
+        // We need a newline token after each dedent so the parser knows to move on
+        if self.was_dedent {
+            self.was_dedent = false;
+            return Some(Ok((self.last, Tok::Newline, self.pos)));
+        }
+
         self.last = self.pos;
 
         if self.was_newline {
@@ -261,6 +288,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Struct => write!(f, "'struct'"),
             The    => write!(f, "'the'"),
 
+            Dot    => write!(f, "'.'"),
             Comma  => write!(f, "','"),
             POpen  => write!(f, "'('"),
             PClose => write!(f, "')'"),

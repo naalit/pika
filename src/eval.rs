@@ -37,6 +37,21 @@ impl Term {
                     f => Value::App(Box::new(f), Box::new(x)),
                 }
             }
+            Term::Struct(v) => {
+                Value::Struct(v.iter().map(|(name, val)| (**name, val.reduce(db, env))).collect())
+            }
+            Term::Project(r, m) => {
+                let r = r.reduce(db, env);
+                match r {
+                    Value::Struct(v) => {
+                        // We unwrap because this type checked already
+                        let (_, val) = v.iter().find(|(name, _)| name.raw() == **m).unwrap();
+                        val.cloned(&mut env.child())
+                    }
+                    // Not a record yet, we can't project it
+                    r => Value::Project(Box::new(r), **m),
+                }
+            }
         }
     }
 }
@@ -55,8 +70,10 @@ pub enum Value {
     Builtin(Builtin),          // Int
     Fun(BVal, BVal),           // fn a => x
     /// Applicand must be neutral
-    App(BVal, BVal), // f x
+    App(BVal, BVal),           // f x
     Pair(BVal, BVal),          // x, y
+    Struct(Vec<(Sym, Value)>), // struct { x := 3 }
+    Project(BVal, RawSym),
 }
 impl Value {
     /// Adds substitutions created by matching `other` with `self` (`self` is the pattern) to `ctx`
@@ -143,6 +160,24 @@ impl Value {
                 let y = Box::new(y.cloned(env));
                 Pair(x, y)
             }
+            Struct(v) => Struct(v.into_iter().map(|(name, val)| {
+                let val = val.cloned(env);
+                let fresh = env.bindings_mut().fresh(*name);
+                #[cfg(feature = "logging")]
+                {
+                    let b = &env.bindings();
+                    println!(
+                        "Renaming {}{} to {}{}",
+                        b.resolve(*name),
+                        name.num(),
+                        b.resolve(fresh),
+                        fresh.num()
+                    );
+                }
+                env.set_val(*name, Var(fresh));
+                (fresh, val)
+            }).collect()),
+            Project(r, m) => Project(Box::new(r.cloned(env)), *m),
         }
     }
 
@@ -168,6 +203,17 @@ impl Value {
                         *self = body.cloned(env);
                     }
                     // Still not a function
+                    _ => (),
+                }
+            }
+            Value::Project(r, m) => {
+                r.update(env);
+                match &**r {
+                    Value::Struct(v) => {
+                        let (_, val) = v.iter().find(|(name, _)| name.raw() == *m).unwrap();
+                        *self = val.cloned(&mut env.child());
+                    }
+                    // Still not a record
                     _ => (),
                 }
             }
@@ -199,6 +245,19 @@ impl CDisplay for Value {
             ),
             Value::App(x, y) => write!(f, "({})({})", WithContext(b, &**x), WithContext(b, &**y)),
             Value::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
+            Value::Struct(v) => {
+                write!(f, "struct {{ ")?;
+                for (name, val) in v.iter() {
+                    write!(f, "{}{} := {}, ", b.resolve(*name), name.num(), WithContext(b, &*val))?;
+                }
+                write!(f, "}}")
+            }
+            Value::Project(r, m) => write!(
+                f,
+                "({}).{}",
+                WithContext(b, &**r),
+                b.resolve_raw(*m),
+            )
         }
     }
 }

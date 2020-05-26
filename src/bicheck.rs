@@ -21,6 +21,8 @@ pub enum TypeError {
     /// We couldn't find a type for the given variable
     /// Currently, this only occurs when using bindings without a type, where we couldn't infer the type
     NotFound(Spanned<Sym>),
+    /// We tried to access this field, but it's not there
+    NoSuchField(Spanned<RawSym>, Value),
 }
 impl TypeError {
     pub fn to_error(self, file: FileId, b: &Bindings) -> Error {
@@ -75,6 +77,16 @@ impl TypeError {
                 s.span(),
                 format!("type not found"),
             ),
+            TypeError::NoSuchField(s, v) => Error::new(
+                file,
+                format!(
+                    "Type error: no such field '{}' on struct type '{}'",
+                    b.resolve_raw(*s),
+                    WithContext(b, &v),
+                ),
+                s.span(),
+                format!("no such field"),
+            )
         }
     }
 }
@@ -105,6 +117,12 @@ impl CDisplay for TypeError {
             TypeError::NotFound(s) => {
                 write!(f, "Type not found for varible: '{}'", b.resolve(**s),)
             }
+            TypeError::NoSuchField(s, v) => write!(
+                f,
+                "Type error: no such field '{}' on struct type '{}'",
+                b.resolve_raw(**s),
+                WithContext(b, &*v),
+            ),
         }
     }
 }
@@ -130,6 +148,17 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
                 Box::new(synth(y, db, env)?),
             ))
         }
+        Term::Struct(iv) => {
+            let mut rv = Vec::new();
+            for (name, val) in iv {
+                let ty = synth(val, db, env)?;
+                // TODO unordered, dependent records
+                let ty2 = ty.cloned(&mut env.child());
+                env.set_ty(**name, ty2);
+                rv.push((**name, ty));
+            }
+            Ok(Value::Struct(rv))
+        }
         Term::App(f, x) => {
             let a = synth(f, db, env)?;
             match &a {
@@ -143,6 +172,19 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
                     Ok(to)
                 }
                 _ => Err(TypeError::NotFunction(f.copy_span(a))),
+            }
+        }
+        Term::Project(r, m) => {
+            let rt = synth(r, db, env)?;
+            match &rt {
+                Value::Struct(v) => {
+                    if let Some((_, val)) = v.iter().find(|(name, _)| name.raw() == **m) {
+                        Ok(val.cloned(&mut env.child()))
+                    } else {
+                        Err(TypeError::NoSuchField(m.clone(), rt))
+                    }
+                }
+                _ => Err(TypeError::NoSuchField(m.clone(), rt)),
             }
         }
         Term::Fun(x, y) => {
@@ -200,6 +242,17 @@ pub fn check(
             // TODO dependent pairs don't really work
             check(x, tx, db, env)?;
             check(y, ty, db, env)
+        }
+
+        (Term::Struct(vals), Value::Struct(tys)) => {
+            let ty_iter = tys.iter();
+            for (name, val) in vals.iter() {
+                let raw = name.raw();
+                // TODO does this support dependent records? What do we do with the name we get here?
+                let (_, ty) = ty_iter.clone().find(|(s, _)| s.raw() == raw).ok_or_else(|| TypeError::NoSuchField(name.copy_span(name.raw()), typ.cloned(&mut env.child())))?;
+                check(val, ty, db, env)?;
+            }
+            Ok(())
         }
 
         // As far as we know, it could be any type
@@ -294,6 +347,7 @@ impl Value {
             Value::Type | Value::Unit | Value::Builtin(Builtin::Int) => true,
             Value::Fun(_, x) => x.is_type(),
             Value::Pair(x, y) => x.is_type() && y.is_type(),
+            Value::Struct(v) => v.iter().all(|(_, x)| x.is_type()),
             Value::Binder(_, _) => true,
             // We're not sure, but it could be
             Value::Var(_) => true,
