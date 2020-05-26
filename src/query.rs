@@ -3,6 +3,7 @@ use crate::binding::*;
 use crate::error::*;
 use crate::eval::*;
 use crate::grammar::*;
+use crate::lexer::Lexer;
 use crate::term::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -100,7 +101,7 @@ fn defs(db: &impl MainGroup, file: FileId) -> Arc<Vec<Def>> {
 
     let parser = DefsParser::new();
     let s = db.source(file);
-    Arc::new(match parser.parse(&s) {
+    Arc::new(match parser.parse(&s, Lexer::new(&s)) {
         Ok(x) => db
             .bindings()
             .write()

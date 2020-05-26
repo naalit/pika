@@ -2,7 +2,8 @@ use codespan_reporting::diagnostic::{Diagnostic, Label};
 use codespan_reporting::files::{Files as FilesT, SimpleFile};
 use codespan_reporting::term::termcolor;
 use codespan_reporting::term::{emit, Config};
-use lalrpop_util::{lexer::Token, ParseError};
+use lalrpop_util::ParseError;
+use crate::lexer::{Tok, LexError};
 use std::ops::Range;
 use std::sync::{Arc, RwLock};
 
@@ -143,6 +144,26 @@ impl PartialEq for Error {
             && self.0.severity == other.0.severity
     }
 }
+
+/// Displays as "a, b, c, or d"
+struct DisplayList<T>(Vec<T>);
+use std::fmt;
+impl<T: fmt::Display> fmt::Display for DisplayList<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.0.len() == 1 {
+            return write!(f, "{}", self.0[0]);
+        }
+        for i in 0..self.0.len() {
+            if i == self.0.len() - 1 {
+                write!(f, "or {}", self.0[i])?;
+            } else {
+                write!(f, "{}, ", self.0[i])?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Eq for Error {}
 impl Error {
     /// Formats like this:
@@ -174,26 +195,26 @@ impl Error {
         self
     }
 
-    pub fn from_lalrpop(e: ParseError<usize, Token, Spanned<String>>, file: usize) -> Self {
+    pub fn from_lalrpop(e: ParseError<usize, Tok, Spanned<LexError>>, file: usize) -> Self {
         let (message, span) = match e {
             ParseError::InvalidToken { location } => {
                 ("Invalid token".to_string(), Span(location, location))
             }
             ParseError::UnrecognizedEOF { location, expected } => (
-                format!("Unexpected EOF, expected one of {:?}", expected),
+                format!("Unexpected EOF, expected {}", DisplayList(expected)),
                 Span(location, location),
             ),
             ParseError::UnrecognizedToken {
-                token: (start, Token(_, s), end),
+                token: (start, tok, end),
                 expected,
             } => (
-                format!("Unexpected token {}, expected one of {:?}", s, expected),
+                format!("Unexpected {}, expected {}", tok, DisplayList(expected)),
                 Span(start, end),
             ),
             ParseError::ExtraToken {
-                token: (start, Token(_, s), end),
+                token: (start, tok, end),
             } => (
-                format!("Unexpected token {}, expected EOF", s),
+                format!("Unexpected {}, expected EOF", tok),
                 Span(start, end),
             ),
             ParseError::User { error } => (error.to_string(), error.span()),

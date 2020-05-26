@@ -4,17 +4,32 @@ use crate::term::*;
 use crate::binding::ParseDef;
 use crate::error::{Spanned, Span};
 use lalrpop_util::ParseError;
+use crate::lexer::Tok;
 
-grammar;
+grammar<'input>(input: &'input str);
 
 extern {
-    type Error = Spanned<String>;
-}
+    type Location = usize;
+    type Error = Spanned<crate::lexer::LexError>;
 
-match {
-    r"[ \t\r]*" => {},
-    r"#[^\n\r]*[\n\r]*" => {},
-    _
+    enum Tok<'input> {
+        "fun" => Tok::Fun,            // "fun"
+        "Type" => Tok::Type,           // "Type"
+        "Int" => Tok::Int,            // "Int"
+        "struct" => Tok::Struct,         // "struct"
+        "the" => Tok::The,
+        ":" => Tok::Colon,          // ":"
+        "=>" => Tok::Arrow,          // "=>"
+        "=" => Tok::Equals,         // "="
+        "\n" => Tok::Newline,        // "\n"
+        "(" => Tok::POpen,
+        ")" => Tok::PClose,
+        "," => Tok::Comma,
+        INT_LIT => Tok::LitInt(<i32>),    // "12"
+        NAME => Tok::Name(<&'input str>),   // "x"
+        INDENT => Tok::Indent,
+        DEDENT => Tok::Dedent,
+    }
 }
 
 Lines<T>: Vec<T> = {
@@ -83,7 +98,7 @@ MultiBinder: Vec<Spanned<ParseTree<'input>>> = {
                 r.push(Spanned::new(ParseTree::Binder(i, t.clone()), span));
             } else {
                 return Err(ParseError::User {
-                    error: Spanned::new(": can only be used with binders".to_string(), span),
+                    error: Spanned::new(crate::lexer::LexError::Other(": can only be used with binders".to_string()), span),
                 });
             }
         }
@@ -105,7 +120,7 @@ Fun: ParseTree<'input> = {
 }
 
 Atom: ParseTree<'input> = {
-    "()" => ParseTree::Unit,
+    "(" ")" => ParseTree::Unit,
     "(" <a:STerm> "," <b:STerm> ")" => ParseTree::Pair(a, b),
     Builtin => ParseTree::Builtin(<>),
     "Type" => ParseTree::Type,
@@ -118,5 +133,7 @@ Builtin: Builtin = {
     "Int" => Builtin::Int,
 }
 
-Var: &'input str = r"[A-Za-z_][A-Za-z_0-9]*";
-Int: i32 = <s:r"[0-9]+"> => i32::from_str(s).unwrap();
+Var: &'input str = {
+    NAME => &<>,
+}
+Int: i32 = INT_LIT;

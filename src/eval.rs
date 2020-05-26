@@ -92,7 +92,18 @@ impl Value {
         match self {
             Var(s) => {
                 if let Some(x) = env.val(*s) {
-                    x.cloned(env)
+                    // Here's how this happens:
+                    // 1. We come up with a value using, say, x3. That value gets stored in Salsa's database.
+                    // 2. We reset the Bindings, define x0, x1, and x2, and ask for the value again.
+                    // 3. Salsa gives us the value from the database, which references x3. We call cloned() on it.
+                    // 4. We see a bound variable, x3, and define a fresh variable to replace it with. The fresh variable is now also x3.
+                    // 5. Now we want to replace x3 with x3, so we better not call cloned() recursively or we'll get stuck in a loop.
+                    // Note, though, that this is expected behaviour and doesn't need fixing.
+                    if &*x == self {
+                        Var(*s)
+                    } else {
+                        x.cloned(env)
+                    }
                 } else {
                     // Free variable
                     Var(*s)
