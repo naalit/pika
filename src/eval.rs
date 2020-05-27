@@ -11,8 +11,8 @@ impl Term {
             Term::I32(i) => Value::I32(*i),
             Term::Type => Value::Type,
             Term::Builtin(b) => Value::Builtin(*b),
-            Term::Var(s) => match db.val(env.file, *s).or_else(|| env.val(*s)) {
-                Some(x) => x.cloned(&mut env.child()),
+            Term::Var(s) => match db.val(env.scope.clone(), *s).or_else(|| env.val(*s)) {
+                Some(x) => x.cloned(&mut env.clone()),
                 // Free variable
                 None => Value::Var(*s),
             },
@@ -37,18 +37,19 @@ impl Term {
                     f => Value::App(Box::new(f), Box::new(x)),
                 }
             }
-            Term::Struct(v) => Value::Struct(
+            Term::Struct(id, v) => Value::Struct({
+                let mut env = env.child(*id);
                 v.iter()
-                    .map(|(name, val)| (**name, val.reduce(db, env)))
-                    .collect(),
-            ),
+                    .map(|(name, val)| (**name, val.reduce(db, &mut env)))
+                    .collect()
+            }),
             Term::Project(r, m) => {
                 let r = r.reduce(db, env);
                 match r {
                     Value::Struct(v) => {
                         // We unwrap because this type checked already
                         let (_, val) = v.iter().find(|(name, _)| name.raw() == **m).unwrap();
-                        val.cloned(&mut env.child())
+                        val.cloned(&mut env.clone())
                     }
                     // Not a record yet, we can't project it
                     r => Value::Project(Box::new(r), **m),
@@ -217,7 +218,7 @@ impl Value {
                 match &**r {
                     Value::Struct(v) => {
                         let (_, val) = v.iter().find(|(name, _)| name.raw() == *m).unwrap();
-                        *self = val.cloned(&mut env.child());
+                        *self = val.cloned(&mut env.clone());
                     }
                     // Still not a record
                     _ => (),

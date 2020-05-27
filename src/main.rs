@@ -69,11 +69,11 @@ fn main() {
 
                 db.set_source(file, std::sync::Arc::new(buf.clone()));
 
-                for s in db.symbols(file).iter() {
+                for s in db.symbols(ScopeId::File(file)).iter() {
                     if !seen_symbols.contains(s) {
                         seen_symbols.insert(**s);
-                        if let Some(ty) = db.typ(file, **s) {
-                            let val = db.val(file, **s).unwrap();
+                        if let Some(ty) = db.typ(ScopeId::File(file), **s) {
+                            let val = db.val(ScopeId::File(file), **s).unwrap();
                             let b = db.bindings();
                             let b = b.read().unwrap();
                             println!(

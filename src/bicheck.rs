@@ -149,9 +149,9 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
     match &**t {
         Term::Type | Term::Builtin(Builtin::Int) => Ok(Value::Type),
         Term::Var(x) => db
-            .typ(env.file, *x)
+            .typ(env.scope.clone(), *x)
             .or_else(|| env.ty(*x))
-            .map(|x| x.cloned(&mut env.child()))
+            .map(|x| x.cloned(&mut env.clone()))
             .ok_or_else(|| TypeError::NotFound(t.copy_span(*x))),
         Term::I32(_) => Ok(Value::Builtin(Builtin::Int)),
         Term::Unit => Ok(Value::Unit),
@@ -162,9 +162,10 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
                 Box::new(synth(y, db, env)?),
             ))
         }
-        Term::Struct(iv) => {
+        Term::Struct(id, iv) => {
             let mut rv = Vec::new();
             let mut syms: Vec<Spanned<Sym>> = Vec::new();
+            let mut env = env.child(*id);
             for (name, val) in iv {
                 if let Some(n2) = syms.iter().find(|n| n.raw() == name.raw()) {
                     return Err(TypeError::DuplicateField(
@@ -174,10 +175,7 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
                 }
                 syms.push(name.clone());
 
-                let ty = synth(val, db, env)?;
-                // TODO unordered, dependent records
-                let ty2 = ty.cloned(&mut env.child());
-                env.set_ty(**name, ty2);
+                let ty = synth(val, db, &mut env)?;
                 rv.push((**name, ty));
             }
             Ok(Value::Struct(rv))
@@ -188,7 +186,7 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
                 Value::Fun(from, to) => {
                     check(x, &from, db, env)?;
                     // Stick the value in in case it's dependent
-                    let mut to = to.cloned(&mut env.child());
+                    let mut to = to.cloned(&mut env.clone());
                     let x = x.reduce(db, env);
                     from.do_match(&x, env);
                     to.update(env);
@@ -202,7 +200,7 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
             match &rt {
                 Value::Struct(v) => {
                     if let Some((_, val)) = v.iter().find(|(name, _)| name.raw() == **m) {
-                        Ok(val.cloned(&mut env.child()))
+                        Ok(val.cloned(&mut env.clone()))
                     } else {
                         Err(TypeError::NoSuchField(m.clone(), rt))
                     }
@@ -279,19 +277,19 @@ pub fn check(
         // }
 
         // As far as we know, it could be any type
-        (Term::Binder(_, None), _) if typ.subtype_of(&Value::Type, &mut env.child()) => Ok(()),
+        (Term::Binder(_, None), _) if typ.subtype_of(&Value::Type, &mut env.clone()) => Ok(()),
 
         (Term::Fun(x, b), Value::Fun(y, to)) => {
             // Make sure it's well typed before reducing it
             check(x, &Value::Type, db, env)?;
             let xr = x.reduce(db, env);
             // Because patterns are types, match checking amounts to subtype checking
-            if y.subtype_of(&xr, &mut env.child()) {
+            if y.subtype_of(&xr, &mut env.clone()) {
                 xr.match_types(y, env);
                 check(b, to, db, env)
             } else {
                 Err(TypeError::NotSubtypeF(
-                    y.cloned(&mut env.child()),
+                    y.cloned(&mut env.clone()),
                     x.copy_span(xr),
                 ))
             }
@@ -299,12 +297,12 @@ pub fn check(
         (_, _) => {
             let t = synth(term, db, env)?;
             // Is it guaranteed to be a `typ`?
-            if t.subtype_of(&typ, &mut env.child()) {
+            if t.subtype_of(&typ, &mut env.clone()) {
                 Ok(())
             } else {
                 Err(TypeError::NotSubtype(
                     term.copy_span(t),
-                    typ.cloned(&mut env.child()),
+                    typ.cloned(&mut env.clone()),
                 ))
             }
         }
@@ -325,7 +323,7 @@ impl Value {
                         println!("env: {} : {}", WithContext(b, self), WithContext(b, &**t));
                     }
 
-                    let t = t.cloned(&mut env.child());
+                    let t = t.cloned(&mut env.clone());
                     env.set_ty(*na, t);
                 }
             }
@@ -343,7 +341,7 @@ impl Value {
                     println!("type: {} : {}", WithContext(b, self), WithContext(b, other));
                 }
 
-                let other = other.cloned(&mut env.child());
+                let other = other.cloned(&mut env.clone());
                 env.set_ty(*s, other);
             }
             (Var(x), _) => {

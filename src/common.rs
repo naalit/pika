@@ -1,7 +1,9 @@
-pub use crate::binding::{Bindings, ParseTree, RawSym, Sym};
-pub use crate::error::{Error, FileId};
+pub use crate::binding::{Bindings, ParseTree, RawSym, Sym, StructId};
+pub use crate::error::Error;
 pub use crate::query::*;
 use std::fmt;
+
+pub type FileId = usize;
 
 /// `std::fmt::Display`, but with context (`Bindings`)
 pub trait CDisplay {

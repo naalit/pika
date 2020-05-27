@@ -1,7 +1,17 @@
-use crate::error::{Error, FileId, Spanned};
+use crate::common::*;
+use crate::error::Spanned;
 use crate::term::*;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+
+/// Like a Sym, but it identifies a record (= struct, module)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StructId(NonZeroU32);
+impl StructId {
+    pub fn num(self) -> u32 {
+        self.0.get() - 1
+    }
+}
 
 /// Represents an interned string directly
 ///
@@ -165,6 +175,7 @@ struct NEnv<'p, 'b> {
     /// That way, we don't have to do anything extra when we add to `symbols`, and we can just `resize()` it when we `pop()` the scope
     scopes: Vec<usize>,
     bindings: &'b mut Bindings,
+    struct_id: u32,
 }
 impl<'p, 'b> NEnv<'p, 'b> {
     fn new(bindings: &'b mut Bindings) -> Self {
@@ -172,7 +183,13 @@ impl<'p, 'b> NEnv<'p, 'b> {
             symbols: Vec::new(),
             scopes: Vec::new(),
             bindings,
+            struct_id: 0,
         }
+    }
+
+    fn next_struct(&mut self) -> StructId {
+        self.struct_id += 1;
+        StructId(NonZeroU32::new(self.struct_id).unwrap())
     }
 
     fn get(&self, s: &str) -> Option<Sym> {
@@ -240,7 +257,7 @@ impl<'p> STree<'p> {
                         rv.push((name, val));
                     }
                     env.pop();
-                    Term::Struct(rv)
+                    Term::Struct(env.next_struct(), rv)
                 }
                 Project(r, m) => Term::Project(
                     r.resolve_names(env)?,

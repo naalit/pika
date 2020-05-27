@@ -6,8 +6,7 @@ use codespan_reporting::term::{emit, Config};
 use lalrpop_util::ParseError;
 use std::ops::Range;
 use std::sync::{Arc, RwLock};
-
-pub type FileId = usize;
+use crate::common::*;
 
 pub struct Files {
     files: Vec<SimpleFile<String, String>>,

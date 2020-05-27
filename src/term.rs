@@ -26,9 +26,27 @@ pub enum Term {
     Fun(STerm, STerm),                  // fn a => x
     App(STerm, STerm),                  // f x
     Pair(STerm, STerm),                 // x, y
-    Struct(Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
+    Struct(StructId, Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
     /// We use RawSym's here because it should work on any record with a field named this
     Project(STerm, Spanned<RawSym>), // r.m
+}
+impl Term {
+    pub fn traverse(&self, f: impl Fn(&Term) + Copy) {
+        f(self);
+        match self {
+            Term::The(t, u) | Term::Fun(t, u) | Term::App(t, u) | Term::Pair(t, u) => {
+                t.traverse(f);
+                u.traverse(f);
+            },
+            Term::Binder(_, Some(t)) | Term::Project(t, _) => {
+                t.traverse(f);
+            }
+            Term::Struct(_, v) => for (_, t) in v.iter() {
+                t.traverse(f);
+            }
+            _ => (),
+        }
+    }
 }
 impl CDisplay for Term {
     fn fmt(&self, f: &mut std::fmt::Formatter, b: &Bindings) -> std::fmt::Result {
@@ -51,8 +69,8 @@ impl CDisplay for Term {
             ),
             Term::App(x, y) => write!(f, "{}({})", WithContext(b, &**x), WithContext(b, &**y)),
             Term::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
-            Term::Struct(v) => {
-                write!(f, "struct {{ ")?;
+            Term::Struct(id, v) => {
+                write!(f, "struct({}) {{ ", id.num())?;
                 for (name, val) in v.iter() {
                     write!(
                         f,
