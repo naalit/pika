@@ -16,17 +16,17 @@ pub type STerm = Spanned<Term>;
 /// We do type checking on `Term`s, and when we want to use it as a type we `reduce()` it to a `Value`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Term {
-    Unit,                       // ()
-    The(STerm, STerm),          // the T x
-    Binder(Sym, Option<STerm>), // x: T
-    Var(Sym),                   // a
-    I32(i32),                   // 3
-    Type,                       // Type
-    Builtin(Builtin),           // Int
-    Fun(STerm, STerm),          // fn a => x
-    App(STerm, STerm),          // f x
-    Pair(STerm, STerm),         // x, y
-    Struct(Vec<(Spanned<Sym>, STerm)>),  // struct { x := 3 }
+    Unit,                               // ()
+    The(STerm, STerm),                  // the T x
+    Binder(Sym, Option<STerm>),         // x: T
+    Var(Sym),                           // a
+    I32(i32),                           // 3
+    Type,                               // Type
+    Builtin(Builtin),                   // Int
+    Fun(STerm, STerm),                  // fn a => x
+    App(STerm, STerm),                  // f x
+    Pair(STerm, STerm),                 // x, y
+    Struct(Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
     /// We use RawSym's here because it should work on any record with a field named this
     Project(STerm, Spanned<RawSym>), // r.m
 }
@@ -54,16 +54,17 @@ impl CDisplay for Term {
             Term::Struct(v) => {
                 write!(f, "struct {{ ")?;
                 for (name, val) in v.iter() {
-                    write!(f, "{}{} := {}, ", b.resolve(**name), name.num(), WithContext(b, &**val))?;
+                    write!(
+                        f,
+                        "{}{} := {}, ",
+                        b.resolve(**name),
+                        name.num(),
+                        WithContext(b, &**val)
+                    )?;
                 }
                 write!(f, "}}")
             }
-            Term::Project(r, m) => write!(
-                f,
-                "({}).{}",
-                WithContext(b, &**r),
-                b.resolve_raw(**m),
-            )
+            Term::Project(r, m) => write!(f, "({}).{}", WithContext(b, &**r), b.resolve_raw(**m),),
         }
     }
 }

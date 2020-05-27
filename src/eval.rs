@@ -37,9 +37,11 @@ impl Term {
                     f => Value::App(Box::new(f), Box::new(x)),
                 }
             }
-            Term::Struct(v) => {
-                Value::Struct(v.iter().map(|(name, val)| (**name, val.reduce(db, env))).collect())
-            }
+            Term::Struct(v) => Value::Struct(
+                v.iter()
+                    .map(|(name, val)| (**name, val.reduce(db, env)))
+                    .collect(),
+            ),
             Term::Project(r, m) => {
                 let r = r.reduce(db, env);
                 match r {
@@ -70,7 +72,7 @@ pub enum Value {
     Builtin(Builtin),          // Int
     Fun(BVal, BVal),           // fn a => x
     /// Applicand must be neutral
-    App(BVal, BVal),           // f x
+    App(BVal, BVal), // f x
     Pair(BVal, BVal),          // x, y
     Struct(Vec<(Sym, Value)>), // struct { x := 3 }
     Project(BVal, RawSym),
@@ -160,23 +162,27 @@ impl Value {
                 let y = Box::new(y.cloned(env));
                 Pair(x, y)
             }
-            Struct(v) => Struct(v.into_iter().map(|(name, val)| {
-                let val = val.cloned(env);
-                let fresh = env.bindings_mut().fresh(*name);
-                #[cfg(feature = "logging")]
-                {
-                    let b = &env.bindings();
-                    println!(
-                        "Renaming {}{} to {}{}",
-                        b.resolve(*name),
-                        name.num(),
-                        b.resolve(fresh),
-                        fresh.num()
-                    );
-                }
-                env.set_val(*name, Var(fresh));
-                (fresh, val)
-            }).collect()),
+            Struct(v) => Struct(
+                v.into_iter()
+                    .map(|(name, val)| {
+                        let val = val.cloned(env);
+                        let fresh = env.bindings_mut().fresh(*name);
+                        #[cfg(feature = "logging")]
+                        {
+                            let b = &env.bindings();
+                            println!(
+                                "Renaming {}{} to {}{}",
+                                b.resolve(*name),
+                                name.num(),
+                                b.resolve(fresh),
+                                fresh.num()
+                            );
+                        }
+                        env.set_val(*name, Var(fresh));
+                        (fresh, val)
+                    })
+                    .collect(),
+            ),
             Project(r, m) => Project(Box::new(r.cloned(env)), *m),
         }
     }
@@ -248,16 +254,17 @@ impl CDisplay for Value {
             Value::Struct(v) => {
                 write!(f, "struct {{ ")?;
                 for (name, val) in v.iter() {
-                    write!(f, "{}{} := {}, ", b.resolve(*name), name.num(), WithContext(b, &*val))?;
+                    write!(
+                        f,
+                        "{}{} := {}, ",
+                        b.resolve(*name),
+                        name.num(),
+                        WithContext(b, &*val)
+                    )?;
                 }
                 write!(f, "}}")
             }
-            Value::Project(r, m) => write!(
-                f,
-                "({}).{}",
-                WithContext(b, &**r),
-                b.resolve_raw(*m),
-            )
+            Value::Project(r, m) => write!(f, "({}).{}", WithContext(b, &**r), b.resolve_raw(*m),),
         }
     }
 }

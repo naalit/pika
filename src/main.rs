@@ -5,8 +5,8 @@ mod error;
 mod term;
 use common::*;
 mod eval;
-mod query;
 mod lexer;
+mod query;
 use rustyline as rl;
 
 use lalrpop_util::*;

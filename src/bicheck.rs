@@ -23,6 +23,8 @@ pub enum TypeError {
     NotFound(Spanned<Sym>),
     /// We tried to access this field, but it's not there
     NoSuchField(Spanned<RawSym>, Value),
+    /// We tried to define a field twice in a struct
+    DuplicateField(Spanned<RawSym>, Spanned<RawSym>),
 }
 impl TypeError {
     pub fn to_error(self, file: FileId, b: &Bindings) -> Error {
@@ -86,7 +88,14 @@ impl TypeError {
                 ),
                 s.span(),
                 format!("no such field"),
+            ),
+            TypeError::DuplicateField(x, y) => Error::new(
+                file,
+                format!("Type error: duplicate struct field '{}'", b.resolve_raw(*x),),
+                x.span(),
+                format!("first defined here"),
             )
+            .with_label(file, y.span(), format!("redefined here")),
         }
     }
 }
@@ -123,6 +132,11 @@ impl CDisplay for TypeError {
                 b.resolve_raw(**s),
                 WithContext(b, &*v),
             ),
+            TypeError::DuplicateField(x, _y) => write!(
+                f,
+                "Type error: duplicate struct field '{}'",
+                b.resolve_raw(**x),
+            ),
         }
     }
 }
@@ -150,7 +164,16 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
         }
         Term::Struct(iv) => {
             let mut rv = Vec::new();
+            let mut syms: Vec<Spanned<Sym>> = Vec::new();
             for (name, val) in iv {
+                if let Some(n2) = syms.iter().find(|n| n.raw() == name.raw()) {
+                    return Err(TypeError::DuplicateField(
+                        n2.copy_span(n2.raw()),
+                        name.copy_span(name.raw()),
+                    ));
+                }
+                syms.push(name.clone());
+
                 let ty = synth(val, db, env)?;
                 // TODO unordered, dependent records
                 let ty2 = ty.cloned(&mut env.child());
@@ -244,16 +267,16 @@ pub fn check(
             check(y, ty, db, env)
         }
 
-        (Term::Struct(vals), Value::Struct(tys)) => {
-            let ty_iter = tys.iter();
-            for (name, val) in vals.iter() {
-                let raw = name.raw();
-                // TODO does this support dependent records? What do we do with the name we get here?
-                let (_, ty) = ty_iter.clone().find(|(s, _)| s.raw() == raw).ok_or_else(|| TypeError::NoSuchField(name.copy_span(name.raw()), typ.cloned(&mut env.child())))?;
-                check(val, ty, db, env)?;
-            }
-            Ok(())
-        }
+        // (Term::Struct(vals), Value::Struct(tys)) => {
+        //     let ty_iter = tys.iter();
+        //     for (name, val) in vals.iter() {
+        //         let raw = name.raw();
+        //         // TODO does this support dependent records? What do we do with the name we get here?
+        //         let (_, ty) = ty_iter.clone().find(|(s, _)| s.raw() == raw).ok_or_else(|| TypeError::NoSuchField(name.copy_span(name.raw()), typ.cloned(&mut env.child())))?;
+        //         check(val, ty, db, env)?;
+        //     }
+        //     Ok(())
+        // }
 
         // As far as we know, it could be any type
         (Term::Binder(_, None), _) if typ.subtype_of(&Value::Type, &mut env.child()) => Ok(()),
@@ -374,6 +397,12 @@ impl Value {
             return false;
         }
         match (self, sup) {
+            (Value::Struct(sub), Value::Struct(sup)) => {
+                // We DON'T do record subtyping, that's hard to compile efficiently
+                sup.iter().all(|(n, sup)| sub.iter().find(|(n2, _)| n2.raw() == n.raw()).map_or(false, |(_, sub)| sub.subtype_of(sup, env)))
+                // so make sure there aren't any extra fields
+                    && sub.iter().all(|(n, _)| sup.iter().any(|(n2, _)| n2.raw() == n.raw()))
+            }
             (Value::Builtin(b), Value::Builtin(c)) if b == c => true,
             (Value::Unit, Value::Unit) => true,
             (Value::Var(x), _) if env.vals.contains_key(x) => {

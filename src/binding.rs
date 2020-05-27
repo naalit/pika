@@ -143,18 +143,18 @@ pub struct ParseDef<'p>(pub Spanned<&'p str>, pub Spanned<ParseTree<'p>>);
 /// This is what the parser generates. All names are stored as string slices
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseTree<'p> {
-    Unit,                               // ()
-    The(STree<'p>, STree<'p>),          // the T x
-    Binder(&'p str, Option<STree<'p>>), // x: T
-    Var(&'p str),                       // a
-    I32(i32),                           // 3
-    Type,                               // Type
-    Builtin(Builtin),                   // Int
-    Fun(STree<'p>, STree<'p>),          // fn a => x
-    App(STree<'p>, STree<'p>),          // f x
-    Pair(STree<'p>, STree<'p>),         // x, y
-    Struct(Vec<(Spanned<&'p str>, STree<'p>)>),  // struct { x := 3 }
-    Project(STree<'p>, Spanned<&'p str>),   // r.m
+    Unit,                                       // ()
+    The(STree<'p>, STree<'p>),                  // the T x
+    Binder(&'p str, Option<STree<'p>>),         // x: T
+    Var(&'p str),                               // a
+    I32(i32),                                   // 3
+    Type,                                       // Type
+    Builtin(Builtin),                           // Int
+    Fun(STree<'p>, STree<'p>),                  // fn a => x
+    App(STree<'p>, STree<'p>),                  // f x
+    Pair(STree<'p>, STree<'p>),                 // x, y
+    Struct(Vec<(Spanned<&'p str>, STree<'p>)>), // struct { x := 3 }
+    Project(STree<'p>, Spanned<&'p str>),       // r.m
 }
 type STree<'p> = Spanned<ParseTree<'p>>;
 
@@ -242,7 +242,10 @@ impl<'p> STree<'p> {
                     env.pop();
                     Term::Struct(rv)
                 }
-                Project(r, m) => Term::Project(r.resolve_names(env)?, m.copy_span(env.bindings.raw(m.to_string()))),
+                Project(r, m) => Term::Project(
+                    r.resolve_names(env)?,
+                    m.copy_span(env.bindings.raw(m.to_string())),
+                ),
             },
             span,
         ))

@@ -1,9 +1,9 @@
+use crate::lexer::{LexError, Tok};
 use codespan_reporting::diagnostic::{Diagnostic, Label};
 use codespan_reporting::files::{Files as FilesT, SimpleFile};
 use codespan_reporting::term::termcolor;
 use codespan_reporting::term::{emit, Config};
 use lalrpop_util::ParseError;
-use crate::lexer::{Tok, LexError};
 use std::ops::Range;
 use std::sync::{Arc, RwLock};
 

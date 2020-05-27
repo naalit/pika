@@ -1,9 +1,9 @@
 //! Whitespace-sensitive lexer
 //! We enforce spaces instead of tabs
 
+use crate::error::{Span, Spanned};
 use std::fmt;
 use std::str::FromStr;
-use crate::error::{Spanned, Span};
 
 pub type LexResult<'i> = Result<(usize, Tok<'i>, usize), Spanned<LexError>>;
 
@@ -18,21 +18,21 @@ pub enum LexError {
 
 #[derive(Clone, Debug)]
 pub enum Tok<'i> {
-    Fun,            // "fun"
-    Type,           // "Type"
-    Int,            // "Int"
-    Struct,         // "struct"
-    The,            // "the"
-    Colon,          // ":"
-    Arrow,          // "=>"
-    Equals,         // "="
-    Newline,        // "\n"
-    LitInt(i32),    // "12"
-    Name(&'i str),  // "x"
-    POpen,          // "("
-    PClose,         // ")"
-    Comma,          // ","
-    Dot,            // "."
+    Fun,           // "fun"
+    Type,          // "Type"
+    Int,           // "Int"
+    Struct,        // "struct"
+    The,           // "the"
+    Colon,         // ":"
+    Arrow,         // "=>"
+    Equals,        // "="
+    Newline,       // "\n"
+    LitInt(i32),   // "12"
+    Name(&'i str), // "x"
+    POpen,         // "("
+    PClose,        // ")"
+    Comma,         // ","
+    Dot,           // "."
     Indent,
     Dedent,
 }
@@ -84,7 +84,7 @@ impl<'i> Lexer<'i> {
         Span(self.last, self.pos)
     }
     fn slice(&self) -> &'i str {
-        &self.input[self.last .. self.pos]
+        &self.input[self.last..self.pos]
     }
 
     fn handle_indent(&mut self) -> Option<Tok<'i>> {
@@ -137,12 +137,12 @@ impl<'i> Lexer<'i> {
         loop {
             if let Some(c) = self.peek() {
                 if !c.non_newline_whitespace() {
-                    break
+                    break;
                 } else {
                     self.next();
                 }
             } else {
-                break
+                break;
             }
         }
     }
@@ -153,7 +153,10 @@ impl<'i> Lexer<'i> {
             if c.map_or(false, |c| c.is_numeric()) {
                 self.next();
             } else {
-                break Tok::LitInt(i32::from_str(self.slice()).map_err(|_| Spanned::new(LexError::InvalidLiteral, self.span()))?)
+                break Tok::LitInt(
+                    i32::from_str(self.slice())
+                        .map_err(|_| Spanned::new(LexError::InvalidLiteral, self.span()))?,
+                );
             }
         })
     }
@@ -175,7 +178,7 @@ impl<'i> Lexer<'i> {
             if c.map_or(false, |c| c.is_alphanumeric() || c == '_') {
                 self.next();
             } else {
-                break ident(self.slice())
+                break ident(self.slice());
             }
         }
     }
@@ -215,7 +218,7 @@ impl<'i> Lexer<'i> {
             '\r' => {
                 self.next();
                 if self.next() != Some('\n') {
-                    return Err(Spanned::new(LexError::CarriageReturn, self.span()))
+                    return Err(Spanned::new(LexError::CarriageReturn, self.span()));
                 } else {
                     self.was_newline = true;
                     Tok::Newline
@@ -263,15 +266,15 @@ impl<'i> std::iter::Iterator for Lexer<'i> {
     }
 }
 
-
-
 impl LexError {
     pub fn to_string(&self) -> String {
         match self {
             LexError::Tabs => "Found tab character, please use spaces".to_string(),
             LexError::InvalidToken => "Invalid token".to_string(),
             LexError::InvalidLiteral => "Invalid literal".to_string(),
-            LexError::CarriageReturn => "Expected newline '\\n' after carriage return '\\r'".to_string(),
+            LexError::CarriageReturn => {
+                "Expected newline '\\n' after carriage return '\\r'".to_string()
+            }
             LexError::Other(s) => s.clone(),
         }
     }
@@ -282,20 +285,19 @@ impl<'i> fmt::Display for Tok<'i> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Tok::*;
         match self {
-            Fun    => write!(f, "'fun'"),
-            Int    => write!(f, "'Int'"),
-            Type   => write!(f, "'Type'"),
+            Fun => write!(f, "'fun'"),
+            Int => write!(f, "'Int'"),
+            Type => write!(f, "'Type'"),
             Struct => write!(f, "'struct'"),
-            The    => write!(f, "'the'"),
+            The => write!(f, "'the'"),
 
-            Dot    => write!(f, "'.'"),
-            Comma  => write!(f, "','"),
-            POpen  => write!(f, "'('"),
+            Dot => write!(f, "'.'"),
+            Comma => write!(f, "','"),
+            POpen => write!(f, "'('"),
             PClose => write!(f, "')'"),
-            Colon  => write!(f, "':'"),
-            Arrow  => write!(f, "'=>'"),
+            Colon => write!(f, "':'"),
+            Arrow => write!(f, "'=>'"),
             Equals => write!(f, "'='"),
-
 
             Newline => write!(f, "newline"),
             LitInt(_) => write!(f, "int literal"),
