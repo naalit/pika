@@ -16,7 +16,7 @@ impl StructId {
 /// Represents an interned string directly
 ///
 /// Same size properties as Sym
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct RawSym(NonZeroU32);
 impl RawSym {
     fn new(idx: usize) -> Self {

@@ -59,11 +59,16 @@ impl Term {
                 for i in 0..v.len() {
                     match &v[i] {
                         // Expressions currently can't do anything in this position
-                        Statement::Expr(e) => if i + 1 == v.len() { return e.reduce(db, env) } else {},
+                        Statement::Expr(e) => {
+                            if i + 1 == v.len() {
+                                return e.reduce(db, env);
+                            } else {
+                            }
+                        }
                         Statement::Def(Def(name, val)) => {
                             let val = val.reduce(db, env);
                             env.set_val(**name, val);
-                        },
+                        }
                     }
                 }
                 Value::Unit

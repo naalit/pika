@@ -4,6 +4,7 @@ mod common;
 mod error;
 mod term;
 use common::*;
+mod codegen;
 mod eval;
 mod lexer;
 mod query;
@@ -86,6 +87,29 @@ fn main() {
                         }
                     }
                 }
+
+                // Generate LLVM and print out the module, for now
+                let module = db.low_mod(file);
+                let context = inkwell::context::Context::create();
+                let llvm = module.codegen(&mut crate::codegen::CodegenCtx::new(&context));
+                llvm.print_to_stderr();
+                if let Err(e) = llvm.verify() {
+                    println!("Verification error: {}", e);
+                }
+
+                // If there's a `main` definition (and only one), run it and assume it returns an Int
+                // This is really terrible, should definitely replace it
+                let engine = llvm
+                    .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                    .unwrap();
+                unsafe {
+                    if let Ok(main) =
+                        engine.get_function::<unsafe extern "C" fn() -> i32>("main$0_0")
+                    {
+                        println!("{}", main.call());
+                    }
+                }
+
                 if db.has_errors() {
                     buf = old_buf;
                 }

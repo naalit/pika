@@ -219,11 +219,13 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
         Term::Block(v) => {
             for i in 0..v.len() {
                 match &v[i] {
-                    Statement::Expr(t) => if i + 1 != v.len() {
-                        check(t, &Value::Unit, db, env)?;
-                    } else {
-                        // last value
-                        return synth(t, db, env);
+                    Statement::Expr(t) => {
+                        if i + 1 != v.len() {
+                            check(t, &Value::Unit, db, env)?;
+                        } else {
+                            // last value
+                            return synth(t, db, env);
+                        }
                     }
                     Statement::Def(Def(name, val)) => {
                         let t = synth(val, db, env)?;

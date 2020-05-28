@@ -1,5 +1,6 @@
 use crate::bicheck::*;
 use crate::binding::*;
+use crate::codegen::*;
 use crate::common::*;
 use crate::error::*;
 use crate::eval::*;
@@ -112,6 +113,47 @@ pub trait MainGroup: MainExt + salsa::Database {
     fn typ(&self, scope: ScopeId, s: Sym) -> Option<Arc<Value>>;
 
     fn val(&self, scope: ScopeId, s: Sym) -> Option<Arc<Value>>;
+
+    fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String>;
+
+    fn low_fun(&self, scope: ScopeId, s: Sym) -> Option<LowFun>;
+
+    fn low_mod(&self, file: FileId) -> LowMod;
+}
+
+fn mangle(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<String> {
+    // Return None if it doesn't exist
+    let _term = db.term(scope.clone(), s)?;
+    // We might mangle types too later
+    // let ty = db.typ(scope.clone(), s)?;
+
+    let b = db.bindings();
+    let b = b.read().unwrap();
+    Some(format!("{}${}_{}", b.resolve(s), s.num(), scope.file()))
+}
+
+fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
+    let funs = db
+        .symbols(ScopeId::File(file))
+        .iter()
+        .filter_map(|s| db.low_fun(ScopeId::File(file), **s))
+        .collect();
+    LowMod {
+        name: String::from("test_mod"),
+        funs,
+    }
+}
+
+fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowFun> {
+    let term = db.term(scope.clone(), s)?;
+    let ty = db.typ(scope.clone(), s)?;
+
+    let name = db.mangle(scope.clone(), s)?;
+
+    let ret_ty = ty.as_low_ty();
+    let body = term.as_low(db, &mut db.temp_env(scope));
+
+    Some(LowFun { name, ret_ty, body })
 }
 
 fn symbols(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>> {
