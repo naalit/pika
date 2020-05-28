@@ -9,6 +9,12 @@ pub enum Builtin {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Def(pub Spanned<Sym>, pub STerm);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Statement {
+    Expr(STerm),
+    Def(Def),
+}
+
 /// A spanned term. Most terms will have this type
 pub type STerm = Spanned<Term>;
 
@@ -16,19 +22,20 @@ pub type STerm = Spanned<Term>;
 /// We do type checking on `Term`s, and when we want to use it as a type we `reduce()` it to a `Value`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Term {
-    Unit,                               // ()
-    The(STerm, STerm),                  // the T x
-    Binder(Sym, Option<STerm>),         // x: T
-    Var(Sym),                           // a
-    I32(i32),                           // 3
-    Type,                               // Type
-    Builtin(Builtin),                   // Int
-    Fun(STerm, STerm),                  // fn a => x
-    App(STerm, STerm),                  // f x
-    Pair(STerm, STerm),                 // x, y
+    Unit,                                         // ()
+    The(STerm, STerm),                            // the T x
+    Binder(Sym, Option<STerm>),                   // x: T
+    Var(Sym),                                     // a
+    I32(i32),                                     // 3
+    Type,                                         // Type
+    Builtin(Builtin),                             // Int
+    Fun(STerm, STerm),                            // fn a => x
+    App(STerm, STerm),                            // f x
+    Pair(STerm, STerm),                           // x, y
     Struct(StructId, Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
     /// We use RawSym's here because it should work on any record with a field named this
     Project(STerm, Spanned<RawSym>), // r.m
+    Block(Vec<Statement>),                        // do { x; y }
 }
 impl Term {
     pub fn traverse(&self, f: impl Fn(&Term) + Copy) {
@@ -37,12 +44,14 @@ impl Term {
             Term::The(t, u) | Term::Fun(t, u) | Term::App(t, u) | Term::Pair(t, u) => {
                 t.traverse(f);
                 u.traverse(f);
-            },
+            }
             Term::Binder(_, Some(t)) | Term::Project(t, _) => {
                 t.traverse(f);
             }
-            Term::Struct(_, v) => for (_, t) in v.iter() {
-                t.traverse(f);
+            Term::Struct(_, v) => {
+                for (_, t) in v.iter() {
+                    t.traverse(f);
+                }
             }
             _ => (),
         }
@@ -79,6 +88,22 @@ impl CDisplay for Term {
                         name.num(),
                         WithContext(b, &**val)
                     )?;
+                }
+                write!(f, "}}")
+            }
+            Term::Block(v) => {
+                write!(f, "do {{ ")?;
+                for s in v.iter() {
+                    match s {
+                        Statement::Expr(e) => write!(f, "{}; ", WithContext(b, &**e)),
+                        Statement::Def(Def(name, val)) => write!(
+                            f,
+                            "{}{} := {}; ",
+                            b.resolve(**name),
+                            name.num(),
+                            WithContext(b, &**val)
+                        ),
+                    }?;
                 }
                 write!(f, "}}")
             }

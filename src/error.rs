@@ -1,3 +1,4 @@
+use crate::common::*;
 use crate::lexer::{LexError, Tok};
 use codespan_reporting::diagnostic::{Diagnostic, Label};
 use codespan_reporting::files::{Files as FilesT, SimpleFile};
@@ -6,7 +7,6 @@ use codespan_reporting::term::{emit, Config};
 use lalrpop_util::ParseError;
 use std::ops::Range;
 use std::sync::{Arc, RwLock};
-use crate::common::*;
 
 pub struct Files {
     files: Vec<SimpleFile<String, String>>,

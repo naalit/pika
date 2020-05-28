@@ -1,6 +1,6 @@
-use crate::common::*;
 use crate::bicheck::*;
 use crate::binding::*;
+use crate::common::*;
 use crate::error::*;
 use crate::eval::*;
 use crate::grammar::*;
@@ -154,7 +154,8 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
 }
 
 fn term(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
-    let r = db.defs(scope.clone())
+    let r = db
+        .defs(scope.clone())
         .iter()
         .find(|Def(x, _y)| **x == s)
         .map(|Def(_x, y)| Arc::new(y.clone()));
@@ -232,7 +233,10 @@ impl MainExt for MainDatabase {
         for Def(_, val) in defs {
             val.traverse(|t| match t {
                 Term::Struct(id, v) => {
-                    let v = v.iter().map(|(name, val)| Def(name.clone(), val.clone())).collect();
+                    let v = v
+                        .iter()
+                        .map(|(name, val)| Def(name.clone(), val.clone()))
+                        .collect();
                     scopes.write().unwrap().insert(*id, Arc::new(v));
                 }
                 _ => (),

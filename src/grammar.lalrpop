@@ -1,6 +1,6 @@
 use crate::common::*;
 use crate::term::*;
-use crate::binding::ParseDef;
+use crate::binding::{ParseDef, ParseStmt};
 use crate::error::{Spanned, Span};
 use lalrpop_util::ParseError;
 use crate::lexer::Tok;
@@ -17,6 +17,7 @@ extern {
         "Int" => Tok::Int,
         "struct" => Tok::Struct,
         "the" => Tok::The,
+        "do" => Tok::Do,
         ":" => Tok::Colon,
         "=>" => Tok::Arrow,
         "=" => Tok::Equals,
@@ -47,6 +48,15 @@ Struct: ParseTree<'input> = {
     "struct" "\n" INDENT <v:(<Def> "\n"+)+> DEDENT => ParseTree::Struct(v.into_iter().map(|ParseDef(name, val)| (name, val)).collect()),
 }
 
+Stmt: ParseStmt<'input> = {
+    Def => ParseStmt::Def(<>),
+    STerm => ParseStmt::Expr(<>),
+}
+
+Block: ParseTree<'input> = {
+    "do" "\n" INDENT <v:(<Stmt> "\n"+)+> DEDENT => ParseTree::Block(v),
+}
+
 pub Defs: Vec<ParseDef<'input>> = Lines<Def>;
 
 Def: ParseDef<'input> = {
@@ -65,12 +75,14 @@ NotFun: ParseTree<'input> = {
 
 STerm: Spanned<ParseTree<'input>> = Spanned<Term>;
 
+#[inline]
 Spanned<T>: Spanned<T> = {
     <l:@L> <t:T> <r:@R> => Spanned::new(t, Span(l, r)),
 };
 
 Term: ParseTree<'input> = {
     Struct,
+    Block,
     Fun,
     The,
     Binder,

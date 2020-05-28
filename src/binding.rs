@@ -146,6 +146,12 @@ impl Bindings {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ParseStmt<'p> {
+    Def(ParseDef<'p>),
+    Expr(STree<'p>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParseDef<'p>(pub Spanned<&'p str>, pub Spanned<ParseTree<'p>>);
 
 /// The AST before name resolution
@@ -165,6 +171,7 @@ pub enum ParseTree<'p> {
     Pair(STree<'p>, STree<'p>),                 // x, y
     Struct(Vec<(Spanned<&'p str>, STree<'p>)>), // struct { x := 3 }
     Project(STree<'p>, Spanned<&'p str>),       // r.m
+    Block(Vec<ParseStmt<'p>>),                  // do { x; y }
 }
 type STree<'p> = Spanned<ParseTree<'p>>;
 
@@ -263,6 +270,24 @@ impl<'p> STree<'p> {
                     r.resolve_names(env)?,
                     m.copy_span(env.bindings.raw(m.to_string())),
                 ),
+                Block(iv) => {
+                    env.push();
+                    let mut rv = Vec::new();
+                    for i in iv {
+                        match i {
+                            ParseStmt::Expr(val) => {
+                                rv.push(Statement::Expr(val.resolve_names(env)?));
+                            }
+                            ParseStmt::Def(ParseDef(name, val)) => {
+                                let val = val.resolve_names(env)?;
+                                let name = name.copy_span(env.create(*name));
+                                rv.push(Statement::Def(Def(name, val)));
+                            }
+                        }
+                    }
+                    env.pop();
+                    Term::Block(rv)
+                }
             },
             span,
         ))

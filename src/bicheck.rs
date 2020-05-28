@@ -216,6 +216,26 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
             x.match_types(&x, env);
             Ok(Value::Fun(Box::new(x), Box::new(synth(y, db, env)?)))
         }
+        Term::Block(v) => {
+            for i in 0..v.len() {
+                match &v[i] {
+                    Statement::Expr(t) => if i + 1 != v.len() {
+                        check(t, &Value::Unit, db, env)?;
+                    } else {
+                        // last value
+                        return synth(t, db, env);
+                    }
+                    Statement::Def(Def(name, val)) => {
+                        let t = synth(val, db, env)?;
+                        env.set_ty(**name, t);
+                        // Blocks can be dependent!
+                        let val = val.reduce(db, env);
+                        env.set_val(**name, val);
+                    }
+                }
+            }
+            Ok(Value::Unit)
+        }
         Term::The(t, u) => {
             // Make sure it's well typed before reducing it
             check(t, &Value::Type, db, env)?;

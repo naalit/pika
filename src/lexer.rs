@@ -22,6 +22,7 @@ pub enum Tok<'i> {
     Type,          // "Type"
     Int,           // "Int"
     Struct,        // "struct"
+    Do,            // "do"
     The,           // "the"
     Colon,         // ":"
     Arrow,         // "=>"
@@ -169,6 +170,7 @@ impl<'i> Lexer<'i> {
                 "Type" => Tok::Type,
                 "Int" => Tok::Int,
                 "the" => Tok::The,
+                "do" => Tok::Do,
                 _ => Tok::Name(s),
             }
         }
@@ -290,6 +292,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Type => write!(f, "'Type'"),
             Struct => write!(f, "'struct'"),
             The => write!(f, "'the'"),
+            Do => write!(f, "'do'"),
 
             Dot => write!(f, "'.'"),
             Comma => write!(f, "','"),
