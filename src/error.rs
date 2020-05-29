@@ -75,8 +75,13 @@ impl Into<Range<usize>> for Span {
 struct SpannedInner<T>(T, Span);
 /// Stores an `Arc` internally, and DerefMut calls `Arc::make_mut()`
 /// i.e. behaves like a `Box` but with cheap cloning
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Spanned<T>(Arc<SpannedInner<T>>);
+impl<T> Clone for Spanned<T> {
+    fn clone(&self) -> Self {
+        Spanned(self.0.clone())
+    }
+}
 impl<T> Spanned<T> {
     /// Calls `Arc::try_unwrap()``
     pub fn try_unwrap(self) -> Result<T, Self> {

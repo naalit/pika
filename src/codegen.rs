@@ -8,7 +8,8 @@
 use crate::{
     common::*,
     eval::Value,
-    term::{Builtin, Def, STerm, Statement, Term},
+    term::{Builtin, Def, Statement, Term},
+    bicheck::{Elab, SElab, ElabStmt},
 };
 pub use inkwell::context::Context;
 use inkwell::{builder::Builder, module::Module, types::*, values::*};
@@ -146,38 +147,38 @@ pub enum LowIR {
     Call(Box<LowIR>, Box<LowIR>),
 }
 
-impl STerm {
+impl SElab {
     /// Convert to LowIR, within the Salsa framework
     ///
     /// Most work should be done here and not in LowIR::codegen()
     pub fn as_low(&self, db: &impl MainGroup, env: &mut TempEnv) -> LowIR {
         match &**self {
-            Term::Unit => LowIR::Unit,
-            Term::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
-            Term::Var(x) => db
+            Elab::Unit => LowIR::Unit,
+            Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
+            Elab::Var(x, _) => db
                 .mangle(env.scope.clone(), *x)
                 .map(LowIR::Global)
                 .unwrap_or(LowIR::Local(*x)),
-            Term::Pair(a, b) => {
+            Elab::Pair(a, b, _) => {
                 let a = a.as_low(db, env);
                 let b = b.as_low(db, env);
                 LowIR::Struct(vec![a, b])
             }
-            Term::Struct(_, v) => {
-                let mut v = v.clone();
+            Elab::Struct(_, v, _) => {
+                let mut v = (*v).clone();
                 v.sort_by_key(|(x, _)| x.raw());
                 LowIR::Struct(v.into_iter().map(|(_, v)| v.as_low(db, env)).collect())
             }
-            Term::Block(v) => {
+            Elab::Block(v) => {
                 let mut iter = v.iter().rev();
                 let mut last = match iter.next().unwrap() {
-                    Statement::Def(_) => LowIR::Unit,
-                    Statement::Expr(e) => e.as_low(db, env),
+                    ElabStmt::Def(_, _) => LowIR::Unit,
+                    ElabStmt::Expr(e) => e.as_low(db, env),
                 };
                 for i in iter {
                     match i {
-                        Statement::Expr(_) => (),
-                        Statement::Def(Def(name, val)) => {
+                        ElabStmt::Expr(_) => (),
+                        ElabStmt::Def(name, val) => {
                             let val = val.as_low(db, env);
                             last = LowIR::Let(**name, Box::new(val), Box::new(last));
                         }
@@ -185,14 +186,13 @@ impl STerm {
                 }
                 last
             }
-            Term::Fun(arg, body) => {
-                let ty = crate::bicheck::synth(self, db, env).unwrap();
-                let (arg_ty, arg_real, ret_ty) = match ty {
+            Elab::Fun(arg, body, ty) => {
+                let (arg_ty, arg_real, ret_ty) = match &**ty {
                     Value::Fun(a, r) => (a.as_low_ty(), a.cloned(&mut env.clone()), r.as_low_ty()),
-                    t => panic!("not a function type?: {}", WithContext(&env.bindings(), &t)),
+                    t => panic!("not a function type?: {}", WithContext(&env.bindings(), &*t)),
                 };
                 match &**arg {
-                    Term::Binder(arg, _) => {
+                    Elab::Binder(arg, _) => {
                         env.set_ty(*arg, arg_real);
                         let body = body.as_low(db, env);
                         LowIR::Fun(*arg, arg_ty, Box::new(body), ret_ty)
@@ -200,7 +200,7 @@ impl STerm {
                     _ => panic!("no pattern matching allowed yet"),
                 }
             }
-            Term::App(f, x) => {
+            Elab::App(f, x, _) => {
                 let f = f.as_low(db, env);
                 let x = x.as_low(db, env);
                 LowIR::Call(Box::new(f), Box::new(x))

@@ -3,6 +3,53 @@ use crate::common::*;
 use crate::error::*;
 use crate::eval::*;
 use crate::term::*;
+use std::sync::Arc;
+
+pub type SElab = Spanned<Elab>;
+type RValue = Arc<Value>;
+#[derive(Debug, PartialEq, Eq)]
+pub enum ElabStmt {
+    Def(Spanned<Sym>, SElab),
+    Expr(SElab),
+}
+/// Elab annotates terms with types, at least when we can't get otherwise a type easily and quickly without context
+#[derive(Debug, PartialEq, Eq)]
+pub enum Elab {
+    Unit,                                                 // ()
+    Binder(Sym, RValue),                                  // x: T
+    Var(Sym, RValue),                                     // a :: T
+    I32(i32),                                             // 3
+    Type,                                                 // Type
+    Builtin(Builtin),                                     // Int
+    Fun(SElab, SElab, RValue),                            // fn a => x :: T
+    App(SElab, SElab, RValue),                            // f x :: T
+    Pair(SElab, SElab, RValue),                           // x, y :: T
+    Struct(StructId, Vec<(Spanned<Sym>, SElab)>, RValue), // struct { x := 3 } :: T
+    /// We use RawSym's here because it should work on any record with a field named this
+    Project(SElab, Spanned<RawSym>, RValue), // r.m
+    Block(Vec<ElabStmt>),                                 // do { x; y }
+}
+impl SElab {
+    pub fn get_type(&self) -> RValue {
+        match &**self {
+            Elab::Unit => Arc::new(Value::Unit),
+            Elab::Binder(_, t) => t.clone(),
+            Elab::Var(_, t) => t.clone(),
+            Elab::I32(_) => Arc::new(Value::Builtin(Builtin::Int)),
+            Elab::Type => Arc::new(Value::Type),
+            Elab::Builtin(Builtin::Int) => Arc::new(Value::Type),
+            Elab::Fun(_, _, t) => t.clone(),
+            Elab::App(_, _, t) => t.clone(),
+            Elab::Pair(_, _, t) => t.clone(),
+            Elab::Struct(_, _, t) => t.clone(),
+            Elab::Project(_, _, t) => t.clone(),
+            Elab::Block(x) => match x.last().unwrap() {
+                ElabStmt::Def(_, _) => Arc::new(Value::Unit),
+                ElabStmt::Expr(e) => e.get_type(),
+            },
+        }
+    }
+}
 
 /// An error produced in type checking
 #[derive(Debug, PartialEq, Eq)]
@@ -40,13 +87,13 @@ impl TypeError {
             ),
             TypeError::NotFunction(t) => Error::new(
                 file,
-                format!("Type error: Not a function type: '{}", WithContext(b, &*t)),
+                format!("Type error: Not a function type: '{}'", WithContext(b, &*t)),
                 t.span(),
                 "Not a function",
             ),
             TypeError::NotType(t) => Error::new(
                 file,
-                format!("Type error: Not a type: '{}", WithContext(b, &*t)),
+                format!("Type error: Not a type: '{}'", WithContext(b, &*t)),
                 t.span(),
                 "This was used as a type",
             ),
@@ -141,30 +188,38 @@ impl CDisplay for TypeError {
     }
 }
 
-/// Attempt to synthesize a type for 't'
-pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value, TypeError> {
+pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<SElab, TypeError> {
     #[cfg(feature = "logging")]
     println!("synth ({})", WithContext(&env.bindings(), &**t));
 
     match &**t {
-        Term::Type | Term::Builtin(Builtin::Int) => Ok(Value::Type),
-        Term::Var(x) => db
-            .typ(env.scope.clone(), *x)
-            .or_else(|| env.ty(*x))
-            .map(|x| x.cloned(&mut env.clone()))
-            .ok_or_else(|| TypeError::NotFound(t.copy_span(*x))),
-        Term::I32(_) => Ok(Value::Builtin(Builtin::Int)),
-        Term::Unit => Ok(Value::Unit),
+        Term::Type => Ok(t.copy_span(Elab::Type)),
+        Term::Builtin(b) => Ok(t.copy_span(Elab::Builtin(*b))),
+        Term::Var(x) => {
+            let ty = db
+                .elab(env.scope.clone(), *x)
+                .map(|x| x.get_type())
+                .or_else(|| env.ty(*x))
+                .map(|x| x.cloned(&mut env.clone()))
+                .ok_or_else(|| TypeError::NotFound(t.copy_span(*x)))?;
+            Ok(t.copy_span(Elab::Var(*x, Arc::new(ty))))
+        }
+        Term::I32(i) => Ok(t.copy_span(Elab::I32(*i))),
+        Term::Unit => Ok(t.copy_span(Elab::Unit)),
         Term::Pair(x, y) => {
-            // TODO this doesn't cover dependent pairs
-            Ok(Value::Pair(
-                Box::new(synth(x, db, env)?),
-                Box::new(synth(y, db, env)?),
-            ))
+            // TODO I don't think this covers dependent pairs
+            let x = synth(x, db, env)?;
+            let y = synth(y, db, env)?;
+            let ty = Arc::new(Value::Pair(
+                Box::new(x.get_type().cloned(&mut env.clone())),
+                Box::new(x.get_type().cloned(&mut env.clone())),
+            ));
+            Ok(t.copy_span(Elab::Pair(x, y, ty)))
         }
         Term::Struct(id, iv) => {
             let mut rv = Vec::new();
             let mut syms: Vec<Spanned<Sym>> = Vec::new();
+            let mut tv = Vec::new();
             let mut env = env.child(*id);
             for (name, val) in iv {
                 if let Some(n2) = syms.iter().find(|n| n.raw() == name.raw()) {
@@ -175,75 +230,86 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Value,
                 }
                 syms.push(name.clone());
 
-                let ty = synth(val, db, &mut env)?;
-                rv.push((**name, ty));
+                let e = synth(val, db, &mut env)?;
+                tv.push((**name, e.get_type().cloned(&mut env)));
+                rv.push((name.clone(), e));
             }
-            Ok(Value::Struct(rv))
+            Ok(t.copy_span(Elab::Struct(*id, rv, Arc::new(Value::Struct(tv)))))
         }
         Term::App(f, x) => {
-            let a = synth(f, db, env)?;
-            match &a {
+            let f = synth(f, db, env)?;
+            let (ret, x) = match &*f.get_type() {
                 Value::Fun(from, to) => {
-                    check(x, &from, db, env)?;
+                    let x2 = check(x, &from, db, env)?;
                     // Stick the value in in case it's dependent
                     let mut to = to.cloned(&mut env.clone());
                     let x = x.reduce(db, env);
                     from.do_match(&x, env);
                     to.update(env);
-                    Ok(to)
+                    (to, x2)
                 }
-                _ => Err(TypeError::NotFunction(f.copy_span(a))),
-            }
+                a => return Err(TypeError::NotFunction(f.copy_span(a.cloned(&mut env.clone())))),
+            };
+            Ok(t.copy_span(Elab::App(f, x, Arc::new(ret))))
         }
         Term::Project(r, m) => {
-            let rt = synth(r, db, env)?;
-            match &rt {
+            let r = synth(r, db, env)?;
+            let rt = r.get_type();
+            let rt = match &*rt {
                 Value::Struct(v) => {
                     if let Some((_, val)) = v.iter().find(|(name, _)| name.raw() == **m) {
-                        Ok(val.cloned(&mut env.clone()))
+                        val.cloned(&mut env.clone())
                     } else {
-                        Err(TypeError::NoSuchField(m.clone(), rt))
+                        return Err(TypeError::NoSuchField(m.clone(), rt.cloned(&mut env.clone())));
                     }
                 }
-                _ => Err(TypeError::NoSuchField(m.clone(), rt)),
-            }
+                _ => return Err(TypeError::NoSuchField(m.clone(), rt.cloned(&mut env.clone()))),
+            };
+            Ok(t.copy_span(Elab::Project(r, m.clone(), Arc::new(rt))))
         }
         Term::Fun(x, y) => {
             // Make sure it's well typed before reducing it
-            check(x, &Value::Type, db, env)?;
-            let x = x.reduce(db, env);
+            let xe = check(x, &Value::Type, db, env)?;
+            let xv = x.reduce(db, env);
             // Match it with itself to apply the types
-            x.match_types(&x, env);
-            Ok(Value::Fun(Box::new(x), Box::new(synth(y, db, env)?)))
+            xv.match_types(&xv, env);
+            let y = synth(y, db, env)?;
+            let ty = Arc::new(Value::Fun(
+                Box::new(xe.get_type().cloned(&mut env.clone())),
+                Box::new(y.get_type().cloned(&mut env.clone())),
+            ));
+            Ok(t.copy_span(Elab::Fun(xe, y, ty)))
         }
         Term::Block(v) => {
+            let mut rv = Vec::new();
             for i in 0..v.len() {
                 match &v[i] {
                     Statement::Expr(t) => {
                         if i + 1 != v.len() {
-                            check(t, &Value::Unit, db, env)?;
+                            rv.push(ElabStmt::Expr(check(t, &Value::Unit, db, env)?));
                         } else {
                             // last value
-                            return synth(t, db, env);
+                            rv.push(ElabStmt::Expr(synth(t, db, env)?));
                         }
                     }
                     Statement::Def(Def(name, val)) => {
-                        let t = synth(val, db, env)?;
-                        env.set_ty(**name, t);
+                        let ve = synth(val, db, env)?;
+                        env.arc_ty(**name, ve.get_type());
                         // Blocks can be dependent!
                         let val = val.reduce(db, env);
                         env.set_val(**name, val);
+                        rv.push(ElabStmt::Def(name.clone(), ve));
                     }
                 }
             }
-            Ok(Value::Unit)
+            Ok(t.copy_span(Elab::Block(rv)))
         }
-        Term::The(t, u) => {
+        Term::The(ty, u) => {
             // Make sure it's well typed before reducing it
-            check(t, &Value::Type, db, env)?;
-            let t = t.reduce(db, env);
-            check(u, &t, db, env)?;
-            Ok(t)
+            let _ = check(ty, &Value::Type, db, env)?;
+            let ty = ty.reduce(db, env);
+            let ue = check(u, &ty, db, env)?;
+            Ok(ue)
         }
         Term::Binder(_, Some(t)) => synth(t, db, env),
         _ => Err(TypeError::Synth(t.clone())),
@@ -256,7 +322,7 @@ pub fn check(
     typ: &Value,
     db: &impl MainGroup,
     env: &mut TempEnv,
-) -> Result<(), TypeError> {
+) -> Result<SElab, TypeError> {
     #[cfg(feature = "logging")]
     {
         let b = &env.bindings();
@@ -268,18 +334,11 @@ pub fn check(
     }
 
     match (&**term, typ) {
-        (Term::Binder(_, Some(t)), _) => check(t, typ, db, env),
-
-        (_, Value::Type) => {
-            let t = term.reduce(db, env);
-            if t.is_type() {
-                Ok(())
-            } else {
-                Err(TypeError::NotType(term.copy_span(t)))
-            }
+        (Term::Binder(s, Some(t)), _) => {
+            let _ = check(t, typ, db, env)?;
+            let t = t.reduce(db, env);
+            Ok(term.copy_span(Elab::Binder(*s, Arc::new(t))))
         }
-
-        (Term::Unit, Value::Unit) => Ok(()),
 
         (Term::Pair(x, y), Value::Pair(tx, ty)) => {
             // TODO dependent pairs don't really work
@@ -287,28 +346,20 @@ pub fn check(
             check(y, ty, db, env)
         }
 
-        // (Term::Struct(vals), Value::Struct(tys)) => {
-        //     let ty_iter = tys.iter();
-        //     for (name, val) in vals.iter() {
-        //         let raw = name.raw();
-        //         // TODO does this support dependent records? What do we do with the name we get here?
-        //         let (_, ty) = ty_iter.clone().find(|(s, _)| s.raw() == raw).ok_or_else(|| TypeError::NoSuchField(name.copy_span(name.raw()), typ.cloned(&mut env.child())))?;
-        //         check(val, ty, db, env)?;
-        //     }
-        //     Ok(())
-        // }
-
         // As far as we know, it could be any type
-        (Term::Binder(_, None), _) if typ.subtype_of(&Value::Type, &mut env.clone()) => Ok(()),
+        (Term::Binder(s, None), _) if typ.subtype_of(&Value::Type, &mut env.clone()) => Ok(term.copy_span(Elab::Binder(
+            *s, Arc::new(typ.cloned(&mut env.clone()))
+        ))),
 
         (Term::Fun(x, b), Value::Fun(y, to)) => {
             // Make sure it's well typed before reducing it
-            check(x, &Value::Type, db, env)?;
+            let xe = check(x, &Value::Type, db, env)?;
             let xr = x.reduce(db, env);
             // Because patterns are types, match checking amounts to subtype checking
             if y.subtype_of(&xr, &mut env.clone()) {
                 xr.match_types(y, env);
-                check(b, to, db, env)
+                let be = check(b, to, db, env)?;
+                Ok(term.copy_span(Elab::Fun(xe, be, Arc::new(typ.cloned(&mut env.clone())))))
             } else {
                 Err(TypeError::NotSubtypeF(
                     y.cloned(&mut env.clone()),
@@ -316,14 +367,25 @@ pub fn check(
                 ))
             }
         }
+        (_, Value::Type) => {
+            let t = synth(term, db, env)?;
+            let ty = t.get_type();
+            // Is it guaranteed to be a `typ`?
+            if ty.subtype_of(&Value::Type, &mut env.clone()) {
+                Ok(t)
+            } else {
+                Err(TypeError::NotType(term.copy_span(ty.cloned(&mut env.clone()))))
+            }
+        }
         (_, _) => {
             let t = synth(term, db, env)?;
+            let ty = t.get_type();
             // Is it guaranteed to be a `typ`?
-            if t.subtype_of(&typ, &mut env.clone()) {
-                Ok(())
+            if ty.subtype_of(&typ, &mut env.clone()) {
+                Ok(t)
             } else {
                 Err(TypeError::NotSubtype(
-                    term.copy_span(t),
+                    term.copy_span(ty.cloned(&mut env.clone())),
                     typ.cloned(&mut env.clone()),
                 ))
             }

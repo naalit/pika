@@ -64,6 +64,12 @@ impl TempEnv {
     pub fn set_val(&mut self, k: Sym, v: Value) {
         self.vals.insert(k, Arc::new(v));
     }
+    pub fn arc_val(&mut self, k: Sym, v: Arc<Value>) {
+        self.vals.insert(k, v);
+    }
+    pub fn arc_ty(&mut self, k: Sym, v: Arc<Value>) {
+        self.tys.insert(k, v);
+    }
     pub fn ty(&self, s: Sym) -> Option<Arc<Value>> {
         self.tys.get(&s).cloned()
     }
@@ -110,7 +116,7 @@ pub trait MainGroup: MainExt + salsa::Database {
 
     fn term(&self, scope: ScopeId, s: Sym) -> Option<Arc<STerm>>;
 
-    fn typ(&self, scope: ScopeId, s: Sym) -> Option<Arc<Value>>;
+    fn elab(&self, scope: ScopeId, s: Sym) -> Option<Arc<SElab>>;
 
     fn val(&self, scope: ScopeId, s: Sym) -> Option<Arc<Value>>;
 
@@ -145,13 +151,13 @@ fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
 }
 
 fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowFun> {
-    let term = db.term(scope.clone(), s)?;
-    let ty = db.typ(scope.clone(), s)?;
+    let elab = db.elab(scope.clone(), s)?;
+    let ty = elab.get_type();
 
     let name = db.mangle(scope.clone(), s)?;
 
     let ret_ty = ty.as_low_ty();
-    let body = term.as_low(db, &mut db.temp_env(scope));
+    let body = elab.as_low(db, &mut db.temp_env(scope));
 
     Some(LowFun { name, ret_ty, body })
 }
@@ -215,11 +221,11 @@ fn val(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Value>> {
     Some(Arc::new(val))
 }
 
-fn typ(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Value>> {
+fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<SElab>> {
     let term = db.term(scope.clone(), s)?;
-    let ty = synth(&term, db, &mut db.temp_env(scope.clone()));
-    match ty {
-        Ok(ty) => Some(Arc::new(ty)),
+    let e = synth(&term, db, &mut db.temp_env(scope.clone()));
+    match e {
+        Ok(e) => Some(Arc::new(e)),
         Err(e) => {
             db.error(e.to_error(scope.file(), &db.bindings().read().unwrap()));
             None

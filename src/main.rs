@@ -73,7 +73,8 @@ fn main() {
                 for s in db.symbols(ScopeId::File(file)).iter() {
                     if !seen_symbols.contains(s) {
                         seen_symbols.insert(**s);
-                        if let Some(ty) = db.typ(ScopeId::File(file), **s) {
+                        if let Some(elab) = db.elab(ScopeId::File(file), **s) {
+                            let ty = elab.get_type();
                             let val = db.val(ScopeId::File(file), **s).unwrap();
                             let b = db.bindings();
                             let b = b.read().unwrap();
