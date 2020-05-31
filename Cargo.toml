@@ -1,5 +1,5 @@
 [package]
-name = "flang"
+name = "pika"
 version = "0.1.0"
 authors = ["Lorxu <sam@dirkback.com>"]
 edition = "2018"

@@ -7,9 +7,8 @@
 
 use crate::{
     common::*,
-    eval::Value,
-    term::{Builtin, Def, Statement, Term},
-    bicheck::{Elab, SElab, ElabStmt},
+    elab::{Elab, ElabStmt},
+    term::Builtin,
 };
 pub use inkwell::context::Context;
 use inkwell::{builder::Builder, module::Module, types::*, values::*};
@@ -48,9 +47,16 @@ impl LowTy {
         let params: Vec<_> = params
             .iter()
             .map(|x| {
-                x.llvm(ctx)
-                    .try_into()
-                    .expect("Parameter types must be basic!")
+                // If we've got Void as a parameter, that means it was an erased type
+                // We represent that as a unit parameter, and units are just Bools = false
+                // which are actually zero-sized so LLVM dead code elimination should get rid of them
+                if let LowTy::Void = x {
+                    ctx.bool_type().as_basic_type_enum()
+                } else {
+                    x.llvm(ctx)
+                        .try_into()
+                        .expect("Parameter types must be basic!")
+                }
             })
             .collect();
         match self {
@@ -91,23 +97,68 @@ impl LowTy {
         }
     }
 }
-impl Value {
-    /// Convert a `Value` representing a type to the `LowTy` that values of that type are stored as
-    /// Right now, panics on many values
+impl Elab {
+    fn has_type(&self) -> bool {
+        match self {
+            Elab::Pair(x, y) => x.has_type() || y.has_type(),
+            Elab::Struct(_, v) => v.iter().any(|(_, x)| x.has_type()),
+            Elab::Type => true,
+            Elab::Unit | Elab::Builtin(_) | Elab::I32(_) | Elab::Var(_, _) => false,
+            Elab::Binder(_, t) => t.has_type(),
+            Elab::Fun(a, b, _) => a.has_type() || b.has_type(),
+            Elab::App(_, _) | Elab::Project(_, _) | Elab::Block(_) => false,
+        }
+    }
+
+    pub fn is_polymorphic(&self) -> bool {
+        match self {
+            Elab::Pair(x, y) => x.is_polymorphic() || y.is_polymorphic(),
+            Elab::Struct(_, v) => v.iter().any(|(_, x)| x.has_type()),
+            Elab::Type | Elab::Unit | Elab::Builtin(_) | Elab::I32(_) | Elab::Var(_, _) => false,
+            Elab::Binder(_, t) => t.has_type(),
+            Elab::Fun(a, b, _) => a.is_polymorphic() || b.is_polymorphic(),
+            Elab::App(_, _) | Elab::Project(_, _) | Elab::Block(_) => false,
+        }
+    }
+
+    /// Is this a concrete type, i.e., we don't need to monomorphize it?
+    pub fn is_concrete(&self) -> bool {
+        match self {
+            Elab::Var(_, _) => false,
+            Elab::Pair(x, y) => x.is_concrete() && y.is_concrete(),
+            Elab::Struct(_, v) => v.iter().all(|(_, x)| x.is_concrete()),
+            Elab::Type
+            | Elab::Unit
+            | Elab::Builtin(_)
+            // Not a type, but concrete, I guess? this should be unreachable
+            | Elab::I32(_) => true,
+            Elab::Binder(_, t) => t.is_concrete(),
+            Elab::Fun(a, b, _) => a.is_concrete() && b.is_concrete(),
+            // Both of these shouldn't happen unless the first param is neutral and thus not concrete
+            Elab::App(_, _)
+            | Elab::Project(_, _)
+            | Elab::Block(_) => false,
+        }
+    }
+
+    /// Convert a `Elab` representing a type to the `LowTy` that Elabs of that type are stored as
+    /// Right now, panics on many Elabs
     pub fn as_low_ty(&self) -> LowTy {
         match self {
-            Value::Builtin(Builtin::Int) => LowTy::Int,
-            Value::Unit => LowTy::Void,
-            Value::Binder(_, Some(t)) => t.as_low_ty(),
-            Value::Fun(from, to) => {
+            Elab::Builtin(Builtin::Int) => LowTy::Int,
+            Elab::Unit => LowTy::Void,
+            Elab::Binder(_, t) => t.as_low_ty(),
+            Elab::Fun(from, to, _) => {
                 LowTy::Fun(Box::new(from.as_low_ty()), Box::new(to.as_low_ty()))
             }
-            Value::Pair(a, b) => LowTy::Struct(vec![a.as_low_ty(), b.as_low_ty()]),
-            Value::Struct(v) => {
+            Elab::Pair(a, b) => LowTy::Struct(vec![a.as_low_ty(), b.as_low_ty()]),
+            Elab::Struct(_, v) => {
                 let mut v: Vec<_> = v.iter().collect();
                 v.sort_by_key(|(x, _)| x.raw());
                 LowTy::Struct(v.into_iter().map(|(_, v)| v.as_low_ty()).collect())
             }
+            // Type erasure
+            Elab::Type => LowTy::Void,
             _ => panic!("{:?} is not supported", self),
         }
     }
@@ -147,71 +198,104 @@ pub enum LowIR {
     Call(Box<LowIR>, Box<LowIR>),
 }
 
-impl SElab {
-    /// Convert to LowIR, within the Salsa framework
+impl Elab {
+    /// Convert to LowIR, within the Salsa framework. Returns `None` if it's polymorphic
     ///
     /// Most work should be done here and not in LowIR::codegen()
-    pub fn as_low(&self, db: &impl MainGroup, env: &mut TempEnv) -> LowIR {
-        match &**self {
+    pub fn as_low(&self, db: &impl MainGroup, env: &mut TempEnv) -> Option<LowIR> {
+        Some(match self {
+            // Type erasure
+            _ if self.get_type(env) == Elab::Type => LowIR::Unit,
             Elab::Unit => LowIR::Unit,
             Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
-            Elab::Var(x, _) => db
-                .mangle(env.scope.clone(), *x)
-                .map(LowIR::Global)
-                .unwrap_or(LowIR::Local(*x)),
-            Elab::Pair(a, b, _) => {
-                let a = a.as_low(db, env);
-                let b = b.as_low(db, env);
+            Elab::Var(x, ty) => {
+                if let Some(t) = db.elab(env.scope.clone(), *x) {
+                    if t.get_type(env).is_concrete() {
+                        db.mangle(env.scope.clone(), *x).map(LowIR::Global).unwrap()
+                    // } else if ty.is_concrete() {
+                    //     println!("Monomorphizing {} to {}", WithContext(&env.bindings(), &**t), WithContext(&env.bindings(), &**ty));
+                    //     t.monomorphizce(ty, &mut env.clone()).as_low(db, env).unwrap()
+                    } else {
+                        println!("Not morphizing to {}", WithContext(&env.bindings(), &**ty));
+                        return None;
+                    }
+                } else {
+                    LowIR::Local(*x)
+                }
+            }
+            Elab::Pair(a, b) => {
+                let a = a.as_low(db, env)?;
+                let b = b.as_low(db, env)?;
                 LowIR::Struct(vec![a, b])
             }
-            Elab::Struct(_, v, _) => {
-                let mut v = (*v).clone();
-                v.sort_by_key(|(x, _)| x.raw());
-                LowIR::Struct(v.into_iter().map(|(_, v)| v.as_low(db, env)).collect())
+            Elab::Struct(_, iv) => {
+                let mut rv = Vec::new();
+                for (name, val) in iv {
+                    rv.push((name, val.as_low(db, env)?));
+                }
+                rv.sort_by_key(|(x, _)| x.raw());
+                LowIR::Struct(rv.into_iter().map(|(_, v)| v).collect())
             }
             Elab::Block(v) => {
                 let mut iter = v.iter().rev();
                 let mut last = match iter.next().unwrap() {
                     ElabStmt::Def(_, _) => LowIR::Unit,
-                    ElabStmt::Expr(e) => e.as_low(db, env),
+                    ElabStmt::Expr(e) => e.as_low(db, env)?,
                 };
                 for i in iter {
                     match i {
                         ElabStmt::Expr(_) => (),
                         ElabStmt::Def(name, val) => {
-                            let val = val.as_low(db, env);
-                            last = LowIR::Let(**name, Box::new(val), Box::new(last));
+                            let val = val.as_low(db, env)?;
+                            last = LowIR::Let(*name, Box::new(val), Box::new(last));
                         }
                     }
                 }
                 last
             }
             Elab::Fun(arg, body, ty) => {
+                if !ty.is_concrete() {
+                    // Don't lower this function yet, wait until it's called
+                    return None;
+                }
                 let (arg_ty, arg_real, ret_ty) = match &**ty {
-                    Value::Fun(a, r) => (a.as_low_ty(), a.cloned(&mut env.clone()), r.as_low_ty()),
-                    t => panic!("not a function type?: {}", WithContext(&env.bindings(), &*t)),
+                    Elab::Fun(a, r, _) => {
+                        (a.as_low_ty(), a.cloned(&mut env.clone()), r.as_low_ty())
+                    }
+                    t => panic!(
+                        "not a function type?: {}",
+                        WithContext(&env.bindings(), &*t)
+                    ),
                 };
                 match &**arg {
                     Elab::Binder(arg, _) => {
                         env.set_ty(*arg, arg_real);
-                        let body = body.as_low(db, env);
+                        let body = body.as_low(db, env)?;
                         LowIR::Fun(*arg, arg_ty, Box::new(body), ret_ty)
                     }
                     _ => panic!("no pattern matching allowed yet"),
                 }
             }
-            Elab::App(f, x, _) => {
-                let f = f.as_low(db, env);
-                let x = x.as_low(db, env);
+            Elab::App(f, x) => {
+                // if let Elab::Fun(from, to, _) = &*f.get_type() {
+                //     if from.is_polymorphic() {
+                //         // Reduce it, read it back, and then re-elaborate it
+                //         return crate::bicheck::synth(&self.reduce(db, env).read_back(), db, env).unwrap().as_low(db, env);
+                //     }
+                // } else {
+                //     panic!("not function type")
+                // }
+                let f = f.as_low(db, env)?;
+                let x = x.as_low(db, env)?;
                 LowIR::Call(Box::new(f), Box::new(x))
             }
             _ => panic!("{:?} not supported (ir)", self),
-        }
+        })
     }
 }
 
 impl LowIR {
-    /// Convert this expression into an LLVM value
+    /// Convert this expression into an LLVM Elab
     ///
     /// Should be really simple, complex things belong in STerm::as_low
     fn codegen<'ctx>(

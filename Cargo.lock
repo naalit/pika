@@ -314,20 +314,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37ab347416e802de484e4d03c7316c48f1ecb56574dfd4a46a80f173ce1de04d"
 
 [[package]]
-name = "flang"
-version = "0.1.0"
-dependencies = [
- "codespan-reporting",
- "inkwell",
- "lalrpop",
- "lalrpop-util",
- "lazy_static",
- "regex",
- "rustyline",
- "salsa",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -577,6 +563,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c00cf8b9eafe68dde5e9eaa2cef8ee84a9336a47d566ec55ca16589633b65af7"
 dependencies = [
  "siphasher",
+]
+
+[[package]]
+name = "pika"
+version = "0.1.0"
+dependencies = [
+ "codespan-reporting",
+ "inkwell",
+ "lalrpop",
+ "lalrpop-util",
+ "lazy_static",
+ "regex",
+ "rustyline",
+ "salsa",
 ]
 
 [[package]]

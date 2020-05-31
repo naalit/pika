@@ -3,7 +3,7 @@ use crate::binding::*;
 use crate::codegen::*;
 use crate::common::*;
 use crate::error::*;
-use crate::eval::*;
+use crate::elab::*;
 use crate::grammar::*;
 use crate::lexer::Lexer;
 use crate::term::*;
@@ -27,15 +27,15 @@ impl ScopeId {
     }
 }
 
-/// An environment to store temporary mappings of symbols to types or values
+/// An environment to store temporary mappings of symbols to types or Elabs
 /// Used, for instance, for renaming bound variables and typing functions
 #[derive(Clone)]
 pub struct TempEnv {
     bindings: Arc<RwLock<Bindings>>,
     /// A TempEnv is associated with a scope, and stores the ScopeId
     pub scope: ScopeId,
-    pub vals: HashMap<Sym, Arc<Value>>,
-    pub tys: HashMap<Sym, Arc<Value>>,
+    pub vals: HashMap<Sym, Arc<Elab>>,
+    pub tys: HashMap<Sym, Arc<Elab>>,
 }
 impl TempEnv {
     /// Locks the global bindings object and returns a write guard
@@ -58,22 +58,22 @@ impl TempEnv {
         }
     }
 
-    pub fn val(&self, s: Sym) -> Option<Arc<Value>> {
+    pub fn val(&self, s: Sym) -> Option<Arc<Elab>> {
         self.vals.get(&s).cloned()
     }
-    pub fn set_val(&mut self, k: Sym, v: Value) {
+    pub fn set_val(&mut self, k: Sym, v: Elab) {
         self.vals.insert(k, Arc::new(v));
     }
-    pub fn arc_val(&mut self, k: Sym, v: Arc<Value>) {
+    pub fn arc_val(&mut self, k: Sym, v: Arc<Elab>) {
         self.vals.insert(k, v);
     }
-    pub fn arc_ty(&mut self, k: Sym, v: Arc<Value>) {
+    pub fn arc_ty(&mut self, k: Sym, v: Arc<Elab>) {
         self.tys.insert(k, v);
     }
-    pub fn ty(&self, s: Sym) -> Option<Arc<Value>> {
+    pub fn ty(&self, s: Sym) -> Option<Arc<Elab>> {
         self.tys.get(&s).cloned()
     }
-    pub fn set_ty(&mut self, k: Sym, v: Value) {
+    pub fn set_ty(&mut self, k: Sym, v: Elab) {
         self.tys.insert(k, Arc::new(v));
     }
 }
@@ -116,13 +116,13 @@ pub trait MainGroup: MainExt + salsa::Database {
 
     fn term(&self, scope: ScopeId, s: Sym) -> Option<Arc<STerm>>;
 
-    fn elab(&self, scope: ScopeId, s: Sym) -> Option<Arc<SElab>>;
+    fn elab(&self, scope: ScopeId, s: Sym) -> Option<Arc<Elab>>;
 
-    fn val(&self, scope: ScopeId, s: Sym) -> Option<Arc<Value>>;
+    fn val(&self, scope: ScopeId, s: Sym) -> Option<Arc<Elab>>;
 
     fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String>;
 
-    fn low_fun(&self, scope: ScopeId, s: Sym) -> Option<LowFun>;
+    fn low_fun(&self, scope: ScopeId, s: Sym) -> Result<LowFun, LowError>;
 
     fn low_mod(&self, file: FileId) -> LowMod;
 }
@@ -142,7 +142,7 @@ fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
     let funs = db
         .symbols(ScopeId::File(file))
         .iter()
-        .filter_map(|s| db.low_fun(ScopeId::File(file), **s))
+        .filter_map(|s| db.low_fun(ScopeId::File(file), **s).ok())
         .collect();
     LowMod {
         name: String::from("test_mod"),
@@ -150,16 +150,22 @@ fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
     }
 }
 
-fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowFun> {
-    let elab = db.elab(scope.clone(), s)?;
-    let ty = elab.get_type();
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum LowError {
+    NoElab,
+    Polymorphic,
+}
 
-    let name = db.mangle(scope.clone(), s)?;
+fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowError> {
+    let elab = db.elab(scope.clone(), s).ok_or(LowError::NoElab)?;
+    let ty = elab.get_type(&mut db.temp_env(scope.clone()));
 
+    let name = db.mangle(scope.clone(), s).ok_or(LowError::NoElab)?;
+
+    let body = elab.as_low(db, &mut db.temp_env(scope)).ok_or(LowError::Polymorphic)?;
     let ret_ty = ty.as_low_ty();
-    let body = elab.as_low(db, &mut db.temp_env(scope));
 
-    Some(LowFun { name, ret_ty, body })
+    Ok(LowFun { name, ret_ty, body })
 }
 
 fn symbols(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>> {
@@ -215,13 +221,14 @@ fn term(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
     r
 }
 
-fn val(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Value>> {
-    let term = db.term(scope.clone(), s)?;
-    let val = term.reduce(db, &mut db.temp_env(scope));
-    Some(Arc::new(val))
+fn val(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
+    db.elab(scope, s)
+    // let term = db.elab(scope.clone(), s)?;
+    // let val = term.reduce(db, &mut db.temp_env(scope));
+    // Some(Arc::new(val))
 }
 
-fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<SElab>> {
+fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
     let term = db.term(scope.clone(), s)?;
     let e = synth(&term, db, &mut db.temp_env(scope.clone()));
     match e {

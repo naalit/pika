@@ -5,9 +5,9 @@ mod error;
 mod term;
 use common::*;
 mod codegen;
-mod eval;
 mod lexer;
 mod query;
+mod elab;
 use rustyline as rl;
 
 use lalrpop_util::*;
@@ -74,7 +74,7 @@ fn main() {
                     if !seen_symbols.contains(s) {
                         seen_symbols.insert(**s);
                         if let Some(elab) = db.elab(ScopeId::File(file), **s) {
-                            let ty = elab.get_type();
+                            let ty = elab.get_type(&mut db.temp_env(ScopeId::File(file)));
                             let val = db.val(ScopeId::File(file), **s).unwrap();
                             let b = db.bindings();
                             let b = b.read().unwrap();
@@ -82,7 +82,7 @@ fn main() {
                                 "{}{} : {} = {}",
                                 b.resolve(**s),
                                 s.num(),
-                                WithContext(&b, &*ty),
+                                WithContext(&b, &ty),
                                 WithContext(&b, &*val)
                             );
                         }
