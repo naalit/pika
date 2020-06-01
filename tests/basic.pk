@@ -1,0 +1,16 @@
+# Testing definitions
+a := 12
+the_ : fun (t:Type) t => t = fun _ x: => x
+b := the_ Int 12
+
+# Church natural numbers
+Nat := fun (t:Type) (fun t => t) t => t
+zero : Nat = fun t f x: => x
+suc : (fun Nat => Nat) = fun n t f x: => f (n t f x)
+one := suc zero
+two := suc one
+
+# How good are we at propagating types?
+a := fun (t:) (x:t) => t
+b := fun (t:) (x:t) => x
+c : fun (t:Type) t => t = fun t x: => b (a t x) x

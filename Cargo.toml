@@ -18,6 +18,8 @@ regex = "1"
 codespan-reporting = "*"
 rustyline = "*"
 salsa = "*"
+arg = "*"
+assert_cmd = "*"
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "llvm10-0" }
 
 [build-dependencies]

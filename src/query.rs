@@ -2,8 +2,8 @@ use crate::bicheck::*;
 use crate::binding::*;
 use crate::codegen::*;
 use crate::common::*;
-use crate::error::*;
 use crate::elab::*;
+use crate::error::*;
 use crate::grammar::*;
 use crate::lexer::Lexer;
 use crate::term::*;
@@ -29,15 +29,26 @@ impl ScopeId {
 
 /// An environment to store temporary mappings of symbols to types or Elabs
 /// Used, for instance, for renaming bound variables and typing functions
-#[derive(Clone)]
-pub struct TempEnv {
+pub struct TempEnv<'a, T: MainGroup> {
+    pub db: &'a T,
     bindings: Arc<RwLock<Bindings>>,
     /// A TempEnv is associated with a scope, and stores the ScopeId
     pub scope: ScopeId,
     pub vals: HashMap<Sym, Arc<Elab>>,
     pub tys: HashMap<Sym, Arc<Elab>>,
 }
-impl TempEnv {
+impl<'a, T: MainGroup> Clone for TempEnv<'a, T> {
+    fn clone(&self) -> TempEnv<'a, T> {
+        TempEnv {
+            scope: self.scope.clone(),
+            vals: self.vals.clone(),
+            tys: self.tys.clone(),
+            bindings: self.bindings.clone(),
+            db: self.db,
+        }
+    }
+}
+impl<'a, T: MainGroup> TempEnv<'a, T> {
     pub fn scope(&self) -> ScopeId {
         self.scope.clone()
     }
@@ -55,22 +66,26 @@ impl TempEnv {
     }
 
     /// Clones the TempEnv, creating a child environment in a struct
-    pub fn child(&self, struct_id: StructId) -> TempEnv {
+    pub fn child(&self, struct_id: StructId) -> TempEnv<'a, T> {
         TempEnv {
             scope: ScopeId::Struct(struct_id, Box::new(self.scope.clone())),
             ..self.clone()
         }
     }
 
+    /// Get a value from the environment
     pub fn val(&self, s: Sym) -> Option<Arc<Elab>> {
         self.vals.get(&s).cloned()
     }
+    /// Set a value in the environment. It should be in WHNF
     pub fn set_val(&mut self, k: Sym, v: Elab) {
         self.vals.insert(k, Arc::new(v));
     }
+    /// Get the type of a symbol from the environment
     pub fn ty(&self, s: Sym) -> Option<Arc<Elab>> {
         self.tys.get(&s).cloned()
     }
+    /// Set the type of a symbol in the environment. It should be in WHNF
     pub fn set_ty(&mut self, k: Sym, v: Elab) {
         self.tys.insert(k, Arc::new(v));
     }
@@ -78,6 +93,8 @@ impl TempEnv {
 
 /// Since queries can't access the database directly, this defines the interface they can use for accessing it
 pub trait MainExt {
+    type DB: MainGroup;
+
     /// Return a new handle to the global bindings object held by the database
     fn bindings(&self) -> Arc<RwLock<Bindings>>;
 
@@ -86,20 +103,14 @@ pub trait MainExt {
     fn error(&self, e: Error);
 
     /// Create a temporary environment associated with the given file
-    fn temp_env(&self, scope: ScopeId) -> TempEnv {
-        TempEnv {
-            bindings: self.bindings(),
-            scope,
-            vals: HashMap::new(),
-            tys: HashMap::new(),
-        }
-    }
+    fn temp_env<'a>(&'a self, scope: ScopeId) -> TempEnv<'a, Self::DB>;
 
     /// Do whatever needs to be done after name resolution
     ///
     /// Currently, this is just adding structs to the struct table
     fn process_defs(&self, v: &Vec<Def>);
 
+    /// Get a handle to the struct table
     fn struct_defs(&self, id: StructId) -> Option<Arc<Vec<Def>>>;
 }
 
@@ -108,28 +119,36 @@ pub trait MainGroup: MainExt + salsa::Database {
     #[salsa::input]
     fn source(&self, file: FileId) -> Arc<String>;
 
+    /// Lists all the definitions in this immediate scope (doesn't include parent scopes)
     fn defs(&self, scope: ScopeId) -> Arc<Vec<Def>>;
 
+    /// Lists all the symbols defined in this immediate scope (doesn't include parent scopes)
     fn symbols(&self, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>>;
 
+    /// Gets the raw term for a definition in this or a parent scope
     fn term(&self, scope: ScopeId, s: Sym) -> Option<Arc<STerm>>;
 
+    /// Gets a definition, type-checked and elaborated
     fn elab(&self, scope: ScopeId, s: Sym) -> Option<Arc<Elab>>;
 
+    /// Gets a definition in Weak-Head Normal Form
     fn val(&self, scope: ScopeId, s: Sym) -> Option<Arc<Elab>>;
 
+    /// If the given definition exists, get the name it would be given in code generation
     fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String>;
 
+    /// Lower a definition to a LowIR function with no arguments
     fn low_fun(&self, scope: ScopeId, s: Sym) -> Result<LowFun, LowError>;
 
+    /// Lower a file to a LowIR module
     fn low_mod(&self, file: FileId) -> LowMod;
 }
 
 fn mangle(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<String> {
     // Return None if it doesn't exist
     let _term = db.term(scope.clone(), s)?;
+
     // We might mangle types too later
-    // let ty = db.typ(scope.clone(), s)?;
 
     let b = db.bindings();
     let b = b.read().unwrap();
@@ -160,7 +179,9 @@ fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowErr
 
     let name = db.mangle(scope.clone(), s).ok_or(LowError::NoElab)?;
 
-    let body = elab.as_low(db, &mut db.temp_env(scope)).ok_or(LowError::Polymorphic)?;
+    let body = elab
+        .as_low(&mut db.temp_env(scope))
+        .ok_or(LowError::Polymorphic)?;
     let ret_ty = ty.as_low_ty();
 
     Ok(LowFun { name, ret_ty, body })
@@ -220,15 +241,16 @@ fn term(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
 }
 
 fn val(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
-    db.elab(scope, s)
-    // let term = db.elab(scope.clone(), s)?;
-    // let val = term.reduce(db, &mut db.temp_env(scope));
-    // Some(Arc::new(val))
+    let x = db.elab(scope.clone(), s)?;
+    let mut env = db.temp_env(scope);
+    let mut x = x.cloned(&mut env.clone());
+    x.whnf(&mut env);
+    Some(Arc::new(x))
 }
 
 fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
     let term = db.term(scope.clone(), s)?;
-    let e = synth(&term, db, &mut db.temp_env(scope.clone()));
+    let e = synth(&term, &mut db.temp_env(scope.clone()));
     match e {
         Ok(e) => Some(Arc::new(e)),
         Err(e) => {
@@ -272,6 +294,18 @@ impl salsa::Database for MainDatabase {
 }
 
 impl MainExt for MainDatabase {
+    type DB = Self;
+
+    fn temp_env<'a>(&'a self, scope: ScopeId) -> TempEnv<'a, Self> {
+        TempEnv {
+            db: self,
+            bindings: self.bindings(),
+            scope,
+            vals: HashMap::new(),
+            tys: HashMap::new(),
+        }
+    }
+
     fn bindings(&self) -> Arc<RwLock<Bindings>> {
         self.bindings.clone()
     }

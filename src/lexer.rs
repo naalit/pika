@@ -137,6 +137,13 @@ impl<'i> Lexer<'i> {
     fn consume_whitespace(&mut self) {
         loop {
             if let Some(c) = self.peek() {
+                if c == '#' {
+                    // Skip line comments
+                    // eat \r here, it's always got a \n after it
+                    while self.peek().map_or(false, |x| x != '\n') {
+                        self.next();
+                    }
+                }
                 if !c.non_newline_whitespace() {
                     break;
                 } else {

@@ -1,81 +1,57 @@
 mod bicheck;
 mod binding;
-mod common;
-mod error;
-mod term;
-use common::*;
 mod codegen;
-mod lexer;
-mod query;
+mod common;
 mod elab;
-use rustyline as rl;
-
-use lalrpop_util::*;
+mod error;
+mod lexer;
+mod options;
+mod query;
+mod repl;
+mod term;
+use lalrpop_util::lalrpop_mod;
 lalrpop_mod!(pub grammar);
 
-struct Helper;
-
-impl rl::completion::Completer for Helper {
-    type Candidate = String;
-}
-
-impl rl::hint::Hinter for Helper {}
-
-impl rl::highlight::Highlighter for Helper {}
-
-impl rl::validate::Validator for Helper {
-    fn validate(
-        &self,
-        ctx: &mut rl::validate::ValidationContext,
-    ) -> rl::Result<rl::validate::ValidationResult> {
-        if ctx.input().trim().is_empty() {
-            Ok(rl::validate::ValidationResult::Incomplete)
-        } else {
-            let l: Vec<_> = ctx.input().lines().collect();
-            if !l.first().unwrap().trim().is_empty() || ctx.input().ends_with('\n') {
-                Ok(rl::validate::ValidationResult::Valid(None))
-            } else {
-                Ok(rl::validate::ValidationResult::Incomplete)
-            }
-        }
-    }
-}
-
-impl rl::Helper for Helper {}
+use crate::common::*;
+use crate::error::FILES;
+use crate::repl::*;
+use arg::Args;
+use std::fs::File;
+use std::io::Read;
 
 fn main() {
-    // A simple REPL
-    let config = rustyline::Config::builder().auto_add_history(true).build();
-    let mut rl = rustyline::Editor::<Helper>::with_config(config);
-    rl.set_helper(Some(Helper));
+    // Skip the binary path
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match Options::from_args(args.iter().map(|x| &**x)) {
+        Ok(options) => {
+            if options.input_files.is_empty() {
+                run_repl(&options)
+            } else {
+                let mut db = MainDatabase::default();
+                for i in &options.input_files {
+                    let mut file = File::open(i).unwrap();
+                    let mut buf = String::new();
+                    file.read_to_string(&mut buf).expect("Error reading file");
+                    if !buf.ends_with('\n') {
+                        buf.push('\n');
+                    }
 
-    let mut db = MainDatabase::default();
-    let mut buf = String::new();
-    let file = error::FILES
-        .write()
-        .unwrap()
-        .add("<input>".to_string(), buf.clone());
-    let mut seen_symbols = std::collections::HashSet::<Sym>::new();
+                    let file = FILES
+                        .write()
+                        .unwrap()
+                        .add("<input>".to_string(), buf.clone());
+                    db.set_source(file, std::sync::Arc::new(buf));
 
-    loop {
-        let readline = rl.readline("> ");
-        match readline {
-            Err(_) => break,
-            Ok(line) => {
-                let old_buf = buf.clone();
-
-                buf.push_str(&line);
-                buf.push('\n');
-                error::FILES.write().unwrap().set_source(file, buf.clone());
-
-                db.set_source(file, std::sync::Arc::new(buf.clone()));
-
-                for s in db.symbols(ScopeId::File(file)).iter() {
-                    if !seen_symbols.contains(s) {
-                        seen_symbols.insert(**s);
+                    for s in db.symbols(ScopeId::File(file)).iter() {
                         if let Some(elab) = db.elab(ScopeId::File(file), **s) {
-                            let ty = elab.get_type(&mut db.temp_env(ScopeId::File(file)));
-                            let val = db.val(ScopeId::File(file), **s).unwrap();
+                            let mut env = db.temp_env(ScopeId::File(file));
+                            let ty = elab.get_type(&mut env);
+                            let mut val = db
+                                .val(ScopeId::File(file), **s)
+                                .unwrap()
+                                .cloned(&mut env.clone());
+                            val.normal(&mut env);
+
                             let b = db.bindings();
                             let b = b.read().unwrap();
                             println!(
@@ -83,39 +59,21 @@ fn main() {
                                 b.resolve(**s),
                                 s.num(),
                                 WithContext(&b, &ty),
-                                WithContext(&b, &*val)
+                                WithContext(&b, &val)
                             );
                         }
                     }
-                }
 
-                // Generate LLVM and print out the module, for now
-                let module = db.low_mod(file);
-                let context = inkwell::context::Context::create();
-                let llvm = module.codegen(&mut crate::codegen::CodegenCtx::new(&context));
-                llvm.print_to_stderr();
-                if let Err(e) = llvm.verify() {
-                    println!("Verification error: {}", e);
-                }
-
-                // If there's a `main` definition (and only one), run it and assume it returns an Int
-                // This is really terrible, should definitely replace it
-                let engine = llvm
-                    .create_jit_execution_engine(inkwell::OptimizationLevel::None)
-                    .unwrap();
-                unsafe {
-                    if let Ok(main) =
-                        engine.get_function::<unsafe extern "C" fn() -> i32>("main$0_0")
-                    {
-                        println!("{}", main.call());
+                    if db.has_errors() {
+                        db.emit_errors();
+                        std::process::exit(1)
                     }
                 }
-
-                if db.has_errors() {
-                    buf = old_buf;
-                }
-                db.emit_errors();
             }
+        }
+        Err(err) => {
+            eprintln!("{}", err);
+            std::process::exit(1)
         }
     }
 }

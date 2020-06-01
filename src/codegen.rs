@@ -202,7 +202,7 @@ impl Elab {
     /// Convert to LowIR, within the Salsa framework. Returns `None` if it's polymorphic
     ///
     /// Most work should be done here and not in LowIR::codegen()
-    pub fn as_low(&self, db: &impl MainGroup, env: &mut TempEnv) -> Option<LowIR> {
+    pub fn as_low<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Option<LowIR> {
         Some(match self {
             // Type erasure
             _ if self.get_type(env) == Elab::Type => LowIR::Unit,
@@ -210,20 +210,23 @@ impl Elab {
             Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
             Elab::Var(x, ty) => {
                 if ty.is_concrete() {
-                    db.mangle(env.scope.clone(), *x).map(LowIR::Global).unwrap_or(LowIR::Local(*x))
+                    env.db
+                        .mangle(env.scope.clone(), *x)
+                        .map(LowIR::Global)
+                        .unwrap_or(LowIR::Local(*x))
                 } else {
                     return None;
                 }
             }
             Elab::Pair(a, b) => {
-                let a = a.as_low(db, env)?;
-                let b = b.as_low(db, env)?;
+                let a = a.as_low(env)?;
+                let b = b.as_low(env)?;
                 LowIR::Struct(vec![a, b])
             }
             Elab::Struct(_, iv) => {
                 let mut rv = Vec::new();
                 for (name, val) in iv {
-                    rv.push((name, val.as_low(db, env)?));
+                    rv.push((name, val.as_low(env)?));
                 }
                 rv.sort_by_key(|(x, _)| x.raw());
                 LowIR::Struct(rv.into_iter().map(|(_, v)| v).collect())
@@ -232,13 +235,13 @@ impl Elab {
                 let mut iter = v.iter().rev();
                 let mut last = match iter.next().unwrap() {
                     ElabStmt::Def(_, _) => LowIR::Unit,
-                    ElabStmt::Expr(e) => e.as_low(db, env)?,
+                    ElabStmt::Expr(e) => e.as_low(env)?,
                 };
                 for i in iter {
                     match i {
                         ElabStmt::Expr(_) => (),
                         ElabStmt::Def(name, val) => {
-                            let val = val.as_low(db, env)?;
+                            let val = val.as_low(env)?;
                             last = LowIR::Let(*name, Box::new(val), Box::new(last));
                         }
                     }
@@ -252,7 +255,7 @@ impl Elab {
                 }
                 match &**arg {
                     Elab::Binder(arg, ty) => {
-                        let body = body.as_low(db, env)?;
+                        let body = body.as_low(env)?;
                         LowIR::Fun(*arg, ty.as_low_ty(), Box::new(body), ret_ty.as_low_ty())
                     }
                     _ => panic!("no pattern matching allowed yet"),
@@ -263,17 +266,16 @@ impl Elab {
                     if from.is_polymorphic() {
                         // Inline it
                         let mut s = self.cloned(&mut env.clone());
-                        s.update_db(db, env.scope());
                         // Only recurse if it actually did something
                         if s.whnf(env) {
-                            return s.as_low(db, env);
+                            return s.as_low(env);
                         }
                     }
                 } else {
                     panic!("not function type")
                 }
-                let f = f.as_low(db, env)?;
-                let x = x.as_low(db, env)?;
+                let f = f.as_low(env)?;
+                let x = x.as_low(env)?;
                 LowIR::Call(Box::new(f), Box::new(x))
             }
             _ => panic!("{:?} not supported (ir)", self),

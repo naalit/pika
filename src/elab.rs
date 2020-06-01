@@ -1,14 +1,13 @@
 use crate::common::*;
 use crate::term::Builtin;
 
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum ElabStmt {
     Def(Sym, Elab),
     Expr(Elab),
 }
 impl ElabStmt {
-    pub fn cloned(&self, env: &mut TempEnv) -> Self {
+    pub fn cloned<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Self {
         match self {
             ElabStmt::Def(s, x) => {
                 let fresh = env.bindings_mut().fresh(*s);
@@ -52,22 +51,61 @@ pub enum Elab {
 type BElab = Box<Elab>;
 
 impl Elab {
-    /// Reduce to Weak-Head Normal Form, in place. This implies `update(env)`
+    /// Reduce to full normal form, essentially recursively calling whnf()
+    pub fn normal<T: MainGroup>(&mut self, env: &mut TempEnv<T>) {
+        // Call whnf()
+        self.whnf(env);
+        // And recurse
+        use Elab::*;
+        match self {
+            Type | Unit | I32(_) | Builtin(_) => (),
+            Var(_, ty) => ty.normal(env),
+            Fun(a, b, c) => {
+                a.normal(env);
+                b.normal(env);
+                c.normal(env);
+            }
+            App(x, y) | Pair(x, y) => {
+                x.normal(env);
+                y.normal(env);
+            }
+            Binder(_, x) => x.normal(env),
+            Struct(_, v) => v.iter_mut().for_each(|(_, x)| x.normal(env)),
+            Project(r, _) => r.normal(env),
+            Block(v) => v.iter_mut().for_each(|x| match x {
+                ElabStmt::Def(_, e) => e.normal(env),
+                ElabStmt::Expr(e) => e.normal(env),
+            }),
+        }
+    }
+
+    /// Reduce to Weak-Head Normal Form, in place. This implies `update_all(env)`
     /// Returns whether the top-level structure changed
     ///
     /// This is like actual normal form, but we only perform one level of beta- or projection-reduction
     /// So we're guaranteed not to have `(\x.t)u` at the top level, but we could have e.g. `(\x.(\y.t)u)`
     /// This is the form we store types in, so if you need to compare types you'll need to call `whnf` recursively
-    pub fn whnf(&mut self, env: &mut TempEnv) -> bool {
-        self.update(env);
+    pub fn whnf<T: MainGroup>(&mut self, env: &mut TempEnv<T>) -> bool {
+        self.update_all(env);
         match self {
+            // Binders don't count as forms
+            Elab::Binder(_, t) => t.whnf(env),
+            Elab::Var(x, _) => {
+                if let Some(t) = env.db.val(env.scope(), *x).or_else(|| env.val(*x)) {
+                    if &*t != self {
+                        *self = t.cloned(&mut env.clone());
+                        return self.whnf(env);
+                    }
+                }
+                false
+            }
             Elab::App(f, x) => {
                 // We recursively WHNF the head
                 f.whnf(env);
                 match &mut **f {
                     Elab::Fun(args, body, _) => {
                         args.do_match(&x, env);
-                        body.update(env);
+                        body.whnf(env);
                         *self = body.cloned(env);
                         true
                     }
@@ -92,79 +130,44 @@ impl Elab {
         }
     }
 
-    /// Substitute in anything in `env`, in place
-    pub fn update(&mut self, env: &mut TempEnv) {
+    /// Substitute in anything in `env` (but not the database), in place
+    /// This avoids need for closures in the evaluator
+    pub fn update_all<T: MainGroup>(&mut self, env: &mut TempEnv<T>) {
         use Elab::*;
         match self {
-            Type
-            | Unit
-            | I32(_)
-            | Builtin(_) => (),
-            Var(x, ty) => if let Some(t) = env.val(*x) {
-                if &*t != self {
-                    *self = t.cloned(&mut env.clone());
-                    self.update(env);
+            Type | Unit | I32(_) | Builtin(_) => (),
+            Var(x, ty) => {
+                if let Some(t) = env.val(*x) {
+                    if &*t != self {
+                        *self = t.cloned(&mut env.clone());
+                        self.update_all(env);
+                    }
+                } else {
+                    ty.update_all(env)
                 }
-            } else {
-                ty.update(env)
             }
             Fun(a, b, c) => {
-                a.update(env);
-                b.update(env);
-                c.update(env);
-            },
+                a.update_all(env);
+                b.update_all(env);
+                c.update_all(env);
+            }
             // We don't beta-reduce here
             App(x, y) | Pair(x, y) => {
-                x.update(env);
-                y.update(env);
+                x.update_all(env);
+                y.update_all(env);
             }
-            Binder(_, x) => x.update(env),
-            Struct(_, v) => v.iter_mut().for_each(|(_, x)| x.update(env)),
+            Binder(_, x) => x.update_all(env),
+            Struct(_, v) => v.iter_mut().for_each(|(_, x)| x.update_all(env)),
             // We also don't reduce projection
-            Project(r, _) => r.update(env),
+            Project(r, _) => r.update_all(env),
             Block(v) => v.iter_mut().for_each(|x| match x {
-                ElabStmt::Def(_, e) => e.update(env),
-                ElabStmt::Expr(e) => e.update(env),
+                ElabStmt::Def(_, e) => e.update_all(env),
+                ElabStmt::Expr(e) => e.update_all(env),
             }),
         }
     }
 
-    /// Substitute in anything in `db` in this `scope`, in place
-    pub fn update_db(&mut self, db: &impl MainGroup, scope: ScopeId) {
-        use Elab::*;
-        match self {
-            Type
-            | Unit
-            | I32(_)
-            | Builtin(_) => (),
-            Var(x, _) => if let Some(t) = db.val(scope.clone(), *x) {
-                if &*t != self {
-                    *self = t.cloned(&mut db.temp_env(scope.clone()));
-                    self.update_db(db, scope);
-                }
-            }
-            Fun(a, b, c) => {
-                a.update_db(db, scope.clone());
-                b.update_db(db, scope.clone());
-                c.update_db(db, scope);
-            },
-            // We don't beta-reduce here
-            App(x, y) | Pair(x, y) => {
-                x.update_db(db, scope.clone());
-                y.update_db(db, scope);
-            }
-            Binder(_, x) => x.update_db(db, scope),
-            Struct(_, v) => v.iter_mut().for_each(|(_, x)| x.update_db(db, scope.clone())),
-            // We also don't reduce projection
-            Project(r, _) => r.update_db(db, scope),
-            Block(v) => v.iter_mut().for_each(|x| match x {
-                ElabStmt::Def(_, e) => e.update_db(db, scope.clone()),
-                ElabStmt::Expr(e) => e.update_db(db, scope.clone()),
-            }),
-        }
-    }
-
-    pub fn get_type(&self, env: &mut TempEnv) -> Elab {
+    pub fn get_type<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Elab {
         use crate::term::Builtin as B;
         use Elab::*;
         match self {
@@ -180,7 +183,7 @@ impl Elab {
                     Box::new(to.cloned(&mut env)),
                     Box::new(Type),
                 )
-            },
+            }
             App(f, x) => {
                 if let Fun(from, mut to, _) = f.get_type(env) {
                     from.do_match(x, env);
@@ -208,13 +211,13 @@ impl Elab {
             Block(v) => match v.last().unwrap() {
                 ElabStmt::Def(_, _) => Unit,
                 ElabStmt::Expr(e) => e.get_type(env),
-            }
+            },
         }
     }
 
     /// Adds substitutions created by matching `other` with `self` (`self` is the pattern) to `ctx`
     /// Does not check if it's a valid match, that's the typechecker's job
-    pub fn do_match(&self, other: &Elab, env: &mut TempEnv) {
+    pub fn do_match<T: MainGroup>(&self, other: &Elab, env: &mut TempEnv<T>) {
         use Elab::*;
         match (self, other) {
             (Binder(s, _), _) => {
@@ -240,7 +243,7 @@ impl Elab {
 
     /// Clones `self`. Unlike a normal clone, we freshen any bound variables (but not free variables)
     /// This means that other code doesn't have to worry about capture-avoidance, we do it here for free
-    pub fn cloned(&self, env: &mut TempEnv) -> Self {
+    pub fn cloned<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Self {
         use Elab::*;
         match self {
             Var(s, t) => {
@@ -333,12 +336,7 @@ impl CDisplay for Elab {
             Elab::Binder(x, t) => {
                 write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t))
             }
-            Elab::Var(s, _) => write!(
-                f,
-                "{}{}",
-                b.resolve(*s),
-                s.num()
-            ),
+            Elab::Var(s, _) => write!(f, "{}{}", b.resolve(*s), s.num()),
             Elab::I32(i) => write!(f, "{}", i),
             Elab::Type => write!(f, "Type"),
             Elab::Builtin(b) => write!(f, "{:?}", b),
@@ -363,22 +361,22 @@ impl CDisplay for Elab {
                 }
                 write!(f, "}}")
             }
-                        Elab::Block(v) => {
-                            write!(f, "do {{ ")?;
-                            for s in v.iter() {
-                                match s {
-                                    ElabStmt::Expr(e) => write!(f, "{}; ", WithContext(b, e)),
-                                    ElabStmt::Def(name, val) => write!(
-                                        f,
-                                        "{}{} := {}; ",
-                                        b.resolve(*name),
-                                        name.num(),
-                                        WithContext(b, val)
-                                    ),
-                                }?;
-                            }
-                            write!(f, "}}")
-                        }
+            Elab::Block(v) => {
+                write!(f, "do {{ ")?;
+                for s in v.iter() {
+                    match s {
+                        ElabStmt::Expr(e) => write!(f, "{}; ", WithContext(b, e)),
+                        ElabStmt::Def(name, val) => write!(
+                            f,
+                            "{}{} := {}; ",
+                            b.resolve(*name),
+                            name.num(),
+                            WithContext(b, val)
+                        ),
+                    }?;
+                }
+                write!(f, "}}")
+            }
             Elab::Project(r, m) => write!(f, "({}).{}", WithContext(b, &**r), b.resolve_raw(*m),),
         }
     }

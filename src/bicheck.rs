@@ -1,7 +1,7 @@
 //! Bidirectional type checking
 use crate::common::*;
-use crate::error::*;
 use crate::elab::*;
+use crate::error::*;
 use crate::term::*;
 
 /// An error produced in type checking
@@ -142,7 +142,7 @@ impl CDisplay for TypeError {
 }
 
 /// Attempts to come up with a type for a term, returning the elaborated term
-pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, TypeError> {
+pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, TypeError> {
     #[cfg(feature = "logging")]
     println!("synth ({})", WithContext(&env.bindings(), &**t));
 
@@ -150,10 +150,11 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
         Term::Type => Ok(Elab::Type),
         Term::Builtin(b) => Ok(Elab::Builtin(*b)),
         Term::Var(x) => {
-            let ty = db
+            let ty = env
+                .db
                 .elab(env.scope.clone(), *x)
                 .map(|x| x.get_type(env))
-                .or_else(|| env.ty(*x).map(|x|x.cloned(&mut env.clone())))
+                .or_else(|| env.ty(*x).map(|x| x.cloned(&mut env.clone())))
                 .ok_or_else(|| TypeError::NotFound(t.copy_span(*x)))?;
             Ok(Elab::Var(*x, Box::new(ty)))
         }
@@ -161,8 +162,8 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
         Term::Unit => Ok(Elab::Unit),
         Term::Pair(x, y) => {
             // TODO I don't think this covers dependent pairs
-            let x = synth(x, db, env)?;
-            let y = synth(y, db, env)?;
+            let x = synth(x, env)?;
+            let y = synth(y, env)?;
             Ok(Elab::Pair(Box::new(x), Box::new(y)))
         }
         Term::Struct(id, iv) => {
@@ -178,44 +179,56 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
                 }
                 syms.push(name.clone());
 
-                let e = synth(val, db, &mut env)?;
+                let e = synth(val, &mut env)?;
                 rv.push((**name, e));
             }
             Ok(Elab::Struct(*id, rv))
         }
         Term::App(fi, x) => {
-            let f = synth(fi, db, env)?;
+            let f = synth(fi, env)?;
             let x = match f.get_type(env) {
-                Elab::Fun(from, _, _) => {
-                    check(x, &from, db, env)?
+                Elab::Fun(mut from, _, _) => {
+                    from.whnf(env);
+                    check(x, &from, env)?
                 }
-                a => return Err(TypeError::NotFunction(fi.copy_span(a.cloned(&mut env.clone())))),
+                a => {
+                    return Err(TypeError::NotFunction(
+                        fi.copy_span(a.cloned(&mut env.clone())),
+                    ))
+                }
             };
             Ok(Elab::App(Box::new(f), Box::new(x)))
         }
         Term::Project(r, m) => {
-            let r = synth(r, db, env)?;
+            let r = synth(r, env)?;
             let rt = r.get_type(env);
             match &r.get_type(env) {
                 Elab::Struct(_, v) => {
                     if let Some((_, val)) = v.iter().find(|(name, _)| name.raw() == **m) {
                         val.cloned(&mut env.clone())
                     } else {
-                        return Err(TypeError::NoSuchField(m.clone(), rt.cloned(&mut env.clone())));
+                        return Err(TypeError::NoSuchField(
+                            m.clone(),
+                            rt.cloned(&mut env.clone()),
+                        ));
                     }
                 }
-                _ => return Err(TypeError::NoSuchField(m.clone(), rt.cloned(&mut env.clone()))),
+                _ => {
+                    return Err(TypeError::NoSuchField(
+                        m.clone(),
+                        rt.cloned(&mut env.clone()),
+                    ))
+                }
             };
             Ok(Elab::Project(Box::new(r), **m))
         }
         Term::Fun(x, y) => {
             // Make sure it's well typed before reducing it
-            let mut x = check(x, &Elab::Type, db, env)?;
-            x.update_db(db, env.scope());
+            let mut x = check(x, &Elab::Type, env)?;
             x.whnf(env);
             // Match it with itself to apply the types
             x.match_types(&x, env);
-            let y = synth(y, db, env)?;
+            let y = synth(y, env)?;
             let mut to = y.get_type(env);
             to.whnf(env);
             Ok(Elab::Fun(Box::new(x), Box::new(y), Box::new(to)))
@@ -226,19 +239,18 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
                 match &v[i] {
                     Statement::Expr(t) => {
                         if i + 1 != v.len() {
-                            rv.push(ElabStmt::Expr(check(t, &Elab::Unit, db, env)?));
+                            rv.push(ElabStmt::Expr(check(t, &Elab::Unit, env)?));
                         } else {
                             // last value
-                            rv.push(ElabStmt::Expr(synth(t, db, env)?));
+                            rv.push(ElabStmt::Expr(synth(t, env)?));
                         }
                     }
                     Statement::Def(Def(name, val)) => {
-                        let mut val = synth(val, db, env)?;
+                        let mut val = synth(val, env)?;
                         let ty = val.get_type(env);
                         env.set_ty(**name, ty);
                         // Blocks can be dependent!
-                        val.update_db(db, env.scope());
-                        val.update(env);
+                        val.whnf(env);
                         env.set_val(**name, val.cloned(&mut env.clone()));
                         rv.push(ElabStmt::Def(**name, val));
                     }
@@ -248,15 +260,13 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
         }
         Term::The(ty, u) => {
             // Make sure it's well typed before reducing it
-            let mut ty = check(ty, &Elab::Type, db, env)?;
-            ty.update_db(db, env.scope());
+            let mut ty = check(ty, &Elab::Type, env)?;
             ty.whnf(env);
-            let ue = check(u, &ty, db, env)?;
+            let ue = check(u, &ty, env)?;
             Ok(ue)
         }
         Term::Binder(x, Some(ty)) => {
-            let mut ty = check(ty, &Elab::Type, db, env)?;
-            ty.update_db(db, env.scope());
+            let mut ty = check(ty, &Elab::Type, env)?;
             ty.whnf(env);
             Ok(Elab::Binder(*x, Box::new(ty)))
         }
@@ -265,11 +275,10 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
 }
 
 /// Checks the given term against the given type, returning the elaborated term
-pub fn check(
+pub fn check<T: MainGroup>(
     term: &STerm,
     typ: &Elab,
-    db: &impl MainGroup,
-    env: &mut TempEnv,
+    env: &mut TempEnv<T>,
 ) -> Result<Elab, TypeError> {
     #[cfg(feature = "logging")]
     {
@@ -283,23 +292,28 @@ pub fn check(
 
     match (&**term, typ) {
         (Term::Pair(x, y), Elab::Pair(tx, ty)) => {
+            let (mut tx, mut ty) = (tx.cloned(env), ty.cloned(env));
+            tx.whnf(env);
+            ty.whnf(env);
             // TODO dependent pairs don't really work
-            check(x, tx, db, env)?;
-            check(y, ty, db, env)
+            check(x, &tx, env)?;
+            check(y, &ty, env)
         }
 
         // As far as we know, it could be any type
-        (Term::Binder(s, None), _) if typ.subtype_of(&Elab::Type, &mut env.clone()) => Ok(Elab::Binder(
-            // This is WRONG, because the *value* of the binder (which *is* a type but not the type of the binder) is the second parameter
-            // We don't know what that is, though, so we'll probably introduce a metavariable when we have them
-            // For now, we should call update_binders wherever we have the information, so this should dissapear
-            *s, Box::new(typ.cloned(&mut env.clone()))
-        )),
+        (Term::Binder(s, None), _) if typ.subtype_of(&Elab::Type, &mut env.clone()) => {
+            Ok(Elab::Binder(
+                // This is WRONG, because the *value* of the binder (which *is* a type but not the type of the binder) is the second parameter
+                // We don't know what that is, though, so we'll probably introduce a metavariable when we have them
+                // For now, we should call update_binders wherever we have the information, so this should dissapear
+                *s,
+                Box::new(typ.cloned(&mut env.clone())),
+            ))
+        }
 
         (Term::Fun(x, b), Elab::Fun(y, to, _)) => {
             // Make sure it's well typed before reducing it
-            let mut xr = check(x, &Elab::Type, db, env)?;
-            xr.update_db(db, env.scope());
+            let mut xr = check(x, &Elab::Type, env)?;
             xr.whnf(env);
             // Because patterns are types, match checking amounts to subtype checking
             if y.subtype_of(&xr, &mut env.clone()) {
@@ -311,7 +325,7 @@ pub fn check(
                 let mut to = to.cloned(&mut env.clone());
                 to.whnf(env);
 
-                let be = check(b, &to, db, env)?;
+                let be = check(b, &to, env)?;
 
                 Ok(Elab::Fun(Box::new(xr), Box::new(be), Box::new(to)))
             } else {
@@ -322,17 +336,19 @@ pub fn check(
             }
         }
         (_, Elab::Type) => {
-            let t = synth(term, db, env)?;
+            let t = synth(term, env)?;
             let ty = t.get_type(env);
             // Is it guaranteed to be a `typ`?
             if ty.subtype_of(&Elab::Type, &mut env.clone()) {
                 Ok(t)
             } else {
-                Err(TypeError::NotType(term.copy_span(ty.cloned(&mut env.clone()))))
+                Err(TypeError::NotType(
+                    term.copy_span(ty.cloned(&mut env.clone())),
+                ))
             }
         }
         (_, _) => {
-            let t = synth(term, db, env)?;
+            let t = synth(term, env)?;
             let ty = t.get_type(env);
             // Is it guaranteed to be a `typ`?
             if ty.subtype_of(&typ, &mut env.clone()) {
@@ -348,7 +364,7 @@ pub fn check(
 }
 
 impl Elab {
-    fn update_binders(&mut self, other: &Elab, env: &mut TempEnv) {
+    fn update_binders<T: MainGroup>(&mut self, other: &Elab, env: &mut TempEnv<T>) {
         use Elab::*;
         match (&mut *self, other) {
             // We don't want `x:y:T`, and we already called match_types()
@@ -371,7 +387,7 @@ impl Elab {
     }
 
     /// Like do_match(), but fills in the types instead of Elabs
-    fn match_types(&self, other: &Elab, env: &mut TempEnv) {
+    fn match_types<T: MainGroup>(&self, other: &Elab, env: &mut TempEnv<T>) {
         use Elab::*;
         match (self, other) {
             // Since we match it against itself to apply binder types
@@ -445,7 +461,7 @@ impl Elab {
 
     /// <=; every `self` is also a `sup`
     /// Not that this is *the* way to check type equality
-    pub fn subtype_of(&self, sup: &Elab, env: &mut TempEnv) -> bool {
+    pub fn subtype_of<T: MainGroup>(&self, sup: &Elab, env: &mut TempEnv<T>) -> bool {
         if !self.is_type() {
             return false;
         }

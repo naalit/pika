@@ -1,0 +1,5 @@
+# This file should give a type error
+# A slightly wrong version of the last example in `basic.pk`
+a := fun (t:) (x:t) => t
+b := fun (t:) (x:t) => x
+c : fun (t:Type) t => t = fun t x: => a (b t x) x
