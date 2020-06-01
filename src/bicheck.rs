@@ -3,214 +3,6 @@ use crate::common::*;
 use crate::error::*;
 use crate::elab::*;
 use crate::term::*;
-use std::sync::Arc;
-
-// #[derive(Debug, PartialEq, Eq, Clone)]
-// pub enum ElabStmt {
-//     Def(Spanned<Sym>, SElab),
-//     Expr(SElab),
-// }
-// /// Elab annotates terms with types, at least when we can't get otherwise a type easily and quickly without context
-// #[derive(Debug, PartialEq, Eq, Clone)]
-// pub enum Elab {
-//     Unit,                                                 // ()
-//     Binder(Sym, RElab),                                  // x: T
-//     Var(Sym, RElab),                                     // a :: T
-//     I32(i32),                                             // 3
-//     Type,                                                 // Type
-//     Builtin(Builtin),                                     // Int
-//     Fun(SElab, SElab, RElab),                            // fn a => x :: T
-//     App(SElab, SElab, RElab),                            // f x :: T
-//     Pair(SElab, SElab, RElab),                           // x, y :: T
-//     Struct(StructId, Vec<(Spanned<Sym>, SElab)>, RElab), // struct { x := 3 } :: T
-//     /// We use RawSym's here because it should work on any record with a field named this
-//     Project(SElab, Spanned<RawSym>, RElab), // r.m
-//     Block(Vec<ElabStmt>),                                 // do { x; y }
-// }
-// impl CDisplay for Elab {
-//     fn fmt(&self, f: &mut std::fmt::Formatter, b: &Bindings) -> std::fmt::Result {
-//         match self {
-//             Elab::Unit => write!(f, "()"),
-//             Elab::Binder(x, t) => {
-//                 write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t))
-//             }
-//             Elab::Var(s, t) => write!(f, "({}{} :: {})", b.resolve(*s), s.num(), WithContext(b, &**t)),
-//             Elab::I32(i) => write!(f, "{}", i),
-//             Elab::Type => write!(f, "Type"),
-//             Elab::Builtin(b) => write!(f, "{:?}", b),
-//             Elab::Fun(x, y, _) => write!(
-//                 f,
-//                 "fun {} => {}",
-//                 WithContext(b, &**x),
-//                 WithContext(b, &**y)
-//             ),
-//             Elab::App(x, y, _) => write!(f, "{}({})", WithContext(b, &**x), WithContext(b, &**y)),
-//             Elab::Pair(x, y, _) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
-//             Elab::Struct(id, v, _) => {
-//                 write!(f, "struct({}) {{ ", id.num())?;
-//                 for (name, val) in v.iter() {
-//                     write!(
-//                         f,
-//                         "{}{} := {}, ",
-//                         b.resolve(**name),
-//                         name.num(),
-//                         WithContext(b, &**val)
-//                     )?;
-//                 }
-//                 write!(f, "}}")
-//             }
-//             Elab::Block(v) => {
-//                 write!(f, "do {{ ")?;
-//                 for s in v.iter() {
-//                     match s {
-//                         ElabStmt::Expr(e) => write!(f, "{}; ", WithContext(b, &**e)),
-//                         ElabStmt::Def(name, val) => write!(
-//                             f,
-//                             "{}{} := {}; ",
-//                             b.resolve(**name),
-//                             name.num(),
-//                             WithContext(b, &**val)
-//                         ),
-//                     }?;
-//                 }
-//                 write!(f, "}}")
-//             }
-//             Elab::Project(r, m, _) => write!(f, "({}).{}", WithContext(b, &**r), b.resolve_raw(**m),),
-//         }
-//     }
-// }
-// impl SElab {
-//     /// Evaluate a `Term` into its `Elab` representation (i.e. normal form), given a context
-//     ///
-//     /// Note that this function can accept, and reduce, ill-typed terms, so always typecheck a `Term` before reducing it
-//     pub fn reduce(&self, db: &impl MainGroup, env: &mut TempEnv) -> Elab {
-//         match &**self {
-//             Elab::Unit => Elab::Unit,
-//             Elab::I32(i) => Elab::I32(*i),
-//             Elab::Type => Elab::Type,
-//             Elab::Builtin(b) => Elab::Builtin(*b),
-//             Elab::Var(s, _) => match db.val(env.scope.clone(), *s).or_else(|| env.val(*s)) {
-//                 Some(x) => x.cloned(&mut env.clone()),
-//                 // Free variable
-//                 None => Elab::Var(*s),
-//             },
-//             Elab::Binder(s, t) => {
-//                 Elab::Binder(*s, Box::new(t.cloned(&mut env.clone())))
-//             }
-//             Elab::Pair(x, y, _) => {
-//                 Elab::Pair(Box::new(x.reduce(db, env)), Box::new(y.reduce(db, env)))
-//             }
-//             Elab::Fun(x, y, _) => Elab::Fun(Box::new(x.reduce(db, env)), Box::new(y.reduce(db, env))),
-//             Elab::App(f, x, _) => {
-//                 let f = f.reduce(db, env);
-//                 let x = x.reduce(db, env);
-//                 match f {
-//                     Elab::Fun(args, mut body) => {
-//                         args.do_match(&x, env);
-//                         body.update(env);
-//                         *body
-//                     }
-//                     // Neutral - we can't apply it yet
-//                     f => Elab::App(Box::new(f), Box::new(x)),
-//                 }
-//             }
-//             Elab::Struct(id, v, _) => Elab::Struct(*id, {
-//                 let mut env = env.child(*id);
-//                 v.iter()
-//                     .map(|(name, val)| (**name, val.reduce(db, &mut env)))
-//                     .collect()
-//             }),
-//             Elab::Project(r, m, _) => {
-//                 let r = r.reduce(db, env);
-//                 match r {
-//                     Elab::Struct(_, v) => {
-//                         // We unwrap because this type checked already
-//                         let (_, val) = v.iter().find(|(name, _)| name.raw() == **m).unwrap();
-//                         val.cloned(&mut env.clone())
-//                     }
-//                     // Not a record yet, we can't project it
-//                     r => Elab::Project(Box::new(r), **m),
-//                 }
-//             }
-//             Elab::Block(v) => {
-//                 for i in 0..v.len() {
-//                     match &v[i] {
-//                         // Expressions currently can't do anything in this position
-//                         ElabStmt::Expr(e) => {
-//                             if i + 1 == v.len() {
-//                                 return e.reduce(db, env);
-//                             } else {
-//                             }
-//                         }
-//                         ElabStmt::Def(name, val) => {
-//                             let val = val.reduce(db, env);
-//                             env.set_val(**name, val);
-//                         }
-//                     }
-//                 }
-//                 Elab::Unit
-//             }
-//         }
-//     }
-//
-//     /// It's possible the returned term won't actually typecheck, since we lost type information
-//     /// However, it should still be well-typed
-//     pub fn as_term(&self) -> STerm {
-//         self.copy_span(match &**self {
-//             Elab::Unit => Term::Unit,
-//             Elab::Binder(s, t) => Term::Binder(*s, None),
-//             _ => panic!()
-//         })
-//     }
-//
-//     pub fn monomorphize(&self, ty: &Elab, env: &mut TempEnv) -> Self {
-//         self.copy_span(match &**self {
-//             Elab::Unit => Elab::Unit,
-//             Elab::Binder(s, _) => Elab::Binder(*s, Arc::new(ty.cloned(env))),
-//             Elab::Var(s, _) => Elab::Var(*s, Arc::new(ty.cloned(env))),
-//             Elab::I32(i) => Elab::I32(*i),
-//             Elab::Type => Elab::Type,
-//             Elab::Builtin(b) => Elab::Builtin(*b),
-//             Elab::Fun(a, b, _) => if let Elab::Fun(from, to) = ty
-//                 {
-//                     Elab::Fun(a.monomorphize(from, env), b.monomorphize(to, env), Arc::new(ty.cloned(env)))
-//                 } else { panic!("Monomorphizing a function to a non-function type: {}!", WithContext(&env.bindings(), ty)) }
-//             Elab::App(a, b, _) => if let Elab::Fun(from, _) = &*a.get_type() { Elab::App(
-//                 a.monomorphize(&Elab::Fun(Box::new(from.cloned(env)), Box::new(ty.cloned(env))), env),
-//                 b.monomorphize(ty, env),
-//                 Arc::new(ty.cloned(env)),
-//             ) } else { unreachable!() }
-//             Elab::Pair(a, b, _) => if let Elab::Pair(at, bt) = ty
-//                 {
-//                     Elab::Pair(a.monomorphize(at, env), b.monomorphize(bt, env), Arc::new(ty.cloned(env)))
-//                 } else { panic!("Monomorphizing a pair to a non-pair type: {}!", WithContext(&env.bindings(), ty)) }
-//             // TODO recurse in these three
-//             Elab::Struct(a, b, _) => Elab::Struct(a.clone(), b.clone(), Arc::new(ty.cloned(env))),
-//             Elab::Project(r, m, _) => Elab::Project(r.clone(), m.clone(), Arc::new(ty.cloned(env))),
-//             Elab::Block(v) => Elab::Block(v.clone()),
-//         })
-//     }
-//
-//     pub fn get_type(&self) -> RElab {
-//         match &**self {
-//             Elab::Unit => Arc::new(Elab::Unit),
-//             Elab::Binder(_, _) => Arc::new(Elab::Type),//t.clone(),
-//             Elab::Var(_, t) => t.clone(),
-//             Elab::I32(_) => Arc::new(Elab::Builtin(Builtin::Int)),
-//             Elab::Type => Arc::new(Elab::Type),
-//             Elab::Builtin(Builtin::Int) => Arc::new(Elab::Type),
-//             Elab::Fun(_, _, t) => t.clone(),
-//             Elab::App(_, _, t) => t.clone(),
-//             Elab::Pair(_, _, t) => t.clone(),
-//             Elab::Struct(_, _, t) => t.clone(),
-//             Elab::Project(_, _, t) => t.clone(),
-//             Elab::Block(x) => match x.last().unwrap() {
-//                 ElabStmt::Def(_, _) => Arc::new(Elab::Unit),
-//                 ElabStmt::Expr(e) => e.get_type(),
-//             },
-//         }
-//     }
-// }
 
 /// An error produced in type checking
 #[derive(Debug, PartialEq, Eq)]
@@ -393,31 +185,18 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
         }
         Term::App(fi, x) => {
             let f = synth(fi, db, env)?;
-            let (ret, x) = match f.get_type(env) {
-                Elab::Fun(from, to, _) => {
-                    let x = check(x, &from, db, env)?;
-                    // Stick the Elab in in case it's dependent
-                    // let x = x2.reduce(db, env);
-                    from.do_match(&x, env);
-                    let to = to.cloned(&mut env.clone());
-                    // println!("F is: {}", WithContext(&env.bindings(), &*f));
-                    // println!("X is: {}", WithContext(&env.bindings(), &x));
-                    // println!("Before match: {}", WithContext(&env.bindings(), &to));
-                    // to.update(env);
-                    // println!("After match:  {}", WithContext(&env.bindings(), &to));
-                    (to, x)
+            let x = match f.get_type(env) {
+                Elab::Fun(from, _, _) => {
+                    check(x, &from, db, env)?
                 }
                 a => return Err(TypeError::NotFunction(fi.copy_span(a.cloned(&mut env.clone())))),
             };
-            // println!("Unmorphized: {}", WithContext(&env.bindings(), &*f));
-            // let f = f.monomorphize(&Elab::Fun(Box::new(x.get_type().cloned(&mut env.clone())), Box::new(ret.cloned(&mut env.clone()))), &mut env.clone());
-            // println!("Morphized: {}", WithContext(&env.bindings(), &*f));
             Ok(Elab::App(Box::new(f), Box::new(x)))
         }
         Term::Project(r, m) => {
             let r = synth(r, db, env)?;
             let rt = r.get_type(env);
-            let rt = match &rt {
+            match &r.get_type(env) {
                 Elab::Struct(_, v) => {
                     if let Some((_, val)) = v.iter().find(|(name, _)| name.raw() == **m) {
                         val.cloned(&mut env.clone())
@@ -431,12 +210,14 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
         }
         Term::Fun(x, y) => {
             // Make sure it's well typed before reducing it
-            let x = check(x, &Elab::Type, db, env)?;
-            // let xv = xe.reduce(db, env);
+            let mut x = check(x, &Elab::Type, db, env)?;
+            x.update_db(db, env.scope());
+            x.whnf(env);
             // Match it with itself to apply the types
             x.match_types(&x, env);
             let y = synth(y, db, env)?;
-            let to = y.get_type(env);
+            let mut to = y.get_type(env);
+            to.whnf(env);
             Ok(Elab::Fun(Box::new(x), Box::new(y), Box::new(to)))
         }
         Term::Block(v) => {
@@ -447,16 +228,17 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
                         if i + 1 != v.len() {
                             rv.push(ElabStmt::Expr(check(t, &Elab::Unit, db, env)?));
                         } else {
-                            // last Elab
+                            // last value
                             rv.push(ElabStmt::Expr(synth(t, db, env)?));
                         }
                     }
                     Statement::Def(Def(name, val)) => {
-                        let val = synth(val, db, env)?;
+                        let mut val = synth(val, db, env)?;
                         let ty = val.get_type(env);
                         env.set_ty(**name, ty);
                         // Blocks can be dependent!
-                        // let val = ve.reduce(db, env);
+                        val.update_db(db, env.scope());
+                        val.update(env);
                         env.set_val(**name, val.cloned(&mut env.clone()));
                         rv.push(ElabStmt::Def(**name, val));
                     }
@@ -466,14 +248,16 @@ pub fn synth(t: &STerm, db: &impl MainGroup, env: &mut TempEnv) -> Result<Elab, 
         }
         Term::The(ty, u) => {
             // Make sure it's well typed before reducing it
-            let ty = check(ty, &Elab::Type, db, env)?;
-            // let ty = ty.reduce(db, env);
+            let mut ty = check(ty, &Elab::Type, db, env)?;
+            ty.update_db(db, env.scope());
+            ty.whnf(env);
             let ue = check(u, &ty, db, env)?;
             Ok(ue)
         }
         Term::Binder(x, Some(ty)) => {
-            let ty = check(ty, &Elab::Type, db, env)?;
-            // let ty = ty.reduce(db, env);
+            let mut ty = check(ty, &Elab::Type, db, env)?;
+            ty.update_db(db, env.scope());
+            ty.whnf(env);
             Ok(Elab::Binder(*x, Box::new(ty)))
         }
         _ => Err(TypeError::Synth(t.clone())),
@@ -506,19 +290,30 @@ pub fn check(
 
         // As far as we know, it could be any type
         (Term::Binder(s, None), _) if typ.subtype_of(&Elab::Type, &mut env.clone()) => Ok(Elab::Binder(
+            // This is WRONG, because the *value* of the binder (which *is* a type but not the type of the binder) is the second parameter
+            // We don't know what that is, though, so we'll probably introduce a metavariable when we have them
+            // For now, we should call update_binders wherever we have the information, so this should dissapear
             *s, Box::new(typ.cloned(&mut env.clone()))
         )),
 
         (Term::Fun(x, b), Elab::Fun(y, to, _)) => {
             // Make sure it's well typed before reducing it
-            let xr = check(x, &Elab::Type, db, env)?;
-            // let xr = xe.reduce(db, env);
+            let mut xr = check(x, &Elab::Type, db, env)?;
+            xr.update_db(db, env.scope());
+            xr.whnf(env);
             // Because patterns are types, match checking amounts to subtype checking
             if y.subtype_of(&xr, &mut env.clone()) {
-                // let xe = xe.monomorphize(y, &mut env.clone());
+                // Add bindings in the argument to the environment with types given by `y`
                 xr.match_types(y, env);
-                let be = check(b, to, db, env)?;//.monomorphize(to, &mut env.clone());
-                Ok(Elab::Fun(Box::new(xr), Box::new(be), Box::new(to.cloned(&mut env.clone()))))
+                // Update the types of binders in `xr` based on the type `y`
+                xr.update_binders(y, env);
+
+                let mut to = to.cloned(&mut env.clone());
+                to.whnf(env);
+
+                let be = check(b, &to, db, env)?;
+
+                Ok(Elab::Fun(Box::new(xr), Box::new(be), Box::new(to)))
             } else {
                 Err(TypeError::NotSubtypeF(
                     y.cloned(&mut env.clone()),
@@ -541,7 +336,7 @@ pub fn check(
             let ty = t.get_type(env);
             // Is it guaranteed to be a `typ`?
             if ty.subtype_of(&typ, &mut env.clone()) {
-                Ok(t)//.monomorphize(&typ, &mut env.clone()))
+                Ok(t)
             } else {
                 Err(TypeError::NotSubtype(
                     term.copy_span(ty.cloned(&mut env.clone())),
@@ -553,6 +348,28 @@ pub fn check(
 }
 
 impl Elab {
+    fn update_binders(&mut self, other: &Elab, env: &mut TempEnv) {
+        use Elab::*;
+        match (&mut *self, other) {
+            // We don't want `x:y:T`, and we already called match_types()
+            (_, Binder(_, t)) => {
+                self.update_binders(t, env);
+            }
+            (Binder(_, t), _) => {
+                **t = other.cloned(&mut env.clone());
+            }
+            (Pair(ax, ay), Pair(bx, by)) => {
+                ax.update_binders(bx, env);
+                ay.update_binders(by, env);
+            }
+            (App(af, ax), App(bf, bx)) => {
+                af.update_binders(bf, env);
+                ax.update_binders(bx, env);
+            }
+            _ => (),
+        }
+    }
+
     /// Like do_match(), but fills in the types instead of Elabs
     fn match_types(&self, other: &Elab, env: &mut TempEnv) {
         use Elab::*;
@@ -568,17 +385,15 @@ impl Elab {
                 let t = t.cloned(&mut env.clone());
                 env.set_ty(*na, t);
             }
-            // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
-            (_, Binder(x, t)) => {
-                self.do_match(&Var(*x, Box::new(t.cloned(&mut env.clone()))), env);
-                self.match_types(t, env);
-            }
-            (Binder(s, _), _) => {
+            (Binder(s, t), _) => {
                 #[cfg(feature = "logging")]
                 {
                     let b = &env.bindings();
                     println!("type: {} : {}", WithContext(b, self), WithContext(b, other));
                 }
+
+                // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
+                other.do_match(&Var(*s, Box::new(t.cloned(&mut env.clone()))), env);
 
                 let other = other.cloned(&mut env.clone());
                 env.set_ty(*s, other);
@@ -636,9 +451,9 @@ impl Elab {
         }
         match (self, sup) {
             (Elab::Struct(_, sub), Elab::Struct(_, sup)) => {
-                // We DON'T do record subtyping, that's hard to compile efficiently
+                // We DON'T do record subtyping, that's confusing and hard to compile efficiently
                 sup.iter().all(|(n, sup)| sub.iter().find(|(n2, _)| n2.raw() == n.raw()).map_or(false, |(_, sub)| sub.subtype_of(sup, env)))
-                // so make sure there aren't any extra fields
+                    // so make sure there aren't any extra fields
                     && sub.iter().all(|(n, _)| sup.iter().any(|(n2, _)| n2.raw() == n.raw()))
             }
             (Elab::Builtin(b), Elab::Builtin(c)) if b == c => true,
@@ -655,9 +470,15 @@ impl Elab {
             // (Type -> (Type, Type)) <= ((Type, Type) -> Type)
             (Elab::Fun(ax, ay, _), Elab::Fun(bx, by, _)) => {
                 if bx.subtype_of(ax, env) {
-                    // Either way works, we have to check alpha equality
+                    // Matching in either direction works, we have to check alpha equality
                     ax.match_types(bx, env);
-                    ay.subtype_of(by, env)
+
+                    // Since types are only in weak-head normal form, we have to reduce the spines to compare them
+                    let mut ay = ay.cloned(env);
+                    ay.whnf(env);
+                    let mut by = by.cloned(env);
+                    by.whnf(env);
+                    ay.subtype_of(&by, env)
                 } else {
                     false
                 }

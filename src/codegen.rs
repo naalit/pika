@@ -209,18 +209,10 @@ impl Elab {
             Elab::Unit => LowIR::Unit,
             Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
             Elab::Var(x, ty) => {
-                if let Some(t) = db.elab(env.scope.clone(), *x) {
-                    if t.get_type(env).is_concrete() {
-                        db.mangle(env.scope.clone(), *x).map(LowIR::Global).unwrap()
-                    // } else if ty.is_concrete() {
-                    //     println!("Monomorphizing {} to {}", WithContext(&env.bindings(), &**t), WithContext(&env.bindings(), &**ty));
-                    //     t.monomorphizce(ty, &mut env.clone()).as_low(db, env).unwrap()
-                    } else {
-                        println!("Not morphizing to {}", WithContext(&env.bindings(), &**ty));
-                        return None;
-                    }
+                if ty.is_concrete() {
+                    db.mangle(env.scope.clone(), *x).map(LowIR::Global).unwrap_or(LowIR::Local(*x))
                 } else {
-                    LowIR::Local(*x)
+                    return None;
                 }
             }
             Elab::Pair(a, b) => {
@@ -253,38 +245,33 @@ impl Elab {
                 }
                 last
             }
-            Elab::Fun(arg, body, ty) => {
-                if !ty.is_concrete() {
+            Elab::Fun(arg, body, ret_ty) => {
+                if !ret_ty.is_concrete() || !arg.is_concrete() {
                     // Don't lower this function yet, wait until it's called
                     return None;
                 }
-                let (arg_ty, arg_real, ret_ty) = match &**ty {
-                    Elab::Fun(a, r, _) => {
-                        (a.as_low_ty(), a.cloned(&mut env.clone()), r.as_low_ty())
-                    }
-                    t => panic!(
-                        "not a function type?: {}",
-                        WithContext(&env.bindings(), &*t)
-                    ),
-                };
                 match &**arg {
-                    Elab::Binder(arg, _) => {
-                        env.set_ty(*arg, arg_real);
+                    Elab::Binder(arg, ty) => {
                         let body = body.as_low(db, env)?;
-                        LowIR::Fun(*arg, arg_ty, Box::new(body), ret_ty)
+                        LowIR::Fun(*arg, ty.as_low_ty(), Box::new(body), ret_ty.as_low_ty())
                     }
                     _ => panic!("no pattern matching allowed yet"),
                 }
             }
             Elab::App(f, x) => {
-                // if let Elab::Fun(from, to, _) = &*f.get_type() {
-                //     if from.is_polymorphic() {
-                //         // Reduce it, read it back, and then re-elaborate it
-                //         return crate::bicheck::synth(&self.reduce(db, env).read_back(), db, env).unwrap().as_low(db, env);
-                //     }
-                // } else {
-                //     panic!("not function type")
-                // }
+                if let Elab::Fun(from, _, _) = &f.get_type(env) {
+                    if from.is_polymorphic() {
+                        // Inline it
+                        let mut s = self.cloned(&mut env.clone());
+                        s.update_db(db, env.scope());
+                        // Only recurse if it actually did something
+                        if s.whnf(env) {
+                            return s.as_low(db, env);
+                        }
+                    }
+                } else {
+                    panic!("not function type")
+                }
                 let f = f.as_low(db, env)?;
                 let x = x.as_low(db, env)?;
                 LowIR::Call(Box::new(f), Box::new(x))

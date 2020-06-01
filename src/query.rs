@@ -38,6 +38,10 @@ pub struct TempEnv {
     pub tys: HashMap<Sym, Arc<Elab>>,
 }
 impl TempEnv {
+    pub fn scope(&self) -> ScopeId {
+        self.scope.clone()
+    }
+
     /// Locks the global bindings object and returns a write guard
     /// Careful: you can't access the bindings from anywhere else if you're holding this object!
     pub fn bindings_mut(&mut self) -> RwLockWriteGuard<Bindings> {
@@ -63,12 +67,6 @@ impl TempEnv {
     }
     pub fn set_val(&mut self, k: Sym, v: Elab) {
         self.vals.insert(k, Arc::new(v));
-    }
-    pub fn arc_val(&mut self, k: Sym, v: Arc<Elab>) {
-        self.vals.insert(k, v);
-    }
-    pub fn arc_ty(&mut self, k: Sym, v: Arc<Elab>) {
-        self.tys.insert(k, v);
     }
     pub fn ty(&self, s: Sym) -> Option<Arc<Elab>> {
         self.tys.get(&s).cloned()
