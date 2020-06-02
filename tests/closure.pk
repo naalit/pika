@@ -1,0 +1,11 @@
+Nat := fun (t:Type) (fun t => t) t => t
+zero : Nat = fun t f x: => x
+suc : (fun Nat => Nat) = fun n t f x: => f (n t f x)
+one := suc zero
+const := fun a b: Int => a
+# If closures work right, this should be 12
+twelve := zero Int (const 2) 12
+# And this 2
+two    := one  Int (const 2) 12
+# Let's test it
+main := (two, twelve)

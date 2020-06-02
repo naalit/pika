@@ -127,7 +127,6 @@ impl LowTy {
             LowTy::Int => AnyTypeEnum::IntType(ctx.i32_type()),
             LowTy::Void => ctx.bool_type().as_any_type_enum(),
             LowTy::ClosRef { from, to } => {
-                println!("LLVM-izing borrowed closure type");
                 // Just use a pointer, since we don't know what we're actually passing
                 let fun_ty = to.llvm_fn_type(ctx, &[LowTy::VoidPtr, (**from).clone()]);
                 let fun_ptr_ty = fun_ty.ptr_type(inkwell::AddressSpace::Generic);
@@ -141,7 +140,6 @@ impl LowTy {
                 .as_any_type_enum()
             }
             LowTy::ClosOwn { from, to, upvalues } => {
-                println!("LLVM-izing owned closure type");
                 let env_struct_type = LowTy::Struct(upvalues.clone());
                 let fun_ty = to.llvm_fn_type(ctx, &[LowTy::VoidPtr, (**from).clone()]);
                 let fun_ptr_ty = fun_ty.ptr_type(inkwell::AddressSpace::Generic);
@@ -300,7 +298,6 @@ impl Elab {
                         env.set_ty(*arg, ty.cloned(&mut env.clone()));
                         let body = body.as_low(env)?;
                         let ret_ty = body.get_type(env);
-                        println!("Ret_ty = {:?}", ret_ty);
                         LowIR::Closure {
                             arg_name: *arg,
                             arg_ty: ty.as_low_ty(),

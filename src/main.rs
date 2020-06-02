@@ -18,15 +18,17 @@ use crate::repl::*;
 use arg::Args;
 use std::fs::File;
 use std::io::Read;
+use std::time::Instant;
 
 fn main() {
     // Skip the binary path
     let args: Vec<String> = std::env::args().skip(1).collect();
     match Options::from_args(args.iter().map(|x| &**x)) {
-        Ok(options) => {
-            if options.input_files.is_empty() {
-                run_repl(&options)
-            } else {
+        Ok(options) => match options.command {
+            Command::Repl => run_repl(&options),
+            Command::Build | Command::Run => {
+                let start_time = Instant::now();
+
                 let mut db = MainDatabase::default();
                 for i in &options.input_files {
                     let mut file = File::open(i).unwrap();
@@ -42,35 +44,62 @@ fn main() {
                         .add("<input>".to_string(), buf.clone());
                     db.set_source(file, std::sync::Arc::new(buf));
 
-                    for s in db.symbols(ScopeId::File(file)).iter() {
-                        if let Some(elab) = db.elab(ScopeId::File(file), **s) {
-                            let mut env = db.temp_env(ScopeId::File(file));
-                            let ty = elab.get_type(&mut env);
-                            let mut val = db
-                                .val(ScopeId::File(file), **s)
-                                .unwrap()
-                                .cloned(&mut env.clone());
-                            val.normal(&mut env);
-
-                            let b = db.bindings();
-                            let b = b.read().unwrap();
-                            println!(
-                                "{}{} : {} = {}",
-                                b.resolve(**s),
-                                s.num(),
-                                WithContext(&b, &ty),
-                                WithContext(&b, &val)
-                            );
-                        }
-                    }
+                    let module = db.low_mod(file);
 
                     if db.has_errors() {
                         db.emit_errors();
                         std::process::exit(1)
+                    } else {
+                        eprintln!("Build successful in {:?}", Instant::now() - start_time);
+                    }
+
+                    if options.command == Command::Run || options.show_llvm {
+                        // Generate LLVM and print out the module, for now
+                        let context = inkwell::context::Context::create();
+                        let llvm = module.codegen(&mut crate::codegen::CodegenCtx::new(&context));
+
+                        if options.show_llvm {
+                            llvm.print_to_stderr();
+                        }
+
+                        // For now we verify it but don't run it
+                        if let Err(e) = llvm.verify() {
+                            eprintln!("Verification error: {}", e);
+                            std::process::exit(1);
+                        } else if options.command == Command::Run {
+                            let main_raw = db.bindings().write().unwrap().raw("main".to_string());
+                            if let Some(main) = db.symbols(ScopeId::File(file)).iter().find(|x| x.raw() == main_raw) {
+                                let main_mangled = db.mangle(ScopeId::File(file), **main).unwrap();
+                                let engine = llvm.create_jit_execution_engine(inkwell::OptimizationLevel::None).expect("Failed to create LLVM execution engine");
+
+                                use crate::elab::Elab;
+                                use crate::term::Builtin;
+                                match db.elab(ScopeId::File(file), **main).unwrap().get_type(&mut db.temp_env(ScopeId::File(file))) {
+                                    Elab::Builtin(Builtin::Int) => unsafe {
+                                        let main_fun: inkwell::execution_engine::JitFunction<unsafe extern "C" fn() -> i32> = engine.get_function(&main_mangled).unwrap();
+                                        let result = main_fun.call();
+                                        println!("{}", result);
+                                    }
+                                    Elab::Pair(x, y) if x == y && *x == Elab::Builtin(Builtin::Int) => unsafe {
+                                        // Rust aligns (i32, i32) differently than LLVM does, so values .1 and .3 in the result are padding
+                                        let main_fun: inkwell::execution_engine::JitFunction<unsafe extern "C" fn() -> (i32, i32, i32, i32)> = engine.get_function(&main_mangled).unwrap();
+                                        let result = main_fun.call();
+                                        println!("({}, {})", result.0, result.2);
+                                    }
+                                    x => {
+                                        eprintln!("Error: Main can't return {}!", WithContext(&*db.bindings().read().unwrap(), &x));
+                                        std::process::exit(1)
+                                    }
+                                }
+                            } else {
+                                eprintln!("Run command specified but no `main` found!");
+                                std::process::exit(1)
+                            }
+                        }
                     }
                 }
             }
-        }
+        },
         Err(err) => {
             eprintln!("{}", err);
             std::process::exit(1)
