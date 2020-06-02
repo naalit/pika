@@ -175,14 +175,13 @@ pub enum LowError {
 
 fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowError> {
     let elab = db.elab(scope.clone(), s).ok_or(LowError::NoElab)?;
-    let ty = elab.get_type(&mut db.temp_env(scope.clone()));
 
     let name = db.mangle(scope.clone(), s).ok_or(LowError::NoElab)?;
 
     let body = elab
-        .as_low(&mut db.temp_env(scope))
+        .as_low(&mut db.temp_env(scope.clone()))
         .ok_or(LowError::Polymorphic)?;
-    let ret_ty = ty.as_low_ty();
+    let ret_ty = body.get_type(&db.temp_env(scope));
 
     Ok(LowFun { name, ret_ty, body })
 }

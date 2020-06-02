@@ -51,6 +51,25 @@ pub enum Elab {
 type BElab = Box<Elab>;
 
 impl Elab {
+    /// Does this term reference this symbol at all?
+    pub fn uses(&self, s: Sym) -> bool {
+        use Elab::*;
+        match self {
+            Type | Unit | I32(_) | Builtin(_) => false,
+            Var(x, ty) => *x == s || ty.uses(s),
+            Fun(a, b, c) => a.uses(s) || b.uses(s) || c.uses(s),
+            // We don't beta-reduce here
+            App(x, y) | Pair(x, y) => x.uses(s) || y.uses(s),
+            Binder(_, x) => x.uses(s),
+            Struct(_, v) => v.iter().any(|(_, x)| x.uses(s)),
+            Project(r, _) => r.uses(s),
+            Block(v) => v.iter().any(|x| match x {
+                ElabStmt::Def(_, e) => e.uses(s),
+                ElabStmt::Expr(e) => e.uses(s),
+            }),
+        }
+    }
+
     /// Reduce to full normal form, essentially recursively calling whnf()
     pub fn normal<T: MainGroup>(&mut self, env: &mut TempEnv<T>) {
         // Call whnf()
