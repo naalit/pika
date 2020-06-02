@@ -68,26 +68,45 @@ fn main() {
                             std::process::exit(1);
                         } else if options.command == Command::Run {
                             let main_raw = db.bindings().write().unwrap().raw("main".to_string());
-                            if let Some(main) = db.symbols(ScopeId::File(file)).iter().find(|x| x.raw() == main_raw) {
+                            if let Some(main) = db
+                                .symbols(ScopeId::File(file))
+                                .iter()
+                                .find(|x| x.raw() == main_raw)
+                            {
                                 let main_mangled = db.mangle(ScopeId::File(file), **main).unwrap();
-                                let engine = llvm.create_jit_execution_engine(inkwell::OptimizationLevel::None).expect("Failed to create LLVM execution engine");
+                                let engine = llvm
+                                    .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                                    .expect("Failed to create LLVM execution engine");
 
                                 use crate::elab::Elab;
                                 use crate::term::Builtin;
-                                match db.elab(ScopeId::File(file), **main).unwrap().get_type(&mut db.temp_env(ScopeId::File(file))) {
+                                match db
+                                    .elab(ScopeId::File(file), **main)
+                                    .unwrap()
+                                    .get_type(&mut db.temp_env(ScopeId::File(file)))
+                                {
                                     Elab::Builtin(Builtin::Int) => unsafe {
-                                        let main_fun: inkwell::execution_engine::JitFunction<unsafe extern "C" fn() -> i32> = engine.get_function(&main_mangled).unwrap();
+                                        let main_fun: inkwell::execution_engine::JitFunction<
+                                            unsafe extern "C" fn() -> i32,
+                                        > = engine.get_function(&main_mangled).unwrap();
                                         let result = main_fun.call();
                                         println!("{}", result);
-                                    }
-                                    Elab::Pair(x, y) if x == y && *x == Elab::Builtin(Builtin::Int) => unsafe {
+                                    },
+                                    Elab::Pair(x, y)
+                                        if x == y && *x == Elab::Builtin(Builtin::Int) =>
+                                    unsafe {
                                         // Rust aligns (i32, i32) differently than LLVM does, so values .1 and .3 in the result are padding
-                                        let main_fun: inkwell::execution_engine::JitFunction<unsafe extern "C" fn() -> (i32, i32, i32, i32)> = engine.get_function(&main_mangled).unwrap();
+                                        let main_fun: inkwell::execution_engine::JitFunction<
+                                            unsafe extern "C" fn() -> (i32, i32, i32, i32),
+                                        > = engine.get_function(&main_mangled).unwrap();
                                         let result = main_fun.call();
                                         println!("({}, {})", result.0, result.2);
                                     }
                                     x => {
-                                        eprintln!("Error: Main can't return {}!", WithContext(&*db.bindings().read().unwrap(), &x));
+                                        eprintln!(
+                                            "Error: Main can't return {}!",
+                                            WithContext(&*db.bindings().read().unwrap(), &x)
+                                        );
                                         std::process::exit(1)
                                     }
                                 }

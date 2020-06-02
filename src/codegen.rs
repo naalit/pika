@@ -41,10 +41,7 @@ pub enum LowTy {
     /// Currently no functions are actually void, this is an alias for `i1`, where Pika's `()` compiles to `false`
     Void,
     /// A borrowed closure (the environment is essentially a `void*`), which you can call or pass as an argument
-    ClosRef {
-        from: Box<LowTy>,
-        to: Box<LowTy>,
-    },
+    ClosRef { from: Box<LowTy>, to: Box<LowTy> },
     /// An owned closure (with a known environment), which is mostly used for returning from functions
     ClosOwn {
         from: Box<LowTy>,
@@ -482,7 +479,8 @@ impl LowIR {
                     .collect();
                 let env_types: Vec<_> = upvalues.iter().map(|(_, t)| t.clone()).collect();
                 let env_struct_type = LowTy::Struct(env_types);
-                let mut env_struct = env_struct_type.llvm(&ctx.context)
+                let mut env_struct = env_struct_type
+                    .llvm(&ctx.context)
                     .into_struct_type()
                     .get_undef()
                     .as_aggregate_value_enum();
