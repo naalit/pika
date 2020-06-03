@@ -5,6 +5,7 @@ use codespan_reporting::files::{Files as FilesT, SimpleFile};
 use codespan_reporting::term::termcolor;
 use codespan_reporting::term::{emit, Config};
 use lalrpop_util::ParseError;
+use lazy_static::lazy_static;
 use std::ops::Range;
 use std::sync::{Arc, RwLock};
 
@@ -57,11 +58,12 @@ impl<'a> FilesT<'a> for Files {
     }
 }
 
-lazy_static::lazy_static! {
+lazy_static! {
     pub static ref FILES: RwLock<Files> = RwLock::new(Files::new());
-
     static ref CONFIG: Config = Default::default();
-    static ref WRITER: RwLock<termcolor::StandardStream> = RwLock::new(termcolor::StandardStream::stderr(termcolor::ColorChoice::Always));
+    static ref WRITER: RwLock<termcolor::StandardStream> = RwLock::new(
+        termcolor::StandardStream::stderr(termcolor::ColorChoice::Always)
+    );
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Hash, Eq)]

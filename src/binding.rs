@@ -60,6 +60,21 @@ impl Sym {
     }
 }
 
+impl Pretty for RawSym {
+    type Context = Bindings;
+    fn pretty(&self, ctx: &Bindings) -> Doc {
+        let name = ctx.resolve_raw(*self).to_owned();
+        Doc::start(name)
+    }
+}
+impl Pretty for Sym {
+    type Context = Bindings;
+    fn pretty(&self, ctx: &Bindings) -> Doc {
+        let name = ctx.resolve(*self).to_owned();
+        Doc::start(name)
+    }
+}
+
 /// They used a variable that wasn't in scope
 #[derive(Clone, Debug)]
 pub struct NameError(Spanned<String>);

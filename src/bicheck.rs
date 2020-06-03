@@ -31,67 +31,85 @@ impl TypeError {
         match self {
             TypeError::Synth(t) => Error::new(
                 file,
-                format!(
-                    "Type error: Could not synthesize type for '{}': try adding an annotation",
-                    WithContext(b, &*t)
-                ),
+                Doc::start("Type error: could not synthesize type for '")
+                    .chain(t.pretty(b).style(Style::None))
+                    .add("': try adding an annotation")
+                    .style(Style::Bold),
                 t.span(),
                 "try adding an annotation here",
             ),
             TypeError::NotFunction(t) => Error::new(
                 file,
-                format!("Type error: Not a function type: '{}'", WithContext(b, &*t)),
+                Doc::start("Type error: not a function: '")
+                    .chain(t.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Bold),
                 t.span(),
                 "Not a function",
             ),
             TypeError::NotType(t) => Error::new(
                 file,
-                format!("Type error: Not a type: '{}'", WithContext(b, &*t)),
+                Doc::start("Type error: not a type: '")
+                    .chain(t.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Bold),
                 t.span(),
                 "This was used as a type",
             ),
             TypeError::NotSubtype(sub, sup) => Error::new(
                 file,
-                format!(
-                    "Type error: Could not match types: '{}' and '{}'",
-                    WithContext(b, &*sub),
-                    WithContext(b, &sup)
-                ),
+                Doc::start("Type error: could not match types '")
+                    .chain(sub.pretty(b).style(Style::None))
+                    .add("' and '")
+                    .chain(sup.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Bold),
                 sub.span(),
-                format!("this has type '{}'", WithContext(b, &*sub)),
+                Doc::start("this has type '")
+                    .chain(sub.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Note),
             ),
             TypeError::NotSubtypeF(sub, sup) => Error::new(
                 file,
-                format!(
-                    "Type error: Could not match types: '{}' and '{}'",
-                    WithContext(b, &sub),
-                    WithContext(b, &*sup)
-                ),
+                Doc::start("Type error: could not match types '")
+                    .chain(sub.pretty(b).style(Style::None))
+                    .add("' and '")
+                    .chain(sup.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Bold),
                 sup.span(),
-                format!("this has type '{}'", WithContext(b, &*sup)),
+                Doc::start("this has type '")
+                    .chain(sup.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Note),
             ),
             TypeError::NotFound(s) => Error::new(
                 file,
-                format!(
-                    "Type error: could not find type for variable: '{}'",
-                    b.resolve(*s),
-                ),
+                Doc::start("Type error: could not find type for variable: '")
+                    .chain(s.pretty(b))
+                    .add("'")
+                    .style(Style::Bold),
                 s.span(),
                 format!("type not found"),
             ),
             TypeError::NoSuchField(s, v) => Error::new(
                 file,
-                format!(
-                    "Type error: no such field '{}' on struct type '{}'",
-                    b.resolve_raw(*s),
-                    WithContext(b, &v),
-                ),
+                Doc::start("Type error: no such field '")
+                    .chain(s.pretty(b))
+                    .add("' on struct type '")
+                    .chain(v.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Bold),
                 s.span(),
                 format!("no such field"),
             ),
             TypeError::DuplicateField(x, y) => Error::new(
                 file,
-                format!("Type error: duplicate struct field '{}'", b.resolve_raw(*x),),
+                Doc::start("Type error: could not find type for variable: '")
+                    .chain(x.pretty(b))
+                    .add("'")
+                    .style(Style::Bold),
                 x.span(),
                 format!("first defined here"),
             )
@@ -99,52 +117,11 @@ impl TypeError {
         }
     }
 }
-impl CDisplay for TypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter, b: &Bindings) -> std::fmt::Result {
-        match self {
-            TypeError::Synth(t) => write!(
-                f,
-                "Could not synthesize type for '{}': try adding an annotation",
-                WithContext(b, &**t)
-            ),
-            TypeError::NotFunction(t) => {
-                write!(f, "Not a function type: '{}'", WithContext(b, &**t))
-            }
-            TypeError::NotType(t) => write!(f, "Not a type: '{}'", WithContext(b, &**t)),
-            TypeError::NotSubtype(sub, sup) => write!(
-                f,
-                "Could not match types: '{}' and '{}'",
-                WithContext(b, &**sub),
-                WithContext(b, &*sup)
-            ),
-            TypeError::NotSubtypeF(sub, sup) => write!(
-                f,
-                "Could not match types: '{}' and '{}'",
-                WithContext(b, &*sub),
-                WithContext(b, &**sup)
-            ),
-            TypeError::NotFound(s) => {
-                write!(f, "Type not found for varible: '{}'", b.resolve(**s),)
-            }
-            TypeError::NoSuchField(s, v) => write!(
-                f,
-                "Type error: no such field '{}' on struct type '{}'",
-                b.resolve_raw(**s),
-                WithContext(b, &*v),
-            ),
-            TypeError::DuplicateField(x, _y) => write!(
-                f,
-                "Type error: duplicate struct field '{}'",
-                b.resolve_raw(**x),
-            ),
-        }
-    }
-}
 
 /// Attempts to come up with a type for a term, returning the elaborated term
 pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, TypeError> {
     #[cfg(feature = "logging")]
-    println!("synth ({})", WithContext(&env.bindings(), &**t));
+    println!("synth ({})", t.pretty(&*env.bindings()).ansi_string());
 
     match &**t {
         Term::Type => Ok(Elab::Type),
@@ -285,8 +262,8 @@ pub fn check<T: MainGroup>(
         let b = &env.bindings();
         println!(
             "check ({}) :: ({})",
-            WithContext(b, &**term),
-            WithContext(b, typ)
+            term.pretty(b).ansi_string(),
+            typ.pretty(b).ansi_string(),
         );
     }
 
@@ -395,7 +372,11 @@ impl Elab {
                 #[cfg(feature = "logging")]
                 {
                     let b = &env.bindings();
-                    println!("env: {} : {}", WithContext(b, self), WithContext(b, &**t));
+                    println!(
+                        "env: {} : {}",
+                        self.pretty(b).ansi_string(),
+                        t.pretty(b).ansi_string()
+                    );
                 }
 
                 let t = t.cloned(&mut env.clone());
@@ -405,7 +386,11 @@ impl Elab {
                 #[cfg(feature = "logging")]
                 {
                     let b = &env.bindings();
-                    println!("type: {} : {}", WithContext(b, self), WithContext(b, other));
+                    println!(
+                        "type: {} : {}",
+                        self.pretty(b).ansi_string(),
+                        other.pretty(b).ansi_string()
+                    );
                 }
 
                 // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same

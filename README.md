@@ -46,7 +46,7 @@ suc : (fun Nat => Nat) = fun n t f x: => f (n t f x)
 one := suc zero
 two := suc one
 
-# `const a` returns a function that ignores its argument and returns `a`
+# Functions are curried, so `const T a` returns a function that ignores its argument and returns `a`
 const : fun (t:Type) t t => t = fun _ a b: => a
 
 # `pika run path-to-this-file.pk` will compile it with LLVM and print out the value of `main`
@@ -57,4 +57,4 @@ main = one Int (const Int 12) 9
 #### Why "Pika"?
 Pikas are little mammals that live on mountains, close relatives of rabbits. Pika the language is also small, but it isn't a close relative of any rabbits. Since it has dependent types, it has pi types, and "Pika" has "Pi" in it, so that's something else.
 
-I think all programming languages should be named after animals. Lots of them already have animal mascots anyway - so Go should be called Gopher, and Rust should be Crab (..or just Ferris? I think Gopher works better than Crab). Originally I was going to pick an insectivore so that I could say the language eats bugs, but I like "Pika" even though pikas are herbiores.
+I think all programming languages should be named after animals. Lots of them already have animal mascots anyway - so Go should be called Gopher, and Rust should be Crab (..or just Ferris? I think Gopher works better than Crab). Originally I was going to pick an insectivore so that I could say the language eats bugs, but I like "Pika" even though pikas are herbivores.

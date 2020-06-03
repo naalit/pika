@@ -6,6 +6,7 @@ mod elab;
 mod error;
 mod lexer;
 mod options;
+mod printing;
 mod query;
 mod repl;
 mod term;
@@ -105,7 +106,7 @@ fn main() {
                                     x => {
                                         eprintln!(
                                             "Error: Main can't return {}!",
-                                            WithContext(&*db.bindings().read().unwrap(), &x)
+                                            x.pretty(&*db.bindings().read().unwrap()).ansi_string()
                                         );
                                         std::process::exit(1)
                                     }

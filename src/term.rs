@@ -6,6 +6,14 @@ pub enum Builtin {
     Int,
 }
 
+impl std::fmt::Display for Builtin {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Builtin::Int => write!(f, "Int"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Def(pub Spanned<Sym>, pub STerm);
 
@@ -57,57 +65,110 @@ impl Term {
         }
     }
 }
-impl CDisplay for Term {
-    fn fmt(&self, f: &mut std::fmt::Formatter, b: &Bindings) -> std::fmt::Result {
+
+/// Handles prettifying curried functions
+/// Does not yet prettify multiple args with the same type (`fun x y: Int => ...` is `fun (x: Int) (y: Int) => ...`)
+fn pretty_fun<'a>(mut args: Vec<Doc<'a>>, body: &'a Term, ctx: &Bindings) -> Doc<'a> {
+    match body {
+        Term::Fun(arg, body) => {
+            args.push(arg.pretty(ctx).nest(Prec::Atom));
+            pretty_fun(args, body, ctx)
+        }
+        _ => {
+            let until_body = Doc::start("fun")
+                .style(Style::Keyword)
+                .line()
+                .chain(Doc::intersperse(args, Doc::none().line()))
+                .indent()
+                .line()
+                .add("=>");
+            Doc::either(
+                until_body
+                    .clone()
+                    .line()
+                    .add("  ")
+                    .chain(body.pretty(ctx).indent())
+                    .group(),
+                until_body.space().chain(body.pretty(ctx).indent()).group(),
+            )
+            .prec(Prec::Term)
+        }
+    }
+}
+
+impl Pretty for Term {
+    type Context = Bindings;
+    fn pretty(&self, ctx: &Bindings) -> Doc {
         match self {
-            Term::Unit => write!(f, "()"),
-            Term::The(t, u) => write!(f, "the {} {}", WithContext(b, &**t), WithContext(b, &**u)),
-            Term::Binder(x, None) => write!(f, "({}{}:)", b.resolve(*x), x.num()),
-            Term::Binder(x, Some(t)) => {
-                write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t))
-            }
-            Term::Var(s) => write!(f, "{}{}", b.resolve(*s), s.num()),
-            Term::I32(i) => write!(f, "{}", i),
-            Term::Type => write!(f, "Type"),
-            Term::Builtin(b) => write!(f, "{:?}", b),
-            Term::Fun(x, y) => write!(
-                f,
-                "fun {} => {}",
-                WithContext(b, &**x),
-                WithContext(b, &**y)
-            ),
-            Term::App(x, y) => write!(f, "{}({})", WithContext(b, &**x), WithContext(b, &**y)),
-            Term::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
-            Term::Struct(id, v) => {
-                write!(f, "struct({}) {{ ", id.num())?;
-                for (name, val) in v.iter() {
-                    write!(
-                        f,
-                        "{}{} := {}, ",
-                        b.resolve(**name),
-                        name.num(),
-                        WithContext(b, &**val)
-                    )?;
-                }
-                write!(f, "}}")
-            }
-            Term::Block(v) => {
-                write!(f, "do {{ ")?;
-                for s in v.iter() {
-                    match s {
-                        Statement::Expr(e) => write!(f, "{}; ", WithContext(b, &**e)),
-                        Statement::Def(Def(name, val)) => write!(
-                            f,
-                            "{}{} := {}; ",
-                            b.resolve(**name),
-                            name.num(),
-                            WithContext(b, &**val)
-                        ),
-                    }?;
-                }
-                write!(f, "}}")
-            }
-            Term::Project(r, m) => write!(f, "({}).{}", WithContext(b, &**r), b.resolve_raw(**m),),
+            Term::Unit => Doc::start("()").style(Style::Literal),
+            Term::Binder(x, Some(t)) => x
+                .pretty(ctx)
+                .add(":")
+                .style(Style::Binder)
+                .space()
+                .chain(t.pretty(ctx))
+                .prec(Prec::Term),
+            Term::Binder(x, None) => x.pretty(ctx).add(":").style(Style::Binder).prec(Prec::Term),
+            Term::Var(s) => s.pretty(ctx),
+            Term::I32(i) => Doc::start(i).style(Style::Literal),
+            Term::Type => Doc::start("Type"),
+            Term::Builtin(b) => Doc::start(b),
+            Term::Fun(x, y) => pretty_fun(vec![x.pretty(ctx).nest(Prec::Atom)], y, ctx),
+            Term::App(x, y) => x
+                .pretty(ctx)
+                .nest(Prec::App)
+                .space()
+                .chain(y.pretty(ctx).nest(Prec::Atom))
+                .prec(Prec::App),
+            Term::Pair(x, y) => Doc::start("(")
+                .chain(x.pretty(ctx))
+                .add(",")
+                .space()
+                .chain(y.pretty(ctx))
+                .add(")")
+                .prec(Prec::Atom),
+            Term::Struct(i, v) => Doc::start("struct")
+                .style(Style::Keyword)
+                .add(i.num())
+                .chain(Doc::intersperse(
+                    v.iter().map(|(name, val)| {
+                        name.pretty(ctx)
+                            .style(Style::Binder)
+                            .space()
+                            .add(":=")
+                            .line()
+                            .chain(val.pretty(ctx))
+                            .group()
+                    }),
+                    Doc::none().hardline(),
+                ))
+                .prec(Prec::Term),
+            Term::Block(v) => Doc::start("do")
+                .style(Style::Keyword)
+                .chain(Doc::intersperse(
+                    v.iter().map(|s| match s {
+                        Statement::Expr(e) => e.pretty(ctx),
+                        Statement::Def(Def(name, val)) => name
+                            .pretty(ctx)
+                            .style(Style::Binder)
+                            .space()
+                            .add(":=")
+                            .line()
+                            .chain(val.pretty(ctx))
+                            .group(),
+                    }),
+                    Doc::none().hardline(),
+                ))
+                .prec(Prec::Term),
+            Term::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).chain(m.pretty(ctx)),
+            Term::The(t, x) => Doc::start("the")
+                .style(Style::Keyword)
+                .line()
+                .chain(t.pretty(ctx).nest(Prec::Atom))
+                .line()
+                .chain(x.pretty(ctx).nest(Prec::Atom))
+                .group()
+                .indent(),
         }
     }
 }

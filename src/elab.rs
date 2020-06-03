@@ -348,55 +348,101 @@ impl Elab {
         }
     }
 }
-impl CDisplay for Elab {
-    fn fmt(&self, f: &mut std::fmt::Formatter, b: &Bindings) -> std::fmt::Result {
+
+/// Handles prettifying curried functions
+/// Does not yet prettify multiple args with the same type (`fun x y: Int => ...` is `fun (x: Int) (y: Int) => ...`)
+fn pretty_fun<'a>(mut args: Vec<Doc<'a>>, body: &'a Elab, ctx: &Bindings) -> Doc<'a> {
+    match body {
+        Elab::Fun(arg, body, _) => {
+            args.push(arg.pretty(ctx).nest(Prec::Atom));
+            pretty_fun(args, body, ctx)
+        }
+        _ => {
+            let until_body = Doc::start("fun")
+                .style(Style::Keyword)
+                .line()
+                .chain(Doc::intersperse(args, Doc::none().line()))
+                .indent()
+                .line()
+                .add("=>");
+            Doc::either(
+                until_body
+                    .clone()
+                    .line()
+                    .add("  ")
+                    .chain(body.pretty(ctx).indent())
+                    .group(),
+                until_body.space().chain(body.pretty(ctx).indent()).group(),
+            )
+            .prec(Prec::Term)
+        }
+    }
+}
+
+impl Pretty for Elab {
+    type Context = Bindings;
+    fn pretty(&self, ctx: &Bindings) -> Doc {
         match self {
-            Elab::Unit => write!(f, "()"),
-            Elab::Binder(x, t) => {
-                write!(f, "{}{}: {}", b.resolve(*x), x.num(), WithContext(b, &**t))
-            }
-            Elab::Var(s, _) => write!(f, "{}{}", b.resolve(*s), s.num()),
-            Elab::I32(i) => write!(f, "{}", i),
-            Elab::Type => write!(f, "Type"),
-            Elab::Builtin(b) => write!(f, "{:?}", b),
-            Elab::Fun(x, y, _) => write!(
-                f,
-                "fun {} => {}",
-                WithContext(b, &**x),
-                WithContext(b, &**y),
-            ),
-            Elab::App(x, y) => write!(f, "({})({})", WithContext(b, &**x), WithContext(b, &**y)),
-            Elab::Pair(x, y) => write!(f, "({}, {})", WithContext(b, &**x), WithContext(b, &**y)),
-            Elab::Struct(i, v) => {
-                write!(f, "struct_{} {{ ", i.num())?;
-                for (name, val) in v.iter() {
-                    write!(
-                        f,
-                        "{}{} := {}, ",
-                        b.resolve(*name),
-                        name.num(),
-                        WithContext(b, &*val)
-                    )?;
-                }
-                write!(f, "}}")
-            }
-            Elab::Block(v) => {
-                write!(f, "do {{ ")?;
-                for s in v.iter() {
-                    match s {
-                        ElabStmt::Expr(e) => write!(f, "{}; ", WithContext(b, e)),
-                        ElabStmt::Def(name, val) => write!(
-                            f,
-                            "{}{} := {}; ",
-                            b.resolve(*name),
-                            name.num(),
-                            WithContext(b, val)
-                        ),
-                    }?;
-                }
-                write!(f, "}}")
-            }
-            Elab::Project(r, m) => write!(f, "({}).{}", WithContext(b, &**r), b.resolve_raw(*m),),
+            Elab::Unit => Doc::start("()").style(Style::Literal),
+            Elab::Binder(x, t) => x
+                .pretty(ctx)
+                .add(":")
+                .style(Style::Binder)
+                .space()
+                .chain(t.pretty(ctx))
+                .prec(Prec::Term),
+            Elab::Var(s, _) => s.pretty(ctx),
+            Elab::I32(i) => Doc::start(i).style(Style::Literal),
+            Elab::Type => Doc::start("Type"),
+            Elab::Builtin(b) => Doc::start(b),
+            Elab::Fun(x, y, _) => pretty_fun(vec![x.pretty(ctx).nest(Prec::Atom)], y, ctx),
+            Elab::App(x, y) => x
+                .pretty(ctx)
+                .nest(Prec::App)
+                .space()
+                .chain(y.pretty(ctx).nest(Prec::Atom))
+                .prec(Prec::App),
+            Elab::Pair(x, y) => Doc::start("(")
+                .chain(x.pretty(ctx))
+                .add(",")
+                .space()
+                .chain(y.pretty(ctx))
+                .add(")")
+                .prec(Prec::Atom),
+            Elab::Struct(i, v) => Doc::start("struct")
+                .style(Style::Keyword)
+                .add(i.num())
+                .chain(Doc::intersperse(
+                    v.iter().map(|(name, val)| {
+                        name.pretty(ctx)
+                            .style(Style::Binder)
+                            .space()
+                            .add(":=")
+                            .line()
+                            .chain(val.pretty(ctx))
+                            .group()
+                    }),
+                    Doc::none().hardline(),
+                ))
+                .prec(Prec::Term),
+            Elab::Block(v) => Doc::start("do")
+                .style(Style::Keyword)
+                .chain(Doc::intersperse(
+                    v.iter().map(|s| match s {
+                        ElabStmt::Expr(e) => e.pretty(ctx),
+                        ElabStmt::Def(name, val) => name
+                            .pretty(ctx)
+                            .style(Style::Binder)
+                            .space()
+                            .add(":=")
+                            .line()
+                            .chain(val.pretty(ctx))
+                            .group(),
+                    }),
+                    Doc::none().hardline(),
+                ))
+                .prec(Prec::Term),
+            Elab::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).chain(m.pretty(ctx)),
         }
     }
 }
