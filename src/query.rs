@@ -273,7 +273,7 @@ fn symbols(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>> {
 }
 
 fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
-    match scope {
+    let r = match scope {
         ScopeId::File(file) => {
             // We reset the bindings when we get all the definitions so they're more reproducible and thus memoizable
             db.bindings().write().unwrap().reset();
@@ -306,7 +306,21 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
         ScopeId::Struct(id, _) => db
             .struct_defs(scope.file(), id)
             .unwrap_or_else(|| Arc::new(Vec::new())),
+    };
+
+    let mut seen: Vec<Spanned<RawSym>> = Vec::new();
+    for Def(sym, _) in r.iter() {
+        if let Some(s) = seen.iter().find(|x| ***x == sym.raw()) {
+            db.error(
+                TypeError::DuplicateField(s.clone(), sym.copy_span(sym.raw()))
+                    .to_error(scope.file(), &db.bindings().read().unwrap()),
+            );
+        } else {
+            seen.push(sym.copy_span(sym.raw()));
+        }
     }
+
+    r
 }
 
 fn term(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
