@@ -106,7 +106,7 @@ impl TypeError {
             ),
             TypeError::DuplicateField(x, y) => Error::new(
                 file,
-                Doc::start("Type error: could not find type for variable: '")
+                Doc::start("Type error: multiple definitions of struct field '")
                     .chain(x.pretty(b))
                     .add("'")
                     .style(Style::Bold),
@@ -147,9 +147,20 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
             // TODO tempenv vars available to structs
             env.db.set_struct_env(*id, env);
             let scope = ScopeId::Struct(*id, Box::new(env.scope()));
+            let mut seen: Vec<Spanned<RawSym>> = Vec::new();
             for sym in env.db.symbols(scope.clone()).iter() {
+                if let Some(s) = seen.iter().find(|x| ***x == sym.raw()) {
+                    return Err(TypeError::DuplicateField(
+                        s.clone(),
+                        sym.copy_span(sym.raw()),
+                    ));
+                } else {
+                    seen.push(sym.copy_span(sym.raw()));
+                }
+
                 env.db.elab(scope.clone(), **sym);
             }
+
             Ok(Elab::StructIntern(*id))
         }
         Term::App(fi, x) => {

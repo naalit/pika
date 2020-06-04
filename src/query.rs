@@ -1,5 +1,6 @@
 use crate::bicheck::*;
 use crate::binding::*;
+use crate::codegen::LowTy;
 use crate::codegen::*;
 use crate::common::*;
 use crate::elab::*;
@@ -76,12 +77,27 @@ impl<'a, T: MainGroup> TempEnv<'a, T> {
         self.bindings.read().unwrap()
     }
 
-    /// Clones the TempEnv, creating a child environment in a struct
-    pub fn child(&self, struct_id: StructId) -> TempEnv<'a, T> {
-        TempEnv {
-            scope: ScopeId::Struct(struct_id, Box::new(self.scope.clone())),
-            ..self.clone()
-        }
+    /// Gets the monomorphization for the given named function with the given parameter type, if one exists
+    pub fn mono(&self, f: Sym, x: &Elab) -> Option<(String, LowTy)> {
+        let mut cloned = self.clone();
+        self.db
+            .monos()
+            .get(&f)?
+            .iter()
+            .find(|v| {
+                let (k, _, _) = &***v;
+                x.subtype_of(k, &mut cloned)
+            })
+            .map(|x| (x.1.clone(), x.2.clone()))
+    }
+
+    /// Registers a monomorphization for the given named function with the given parameter type
+    pub fn set_mono(&mut self, f: Sym, x: Elab, mono: String, ty: LowTy) {
+        self.db
+            .monos_mut()
+            .entry(f)
+            .or_insert_with(Vec::new)
+            .push(Arc::new((x, mono, ty)));
     }
 
     /// Get a value from the environment
@@ -105,6 +121,10 @@ impl<'a, T: MainGroup> TempEnv<'a, T> {
 /// Since queries can't access the database directly, this defines the interface they can use for accessing it
 pub trait MainExt {
     type DB: MainGroup;
+
+    fn monos(&self) -> RwLockReadGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
+
+    fn monos_mut(&self) -> RwLockWriteGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
 
     fn set_struct_env<T: MainGroup>(&self, st: StructId, env: &TempEnv<T>);
 
@@ -331,6 +351,7 @@ pub struct MainDatabase {
     errors: RwLock<Vec<Error>>,
     scopes: RwLock<HashMap<(FileId, StructId), Arc<Vec<Def>>>>,
     struct_envs: RwLock<HashMap<(FileId, StructId), HashMap<Sym, Arc<Elab>>>>,
+    monos: RwLock<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>,
 }
 
 impl MainDatabase {
@@ -359,6 +380,13 @@ impl salsa::Database for MainDatabase {
 
 impl MainExt for MainDatabase {
     type DB = Self;
+
+    fn monos(&self) -> RwLockReadGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>> {
+        self.monos.read().unwrap()
+    }
+    fn monos_mut(&self) -> RwLockWriteGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>> {
+        self.monos.write().unwrap()
+    }
 
     fn temp_env<'a>(&'a self, scope: ScopeId) -> TempEnv<'a, Self> {
         let tys = match &scope {

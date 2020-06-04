@@ -12,8 +12,19 @@ use crate::{
 };
 pub use inkwell::context::Context;
 use inkwell::{builder::Builder, module::Module, types::*, values::*};
+use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
+use std::sync::RwLock;
+
+lazy_static! {
+    static ref CLOSURE_NUM: RwLock<u32> = RwLock::new(0);
+}
+fn next_closure() -> u32 {
+    let mut n = CLOSURE_NUM.write().unwrap();
+    *n += 1;
+    *n - 1
+}
 
 /// We need one of these to generate any LLVM code, but not to generate LowIR
 pub struct CodegenCtx<'ctx> {
@@ -329,6 +340,7 @@ impl Elab {
                     // Don't lower this function yet, wait until it's called
                     return None;
                 }
+
                 let upvalues: Vec<_> = env
                     .tys
                     .iter()
@@ -342,6 +354,7 @@ impl Elab {
                         let body = body.as_low(env)?;
                         let ret_ty = body.get_type(env);
                         LowIR::Closure {
+                            fun_name: format!("$_closure{}", next_closure()),
                             arg_name: *arg,
                             arg_ty: ty.as_low_ty(),
                             ret_ty,
@@ -353,18 +366,54 @@ impl Elab {
                 }
             }
             Elab::App(f, x) => {
-                if let Elab::Fun(from, _, _) = &f.get_type(env) {
+                if let Elab::Fun(from, _, _) = f.get_type(env) {
                     if from.is_polymorphic() {
-                        // Inline it
-                        let mut s = self.cloned(&mut env.clone());
-                        // Only recurse if it actually did something
-                        if s.whnf(env) {
-                            return s.as_low(env);
+                        match &**f {
+                            Elab::Var(name, _) => {
+                                if let Some((mono, ty)) = env.mono(*name, x) {
+                                    return Some(LowIR::TypedGlobal(ty, mono));
+                                } else {
+                                    let mut s = self.cloned(&mut env.clone());
+                                    // Only recurse if it actually did something
+                                    if s.whnf(env) {
+                                        let mut low = s.as_low(env)?;
+                                        let ty = low.get_type(env);
+                                        match &mut low {
+                                            LowIR::Closure {
+                                                fun_name, upvalues, ..
+                                            } if upvalues.is_empty() => {
+                                                *fun_name = Doc::start("$mono$")
+                                                    .chain(name.pretty(&env.bindings()))
+                                                    .add("$")
+                                                    .chain(x.pretty(&env.bindings()))
+                                                    .raw_string();
+                                                env.set_mono(
+                                                    *name,
+                                                    x.cloned(&mut env.clone()),
+                                                    fun_name.to_string(),
+                                                    ty,
+                                                );
+                                            }
+                                            _ => (),
+                                        };
+                                        return Some(low);
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Inline it
+                                let mut s = self.cloned(&mut env.clone());
+                                // Only recurse if it actually did something
+                                if s.whnf(env) {
+                                    return s.as_low(env);
+                                }
+                            }
                         }
                     }
                 } else {
                     panic!("not function type")
                 }
+
                 // We borrow both the function and the argument
                 let f = f.as_low(env)?.borrow(env);
                 let x = x.as_low(env)?.borrow(env);
@@ -423,6 +472,7 @@ pub enum LowIR {
     Let(Sym, Box<LowIR>, Box<LowIR>),
     Local(Sym),
     Global(Sym, ScopeId, String),
+    TypedGlobal(LowTy, String),
     /// The symbols are only so that other struct elements can refer to them, the members must be sorted by RawSym
     Struct(Vec<(Sym, LowIR)>),
     Project(Box<LowIR>, usize),
@@ -430,6 +480,7 @@ pub enum LowIR {
     ClosureBorrow(Box<LowIR>),
     /// An owned closure
     Closure {
+        fun_name: String,
         arg_name: Sym,
         arg_ty: LowTy,
         upvalues: Vec<(Sym, LowTy)>,
@@ -467,6 +518,7 @@ impl LowIR {
                 .unwrap_or_else(|| panic!("not found: {}", s.pretty(&env.bindings()).ansi_string()))
                 .cloned(&mut env.clone())
                 .as_low_ty(),
+            LowIR::TypedGlobal(t, _) => t.clone(),
             LowIR::Global(s, scope, _) => env.db.low_fun(scope.clone(), *s).unwrap().ret_ty,
             LowIR::Call(f, _) => match f.get_type(env) {
                 LowTy::ClosRef { to, .. } | LowTy::ClosOwn { to, .. } => *to,
@@ -556,7 +608,21 @@ impl LowIR {
                 .builder
                 .build_call(module.get_function(name).unwrap(), &[], name)
                 .as_any_value_enum(),
+            LowIR::TypedGlobal(ty, name) => {
+                let ty = LowTy::Struct(vec![ty.clone(), LowTy::Unit])
+                    .llvm(&ctx.context)
+                    .into_struct_type();
+
+                let fun = module.get_function(name).unwrap();
+                let fun_ptr = fun.as_any_value_enum().into_pointer_value();
+
+                ctx.builder
+                    .build_insert_value(ty.get_undef(), fun_ptr, 0, "clos")
+                    .unwrap()
+                    .as_any_value_enum()
+            }
             LowIR::Closure {
+                fun_name,
                 arg_name,
                 arg_ty,
                 body,
@@ -585,10 +651,9 @@ impl LowIR {
                 }
 
                 let bb = ctx.builder.get_insert_block().unwrap();
-                let name = "$_closure";
 
                 let fun_ty = ret_ty.llvm_fn_type(&ctx.context, &[LowTy::VoidPtr, arg_ty.clone()]);
-                let fun = module.add_function(&name, fun_ty, None);
+                let fun = module.add_function(&fun_name, fun_ty, None);
                 let entry = ctx.context.append_basic_block(fun, "entry");
                 ctx.builder.position_at_end(entry);
 
@@ -606,7 +671,7 @@ impl LowIR {
                             .llvm(&ctx.context)
                             .into_struct_type()
                             .ptr_type(inkwell::AddressSpace::Generic),
-                        name,
+                        "env",
                     )
                     .into_pointer_value();
                 let local_env = ctx
@@ -636,7 +701,7 @@ impl LowIR {
                     ],
                     false,
                 );
-                // Not sure if this works
+                // Magic, might break eventually
                 let fun_ptr = fun.as_any_value_enum().into_pointer_value();
                 let closure = clos_ty.get_undef();
                 let closure = ctx

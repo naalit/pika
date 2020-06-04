@@ -53,6 +53,17 @@ impl<'a> Into<String> for Doc<'a> {
 }
 
 impl<'a> Doc<'a> {
+    /// Render into a string with no newlines and no colors
+    pub fn raw_string(self) -> String {
+        let mut buffer = Buffer::no_color();
+        buffer.reset().unwrap();
+        self.group()
+            .doc
+            .render_colored(100000, &mut buffer)
+            .unwrap();
+        String::from_utf8(buffer.into_inner()).unwrap()
+    }
+
     /// Render into a string with ANSI colors
     pub fn ansi_string(self) -> String {
         let mut buffer = Buffer::ansi();

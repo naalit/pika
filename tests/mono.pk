@@ -1,0 +1,3 @@
+needs_mono := fun (t:Type) (x:t) => x
+a := needs_mono Int 3
+b := needs_mono Int 4
