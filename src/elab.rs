@@ -115,7 +115,6 @@ impl Elab {
     /// So we're guaranteed not to have `(\x.t)u` at the top level, but we could have e.g. `(\x.(\y.t)u)`
     /// This is the form we store types in, so if you need to compare types you'll need to call `whnf` recursively
     pub fn whnf<T: MainGroup>(&mut self, env: &mut TempEnv<T>) -> bool {
-        self.update_all(env);
         match self {
             // Binders don't count as forms
             Elab::Binder(_, t) => t.whnf(env),
@@ -167,44 +166,6 @@ impl Elab {
                 }
             }
             _ => false,
-        }
-    }
-
-    /// Substitute in anything in `env` (but not the database), in place
-    /// This avoids need for closures in the evaluator
-    pub fn update_all<T: MainGroup>(&mut self, env: &TempEnv<T>) {
-        use Elab::*;
-        match self {
-            Type | Unit | I32(_) | Builtin(_) => (),
-            Var(x, ty) => {
-                if let Some(t) = env.val(*x) {
-                    if &*t != self {
-                        *self = t.cloned(&mut env.clone());
-                        self.update_all(env);
-                    }
-                } else {
-                    ty.update_all(env)
-                }
-            }
-            Fun(a, b, c) => {
-                a.update_all(env);
-                b.update_all(env);
-                c.update_all(env);
-            }
-            // We don't beta-reduce here
-            App(x, y) | Pair(x, y) => {
-                x.update_all(env);
-                y.update_all(env);
-            }
-            Binder(_, x) => x.update_all(env),
-            StructIntern(_) => (), // TODO get rid of update_all()
-            StructInline(v) => v.iter_mut().for_each(|(_, x)| x.update_all(env)),
-            // We also don't reduce projection
-            Project(r, _) => r.update_all(env),
-            Block(v) => v.iter_mut().for_each(|x| match x {
-                ElabStmt::Def(_, e) => e.update_all(env),
-                ElabStmt::Expr(e) => e.update_all(env),
-            }),
         }
     }
 
