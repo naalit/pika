@@ -38,8 +38,8 @@ pub enum LowTy {
     Int,
     /// A `void*` used for unknown closure environments. LLVM doesn't have `void*`, though, so it's really an `i8*`
     VoidPtr,
-    /// Currently no functions are actually void, this is an alias for `i1`, where Pika's `()` compiles to `false`
-    Void,
+    /// Pika's `()` compiles to `{}`, nothing actually returns `void`
+    Unit,
     /// A borrowed closure (the environment is essentially a `void*`), which you can call or pass as an argument
     ClosRef { from: Box<LowTy>, to: Box<LowTy> },
     /// An owned closure (with a known environment), which is mostly used for returning from functions
@@ -60,10 +60,10 @@ impl LowTy {
             .iter()
             .map(|x| {
                 // If we've got Void as a parameter, that means it was an erased type
-                // We represent that as a unit parameter, and units are just Bools = false
+                // We represent that as a unit parameter, and units are just empty LLVM structs `{}`
                 // which are actually zero-sized so LLVM dead code elimination should get rid of them
-                if let LowTy::Void = x {
-                    ctx.bool_type().as_basic_type_enum()
+                if let LowTy::Unit = x {
+                    ctx.struct_type(&[], false).as_basic_type_enum()
                 } else {
                     x.llvm(ctx)
                         .try_into()
@@ -77,7 +77,7 @@ impl LowTy {
                 .ptr_type(inkwell::AddressSpace::Generic)
                 .fn_type(&params, false),
             LowTy::Int => ctx.i32_type().fn_type(&params, false),
-            LowTy::Void => ctx.bool_type().fn_type(&params, false),
+            LowTy::Unit => ctx.struct_type(&[], false).fn_type(&params, false),
             LowTy::ClosRef { from, to } => {
                 let fun_ty = to.llvm_fn_type(ctx, &[LowTy::VoidPtr, (**from).clone()]);
                 let fun_ptr_ty = fun_ty.ptr_type(inkwell::AddressSpace::Generic);
@@ -122,7 +122,7 @@ impl LowTy {
                 .ptr_type(inkwell::AddressSpace::Generic)
                 .as_any_type_enum(),
             LowTy::Int => AnyTypeEnum::IntType(ctx.i32_type()),
-            LowTy::Void => ctx.bool_type().as_any_type_enum(),
+            LowTy::Unit => ctx.struct_type(&[], false).as_any_type_enum(),
             LowTy::ClosRef { from, to } => {
                 // Just use a pointer, since we don't know what we're actually passing
                 let fun_ty = to.llvm_fn_type(ctx, &[LowTy::VoidPtr, (**from).clone()]);
@@ -164,23 +164,23 @@ impl Elab {
     fn has_type(&self) -> bool {
         match self {
             Elab::Pair(x, y) => x.has_type() || y.has_type(),
-            Elab::Struct(_, v) => v.iter().any(|(_, x)| x.has_type()),
+            Elab::StructInline(v) => v.iter().any(|(_, x)| x.has_type()),
             Elab::Type => true,
             Elab::Unit | Elab::Builtin(_) | Elab::I32(_) | Elab::Var(_, _) => false,
             Elab::Binder(_, t) => t.has_type(),
             Elab::Fun(a, b, _) => a.has_type() || b.has_type(),
-            Elab::App(_, _) | Elab::Project(_, _) | Elab::Block(_) => false,
+            Elab::App(_, _) | Elab::Project(_, _) | Elab::Block(_) | Elab::StructIntern(_) => false,
         }
     }
 
     pub fn is_polymorphic(&self) -> bool {
         match self {
             Elab::Pair(x, y) => x.is_polymorphic() || y.is_polymorphic(),
-            Elab::Struct(_, v) => v.iter().any(|(_, x)| x.has_type()),
+            Elab::StructInline(v) => v.iter().any(|(_, x)| x.has_type()),
             Elab::Type | Elab::Unit | Elab::Builtin(_) | Elab::I32(_) | Elab::Var(_, _) => false,
             Elab::Binder(_, t) => t.has_type(),
             Elab::Fun(a, b, _) => a.is_polymorphic() || b.is_polymorphic(),
-            Elab::App(_, _) | Elab::Project(_, _) | Elab::Block(_) => false,
+            Elab::App(_, _) | Elab::Project(_, _) | Elab::Block(_) | Elab::StructIntern(_) => false,
         }
     }
 
@@ -189,12 +189,13 @@ impl Elab {
         match self {
             Elab::Var(_, _) => false,
             Elab::Pair(x, y) => x.is_concrete() && y.is_concrete(),
-            Elab::Struct(_, v) => v.iter().all(|(_, x)| x.is_concrete()),
+            Elab::StructInline(v) => v.iter().all(|(_, x)| x.is_concrete()),
             Elab::Type
             | Elab::Unit
             | Elab::Builtin(_)
             // Not a type, but concrete, I guess? this should be unreachable
-            | Elab::I32(_) => true,
+            | Elab::I32(_)
+            | Elab::StructIntern(_) => true,
             Elab::Binder(_, t) => t.is_concrete(),
             Elab::Fun(a, b, _) => a.is_concrete() && b.is_concrete(),
             // Both of these shouldn't happen unless the first param is neutral and thus not concrete
@@ -209,20 +210,20 @@ impl Elab {
     pub fn as_low_ty(&self) -> LowTy {
         match self {
             Elab::Builtin(Builtin::Int) => LowTy::Int,
-            Elab::Unit => LowTy::Void,
+            Elab::Unit => LowTy::Unit,
             Elab::Binder(_, t) => t.as_low_ty(),
             Elab::Fun(from, to, _) => LowTy::ClosRef {
                 from: Box::new(from.as_low_ty()),
                 to: Box::new(to.as_low_ty()),
             },
             Elab::Pair(a, b) => LowTy::Struct(vec![a.as_low_ty(), b.as_low_ty()]),
-            Elab::Struct(_, v) => {
+            Elab::StructInline(v) => {
                 let mut v: Vec<_> = v.iter().collect();
                 v.sort_by_key(|(x, _)| x.raw());
                 LowTy::Struct(v.into_iter().map(|(_, v)| v.as_low_ty()).collect())
             }
             // Type erasure
-            Elab::Type => LowTy::Void,
+            Elab::Type => LowTy::Unit,
             _ => panic!("{:?} is not supported", self),
         }
     }
@@ -239,11 +240,20 @@ impl Elab {
             Elab::Unit => LowIR::Unit,
             Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
             Elab::Var(x, ty) => {
-                if ty.is_concrete() {
-                    env.db
+                if ty.is_concrete()
+                    && env.db.low_fun(env.scope.clone(), *x) != Err(LowError::Polymorphic)
+                {
+                    return env
+                        .db
                         .mangle(env.scope.clone(), *x)
-                        .map(|s| LowIR::Global(*x, s))
-                        .unwrap_or(LowIR::Local(*x))
+                        .map(|s| LowIR::Global(*x, env.scope(), s))
+                        .or_else(|| {
+                            if env.tys.contains_key(x) {
+                                Some(LowIR::Local(*x))
+                            } else {
+                                None
+                            }
+                        });
                 } else {
                     return None;
                 }
@@ -251,32 +261,68 @@ impl Elab {
             Elab::Pair(a, b) => {
                 let a = a.as_low(env)?;
                 let b = b.as_low(env)?;
-                LowIR::Struct(vec![a, b])
+                let fresh = env.bindings_mut().create("_".to_string());
+                LowIR::Struct(vec![(fresh, a), (fresh, b)])
             }
-            Elab::Struct(_, iv) => {
+            // We compile records in either "module mode" or "struct mode"
+            // Inline structs (ones that weren't in the original code) are always compiled in struct mode
+            // Interned structs (ones that were in the original code) are compiled in struct mode if they use local variables
+            // Otherwise, they're compiled in module mode
+            Elab::StructInline(iv) => {
                 let mut rv = Vec::new();
                 for (name, val) in iv {
-                    rv.push((name, val.as_low(env)?));
+                    let ty = val.get_type(env);
+                    env.set_ty(*name, ty);
+                    rv.push((*name, val.as_low(env)?));
                 }
                 rv.sort_by_key(|(x, _)| x.raw());
-                LowIR::Struct(rv.into_iter().map(|(_, v)| v).collect())
+                LowIR::Struct(rv)
             }
-            Elab::Block(v) => {
-                let mut iter = v.iter().rev();
-                let mut last = match iter.next().unwrap() {
-                    ElabStmt::Def(_, _) => LowIR::Unit,
-                    ElabStmt::Expr(e) => e.as_low(env)?,
-                };
-                for i in iter {
-                    match i {
-                        ElabStmt::Expr(_) => (),
-                        ElabStmt::Def(name, val) => {
-                            let val = val.as_low(env)?;
-                            last = LowIR::Let(*name, Box::new(val), Box::new(last));
-                        }
+            Elab::StructIntern(id) => {
+                let scope = ScopeId::Struct(*id, Box::new(env.scope()));
+
+                if env.tys.keys().any(|t| self.uses(*t, env)) {
+                    // Uses local variables, so we can't make its members globals
+                    return scope.inline(env.db).as_low(env);
+                }
+
+                // Compile it in "module mode": all members are global functions, like top-level definitions
+                let mut rv = Vec::new();
+                let s = env.db.symbols(scope.clone());
+                for name in s.iter() {
+                    match env.db.low_fun(scope.clone(), **name) {
+                        Ok(fun) => rv.push((
+                            **name,
+                            LowIR::Global(**name, scope.clone(), fun.name.clone()),
+                        )),
+                        Err(LowError::Polymorphic) => return None,
+                        Err(LowError::NoElab) => panic!("Shouldn't have gotten here"),
                     }
                 }
-                last
+                rv.sort_by_key(|(x, _)| x.raw());
+                LowIR::Struct(rv)
+            }
+            Elab::Block(v) => {
+                let lows: Vec<(Sym, LowIR)> = v
+                    .iter()
+                    .take(v.len() - 1)
+                    .filter_map(|x| match x {
+                        ElabStmt::Expr(_) => None,
+                        ElabStmt::Def(name, val) => Some({
+                            let ty = val.get_type(env);
+                            env.set_ty(*name, ty);
+                            let val = val.as_low(env)?;
+                            (*name, val)
+                        }),
+                    })
+                    .collect();
+                let last = match v.last().unwrap() {
+                    ElabStmt::Expr(e) => e.as_low(env)?,
+                    ElabStmt::Def(_, _) => LowIR::Unit,
+                };
+                lows.into_iter().rfold(last, |acc, (name, val)| {
+                    LowIR::Let(name, Box::new(val), Box::new(acc))
+                })
             }
             Elab::Fun(arg, body, ret_ty) => {
                 if !ret_ty.is_concrete() || !arg.is_concrete() {
@@ -286,7 +332,7 @@ impl Elab {
                 let upvalues: Vec<_> = env
                     .tys
                     .iter()
-                    .filter(|(s, _)| body.uses(**s))
+                    .filter(|(s, _)| body.uses(**s, env))
                     .map(|(s, t)| (*s, t.as_low_ty()))
                     .collect();
                 match &**arg {
@@ -324,6 +370,25 @@ impl Elab {
                 let x = x.as_low(env)?.borrow(env);
                 LowIR::Call(Box::new(f), Box::new(x))
             }
+            Elab::Project(r, m) => {
+                let ty = r.get_type(env);
+                let mut list: Vec<_> = match ty {
+                    Elab::StructIntern(id) => {
+                        let scope = ScopeId::Struct(id, Box::new(env.scope()));
+                        env.db
+                            .symbols(scope.clone())
+                            .iter()
+                            .map(|name| name.raw())
+                            .collect()
+                    }
+                    Elab::StructInline(v) => v.into_iter().map(|(name, _)| name.raw()).collect(),
+                    x => panic!("not a struct: {:?}", x),
+                };
+                list.sort();
+                let idx = list.binary_search(&m).unwrap();
+                let r = r.as_low(env)?;
+                LowIR::Project(Box::new(r), idx)
+            }
             _ => panic!("{:?} not supported (ir)", self),
         })
     }
@@ -357,8 +422,10 @@ pub enum LowIR {
     },
     Let(Sym, Box<LowIR>, Box<LowIR>),
     Local(Sym),
-    Global(Sym, String),
-    Struct(Vec<LowIR>),
+    Global(Sym, ScopeId, String),
+    /// The symbols are only so that other struct elements can refer to them, the members must be sorted by RawSym
+    Struct(Vec<(Sym, LowIR)>),
+    Project(Box<LowIR>, usize),
     /// Wraps an owned closure and turns it into a borrowed one (takes a pointer to the environment and bitcasts it to `void*`)
     ClosureBorrow(Box<LowIR>),
     /// An owned closure
@@ -383,13 +450,24 @@ impl LowIR {
 
     pub fn get_type<T: MainGroup>(&self, env: &TempEnv<T>) -> LowTy {
         match self {
-            LowIR::Unit => LowTy::Void,
+            LowIR::Unit => LowTy::Unit,
             LowIR::IntConst(_) => LowTy::Int,
             LowIR::IntOp { .. } => LowTy::Int,
-            LowIR::Struct(v) => LowTy::Struct(v.iter().map(|x| x.get_type(env)).collect()),
+            LowIR::Struct(v) => LowTy::Struct(v.iter().map(|(_, x)| x.get_type(env)).collect()),
+            LowIR::Project(v, i) => {
+                if let LowTy::Struct(v) = v.get_type(env) {
+                    v[*i].clone()
+                } else {
+                    panic!("Not a struct type on project")
+                }
+            }
             LowIR::Let(_, _, body) => body.get_type(env),
-            LowIR::Local(s) => env.ty(*s).unwrap().cloned(&mut env.clone()).as_low_ty(),
-            LowIR::Global(s, _) => env.db.low_fun(env.scope(), *s).unwrap().ret_ty,
+            LowIR::Local(s) => env
+                .ty(*s)
+                .unwrap_or_else(|| panic!("not found: {}", s.pretty(&env.bindings()).ansi_string()))
+                .cloned(&mut env.clone())
+                .as_low_ty(),
+            LowIR::Global(s, scope, _) => env.db.low_fun(scope.clone(), *s).unwrap().ret_ty,
             LowIR::Call(f, _) => match f.get_type(env) {
                 LowTy::ClosRef { to, .. } | LowTy::ClosOwn { to, .. } => *to,
                 _ => panic!("not a function LowTy"),
@@ -423,7 +501,11 @@ impl LowIR {
         module: &Module<'ctx>,
     ) -> AnyValueEnum<'ctx> {
         match self {
-            LowIR::Unit => ctx.context.bool_type().const_int(0, false).into(),
+            LowIR::Unit => ctx
+                .context
+                .struct_type(&[], false)
+                .const_named_struct(&[])
+                .into(),
             LowIR::IntConst(i) => ctx.context.i32_type().const_int(*i, false).into(),
             LowIR::IntOp { op, lhs, rhs } => {
                 let lhs = lhs.codegen(ctx, module).into_int_value();
@@ -437,7 +519,11 @@ impl LowIR {
             LowIR::Struct(v) => {
                 let values: Vec<BasicValueEnum> = v
                     .iter()
-                    .map(|x| x.codegen(ctx, module).try_into().unwrap())
+                    .map(|(n, x)| {
+                        let v = x.codegen(ctx, module);
+                        ctx.locals.insert(*n, v);
+                        v.try_into().unwrap()
+                    })
                     .collect();
                 let types: Vec<_> = values.iter().map(|x| x.get_type()).collect();
                 let mut struct_val = ctx
@@ -453,13 +539,20 @@ impl LowIR {
                 }
                 struct_val.as_any_value_enum()
             }
+            LowIR::Project(r, m) => {
+                let r = r.codegen(ctx, module).into_struct_value();
+                ctx.builder
+                    .build_extract_value(r, *m as u32, "project")
+                    .unwrap()
+                    .as_any_value_enum()
+            }
             LowIR::Let(var, val, body) => {
                 let val = val.codegen(ctx, module);
                 ctx.locals.insert(*var, val);
                 body.codegen(ctx, module)
             }
             LowIR::Local(var) => *ctx.locals.get(var).expect("Used nonexistent local"),
-            LowIR::Global(_, name) => ctx
+            LowIR::Global(_, _, name) => ctx
                 .builder
                 .build_call(module.get_function(name).unwrap(), &[], name)
                 .as_any_value_enum(),
@@ -624,12 +717,8 @@ impl LowFun {
         );
         let entry = ctx.context.append_basic_block(fun, "entry");
         ctx.builder.position_at_end(entry);
-        if self.ret_ty != LowTy::Void {
-            let ret_val: BasicValueEnum = self.body.codegen(ctx, module).try_into().unwrap();
-            ctx.builder.build_return(Some(&ret_val as &_));
-        } else {
-            ctx.builder.build_return(None);
-        }
+        let ret_val: BasicValueEnum = self.body.codegen(ctx, module).try_into().unwrap();
+        ctx.builder.build_return(Some(&ret_val as &_));
     }
 }
 

@@ -4,10 +4,10 @@ use assert_cmd::*;
 fn test_repl() {
     Command::cargo_bin("pika")
         .unwrap()
-        .arg("repl")
-        .write_stdin("a := (fun i:Int => i) 12\n")
+        .args(&["repl", "--color", "none"])
+        .write_stdin("a := (fun i:Int => i) 12")
         .assert()
-        .stdout("a0 : Int = 12\n");
+        .stderr("--> a : Int = 12\n");
 }
 
 #[test]
@@ -35,5 +35,25 @@ fn test_closures_llvm() {
         .args(&["run", "tests/closure.pk"])
         .assert()
         .stdout("(2, 12)\n")
+        .success();
+}
+
+#[test]
+fn test_struct() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/struct.pk"])
+        .assert()
+        .stdout("(12, 4)\n")
+        .success();
+}
+
+#[test]
+fn test_struct_env() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/struct_env.pk"])
+        .assert()
+        .stdout("(2, 3)\n")
         .success();
 }

@@ -1,0 +1,9 @@
+f := fun i:Int => struct
+  x := i
+
+g := fun i:Int => struct
+  a := i
+  b := a
+  c := b
+
+main := ((f 2).x, (g 3).c)

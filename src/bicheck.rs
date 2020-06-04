@@ -143,23 +143,14 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
             let y = synth(y, env)?;
             Ok(Elab::Pair(Box::new(x), Box::new(y)))
         }
-        Term::Struct(id, iv) => {
-            let mut rv = Vec::new();
-            let mut syms: Vec<Spanned<Sym>> = Vec::new();
-            let mut env = env.child(*id);
-            for (name, val) in iv {
-                if let Some(n2) = syms.iter().find(|n| n.raw() == name.raw()) {
-                    return Err(TypeError::DuplicateField(
-                        n2.copy_span(n2.raw()),
-                        name.copy_span(name.raw()),
-                    ));
-                }
-                syms.push(name.clone());
-
-                let e = synth(val, &mut env)?;
-                rv.push((**name, e));
+        Term::Struct(id, _) => {
+            // TODO tempenv vars available to structs
+            env.db.set_struct_env(*id, env);
+            let scope = ScopeId::Struct(*id, Box::new(env.scope()));
+            for sym in env.db.symbols(scope.clone()).iter() {
+                env.db.elab(scope.clone(), **sym);
             }
-            Ok(Elab::Struct(*id, rv))
+            Ok(Elab::StructIntern(*id))
         }
         Term::App(fi, x) => {
             let f = synth(fi, env)?;
@@ -180,7 +171,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
             let r = synth(r, env)?;
             let rt = r.get_type(env);
             match &r.get_type(env) {
-                Elab::Struct(_, v) => {
+                Elab::StructInline(v) => {
                     if let Some((_, val)) = v.iter().find(|(name, _)| name.raw() == **m) {
                         val.cloned(&mut env.clone())
                     } else {
@@ -423,7 +414,7 @@ impl Elab {
             Elab::Type | Elab::Unit | Elab::Builtin(Builtin::Int) => true,
             Elab::Fun(_, x, _) => x.is_type(),
             Elab::Pair(x, y) => x.is_type() && y.is_type(),
-            Elab::Struct(_, v) => v.iter().all(|(_, x)| x.is_type()),
+            Elab::StructInline(v) => v.iter().all(|(_, x)| x.is_type()),
             Elab::Binder(_, _) => true,
             Elab::Var(_, t) => t.is_type_type(),
             _ => false,
@@ -451,7 +442,7 @@ impl Elab {
             return false;
         }
         match (self, sup) {
-            (Elab::Struct(_, sub), Elab::Struct(_, sup)) => {
+            (Elab::StructInline(sub), Elab::StructInline(sup)) => {
                 // We DON'T do record subtyping, that's confusing and hard to compile efficiently
                 sup.iter().all(|(n, sup)| sub.iter().find(|(n2, _)| n2.raw() == n.raw()).map_or(false, |(_, sub)| sub.subtype_of(sup, env)))
                     // so make sure there aren't any extra fields

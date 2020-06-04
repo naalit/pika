@@ -35,37 +35,46 @@ impl ElabStmt {
 /// For a term to get to here, it must be well typed
 #[derive(Debug, PartialEq, Eq)]
 pub enum Elab {
-    Unit,                               // ()
-    Binder(Sym, BElab),                 // x: T
-    Var(Sym, BElab),                    // (a, T) --> the T a
-    I32(i32),                           // 3
-    Type,                               // Type
-    Builtin(Builtin),                   // Int
-    Fun(BElab, BElab, BElab),           // (a, x, T) --> fn a => the T x
-    App(BElab, BElab),                  // f x
-    Pair(BElab, BElab),                 // x, y
-    Struct(StructId, Vec<(Sym, Elab)>), // struct { x := 3 }
-    Project(BElab, RawSym),             // r.m
-    Block(Vec<ElabStmt>),               // do { x; y }
+    Unit,                           // ()
+    Binder(Sym, BElab),             // x: T
+    Var(Sym, BElab),                // (a, T) --> the T a
+    I32(i32),                       // 3
+    Type,                           // Type
+    Builtin(Builtin),               // Int
+    Fun(BElab, BElab, BElab),       // (a, x, T) --> fn a => the T x
+    App(BElab, BElab),              // f x
+    Pair(BElab, BElab),             // x, y
+    StructIntern(StructId),         // struct { x := 3 }
+    StructInline(Vec<(Sym, Elab)>), // struct { x := 3 }
+    Project(BElab, RawSym),         // r.m
+    Block(Vec<ElabStmt>),           // do { x; y }
 }
 type BElab = Box<Elab>;
 
 impl Elab {
     /// Does this term reference this symbol at all?
-    pub fn uses(&self, s: Sym) -> bool {
+    pub fn uses<T: MainGroup>(&self, s: Sym, env: &TempEnv<T>) -> bool {
         use Elab::*;
         match self {
             Type | Unit | I32(_) | Builtin(_) => false,
-            Var(x, ty) => *x == s || ty.uses(s),
-            Fun(a, b, c) => a.uses(s) || b.uses(s) || c.uses(s),
+            Var(x, ty) => *x == s || ty.uses(s, env),
+            Fun(a, b, c) => a.uses(s, env) || b.uses(s, env) || c.uses(s, env),
             // We don't beta-reduce here
-            App(x, y) | Pair(x, y) => x.uses(s) || y.uses(s),
-            Binder(_, x) => x.uses(s),
-            Struct(_, v) => v.iter().any(|(_, x)| x.uses(s)),
-            Project(r, _) => r.uses(s),
+            App(x, y) | Pair(x, y) => x.uses(s, env) || y.uses(s, env),
+            Binder(_, x) => x.uses(s, env),
+            StructIntern(i) => {
+                let scope = ScopeId::Struct(*i, Box::new(env.scope()));
+                env.db.symbols(scope.clone()).iter().any(|sym| {
+                    env.db
+                        .elab(scope.clone(), **sym)
+                        .map_or(false, |e| e.uses(s, env))
+                })
+            }
+            StructInline(v) => v.iter().any(|(_, x)| x.uses(s, env)),
+            Project(r, _) => r.uses(s, env),
             Block(v) => v.iter().any(|x| match x {
-                ElabStmt::Def(_, e) => e.uses(s),
-                ElabStmt::Expr(e) => e.uses(s),
+                ElabStmt::Def(_, e) => e.uses(s, env),
+                ElabStmt::Expr(e) => e.uses(s, env),
             }),
         }
     }
@@ -89,7 +98,8 @@ impl Elab {
                 y.normal(env);
             }
             Binder(_, x) => x.normal(env),
-            Struct(_, v) => v.iter_mut().for_each(|(_, x)| x.normal(env)),
+            StructIntern(_) => (),
+            StructInline(v) => v.iter_mut().for_each(|(_, x)| x.normal(env)),
             Project(r, _) => r.normal(env),
             Block(v) => v.iter_mut().for_each(|x| match x {
                 ElabStmt::Def(_, e) => e.normal(env),
@@ -136,7 +146,18 @@ impl Elab {
                 // We recursively WHNF the head
                 r.whnf(env);
                 match &**r {
-                    Elab::Struct(_, v) => {
+                    Elab::StructIntern(i) => {
+                        let scope = ScopeId::Struct(*i, Box::new(env.scope()));
+                        for i in env.db.symbols(scope.clone()).iter() {
+                            if i.raw() == *m {
+                                let val = env.db.elab(scope.clone(), **i).unwrap();
+                                *self = val.cloned(&mut env.clone());
+                                return true;
+                            }
+                        }
+                        panic!("not found")
+                    }
+                    Elab::StructInline(v) => {
                         let (_, val) = v.iter().find(|(name, _)| name.raw() == *m).unwrap();
                         *self = val.cloned(&mut env.clone());
                         true
@@ -151,7 +172,7 @@ impl Elab {
 
     /// Substitute in anything in `env` (but not the database), in place
     /// This avoids need for closures in the evaluator
-    pub fn update_all<T: MainGroup>(&mut self, env: &mut TempEnv<T>) {
+    pub fn update_all<T: MainGroup>(&mut self, env: &TempEnv<T>) {
         use Elab::*;
         match self {
             Type | Unit | I32(_) | Builtin(_) => (),
@@ -176,7 +197,8 @@ impl Elab {
                 y.update_all(env);
             }
             Binder(_, x) => x.update_all(env),
-            Struct(_, v) => v.iter_mut().for_each(|(_, x)| x.update_all(env)),
+            StructIntern(_) => (), // TODO get rid of update_all()
+            StructInline(v) => v.iter_mut().for_each(|(_, x)| x.update_all(env)),
             // We also don't reduce projection
             Project(r, _) => r.update_all(env),
             Block(v) => v.iter_mut().for_each(|x| match x {
@@ -214,10 +236,20 @@ impl Elab {
             }
             Pair(x, y) => Pair(Box::new(x.get_type(env)), Box::new(y.get_type(env))),
             Binder(_, x) => x.get_type(env),
-            // The `id` here is actually wrong, but I don't think anything currently uses it after this?
-            Struct(id, v) => Struct(*id, v.iter().map(|(n, x)| (*n, x.get_type(env))).collect()),
+            StructIntern(id) => {
+                let scope = ScopeId::Struct(*id, Box::new(env.scope()));
+                // TODO rename
+                StructInline(
+                    env.db
+                        .symbols(scope.clone())
+                        .iter()
+                        .filter_map(|x| Some((**x, env.db.elab(scope.clone(), **x)?.get_type(env))))
+                        .collect(),
+                )
+            }
+            StructInline(v) => StructInline(v.iter().map(|(n, x)| (*n, x.get_type(env))).collect()),
             Project(r, m) => {
-                if let Struct(_, t) = r.get_type(env) {
+                if let StructInline(t) = r.get_type(env) {
                     t.iter()
                         .find(|(n, _)| n.raw() == *m)
                         .unwrap()
@@ -320,8 +352,8 @@ impl Elab {
                 let y = Box::new(y.cloned(env));
                 Pair(x, y)
             }
-            Struct(i, v) => Struct(
-                *i,
+            StructIntern(i) => StructIntern(*i),
+            StructInline(v) => StructInline(
                 v.into_iter()
                     .map(|(name, val)| {
                         let val = val.cloned(env);
@@ -409,39 +441,91 @@ impl Pretty for Elab {
                 .chain(y.pretty(ctx))
                 .add(")")
                 .prec(Prec::Atom),
-            Elab::Struct(i, v) => Doc::start("struct")
-                .style(Style::Keyword)
-                .add(i.num())
-                .chain(Doc::intersperse(
-                    v.iter().map(|(name, val)| {
-                        name.pretty(ctx)
-                            .style(Style::Binder)
-                            .space()
-                            .add(":=")
-                            .line()
-                            .chain(val.pretty(ctx))
-                            .group()
-                    }),
-                    Doc::none().hardline(),
-                ))
-                .prec(Prec::Term),
-            Elab::Block(v) => Doc::start("do")
-                .style(Style::Keyword)
-                .chain(Doc::intersperse(
-                    v.iter().map(|s| match s {
-                        ElabStmt::Expr(e) => e.pretty(ctx),
-                        ElabStmt::Def(name, val) => name
-                            .pretty(ctx)
-                            .style(Style::Binder)
-                            .space()
-                            .add(":=")
-                            .line()
-                            .chain(val.pretty(ctx))
-                            .group(),
-                    }),
-                    Doc::none().hardline(),
-                ))
-                .prec(Prec::Term),
+            Elab::StructIntern(i) => Doc::start("struct#").style(Style::Keyword).add(i.num()),
+            Elab::StructInline(v) => Doc::either(
+                Doc::start("struct")
+                    .style(Style::Keyword)
+                    .line()
+                    .chain(Doc::intersperse(
+                        v.iter().map(|(name, val)| {
+                            name.pretty(ctx)
+                                .style(Style::Binder)
+                                .space()
+                                .add(":=")
+                                .line()
+                                .chain(val.pretty(ctx))
+                                .group()
+                        }),
+                        Doc::none().line(),
+                    ))
+                    .group()
+                    .indent(),
+                Doc::start("struct")
+                    .style(Style::Keyword)
+                    .space()
+                    .add("{")
+                    .space()
+                    .chain(Doc::intersperse(
+                        v.iter().map(|(name, val)| {
+                            name.pretty(ctx)
+                                .style(Style::Binder)
+                                .space()
+                                .add(":=")
+                                .space()
+                                .chain(val.pretty(ctx))
+                                .group()
+                        }),
+                        Doc::start(";").space(),
+                    ))
+                    .space()
+                    .add("}")
+                    .group(),
+            )
+            .prec(Prec::Term),
+            Elab::Block(v) => Doc::either(
+                Doc::start("do")
+                    .style(Style::Keyword)
+                    .line()
+                    .chain(Doc::intersperse(
+                        v.iter().map(|s| match s {
+                            ElabStmt::Expr(e) => e.pretty(ctx),
+                            ElabStmt::Def(name, val) => name
+                                .pretty(ctx)
+                                .style(Style::Binder)
+                                .space()
+                                .add(":=")
+                                .line()
+                                .chain(val.pretty(ctx))
+                                .group(),
+                        }),
+                        Doc::none().line(),
+                    ))
+                    .group()
+                    .indent(),
+                Doc::start("do")
+                    .style(Style::Keyword)
+                    .space()
+                    .add("{")
+                    .space()
+                    .chain(Doc::intersperse(
+                        v.iter().map(|s| match s {
+                            ElabStmt::Expr(e) => e.pretty(ctx),
+                            ElabStmt::Def(name, val) => name
+                                .pretty(ctx)
+                                .style(Style::Binder)
+                                .space()
+                                .add(":=")
+                                .space()
+                                .chain(val.pretty(ctx))
+                                .group(),
+                        }),
+                        Doc::start(";").space(),
+                    ))
+                    .space()
+                    .add("}")
+                    .group(),
+            )
+            .prec(Prec::Term),
             Elab::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).chain(m.pretty(ctx)),
         }
     }

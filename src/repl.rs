@@ -137,7 +137,7 @@ pub fn run_repl(options: &Options) {
         .add("<input>".to_string(), buf.clone());
     let mut seen_symbols = std::collections::HashSet::<Sym>::new();
 
-    let printer = Printer::new(ColorChoice::Auto, 80); //rl.dimensions().map_or(80, |x| x.0));
+    let printer = Printer::new(options.color.0, 80); //rl.dimensions().map_or(80, |x| x.0));
 
     loop {
         let readline = rl.readline("> ");

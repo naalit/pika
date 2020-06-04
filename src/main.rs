@@ -45,17 +45,20 @@ fn main() {
                         .add("<input>".to_string(), buf.clone());
                     db.set_source(file, std::sync::Arc::new(buf));
 
-                    let module = db.low_mod(file);
+                    for i in db.symbols(ScopeId::File(file)).iter() {
+                        db.elab(ScopeId::File(file), **i);
+                    }
 
+                    // If we have type errors, don't start lowering
                     if db.has_errors() {
                         db.emit_errors();
                         std::process::exit(1)
-                    } else {
-                        eprintln!("Build successful in {:?}", Instant::now() - start_time);
                     }
 
+                    let module = db.low_mod(file);
+
                     if options.command == Command::Run || options.show_llvm {
-                        // Generate LLVM and print out the module, for now
+                        // Generate LLVM
                         let context = inkwell::context::Context::create();
                         let llvm = module.codegen(&mut crate::codegen::CodegenCtx::new(&context));
 
@@ -63,11 +66,14 @@ fn main() {
                             llvm.print_to_stderr();
                         }
 
-                        // For now we verify it but don't run it
                         if let Err(e) = llvm.verify() {
                             eprintln!("Verification error: {}", e);
                             std::process::exit(1);
-                        } else if options.command == Command::Run {
+                        } else {
+                            eprintln!("Build successful in {:?}", Instant::now() - start_time);
+                        }
+
+                        if options.command == Command::Run {
                             let main_raw = db.bindings().write().unwrap().raw("main".to_string());
                             if let Some(main) = db
                                 .symbols(ScopeId::File(file))
@@ -116,6 +122,8 @@ fn main() {
                                 std::process::exit(1)
                             }
                         }
+                    } else {
+                        eprintln!("Build successful in {:?}", Instant::now() - start_time);
                     }
                 }
             }

@@ -1,0 +1,12 @@
+module := struct
+  SomeType := Int
+  some_fun := fun x: SomeType => x
+
+a : module.SomeType = module.some_fun 12
+
+s := do
+  a := 4
+  a
+
+# Should be (12, 4)
+main := (a, s)
