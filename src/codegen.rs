@@ -177,7 +177,7 @@ impl Elab {
             Elab::Pair(x, y) => x.has_type() || y.has_type(),
             Elab::StructInline(v) => v.iter().any(|(_, x)| x.has_type()),
             Elab::Type => true,
-            Elab::Unit | Elab::Builtin(_) | Elab::I32(_) | Elab::Var(_, _) => false,
+            Elab::Unit | Elab::Builtin(_) | Elab::I32(_) | Elab::Var(_, _) | Elab::Tag(_) => false,
             Elab::Binder(_, t) => t.has_type(),
             Elab::Fun(a, b, _) => a.has_type() || b.has_type(),
             Elab::App(_, _) | Elab::Project(_, _) | Elab::Block(_) | Elab::StructIntern(_) => false,
@@ -188,7 +188,12 @@ impl Elab {
         match self {
             Elab::Pair(x, y) => x.is_polymorphic() || y.is_polymorphic(),
             Elab::StructInline(v) => v.iter().any(|(_, x)| x.has_type()),
-            Elab::Type | Elab::Unit | Elab::Builtin(_) | Elab::I32(_) | Elab::Var(_, _) => false,
+            Elab::Type
+            | Elab::Unit
+            | Elab::Builtin(_)
+            | Elab::I32(_)
+            | Elab::Var(_, _)
+            | Elab::Tag(_) => false,
             Elab::Binder(_, t) => t.has_type(),
             Elab::Fun(a, b, _) => a.is_polymorphic() || b.is_polymorphic(),
             Elab::App(_, _) | Elab::Project(_, _) | Elab::Block(_) | Elab::StructIntern(_) => false,
@@ -206,7 +211,8 @@ impl Elab {
             | Elab::Builtin(_)
             // Not a type, but concrete, I guess? this should be unreachable
             | Elab::I32(_)
-            | Elab::StructIntern(_) => true,
+            | Elab::StructIntern(_)
+            | Elab::Tag(_) => true,
             Elab::Binder(_, t) => t.is_concrete(),
             Elab::Fun(a, b, _) => a.is_concrete() && b.is_concrete(),
             // Both of these shouldn't happen unless the first param is neutral and thus not concrete
@@ -235,6 +241,8 @@ impl Elab {
             }
             // Type erasure
             Elab::Type => LowTy::Unit,
+            // We don't actually care what tag it is if it's not in a union
+            Elab::Tag(_) => LowTy::Unit,
             _ => panic!("{:?} is not supported", self),
         }
     }
@@ -248,6 +256,8 @@ impl Elab {
         Some(match self {
             // Type erasure
             _ if self.get_type(env) == Elab::Type => LowIR::Unit,
+            // We don't actually care what tag it is if it's not in a union
+            Elab::Tag(_) => LowIR::Unit,
             Elab::Unit => LowIR::Unit,
             Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
             Elab::Var(x, ty) => {

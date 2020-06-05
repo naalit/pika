@@ -194,6 +194,7 @@ pub fn run_repl(options: &Options) {
                                     .group()
                                     .indent(),
                                 s.pretty(&b)
+                                    .space()
                                     .add(":")
                                     .style(Style::Binder)
                                     .space()

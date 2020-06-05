@@ -77,6 +77,10 @@ Block: ParseTree<'input> = {
 pub Defs: Vec<ParseDef<'input>> = Lines<Def>;
 
 Def: ParseDef<'input> = {
+    <t:Spanned<"tag">> <v:Spanned<Var>> => {
+        let span = Span(t.span().0, v.span().1);
+        ParseDef(v.clone(), Spanned::new(ParseTree::Tag(v.force_unwrap()), span))
+    },
     <l:Spanned<Var>> ":" <t:STerm> "=" <r:STerm> => {
         let span = Span(t.span().0, r.span().1);
         ParseDef(l, Spanned::new(ParseTree::The(t, r), span))
@@ -103,6 +107,8 @@ Term: ParseTree<'input> = {
     Fun,
     The,
     Binder,
+    // To allow e.g. (Some x:)
+    <f:Spanned<App>> <x:Spanned<Binder>> => ParseTree::App(f, x),
     App,
 }
 

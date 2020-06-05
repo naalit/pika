@@ -4,6 +4,14 @@ use crate::term::*;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TagId(NonZeroU32);
+impl TagId {
+    pub fn num(self) -> u32 {
+        self.0.get() - 1
+    }
+}
+
 /// Like a Sym, but it identifies a record (= struct, module)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StructId(NonZeroU32);
@@ -60,6 +68,14 @@ impl Sym {
     }
 }
 
+impl Pretty for TagId {
+    type Context = Bindings;
+    fn pretty(&self, ctx: &Bindings) -> Doc {
+        let raw = ctx.tags[(self.0.get() - 1) as usize];
+        let name = ctx.resolve_raw(raw).to_owned();
+        Doc::start(name)
+    }
+}
 impl Pretty for RawSym {
     type Context = Bindings;
     fn pretty(&self, ctx: &Bindings) -> Doc {
@@ -97,6 +113,7 @@ pub struct Bindings {
     strings: HashMap<String, RawSym>,
     string_pool: Vec<String>,
     nums: HashMap<RawSym, u32>,
+    tags: Vec<RawSym>,
 }
 impl Bindings {
     /// Don't do this if you're holding symbols somewhere!
@@ -185,6 +202,7 @@ pub enum ParseTree<'p> {
     App(STree<'p>, STree<'p>),                  // f x
     Pair(STree<'p>, STree<'p>),                 // x, y
     Struct(Vec<(Spanned<&'p str>, STree<'p>)>), // struct { x := 3 }
+    Tag(&'p str),                               // tag X
     Project(STree<'p>, Spanned<&'p str>),       // r.m
     Block(Vec<ParseStmt<'p>>),                  // do { x; y }
 }
@@ -207,6 +225,12 @@ impl<'p, 'b> NEnv<'p, 'b> {
             bindings,
             struct_id: 0,
         }
+    }
+
+    fn next_tag(&mut self, k: &'p str) -> TagId {
+        let raw = self.bindings.raw(k.to_string());
+        self.bindings.tags.push(raw);
+        TagId(NonZeroU32::new(self.bindings.tags.len() as u32).unwrap())
     }
 
     fn next_struct(&mut self) -> StructId {
@@ -281,6 +305,7 @@ impl<'p> STree<'p> {
                     env.pop();
                     Term::Struct(env.next_struct(), rv)
                 }
+                Tag(s) => Term::Tag(env.next_tag(s)),
                 Project(r, m) => Term::Project(
                     r.resolve_names(env)?,
                     m.copy_span(env.bindings.raw(m.to_string())),

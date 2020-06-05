@@ -137,6 +137,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         }
         Term::I32(i) => Ok(Elab::I32(*i)),
         Term::Unit => Ok(Elab::Unit),
+        Term::Tag(t) => Ok(Elab::Tag(*t)),
         Term::Pair(x, y) => {
             // TODO I don't think this covers dependent pairs
             let x = synth(x, env)?;
@@ -160,6 +161,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                     from.whnf(env);
                     check(x, &from, env)?
                 }
+                Elab::Tag(_) | Elab::App(_, _) => synth(x, env)?,
                 a => {
                     return Err(TypeError::NotFunction(
                         fi.copy_span(a.cloned(&mut env.clone())),
@@ -304,6 +306,14 @@ pub fn check<T: MainGroup>(
                 ))
             }
         }
+        (Term::App(f, x), Elab::App(tf, tx)) => {
+            check(f, tf, env)?;
+            check(x, tx, env)
+        }
+        (Term::App(f, x), Elab::Type) if f.tag_head(env) => {
+            check(f, &Elab::Type, env)?;
+            check(x, &Elab::Type, env)
+        }
         (_, Elab::Type) => {
             let t = synth(term, env)?;
             let ty = t.get_type(env);
@@ -332,7 +342,32 @@ pub fn check<T: MainGroup>(
     }
 }
 
+impl Term {
+    fn tag_head<T: MainGroup>(&self, env: &TempEnv<T>) -> bool {
+        match self {
+            Term::Tag(_) => true,
+            Term::App(f, _) => f.tag_head(env),
+            Term::Var(x) => env
+                .db
+                .elab(env.scope.clone(), *x)
+                .map(|x| x.get_type(&mut env.clone()))
+                .or_else(|| env.ty(*x).map(|x| x.cloned(&mut env.clone())))
+                .map_or(false, |x| x.tag_head()),
+            _ => false,
+        }
+    }
+}
+
 impl Elab {
+    fn tag_head(&self) -> bool {
+        match self {
+            Elab::Tag(_) => true,
+            Elab::App(f, _) => f.tag_head(),
+            Elab::Var(_, t) => t.tag_head(),
+            _ => false,
+        }
+    }
+
     fn update_binders<T: MainGroup>(&mut self, other: &Elab, env: &mut TempEnv<T>) {
         use Elab::*;
         match (&mut *self, other) {
@@ -400,7 +435,6 @@ impl Elab {
                 ax.match_types(bx, env);
                 ay.match_types(by, env);
             }
-            // We will allow this for now, and see if it causes any problems
             (App(af, ax), App(bf, bx)) => {
                 af.match_types(bf, env);
                 ax.match_types(bx, env);
@@ -412,7 +446,8 @@ impl Elab {
     /// *Could* it be a type?
     fn is_type(&self) -> bool {
         match self {
-            Elab::Type | Elab::Unit | Elab::Builtin(Builtin::Int) => true,
+            Elab::Type | Elab::Unit | Elab::Builtin(Builtin::Int) | Elab::Tag(_) => true,
+            Elab::App(f, x) => f.is_type() && x.is_type(),
             Elab::Fun(_, x, _) => x.is_type(),
             Elab::Pair(x, y) => x.is_type() && y.is_type(),
             Elab::StructInline(v) => v.iter().all(|(_, x)| x.is_type()),
@@ -427,7 +462,9 @@ impl Elab {
         match self {
             // () : () : ()
             Elab::Unit => true,
+            Elab::Tag(_) => true,
             Elab::Type => true,
+            Elab::App(f, x) => f.is_type_type() && x.is_type_type(),
             Elab::Pair(x, y) => x.is_type_type() && y.is_type_type(),
             Elab::Fun(_, x, _) => x.is_type_type(),
             Elab::Binder(_, t) => t.is_type_type(),
@@ -449,6 +486,7 @@ impl Elab {
                     // so make sure there aren't any extra fields
                     && sub.iter().all(|(n, _)| sup.iter().any(|(n2, _)| n2.raw() == n.raw()))
             }
+            (Elab::Tag(x), Elab::Tag(y)) if x == y => true,
             (Elab::Builtin(b), Elab::Builtin(c)) if b == c => true,
             (Elab::Unit, Elab::Unit) => true,
             (Elab::Var(x, _), _) if env.vals.contains_key(x) => {
@@ -456,6 +494,9 @@ impl Elab {
             }
             (_, Elab::Var(x, _)) if env.vals.contains_key(x) => {
                 self.subtype_of(&env.val(*x).unwrap().cloned(env), env)
+            }
+            (Elab::App(f1, x1), Elab::App(f2, x2)) => {
+                f1.subtype_of(f2, env) && x1.subtype_of(x2, env)
             }
             (Elab::Pair(ax, ay), Elab::Pair(bx, by)) => {
                 ax.subtype_of(bx, env) && ay.subtype_of(by, env)

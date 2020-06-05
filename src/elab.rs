@@ -44,6 +44,7 @@ pub enum Elab {
     Fun(BElab, BElab, BElab),       // (a, x, T) --> fn a => the T x
     App(BElab, BElab),              // f x
     Pair(BElab, BElab),             // x, y
+    Tag(TagId),                     // tag X
     StructIntern(StructId),         // struct { x := 3 }
     StructInline(Vec<(Sym, Elab)>), // struct { x := 3 }
     Project(BElab, RawSym),         // r.m
@@ -56,7 +57,7 @@ impl Elab {
     pub fn uses<T: MainGroup>(&self, s: Sym, env: &TempEnv<T>) -> bool {
         use Elab::*;
         match self {
-            Type | Unit | I32(_) | Builtin(_) => false,
+            Type | Unit | I32(_) | Builtin(_) | Tag(_) => false,
             Var(x, ty) => *x == s || ty.uses(s, env),
             Fun(a, b, c) => a.uses(s, env) || b.uses(s, env) || c.uses(s, env),
             // We don't beta-reduce here
@@ -86,7 +87,7 @@ impl Elab {
         // And recurse
         use Elab::*;
         match self {
-            Type | Unit | I32(_) | Builtin(_) => (),
+            Type | Unit | I32(_) | Builtin(_) | Tag(_) => (),
             Var(_, ty) => ty.normal(env),
             Fun(a, b, c) => {
                 a.normal(env);
@@ -177,6 +178,7 @@ impl Elab {
             Unit => Unit,
             I32(_) => Builtin(B::Int),
             Builtin(B::Int) => Type,
+            Tag(t) => Tag(*t),
             Var(_, t) => t.cloned(&mut env.clone()),
             Fun(from, _, to) => {
                 let mut env = env.clone();
@@ -186,15 +188,15 @@ impl Elab {
                     Box::new(Type),
                 )
             }
-            App(f, x) => {
-                if let Fun(from, mut to, _) = f.get_type(env) {
+            App(f, x) => match f.get_type(env) {
+                Fun(from, mut to, _) => {
                     from.do_match(x, env);
                     to.whnf(env);
                     *to
-                } else {
-                    panic!("not a function type")
                 }
-            }
+                f @ Tag(_) | f @ App(_, _) => App(Box::new(f), Box::new(x.get_type(env))),
+                _ => panic!("not a function type"),
+            },
             Pair(x, y) => Pair(Box::new(x.get_type(env)), Box::new(y.get_type(env))),
             Binder(_, x) => x.get_type(env),
             StructIntern(id) => {
@@ -244,7 +246,6 @@ impl Elab {
                 ax.do_match(bx, env);
                 ay.do_match(by, env);
             }
-            // We will allow this for now, and see if it causes any problems
             (App(af, ax), App(bf, bx)) => {
                 af.do_match(bf, env);
                 ax.do_match(bx, env);
@@ -281,6 +282,7 @@ impl Elab {
             Type => Type,
             I32(i) => I32(*i),
             Builtin(b) => Builtin(*b),
+            Tag(t) => Tag(*t),
             App(f, x) => App(Box::new(f.cloned(env)), Box::new(x.cloned(env))),
             // Rename bound variables
             // This case runs before any that depend on it, and the Elab has unique names
@@ -402,6 +404,7 @@ impl Pretty for Elab {
                 .chain(y.pretty(ctx))
                 .add(")")
                 .prec(Prec::Atom),
+            Elab::Tag(id) => id.pretty(ctx),
             Elab::StructIntern(i) => Doc::start("struct#").style(Style::Keyword).add(i.num()),
             Elab::StructInline(v) => Doc::either(
                 Doc::start("struct")

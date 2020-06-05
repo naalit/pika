@@ -1,0 +1,5 @@
+# `Option`, but we don't have unions yet
+tag None
+tag Some
+
+unwrap : fun (t:Type) (Some t) => t = fun (_:) (Some x:) => x

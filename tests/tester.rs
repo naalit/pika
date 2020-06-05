@@ -20,6 +20,15 @@ fn test_basic() {
 }
 
 #[test]
+fn test_tag() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/tag.pk"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_error() {
     Command::cargo_bin("pika")
         .unwrap()

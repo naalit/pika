@@ -40,6 +40,7 @@ pub enum Term {
     Fun(STerm, STerm),                            // fn a => x
     App(STerm, STerm),                            // f x
     Pair(STerm, STerm),                           // x, y
+    Tag(TagId),                                   // tag
     Struct(StructId, Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
     /// We use RawSym's here because it should work on any record with a field named this
     Project(STerm, Spanned<RawSym>), // r.m
@@ -127,6 +128,7 @@ impl Pretty for Term {
                 .chain(y.pretty(ctx))
                 .add(")")
                 .prec(Prec::Atom),
+            Term::Tag(id) => id.pretty(ctx),
             Term::Struct(_, v) => Doc::either(
                 Doc::start("struct")
                     .style(Style::Keyword)
