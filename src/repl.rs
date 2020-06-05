@@ -24,10 +24,10 @@ impl Default for ReplHelper {
         // Yes, we do have an actual lexer, but this is a little more flexible
         // We can do binders, etc. without actually lexing them, and ignore lexer errors
         ReplHelper {
-            literal: Regex::new(r"\d+|\(\)").unwrap(),
-            keyword: Regex::new(r"fun|struct|do").unwrap(),
-            symbol: Regex::new(r"=>|\.|=|:").unwrap(),
-            binder: Regex::new(r"[a-zA-Z_][a-zA-Z_0-9]*\s*:").unwrap(),
+            literal: Regex::new(r"((^|\s)\d+)|\(\)").unwrap(),
+            keyword: Regex::new(r"fun|struct|do|tag|the").unwrap(),
+            symbol: Regex::new(r"=>|\.|=|:|\|").unwrap(),
+            binder: Regex::new(r"([a-zA-Z_][a-zA-Z_0-9]*\s*)+:").unwrap(),
         }
     }
 }
@@ -42,10 +42,14 @@ fn match_regex<'l>(
     slices: Vec<(&'l str, Style)>,
     regex: &Regex,
     style: Style,
+    overrides: bool,
 ) -> Vec<(&'l str, Style)> {
     slices
         .into_iter()
         .flat_map(|(slice, old_style)| {
+            if old_style != Style::None && !overrides {
+                return vec![(slice, old_style)]
+            }
             let mut slices = Vec::new();
             let mut pos = 0;
             for m in regex.find_iter(slice) {
@@ -77,10 +81,10 @@ impl Highlighter for ReplHelper {
             Borrowed(line)
         } else {
             let slices = vec![(line, Style::None)];
-            let slices = match_regex(slices, &self.literal, Style::Literal);
-            let slices = match_regex(slices, &self.keyword, Style::Keyword);
-            let slices = match_regex(slices, &self.binder, Style::Binder);
-            let slices = match_regex(slices, &self.symbol, Style::Symbol);
+            let slices = match_regex(slices, &self.keyword, Style::Keyword, true);
+            let slices = match_regex(slices, &self.binder, Style::Binder, true);
+            let slices = match_regex(slices, &self.symbol, Style::Symbol, true);
+            let slices = match_regex(slices, &self.literal, Style::Literal, false);
 
             let mut buffer = Buffer::ansi();
 
@@ -145,6 +149,7 @@ pub fn run_repl(options: &Options) {
             Err(_) => break,
             Ok(line) => {
                 let old_buf = buf.clone();
+                let old_syms = seen_symbols.clone();
 
                 buf.push_str(&line);
                 buf.push('\n');
@@ -227,6 +232,7 @@ pub fn run_repl(options: &Options) {
                 // If the line they just input had errors, throw it out
                 if db.has_errors() {
                     buf = old_buf;
+                    seen_symbols = old_syms;
                 }
                 db.emit_errors();
             }
