@@ -151,19 +151,29 @@ impl PartialEq for Error {
     }
 }
 
-/// Displays as "a, b, c, or d"
-struct DisplayList<T>(Vec<T>);
+struct Alternatives(Vec<String>);
 use std::fmt;
-impl<T: fmt::Display> fmt::Display for DisplayList<T> {
+impl fmt::Display for Alternatives {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn to_err(x: &str) -> String {
+            match x {
+                r#""\n""# => "newline".to_string(),
+                "INT_LIT" => "literal".to_string(),
+                "NAME" => "identifier".to_string(),
+                "INDENT" => "indent".to_string(),
+                "DEDENT" => "dedent".to_string(),
+                x => x.replace('"', "'"),
+            }
+        }
+
         if self.0.len() == 1 {
-            return write!(f, "{}", self.0[0]);
+            return write!(f, "{}", to_err(&self.0[0]));
         }
         for i in 0..self.0.len() {
             if i == self.0.len() - 1 {
-                write!(f, "or {}", self.0[i])?;
+                write!(f, "or {}", to_err(&self.0[i]))?;
             } else {
-                write!(f, "{}, ", self.0[i])?;
+                write!(f, "{}, ", to_err(&self.0[i]))?;
             }
         }
         Ok(())
@@ -207,14 +217,14 @@ impl Error {
                 ("Invalid token".to_string(), Span(location, location))
             }
             ParseError::UnrecognizedEOF { location, expected } => (
-                format!("Unexpected EOF, expected {}", DisplayList(expected)),
+                format!("Unexpected EOF, expected {}", Alternatives(expected)),
                 Span(location, location),
             ),
             ParseError::UnrecognizedToken {
                 token: (start, tok, end),
                 expected,
             } => (
-                format!("Unexpected {}, expected {}", tok, DisplayList(expected)),
+                format!("Unexpected {}, expected {}", tok, Alternatives(expected)),
                 Span(start, end),
             ),
             ParseError::ExtraToken {
