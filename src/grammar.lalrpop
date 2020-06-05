@@ -18,12 +18,16 @@ extern {
         "struct" => Tok::Struct,
         "the" => Tok::The,
         "do" => Tok::Do,
+        "tag" => Tok::Tag,
         ":" => Tok::Colon,
+        ";" => Tok::Semi,
         "=>" => Tok::Arrow,
         "=" => Tok::Equals,
         "\n" => Tok::Newline,
         "(" => Tok::POpen,
         ")" => Tok::PClose,
+        "{" => Tok::BraceOpen,
+        "}" => Tok::BraceClose,
         "," => Tok::Comma,
         "." => Tok::Dot,
         INT_LIT => Tok::LitInt(<i32>),
@@ -44,8 +48,21 @@ Lines<T>: Vec<T> = {
     }
 }
 
+// A block beginning with the `Keyword` and then one or more `Inner`s
+// Can be in { a; b } form or indented with `\n` as delimiter
+IBlock<Keyword, Inner>: Vec<Inner> = {
+    Keyword "{" <v:(<Inner> ";")*> <o:Inner?> "}" => if let Some(o) = o {
+        let mut v = v;
+        v.push(o);
+        v
+    } else {
+        v
+    },
+    Keyword "\n" INDENT <(<Inner> "\n"+)+> DEDENT,
+}
+
 Struct: ParseTree<'input> = {
-    "struct" "\n" INDENT <v:(<Def> "\n"+)+> DEDENT => ParseTree::Struct(v.into_iter().map(|ParseDef(name, val)| (name, val)).collect()),
+    IBlock<"struct", Def> => ParseTree::Struct(<>.into_iter().map(|ParseDef(name, val)| (name, val)).collect()),
 }
 
 Stmt: ParseStmt<'input> = {
@@ -54,7 +71,7 @@ Stmt: ParseStmt<'input> = {
 }
 
 Block: ParseTree<'input> = {
-    "do" "\n" INDENT <v:(<Stmt> "\n"+)+> DEDENT => ParseTree::Block(v),
+    IBlock<"do", Stmt> => ParseTree::Block(<>),
 }
 
 pub Defs: Vec<ParseDef<'input>> = Lines<Def>;

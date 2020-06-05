@@ -200,6 +200,7 @@ pub fn run_repl(options: &Options) {
                                     .chain(ty.pretty(&b))
                                     .space()
                                     .add("=")
+                                    .space()
                                     .chain(val.pretty(&b))
                                     .group(),
                             )

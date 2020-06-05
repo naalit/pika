@@ -1,7 +1,7 @@
 # Testing definitions
-a := 12
+x := 12
 the_ : fun (t:Type) t => t = fun _ x: => x
-b := the_ Int 12
+y := the_ Int 12
 
 # Church natural numbers
 Nat := fun (t:Type) (fun t => t) t => t

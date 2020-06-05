@@ -203,7 +203,7 @@ impl<'a> Doc<'a> {
     /// Creates a `Doc` displayed one way for multi-line, and another way for flat
     pub fn either(multi: Self, flat: Self) -> Self {
         Doc {
-            doc: multi.doc.flat_alt(flat.doc),
+            doc: multi.doc.flat_alt(flat.doc).group(),
             prec: Prec::Term,
         }
     }

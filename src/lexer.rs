@@ -24,7 +24,9 @@ pub enum Tok<'i> {
     Struct,        // "struct"
     Do,            // "do"
     The,           // "the"
+    Tag,           // "tag"
     Colon,         // ":"
+    Semi,          // ";"
     Arrow,         // "=>"
     Equals,        // "="
     Newline,       // "\n"
@@ -32,6 +34,8 @@ pub enum Tok<'i> {
     Name(&'i str), // "x"
     POpen,         // "("
     PClose,        // ")"
+    BraceOpen,     // "{"
+    BraceClose,    // "}"
     Comma,         // ","
     Dot,           // "."
     Indent,
@@ -178,6 +182,7 @@ impl<'i> Lexer<'i> {
                 "Int" => Tok::Int,
                 "the" => Tok::The,
                 "do" => Tok::Do,
+                "tag" => Tok::Tag,
                 _ => Tok::Name(s),
             }
         }
@@ -202,6 +207,18 @@ impl<'i> Lexer<'i> {
             ')' => {
                 self.next();
                 Tok::PClose
+            }
+            '{' => {
+                self.next();
+                Tok::BraceOpen
+            }
+            '}' => {
+                self.next();
+                Tok::BraceClose
+            }
+            ';' => {
+                self.next();
+                Tok::Semi
             }
             ',' => {
                 self.next();
@@ -300,11 +317,15 @@ impl<'i> fmt::Display for Tok<'i> {
             Struct => write!(f, "'struct'"),
             The => write!(f, "'the'"),
             Do => write!(f, "'do'"),
+            Tag => write!(f, "'tag'"),
 
             Dot => write!(f, "'.'"),
             Comma => write!(f, "','"),
+            Semi => write!(f, "';'"),
             POpen => write!(f, "'('"),
             PClose => write!(f, "')'"),
+            BraceOpen => write!(f, "'{{'"),
+            BraceClose => write!(f, "'}}'"),
             Colon => write!(f, "':'"),
             Arrow => write!(f, "'=>'"),
             Equals => write!(f, "'='"),
