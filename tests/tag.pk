@@ -1,5 +1,37 @@
-# `Option`, but we don't have unions yet
+# `Option`, but without unions
 tag None
 tag Some
 
 unwrap : fun (t:Type) (Some t) => t = fun (_:) (Some x:) => x
+
+# Unions
+f := fun (Int | ()) => ()
+g := fun (x: Int | ()) => f x
+
+# Combine them
+tag True
+tag False
+Bool := True | False
+
+Nat := fun (t:Type) (fun t => t) t => t
+zero : Nat = fun t f x: => x
+suc : (fun Nat => Nat) = fun n t f x: => f (n t f x)
+one := suc zero
+two := suc one
+
+is_zero : (fun Nat => Bool) = fun n: => n Bool (fun Bool => False) True
+is_zero_zero := is_zero zero
+is_one_zero := is_zero one
+
+# Full options
+Option := fun a:Type => None | Some a
+
+s : Option Int = Some 3
+n : Option Int = None
+
+k := g 3
+
+a := fun ((Int, Int) | Int | ()) => ()
+b := fun x: Int | () => a x
+
+main : Int = unwrap Int (Some 3)

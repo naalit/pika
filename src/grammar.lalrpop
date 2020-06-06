@@ -28,6 +28,7 @@ extern {
         ")" => Tok::PClose,
         "{" => Tok::BraceOpen,
         "}" => Tok::BraceClose,
+        "|" => Tok::Bar,
         "," => Tok::Comma,
         "." => Tok::Dot,
         INT_LIT => Tok::LitInt(<i32>),
@@ -37,8 +38,8 @@ extern {
     }
 }
 
-Lines<T>: Vec<T> = {
-    "\n"* <v:(<T> "\n"+)*> <e:T?> => match e {
+pub Defs: Vec<ParseDef<'input>> = {
+    "\n"* <v:(<Def> "\n"+)*> <e:Def?> => match e {
         None => v,
         Some(e) => {
             let mut v = v;
@@ -74,8 +75,6 @@ Block: ParseTree<'input> = {
     IBlock<"do", Stmt> => ParseTree::Block(<>),
 }
 
-pub Defs: Vec<ParseDef<'input>> = Lines<Def>;
-
 Def: ParseDef<'input> = {
     <t:Spanned<"tag">> <v:Spanned<Var>> => {
         let span = Span(t.span().0, v.span().1);
@@ -88,24 +87,24 @@ Def: ParseDef<'input> = {
     <l:Spanned<Var>> ":" "=" <r:STerm> => ParseDef(l, r),
 }
 
-NotFun: ParseTree<'input> = {
-    The,
-    Binder,
-    App,
-}
-
 STerm: Spanned<ParseTree<'input>> = Spanned<Term>;
 
 #[inline]
 Spanned<T>: Spanned<T> = {
     <l:@L> <t:T> <r:@R> => Spanned::new(t, Span(l, r)),
-};
+}
 
 Term: ParseTree<'input> = {
     Struct,
     Block,
     Fun,
-    The,
+    "the" <t:Spanned<Atom>> <u:Spanned<Atom>> => ParseTree::The(t, u),
+    <f:Spanned<App>> <v:("|" <Spanned<App>>)+> => {
+      let mut v = v;
+      // It's a little out of order, but that shouldn't really matter, and we can fix it later anyway
+      v.push(f);
+      ParseTree::Union(v)
+    },
     Binder,
     // To allow e.g. (Some x:)
     <f:Spanned<App>> <x:Spanned<Binder>> => ParseTree::App(f, x),
@@ -117,20 +116,13 @@ App: ParseTree<'input> = {
     Atom,
 }
 
-The: ParseTree<'input> = {
-    "the" <t:Spanned<Atom>> <u:Spanned<Atom>> => ParseTree::The(t, u),
-}
-
 Binder: ParseTree<'input> = {
     <x:Var> ":" <t:STerm?> => ParseTree::Binder(x, t),
 }
 
-Binder2: Option<Spanned<ParseTree<'input>>> = {
-    ":" <STerm?>,
-}
 /// a b c : T --> (a:T) (b:T) (c:T)
 MultiBinder: Vec<Spanned<ParseTree<'input>>> = {
-    <v:Spanned<Atom>+> <t:Binder2?> =>? if let Some(t) = t {
+    <v:Spanned<Atom>+> <t:(":" <STerm?>)?> =>? if let Some(t) = t {
         let mut r = Vec::new();
         for i in v {
             let span = i.span();
@@ -138,7 +130,7 @@ MultiBinder: Vec<Spanned<ParseTree<'input>>> = {
                 r.push(Spanned::new(ParseTree::Binder(i, t.clone()), span));
             } else {
                 return Err(ParseError::User {
-                    error: Spanned::new(crate::lexer::LexError::Other(": can only be used with binders".to_string()), span),
+                    error: Spanned::new(crate::lexer::LexError::Other("':' can only be used with binders".to_string()), span),
                 });
             }
         }
@@ -154,8 +146,11 @@ SpanToo<T>: (T, Span) = {
 
 Fun: ParseTree<'input> = {
     "fun" <a:MultiBinder> "=>" <b:SpanToo<Term>> => {
-        let (b, bs) = b;
-        a.into_iter().rfold(b, |b, a| ParseTree::Fun(a, Spanned::new(b, bs)))
+        let (b, mut bs) = b;
+        a.into_iter().rfold(b, |b, a| {
+          bs.0 = a.span().1;
+          ParseTree::Fun(a, Spanned::new(b, bs))
+        })
     },
 }
 

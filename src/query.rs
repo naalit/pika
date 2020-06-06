@@ -192,6 +192,7 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
             Term::Block(t) => t.iter().for_each(|x| match x {
                 Statement::Expr(x) | Statement::Def(Def(_, x)) => add_term(x, db, v, scope.clone()),
             }),
+            Term::Union(t) => t.iter().for_each(|x| add_term(x, db, v, scope.clone())),
             Term::Unit
             | Term::Var(_)
             | Term::I32(_)

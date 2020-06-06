@@ -38,6 +38,7 @@ pub enum Tok<'i> {
     BraceClose,    // "}"
     Comma,         // ","
     Dot,           // "."
+    Bar,           // "|"
     Indent,
     Dedent,
 }
@@ -232,6 +233,10 @@ impl<'i> Lexer<'i> {
                 self.next();
                 Tok::Colon
             }
+            '|' => {
+                self.next();
+                Tok::Bar
+            }
             '=' => {
                 self.next();
                 if self.peek() == Some('>') {
@@ -327,6 +332,7 @@ impl<'i> fmt::Display for Tok<'i> {
             BraceOpen => write!(f, "'{{'"),
             BraceClose => write!(f, "'}}'"),
             Colon => write!(f, "':'"),
+            Bar => write!(f, "'|'"),
             Arrow => write!(f, "'=>'"),
             Equals => write!(f, "'='"),
 

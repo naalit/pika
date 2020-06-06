@@ -241,6 +241,14 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
             ty.whnf(env);
             Ok(Elab::Binder(*x, Box::new(ty)))
         }
+        Term::Union(iv) => {
+            let mut rv = Vec::new();
+            for val in iv {
+                let val = check(val, &Elab::Type, env)?;
+                rv.push(val);
+            }
+            Ok(Elab::Union(rv).simplify_unions(env))
+        }
         _ => Err(TypeError::Synth(t.clone())),
     }
 }
@@ -307,12 +315,14 @@ pub fn check<T: MainGroup>(
             }
         }
         (Term::App(f, x), Elab::App(tf, tx)) => {
-            check(f, tf, env)?;
-            check(x, tx, env)
+            let f = check(f, tf, env)?;
+            let x = check(x, tx, env)?;
+            Ok(Elab::App(Box::new(f), Box::new(x)))
         }
         (Term::App(f, x), Elab::Type) if f.tag_head(env) => {
-            check(f, &Elab::Type, env)?;
-            check(x, &Elab::Type, env)
+            let f = check(f, &Elab::Type, env)?;
+            let x = check(x, &Elab::Type, env)?;
+            Ok(Elab::App(Box::new(f), Box::new(x)))
         }
         (_, Elab::Type) => {
             let t = synth(term, env)?;
@@ -391,7 +401,7 @@ impl Elab {
     }
 
     /// Like do_match(), but fills in the types instead of Elabs
-    fn match_types<T: MainGroup>(&self, other: &Elab, env: &mut TempEnv<T>) {
+    pub fn match_types<T: MainGroup>(&self, other: &Elab, env: &mut TempEnv<T>) {
         use Elab::*;
         match (self, other) {
             // Since we match it against itself to apply binder types
@@ -453,6 +463,7 @@ impl Elab {
             Elab::StructInline(v) => v.iter().all(|(_, x)| x.is_type()),
             Elab::Binder(_, _) => true,
             Elab::Var(_, t) => t.is_type_type(),
+            Elab::Union(v) => v.iter().any(|x| x.is_type()),
             _ => false,
         }
     }
@@ -469,6 +480,7 @@ impl Elab {
             Elab::Fun(_, x, _) => x.is_type_type(),
             Elab::Binder(_, t) => t.is_type_type(),
             Elab::Var(_, t) => t.is_type_type(),
+            Elab::Union(v) => v.iter().any(|x| x.is_type_type()),
             _ => false,
         }
     }
@@ -489,6 +501,15 @@ impl Elab {
             (Elab::Tag(x), Elab::Tag(y)) if x == y => true,
             (Elab::Builtin(b), Elab::Builtin(c)) if b == c => true,
             (Elab::Unit, Elab::Unit) => true,
+            (Elab::Var(x, _), _) if env.db.elab(env.scope(), *x).is_some() => env
+                .db
+                .elab(env.scope(), *x)
+                .unwrap()
+                .cloned(env)
+                .subtype_of(sup, env),
+            (_, Elab::Var(x, _)) if env.db.elab(env.scope(), *x).is_some() => {
+                self.subtype_of(&env.db.elab(env.scope(), *x).unwrap().cloned(env), env)
+            }
             (Elab::Var(x, _), _) if env.vals.contains_key(x) => {
                 env.val(*x).unwrap().cloned(env).subtype_of(sup, env)
             }
@@ -521,6 +542,25 @@ impl Elab {
             (Elab::Var(x, _), Elab::Var(y, _)) if y == x => true,
             (Elab::Binder(_, t), _) => t.subtype_of(sup, env),
             (_, Elab::Binder(_, t)) => self.subtype_of(t, env),
+            (Elab::Union(sub), Elab::Union(sup)) => {
+                // If each type in `sub` has a supertype in `sup`, we're good
+                let mut sub: Vec<_> = sub.iter().collect();
+                for sup in sup.iter() {
+                    let mut i = 0;
+                    while i < sub.len() {
+                        let x = sub[i];
+
+                        if x.subtype_of(&sup, env) {
+                            sub.remove(i);
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                sub.is_empty()
+            }
+            (Elab::Union(v), _) => v.iter().all(|x| x.subtype_of(sup, env)),
+            (_, Elab::Union(v)) => v.iter().any(|x| self.subtype_of(x, env)),
             // (Type, Type) <= Type
             (_, Elab::Type) if self.is_type_type() => true,
             _ => false,

@@ -48,7 +48,7 @@ fn match_regex<'l>(
         .into_iter()
         .flat_map(|(slice, old_style)| {
             if old_style != Style::None && !overrides {
-                return vec![(slice, old_style)]
+                return vec![(slice, old_style)];
             }
             let mut slices = Vec::new();
             let mut pos = 0;

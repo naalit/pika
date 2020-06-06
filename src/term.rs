@@ -45,6 +45,7 @@ pub enum Term {
     /// We use RawSym's here because it should work on any record with a field named this
     Project(STerm, Spanned<RawSym>), // r.m
     Block(Vec<Statement>),                        // do { x; y }
+    Union(Vec<STerm>),                            // x | y
 }
 impl Term {
     pub fn traverse(&self, f: impl Fn(&Term) + Copy) {
@@ -222,6 +223,10 @@ impl Pretty for Term {
                 .chain(x.pretty(ctx).nest(Prec::Atom))
                 .group()
                 .indent(),
+            Term::Union(v) => Doc::intersperse(
+                v.iter().map(|x| x.pretty(ctx)),
+                Doc::none().space().add("|").space(),
+            ),
         }
     }
 }

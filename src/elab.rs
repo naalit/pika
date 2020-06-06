@@ -49,10 +49,71 @@ pub enum Elab {
     StructInline(Vec<(Sym, Elab)>), // struct { x := 3 }
     Project(BElab, RawSym),         // r.m
     Block(Vec<ElabStmt>),           // do { x; y }
+    Union(Vec<Elab>),               // x | y
 }
 type BElab = Box<Elab>;
 
 impl Elab {
+    /// Instead of calling `Elab::union()` and over again, if you construct a union with several parts,
+    /// call this after to simplify it in one pass
+    pub fn simplify_unions<T: MainGroup>(mut self, env: &TempEnv<T>) -> Self {
+        match &mut self {
+            Elab::Union(v) => match v.len() {
+                0 => self,
+                1 => v.pop().unwrap(),
+                _ => {
+                    let end = v.pop().unwrap();
+                    self.union(end, &mut env.clone())
+                }
+            },
+            _ => self,
+        }
+    }
+
+    /// Don't construct a `Elab::Union` directly, use this function to simplify nested unions
+    /// Clone the environment
+    pub fn union<T: MainGroup>(self, other: Elab, env: &mut TempEnv<T>) -> Elab {
+        let self_vec = match self {
+            Elab::Union(v) => v,
+            x => vec![x],
+        };
+        let other_vec = match other {
+            Elab::Union(v) => v,
+            x => vec![x],
+        };
+
+        let mut rv: Vec<Elab> = Vec::new();
+        let iter = self_vec.into_iter().chain(other_vec);
+        for val in iter {
+            let mut i = 0;
+            let mut should_add = true;
+            while i < rv.len() {
+                let x = &rv[i];
+
+                // If `val` covers `x`'s case, we don't need `x`
+                if x.subtype_of(&val, env) {
+                    rv.remove(i);
+                } else {
+                    i += 1;
+                    // but if `x` covers `val`'s case, we don't need `val`
+                    if val.subtype_of(x, env) {
+                        should_add = false;
+                        break;
+                    }
+                }
+            }
+            if should_add {
+                rv.push(val);
+            }
+        }
+
+        if rv.len() == 1 {
+            rv.pop().unwrap()
+        } else {
+            Elab::Union(rv)
+        }
+    }
+
     /// Does this term reference this symbol at all?
     pub fn uses<T: MainGroup>(&self, s: Sym, env: &TempEnv<T>) -> bool {
         use Elab::*;
@@ -77,6 +138,7 @@ impl Elab {
                 ElabStmt::Def(_, e) => e.uses(s, env),
                 ElabStmt::Expr(e) => e.uses(s, env),
             }),
+            Union(v) => v.iter().any(|x| x.uses(s, env)),
         }
     }
 
@@ -106,10 +168,11 @@ impl Elab {
                 ElabStmt::Def(_, e) => e.normal(env),
                 ElabStmt::Expr(e) => e.normal(env),
             }),
+            Union(v) => v.iter_mut().for_each(|x| x.normal(env)),
         }
     }
 
-    /// Reduce to Weak-Head Normal Form, in place. This implies `update_all(env)`
+    /// Reduce to Weak-Head Normal Form, in place
     /// Returns whether the top-level structure changed
     ///
     /// This is like actual normal form, but we only perform one level of beta- or projection-reduction
@@ -119,6 +182,13 @@ impl Elab {
         match self {
             // Binders don't count as forms
             Elab::Binder(_, t) => t.whnf(env),
+            // Unions don't either (no head)
+            Elab::Union(v) => v
+                .iter_mut()
+                .map(|x| x.whnf(env))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .any(|x| x),
             Elab::Var(x, _) => {
                 if let Some(t) = env.db.val(env.scope(), *x).or_else(|| env.val(*x)) {
                     if &*t != self {
@@ -226,6 +296,8 @@ impl Elab {
                 ElabStmt::Def(_, _) => Unit,
                 ElabStmt::Expr(e) => e.get_type(env),
             },
+            // Unions can only be types, and the type of a union doesn't mean that much
+            Union(_) => Type,
         }
     }
 
@@ -315,7 +387,25 @@ impl Elab {
                 let y = Box::new(y.cloned(env));
                 Pair(x, y)
             }
-            StructIntern(i) => StructIntern(*i),
+            StructIntern(i) => {
+                // Make sure renames propagate to any local variables we use in the struct
+                if env.vals.keys().any(|k| self.uses(*k, env)) {
+                    let scope = ScopeId::Struct(*i, Box::new(env.scope()));
+                    // TODO rename definitions
+                    StructInline(
+                        env.db
+                            .symbols(scope.clone())
+                            .iter()
+                            .filter_map(|x| {
+                                Some((**x, env.db.elab(scope.clone(), **x)?.cloned(env)))
+                            })
+                            .collect(),
+                    )
+                } else {
+                    // It doesn't capture any locals (that we're renaming), so we can leave it
+                    StructIntern(*i)
+                }
+            }
             StructInline(v) => StructInline(
                 v.into_iter()
                     .map(|(name, val)| {
@@ -340,6 +430,7 @@ impl Elab {
             ),
             Project(r, m) => Project(Box::new(r.cloned(env)), *m),
             Block(v) => Block(v.iter().map(|x| x.cloned(env)).collect()),
+            Union(v) => Union(v.iter().map(|x| x.cloned(env)).collect()),
         }
     }
 }
@@ -491,6 +582,10 @@ impl Pretty for Elab {
             )
             .prec(Prec::Term),
             Elab::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).chain(m.pretty(ctx)),
+            Elab::Union(v) => Doc::intersperse(
+                v.iter().map(|x| x.pretty(ctx)),
+                Doc::none().space().add("|").space(),
+            ),
         }
     }
 }

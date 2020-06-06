@@ -205,6 +205,7 @@ pub enum ParseTree<'p> {
     Tag(&'p str),                               // tag X
     Project(STree<'p>, Spanned<&'p str>),       // r.m
     Block(Vec<ParseStmt<'p>>),                  // do { x; y }
+    Union(Vec<STree<'p>>),                      // x | y
 }
 type STree<'p> = Spanned<ParseTree<'p>>;
 
@@ -327,6 +328,18 @@ impl<'p> STree<'p> {
                     }
                     env.pop();
                     Term::Block(rv)
+                }
+                Union(mut iv) => {
+                    let mut rv = Vec::new();
+                    let first = iv.split_off(iv.len() - 1);
+                    // There's only one, but this is easier
+                    for val in first {
+                        rv.push(val.resolve_names(env)?);
+                    }
+                    for val in iv {
+                        rv.push(val.resolve_names(env)?);
+                    }
+                    Term::Union(rv)
                 }
             },
             span,

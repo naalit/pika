@@ -134,9 +134,9 @@ impl<'a> Doc<'a> {
     /// Appends some text or an object to the `Doc`
     pub fn add<D: std::fmt::Display>(self, x: D) -> Self {
         let s = x.to_string();
-        if s.chars()
-            .any(|x| x.is_alphanumeric() || x == '\'' || x == '_')
-        {
+        if s.chars().any(|x| {
+            x.is_alphanumeric() || x == '\'' || x == '_' || x == '(' || x == ')' || x == ','
+        }) {
             Doc {
                 doc: self.doc.append(RcDoc::text(s)),
                 ..self

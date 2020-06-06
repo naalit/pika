@@ -23,8 +23,9 @@ fn test_basic() {
 fn test_tag() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["build", "tests/tag.pk"])
+        .args(&["run", "tests/tag.pk"])
         .assert()
+        .stdout("3\n")
         .success();
 }
 
