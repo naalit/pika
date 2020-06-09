@@ -92,6 +92,8 @@ fn main() {
                                     .create_jit_execution_engine(inkwell::OptimizationLevel::None)
                                     .expect("Failed to create LLVM execution engine");
 
+                                let mut env = db.temp_env(ScopeId::File(file));
+
                                 use crate::elab::Elab;
                                 use crate::term::Builtin;
                                 match db
@@ -99,15 +101,20 @@ fn main() {
                                     .unwrap()
                                     .get_type(&mut db.temp_env(ScopeId::File(file)))
                                 {
-                                    Elab::Builtin(Builtin::Int) => unsafe {
+                                    x if x.subtype_of(&Elab::Builtin(Builtin::Int), &mut env) => unsafe {
                                         let main_fun: inkwell::execution_engine::JitFunction<
                                             unsafe extern "C" fn() -> i32,
                                         > = engine.get_function(&main_mangled).unwrap();
                                         let result = main_fun.call();
                                         println!("{}", result);
                                     },
-                                    Elab::Pair(x, y)
-                                        if x == y && *x == Elab::Builtin(Builtin::Int) =>
+                                    x if x.subtype_of(
+                                        &Elab::Pair(
+                                            Box::new(Elab::Builtin(Builtin::Int)),
+                                            Box::new(Elab::Builtin(Builtin::Int)),
+                                        ),
+                                        &mut env,
+                                    ) =>
                                     unsafe {
                                         // Rust aligns (i32, i32) differently than LLVM does, so values .1 and .3 in the result are padding
                                         let main_fun: inkwell::execution_engine::JitFunction<

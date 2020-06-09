@@ -16,7 +16,7 @@ pub enum LexError {
     Other(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tok<'i> {
     Fun,           // "fun"
     Type,          // "Type"
@@ -304,7 +304,20 @@ impl<'i> std::iter::Iterator for Lexer<'i> {
         if self.peek().is_none() {
             return None;
         } else {
-            Some(self.next_tok())
+            let tok = self.next_tok();
+            if tok.as_ref().map_or(false, |x| x.1 == Tok::Newline) {
+                let p = self.save();
+                let z = self.indent.clone();
+                if self.handle_indent().map_or(false, |x| x == Tok::Indent) {
+                    return Some(Ok((self.last, Tok::Indent, self.pos)));
+                } else {
+                    self.was_dedent = false;
+                    self.was_newline = true;
+                    self.load(p);
+                    self.indent = z;
+                }
+            }
+            Some(tok)
         }
     }
 }
@@ -354,5 +367,37 @@ impl<'i> fmt::Display for Tok<'i> {
             Indent => write!(f, "indent"),
             Dedent => write!(f, "dedent"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lex_indent() {
+        let lex = Lexer::new(
+            r#"a
+    : Int
+    = 3
+"#,
+        );
+        let v: Vec<Tok> = lex.map(|x| x.unwrap().1).collect();
+        use Tok::*;
+        assert_eq!(
+            &v,
+            &[
+                Name("a"),
+                Indent,
+                Colon,
+                Int,
+                Newline,
+                Equals,
+                LitInt(3),
+                Newline,
+                Dedent,
+                Newline,
+            ]
+        );
     }
 }

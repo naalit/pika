@@ -17,6 +17,7 @@ struct ReplHelper {
     keyword: Regex,
     symbol: Regex,
     binder: Regex,
+    comment: Regex,
 }
 
 impl Default for ReplHelper {
@@ -27,7 +28,8 @@ impl Default for ReplHelper {
             literal: Regex::new(r"((^|\s)\d+)|\(\)").unwrap(),
             keyword: Regex::new(r"fun|struct|do|tag|the").unwrap(),
             symbol: Regex::new(r"=>|\.|=|:|\|").unwrap(),
-            binder: Regex::new(r"([a-zA-Z_][a-zA-Z_0-9]*\s*)+:").unwrap(),
+            binder: Regex::new(r"([a-zA-Z_][a-zA-Z_0-9]*[\t ]*)+:").unwrap(),
+            comment: Regex::new(r"#[^\n]*").unwrap(),
         }
     }
 }
@@ -47,7 +49,7 @@ fn match_regex<'l>(
     slices
         .into_iter()
         .flat_map(|(slice, old_style)| {
-            if old_style != Style::None && !overrides {
+            if old_style != Style::None && old_style != Style::Comment && !overrides {
                 return vec![(slice, old_style)];
             }
             let mut slices = Vec::new();
@@ -81,6 +83,7 @@ impl Highlighter for ReplHelper {
             Borrowed(line)
         } else {
             let slices = vec![(line, Style::None)];
+            let slices = match_regex(slices, &self.comment, Style::Comment, true);
             let slices = match_regex(slices, &self.keyword, Style::Keyword, true);
             let slices = match_regex(slices, &self.binder, Style::Binder, true);
             let slices = match_regex(slices, &self.symbol, Style::Symbol, true);

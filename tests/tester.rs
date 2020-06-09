@@ -79,6 +79,16 @@ fn test_match() {
 }
 
 #[test]
+fn test_match_int() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/match_int.pk"])
+        .assert()
+        .stdout("(12, 4)\n")
+        .success();
+}
+
+#[test]
 fn test_missing_branch() {
     Command::cargo_bin("pika")
         .unwrap()

@@ -247,7 +247,7 @@ impl Elab {
     /// Convert a `Elab` representing a type to the `LowTy` that Elabs of that type are stored as
     pub fn as_low_ty<T: MainGroup>(&self, env: &TempEnv<T>) -> LowTy {
         match self {
-            Elab::Builtin(Builtin::Int) => LowTy::Int(32),
+            Elab::Builtin(Builtin::Int) | Elab::I32(_) => LowTy::Int(32),
             Elab::Unit => LowTy::Unit,
             Elab::Binder(_, t) => t.as_low_ty(env),
             Elab::Fun(v) => {
@@ -342,13 +342,7 @@ impl Elab {
                     .iter()
                     .enumerate()
                     .find(|(_, x)| ty.subtype_of(x, env))
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Ah {} </: {}",
-                            self.pretty(&env.bindings()).ansi_string(),
-                            ty.pretty(&env.bindings()).ansi_string()
-                        )
-                    });
+                    .unwrap();
                 let param = LowIR::Variant(idx as u64, self.as_low_ty(env), Box::new(param));
                 t.compile_match(env, need_phi, t, param)
             }
@@ -422,6 +416,12 @@ impl Elab {
                 }
                 _ => panic!("not a function"),
             },
+            (Elab::I32(_), _) => LowIR::CompOp {
+                op: CompOp::Eq,
+                // This does the necessary bit-fiddling to make it a u64
+                lhs: Box::new(self.as_low(env).unwrap()),
+                rhs: Box::new(param),
+            },
             // Don't bind anything
             // Once patterns can fail, these will be more interesting
             // TODO that
@@ -429,8 +429,7 @@ impl Elab {
             | (Elab::Builtin(_), _)
             | (Elab::Unit, _)
             | (Elab::Tag(_), _)
-            | (Elab::Fun(_), _)
-            | (Elab::Union(_), _) => LowIR::BoolConst(true),
+            | (Elab::Fun(_), _) => LowIR::BoolConst(true),
             _ => panic!(
                 "pattern {} can't be compiled yet",
                 self.pretty(&env.bindings()).ansi_string()
@@ -663,8 +662,7 @@ impl Elab {
                     // Not a union, so no switch, just pattern matching with ifs
                     branches
                         .iter()
-                        .enumerate()
-                        .map(|(i, (args, body, _))| {
+                        .map(|(args, body, _)| {
                             // Skip upcasting to union, because if the argument was a union type we wouldn't be here
 
                             let mut need_phi = Vec::new();
@@ -1006,7 +1004,7 @@ impl LowIR {
             }
             (_, Elab::Union(vto)) => {
                 for (i, t) in vto.iter().enumerate() {
-                    if t.subtype_of(from, env) {
+                    if from.subtype_of(t, env) {
                         let r = self.cast(from, t, env);
                         return LowIR::Variant(i as u64, to.as_low_ty(env), Box::new(r));
                     }

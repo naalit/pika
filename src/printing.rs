@@ -21,6 +21,7 @@ pub enum Style {
     Special,
     Bold,
     Note,
+    Comment,
     None,
 }
 impl Style {
@@ -33,6 +34,10 @@ impl Style {
             Style::Special => spec(Color::Blue, true),
             Style::Bold => ColorSpec::new().set_bold(true).clone(),
             Style::Note => spec(Color::Blue, false),
+            Style::Comment => ColorSpec::new()
+                .set_fg(Some(Color::Black))
+                .set_intense(true)
+                .clone(),
             Style::None => ColorSpec::new(),
         }
     }

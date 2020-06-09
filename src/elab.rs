@@ -79,6 +79,14 @@ pub fn unionize_ty<T: MainGroup>(
 }
 
 impl Elab {
+    /// Binders are usually confusing in type errors, so you can get rid of them
+    pub fn unbind(&self) -> &Self {
+        match self {
+            Elab::Binder(_, x) => x,
+            x => x,
+        }
+    }
+
     /// Are there any values that occupy both types `self` and `other`?
     /// Bottom doesn't count, of course, since it's not a value
     /// The same as "could a value of type `other` match `self`?" or vice versa
@@ -290,7 +298,7 @@ impl Elab {
             Bottom => Type,
             Type => Type,
             Unit => Unit,
-            I32(_) => Builtin(B::Int),
+            I32(i) => I32(*i), //Builtin(B::Int),
             Builtin(B::Int) => Type,
             Tag(t) => Tag(*t),
             Var(_, t) => t.cloned(&mut env.clone()),

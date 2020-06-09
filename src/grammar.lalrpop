@@ -59,7 +59,7 @@ IBlock<Keyword, Inner>: Vec<Inner> = {
     } else {
         v
     },
-    Keyword "\n" INDENT <(<Inner> "\n"+)+> DEDENT,
+    Keyword INDENT <(<Inner> "\n"+)+> DEDENT,
 }
 
 Struct: ParseTree<'input> = {
@@ -80,10 +80,19 @@ Def: ParseDef<'input> = {
         let span = Span(t.span().0, v.span().1);
         ParseDef(v.clone(), Spanned::new(ParseTree::Tag(v.force_unwrap()), span))
     },
+    <l:Spanned<Var>> ":" <t:STerm> INDENT "=" <r:STerm> "\n"+ DEDENT => {
+        let span = Span(t.span().0, r.span().1);
+        ParseDef(l, Spanned::new(ParseTree::The(t, r), span))
+    },
+    <l:Spanned<Var>> INDENT ":" <t:STerm> "\n"+ "=" <r:STerm> "\n"+ DEDENT => {
+        let span = Span(t.span().0, r.span().1);
+        ParseDef(l, Spanned::new(ParseTree::The(t, r), span))
+    },
     <l:Spanned<Var>> ":" <t:STerm> "=" <r:STerm> => {
         let span = Span(t.span().0, r.span().1);
         ParseDef(l, Spanned::new(ParseTree::The(t, r), span))
     },
+    <l:Spanned<Var>> INDENT ":" "=" <r:STerm> "\n"+ DEDENT => ParseDef(l, r),
     <l:Spanned<Var>> ":" "=" <r:STerm> => ParseDef(l, r),
 }
 
@@ -140,6 +149,17 @@ MultiBinder: Vec<Spanned<ParseTree<'input>>> = {
     },
 }
 
+Intersperse<T, Sep>: Vec<T> = {
+  T => vec![<>],
+  <v:(<T> Sep)+> <l:T?> => if let Some(l) = l {
+    let mut v = v;
+    v.push(l);
+    v
+  } else {
+    v
+  },
+}
+
 Branch: (Vec<Spanned<ParseTree<'input>>>, Spanned<ParseTree<'input>>) = {
   // Standard single-line case
   <MultiBinder> "=>" <Spanned<Term>>,
@@ -157,7 +177,7 @@ Branch: (Vec<Spanned<ParseTree<'input>>>, Spanned<ParseTree<'input>>) = {
   //     => b
   //   z: => z
   // ```
-  <(<Spanned<Atom>> "\n"+)+> INDENT "=>" <Spanned<Term>> "\n"+ DEDENT,
+  <Intersperse<<Spanned<Atom>>, "\n"+>> INDENT "=>" <Spanned<Term>> "\n"+ DEDENT,
 }
 
 Fun: ParseTree<'input> = {

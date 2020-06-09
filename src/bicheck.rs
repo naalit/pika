@@ -18,8 +18,6 @@ pub enum TypeError {
     NotSubtypeF(Elab, Spanned<Elab>),
     /// No match branch matched
     NoBranch(Elab, Vec<Spanned<Elab>>),
-    /// Something that isn't a type was used as a type
-    NotType(Spanned<Elab>),
     /// We couldn't find a type for the given variable
     /// Currently, this only occurs when using bindings without a type, where we couldn't infer the type
     NotFound(Spanned<Sym>),
@@ -43,46 +41,37 @@ impl TypeError {
             TypeError::NotFunction(t) => Error::new(
                 file,
                 Doc::start("Type error: not a function: '")
-                    .chain(t.pretty(b).style(Style::None))
+                    .chain(t.unbind().pretty(b).style(Style::None))
                     .add("'")
                     .style(Style::Bold),
                 t.span(),
                 "Not a function",
             ),
-            TypeError::NotType(t) => Error::new(
-                file,
-                Doc::start("Type error: not a type: '")
-                    .chain(t.pretty(b).style(Style::None))
-                    .add("'")
-                    .style(Style::Bold),
-                t.span(),
-                "This was used as a type",
-            ),
             TypeError::NotSubtype(sub, sup) => Error::new(
                 file,
                 Doc::start("Type error: could not match types '")
-                    .chain(sub.pretty(b).style(Style::None))
+                    .chain(sub.unbind().pretty(b).style(Style::None))
                     .add("' and '")
-                    .chain(sup.pretty(b).style(Style::None))
+                    .chain(sup.unbind().pretty(b).style(Style::None))
                     .add("'")
                     .style(Style::Bold),
                 sub.span(),
                 Doc::start("this has type '")
-                    .chain(sub.pretty(b).style(Style::None))
+                    .chain(sub.unbind().pretty(b).style(Style::None))
                     .add("'")
                     .style(Style::Note),
             ),
             TypeError::NotSubtypeF(sub, sup) => Error::new(
                 file,
                 Doc::start("Type error: could not match types '")
-                    .chain(sub.pretty(b).style(Style::None))
+                    .chain(sub.unbind().pretty(b).style(Style::None))
                     .add("' and '")
-                    .chain(sup.pretty(b).style(Style::None))
+                    .chain(sup.unbind().pretty(b).style(Style::None))
                     .add("'")
                     .style(Style::Bold),
                 sup.span(),
                 Doc::start("this has type '")
-                    .chain(sup.pretty(b).style(Style::None))
+                    .chain(sup.unbind().pretty(b).style(Style::None))
                     .add("'")
                     .style(Style::Note),
             ),
@@ -100,7 +89,7 @@ impl TypeError {
                 Doc::start("Type error: no such field '")
                     .chain(s.pretty(b))
                     .add("' on struct type '")
-                    .chain(v.pretty(b).style(Style::None))
+                    .chain(v.unbind().pretty(b).style(Style::None))
                     .add("'")
                     .style(Style::Bold),
                 s.span(),
@@ -119,7 +108,7 @@ impl TypeError {
             TypeError::NoBranch(sub, sups) => {
                 let mut e = Error::no_label(
                     Doc::start("Type error: no branch matched the type '")
-                        .chain(sub.pretty(b).style(Style::None))
+                        .chain(sub.unbind().pretty(b).style(Style::None))
                         .add("'")
                         .style(Style::Bold),
                 );
@@ -128,7 +117,7 @@ impl TypeError {
                         file,
                         branch.span(),
                         Doc::start("This branch has type '")
-                            .chain(branch.pretty(b).style(Style::None))
+                            .chain(branch.unbind().pretty(b).style(Style::None))
                             .add("'")
                             .style(Style::Note)
                             .ansi_string(),
@@ -513,18 +502,8 @@ pub fn check<T: MainGroup>(
             let x = check(x, &Elab::Type, env)?;
             Ok(Elab::App(Box::new(f), Box::new(x)))
         }
-        (_, Elab::Type) => {
-            let t = synth(term, env)?;
-            let ty = t.get_type(env);
-            // Is it guaranteed to be a `typ`?
-            if ty.subtype_of(&Elab::Type, &mut env.clone()) {
-                Ok(t)
-            } else {
-                Err(TypeError::NotType(
-                    term.copy_span(ty.cloned(&mut env.clone())),
-                ))
-            }
-        }
+        // With singleton types, everything well-typed is a type
+        (_, Elab::Type) => synth(term, env),
         (_, _) => {
             let t = synth(term, env)?;
             let ty = t.get_type(env);
@@ -642,55 +621,14 @@ impl Elab {
         }
     }
 
-    /// *Could* it be a type?
-    fn is_type(&self) -> bool {
-        match self {
-            Elab::Type
-            | Elab::Unit
-            | Elab::Builtin(Builtin::Int)
-            | Elab::Tag(_)
-            | Elab::Top
-            | Elab::Bottom => true,
-            Elab::App(f, x) => f.is_type() && x.is_type(),
-            Elab::Fun(_) => true, // TODO more specific
-            Elab::Pair(x, y) => x.is_type() && y.is_type(),
-            Elab::StructInline(v) => v.iter().all(|(_, x)| x.is_type()),
-            Elab::Binder(_, _) => true,
-            Elab::Var(_, t) => t.is_type_type(),
-            Elab::Union(v) => v.iter().any(|x| x.is_type()),
-            _ => false,
-        }
-    }
-
-    /// Is this a subtype of Type?
-    fn is_type_type(&self) -> bool {
-        match self {
-            // () : () : ()
-            Elab::Unit => true,
-            Elab::Tag(_) => true,
-            Elab::Type => true,
-            Elab::Bottom => true,
-            // Might be
-            Elab::Top => true,
-            Elab::App(f, x) => f.is_type_type() && x.is_type_type(),
-            Elab::Pair(x, y) => x.is_type_type() && y.is_type_type(),
-            Elab::Fun(_) => true, // TODO more specific
-            Elab::Binder(_, t) => t.is_type_type(),
-            Elab::Var(_, t) => t.is_type_type(),
-            Elab::Union(v) => v.iter().any(|x| x.is_type_type()),
-            _ => false,
-        }
-    }
-
     /// <=; every `self` is also a `sup`
     /// Not that this is *the* way to check type equality
     pub fn subtype_of<T: MainGroup>(&self, sup: &Elab, env: &mut TempEnv<T>) -> bool {
-        if !self.is_type() {
-            return false;
-        }
         match (self, sup) {
             (Elab::Bottom, _) => true,
             (_, Elab::Top) => true,
+            (Elab::I32(n), Elab::I32(m)) => n == m,
+            (Elab::I32(_), Elab::Builtin(Builtin::Int)) => true,
             (Elab::StructInline(sub), Elab::StructInline(sup)) => {
                 // We DON'T do record subtyping, that's confusing and hard to compile efficiently
                 sup.iter().all(|(n, sup)| sub.iter().find(|(n2, _)| n2.raw() == n.raw()).map_or(false, |(_, sub)| sub.subtype_of(sup, env)))
@@ -781,8 +719,8 @@ impl Elab {
             }
             (Elab::Union(v), _) => v.iter().all(|x| x.subtype_of(sup, env)),
             (_, Elab::Union(v)) => v.iter().any(|x| self.subtype_of(x, env)),
-            // (Type, Type) <= Type
-            (_, Elab::Type) if self.is_type_type() => true,
+            // Due to singleton types, pretty much everything (except unions) can be its own type, so everything can be a type of types
+            (_, Elab::Type) => true,
             _ => false,
         }
     }

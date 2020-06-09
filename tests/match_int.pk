@@ -1,0 +1,7 @@
+# Can we match on int literals?
+f := fun
+  3 => 12
+  i:Int => i
+
+# (12, 4)
+main := (f 3, f 4)
