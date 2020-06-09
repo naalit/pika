@@ -94,7 +94,10 @@ impl Pretty for Term {
                 let until_body = Doc::start("fun")
                     .style(Style::Keyword)
                     .line()
-                    .chain(Doc::intersperse(args.iter().map(|x| x.pretty(ctx)), Doc::none().line()))
+                    .chain(Doc::intersperse(
+                        args.iter().map(|x| x.pretty(ctx)),
+                        Doc::none().line(),
+                    ))
                     .indent()
                     .line()
                     .add("=>");
@@ -108,25 +111,31 @@ impl Pretty for Term {
                     until_body.space().chain(body.pretty(ctx).indent()).group(),
                 )
                 .prec(Prec::Term)
-            },
-            Term::Fun(v) => pretty_block("fun", v.iter().map(|(args, body)| {
-                let until_body = Doc::start("fun")
-                    .style(Style::Keyword)
-                    .line()
-                    .chain(Doc::intersperse(args.iter().map(|x| x.pretty(ctx)), Doc::none().line()))
-                    .indent()
-                    .line()
-                    .add("=>");
-                Doc::either(
-                    until_body
-                        .clone()
+            }
+            Term::Fun(v) => pretty_block(
+                "fun",
+                v.iter().map(|(args, body)| {
+                    let until_body = Doc::start("fun")
+                        .style(Style::Keyword)
                         .line()
-                        .add("  ")
-                        .chain(body.pretty(ctx).indent())
-                        .group(),
-                    until_body.space().chain(body.pretty(ctx).indent()).group(),
-                )
-            })),
+                        .chain(Doc::intersperse(
+                            args.iter().map(|x| x.pretty(ctx)),
+                            Doc::none().line(),
+                        ))
+                        .indent()
+                        .line()
+                        .add("=>");
+                    Doc::either(
+                        until_body
+                            .clone()
+                            .line()
+                            .add("  ")
+                            .chain(body.pretty(ctx).indent())
+                            .group(),
+                        until_body.space().chain(body.pretty(ctx).indent()).group(),
+                    )
+                }),
+            ),
             Term::App(x, y) => x
                 .pretty(ctx)
                 .nest(Prec::App)
@@ -141,26 +150,32 @@ impl Pretty for Term {
                 .add(")")
                 .prec(Prec::Atom),
             Term::Tag(id) => id.pretty(ctx),
-            Term::Struct(_, v) => pretty_block("struct", v.iter().map(|(name, val)| {
-                name.pretty(ctx)
-                    .style(Style::Binder)
-                    .space()
-                    .add(":=")
-                    .line()
-                    .chain(val.pretty(ctx))
-                    .group()
-            })),
-            Term::Block(v) => pretty_block("do", v.iter().map(|s| match s {
-                Statement::Expr(e) => e.pretty(ctx),
-                Statement::Def(Def(name, val)) => name
-                    .pretty(ctx)
-                    .style(Style::Binder)
-                    .space()
-                    .add(":=")
-                    .line()
-                    .chain(val.pretty(ctx))
-                    .group(),
-            })),
+            Term::Struct(_, v) => pretty_block(
+                "struct",
+                v.iter().map(|(name, val)| {
+                    name.pretty(ctx)
+                        .style(Style::Binder)
+                        .space()
+                        .add(":=")
+                        .line()
+                        .chain(val.pretty(ctx))
+                        .group()
+                }),
+            ),
+            Term::Block(v) => pretty_block(
+                "do",
+                v.iter().map(|s| match s {
+                    Statement::Expr(e) => e.pretty(ctx),
+                    Statement::Def(Def(name, val)) => name
+                        .pretty(ctx)
+                        .style(Style::Binder)
+                        .space()
+                        .add(":=")
+                        .line()
+                        .chain(val.pretty(ctx))
+                        .group(),
+                }),
+            ),
             Term::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).chain(m.pretty(ctx)),
             Term::The(t, x) => Doc::start("the")
                 .style(Style::Keyword)

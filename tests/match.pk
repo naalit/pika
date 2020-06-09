@@ -2,10 +2,11 @@ tag True
 tag False
 Bool := True | False
 
-f : fun Bool => Int = fun
-  True => 3
-  False => 4
+f : fun Int Bool => Int = fun
+  (i:) True => i
+  (_:) False => 4
 
-b := fun x:Bool => f x
+b := fun x:Bool => f 23 x
 
-main := (f True, b False)
+# (8, 4)
+main := (f 8 True, b False)

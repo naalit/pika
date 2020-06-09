@@ -52,31 +52,25 @@ impl<'a> Into<String> for Doc<'a> {
     }
 }
 
-pub fn pretty_block<'a>(keyword: &str, v: impl IntoIterator<Item=Doc<'a>> + Clone) -> Doc<'a> {
+pub fn pretty_block<'a>(keyword: &str, v: impl IntoIterator<Item = Doc<'a>> + Clone) -> Doc<'a> {
     Doc::either(
-                Doc::start(keyword)
-                    .style(Style::Keyword)
-                    .line()
-                    .chain(Doc::intersperse(
-                        v.clone(),
-                        Doc::none().line(),
-                    ))
-                    .group()
-                    .indent(),
-                Doc::start(keyword)
-                    .style(Style::Keyword)
-                    .space()
-                    .add("{")
-                    .space()
-                    .chain(Doc::intersperse(
-                        v,
-                        Doc::start(";").space(),
-                    ))
-                    .space()
-                    .add("}")
-                    .group(),
-            )
-            .prec(Prec::Term)
+        Doc::start(keyword)
+            .style(Style::Keyword)
+            .line()
+            .chain(Doc::intersperse(v.clone(), Doc::none().line()))
+            .group()
+            .indent(),
+        Doc::start(keyword)
+            .style(Style::Keyword)
+            .space()
+            .add("{")
+            .space()
+            .chain(Doc::intersperse(v, Doc::start(";").space()))
+            .space()
+            .add("}")
+            .group(),
+    )
+    .prec(Prec::Term)
 }
 
 impl<'a> Doc<'a> {

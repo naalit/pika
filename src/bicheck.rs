@@ -317,13 +317,9 @@ pub fn check<T: MainGroup>(
 
         // As far as we know, it could be any type
         (Term::Binder(s, None), _) if typ.subtype_of(&Elab::Type, &mut env.clone()) => {
-            Ok(Elab::Binder(
-                // This is WRONG, because the *value* of the binder (which *is* a type but not the type of the binder) is the second parameter
-                // We don't know what that is, though, so we'll probably introduce a metavariable when we have them
-                // For now, we should call update_binders wherever we have the information, so this should dissapear
-                *s,
-                Box::new(typ.cloned(&mut env.clone())),
-            ))
+            // As far as we know, it could be anything, so it's `Top`
+            // We'll narrow it down with `update_binders()` later, if we can
+            Ok(Elab::Binder(*s, Box::new(Elab::Top)))
         }
 
         (Term::Fun(v), Elab::Fun(v2)) => {
@@ -649,7 +645,12 @@ impl Elab {
     /// *Could* it be a type?
     fn is_type(&self) -> bool {
         match self {
-            Elab::Type | Elab::Unit | Elab::Builtin(Builtin::Int) | Elab::Tag(_) => true,
+            Elab::Type
+            | Elab::Unit
+            | Elab::Builtin(Builtin::Int)
+            | Elab::Tag(_)
+            | Elab::Top
+            | Elab::Bottom => true,
             Elab::App(f, x) => f.is_type() && x.is_type(),
             Elab::Fun(_) => true, // TODO more specific
             Elab::Pair(x, y) => x.is_type() && y.is_type(),
@@ -668,6 +669,9 @@ impl Elab {
             Elab::Unit => true,
             Elab::Tag(_) => true,
             Elab::Type => true,
+            Elab::Bottom => true,
+            // Might be
+            Elab::Top => true,
             Elab::App(f, x) => f.is_type_type() && x.is_type_type(),
             Elab::Pair(x, y) => x.is_type_type() && y.is_type_type(),
             Elab::Fun(_) => true, // TODO more specific
@@ -685,6 +689,8 @@ impl Elab {
             return false;
         }
         match (self, sup) {
+            (Elab::Bottom, _) => true,
+            (_, Elab::Top) => true,
             (Elab::StructInline(sub), Elab::StructInline(sup)) => {
                 // We DON'T do record subtyping, that's confusing and hard to compile efficiently
                 sup.iter().all(|(n, sup)| sub.iter().find(|(n2, _)| n2.raw() == n.raw()).map_or(false, |(_, sub)| sub.subtype_of(sup, env)))

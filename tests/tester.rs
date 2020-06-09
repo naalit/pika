@@ -74,7 +74,7 @@ fn test_match() {
         .unwrap()
         .args(&["run", "tests/match.pk"])
         .assert()
-        .stdout("(3, 4)\n")
+        .stdout("(8, 4)\n")
         .success();
 }
 
