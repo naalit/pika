@@ -1,0 +1,11 @@
+tag True
+tag False
+Bool := True | False
+
+f : fun Bool => Int = fun
+  True => 3
+  False => 4
+
+b := fun x:Bool => f x
+
+main := (f True, b False)

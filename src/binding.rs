@@ -4,7 +4,7 @@ use crate::term::*;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
 pub struct TagId(NonZeroU32);
 impl TagId {
     pub fn num(self) -> u32 {
@@ -13,7 +13,7 @@ impl TagId {
 }
 
 /// Like a Sym, but it identifies a record (= struct, module)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
 pub struct StructId(NonZeroU32);
 impl StructId {
     pub fn num(self) -> u32 {
@@ -39,7 +39,7 @@ impl RawSym {
 ///
 /// It's the size of a u32 but is optimized for things like `Option<Sym>` (because it has a `NonZeroU32` inside)
 /// The 18 least significant bits represent the raw symbol (interned string), the top 14 the instance of that symbol
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
 pub struct Sym(NonZeroU32);
 impl Sym {
     fn from_parts(raw: RawSym, num: u32) -> Self {
@@ -198,7 +198,7 @@ pub enum ParseTree<'p> {
     I32(i32),                                   // 3
     Type,                                       // Type
     Builtin(Builtin),                           // Int
-    Fun(STree<'p>, STree<'p>),                  // fn a => x
+    Fun(Vec<(Vec<STree<'p>>, STree<'p>)>),      // fn { a b => x; c d => y }
     App(STree<'p>, STree<'p>),                  // f x
     Pair(STree<'p>, STree<'p>),                 // x, y
     Struct(Vec<(Spanned<&'p str>, STree<'p>)>), // struct { x := 3 }
@@ -278,13 +278,19 @@ impl<'p> STree<'p> {
                     let t = t.map(|t| t.resolve_names(env)).transpose()?;
                     Term::Binder(env.create(x), t)
                 }
-                Fun(arg, body) => {
-                    env.push();
-                    let arg = arg.resolve_names(env)?;
-                    let body = body.resolve_names(env)?;
-                    let f = Term::Fun(arg, body);
-                    env.pop();
-                    f
+                Fun(iv) => {
+                    let mut rv = Vec::new();
+                    for (args, body) in iv {
+                        env.push();
+                        let mut ra = Vec::new();
+                        for a in args {
+                            ra.push(a.resolve_names(env)?);
+                        }
+                        let body = body.resolve_names(env)?;
+                        rv.push((ra, body));
+                        env.pop();
+                    }
+                    Term::Fun(rv)
                 }
                 App(f, x) => Term::App(f.resolve_names(env)?, x.resolve_names(env)?),
                 Pair(x, y) => {

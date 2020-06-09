@@ -67,7 +67,7 @@ fn main() {
                         }
 
                         if let Err(e) = llvm.verify() {
-                            eprintln!("Verification error: {}", e);
+                            eprintln!("{}", Doc::start("Verification error:").style(Style::Bold).line().add(e.to_string()).ansi_string());
                             std::process::exit(1);
                         } else {
                             eprintln!("Build successful in {:?}", Instant::now() - start_time);

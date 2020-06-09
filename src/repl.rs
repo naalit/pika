@@ -103,7 +103,7 @@ impl Highlighter for ReplHelper {
 }
 
 /// Allows multiline inputs
-/// If the first line is empty or ends in `do`, `struct`, `=>`, or `=`, we'll allow more lines until a blank one
+/// If the first line is empty or ends in `do`, `struct`, `fun`, `=>`, or `=`, we'll allow more lines until a blank one
 impl Validator for ReplHelper {
     fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
         if ctx.input().trim().is_empty() {
@@ -114,6 +114,7 @@ impl Validator for ReplHelper {
                 || (!l.last().unwrap().contains('#')
                     && (ctx.input().trim().ends_with("do")
                         || ctx.input().trim().ends_with("struct")
+                        || ctx.input().trim().ends_with("fun")
                         || ctx.input().trim().ends_with("=>")
                         || ctx.input().trim().ends_with("=")))
             {

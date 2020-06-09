@@ -182,6 +182,12 @@ impl fmt::Display for Alternatives {
 
 impl Eq for Error {}
 impl Error {
+    pub fn no_label(
+        message: impl Into<String>,
+    ) -> Self {
+        Error(Diagnostic::error().with_message(message))
+    }
+
     /// Formats like this:
     /// ```text
     ///  error: <primary>

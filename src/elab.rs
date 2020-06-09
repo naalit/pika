@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::term::Builtin;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd)]
 pub enum ElabStmt {
     Def(Sym, Elab),
     Expr(Elab),
@@ -33,18 +33,18 @@ impl ElabStmt {
 
 /// The language of elaborated terms, which have enough type information to reconstruct types pretty easily
 /// For a term to get to here, it must be well typed
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd)]
 pub enum Elab {
     Unit,                           // ()
-    Binder(Sym, BElab),             // x: T
-    Var(Sym, BElab),                // (a, T) --> the T a
-    I32(i32),                       // 3
-    Type,                           // Type
-    Builtin(Builtin),               // Int
-    Fun(BElab, BElab, BElab),       // (a, x, T) --> fn a => the T x
-    App(BElab, BElab),              // f x
-    Pair(BElab, BElab),             // x, y
-    Tag(TagId),                     // tag X
+    Binder(Sym, BElab),              // x: T
+    Var(Sym, BElab),                    // (a, T) --> the T a
+    I32(i32),                           // 3
+    Type,                               // Type
+    Builtin(Builtin),                    // Int
+    Fun(Vec<(Vec<Elab>, Elab, Elab)>),// fun { a b => the T x; c d => the U y }
+    App(BElab, BElab),                      // f x
+    Pair(BElab, BElab),                 // x, y
+    Tag(TagId),                         // tag X
     StructIntern(StructId),         // struct { x := 3 }
     StructInline(Vec<(Sym, Elab)>), // struct { x := 3 }
     Project(BElab, RawSym),         // r.m
@@ -53,7 +53,33 @@ pub enum Elab {
 }
 type BElab = Box<Elab>;
 
+pub fn unionize_ty<T: MainGroup>(v: Vec<(Vec<Elab>, Elab, Elab)>, env: &TempEnv<T>) -> (Vec<Elab>, Elab) {
+    let len = v.first().unwrap().0.len();
+    let (args, ret) = v.into_iter().fold(((0..len).map(|_| Vec::new()).collect::<Vec<_>>(), Vec::new()), |(mut accf, mut acct), (from, to, _)| {
+        for (accf, from) in accf.iter_mut().zip(from) {
+            accf.push(from);
+        }
+        acct.push(to);
+        (accf, acct)
+    });
+    let args = args.into_iter().map(|v| Elab::Union(v).simplify_unions(env)).collect();
+    let ret = Elab::Union(ret).simplify_unions(env);
+    (args, ret)
+}
+
 impl Elab {
+    /// Are there any values that occupy both types `self` and `other`?
+    /// Bottom doesn't count, of course, since it's not a value
+    /// The same as "could a value of type `other` match `self`?" or vice versa
+    pub fn overlap<T: MainGroup>(&self, other: &Elab, env: &TempEnv<T>) -> bool {
+        match (self, other) {
+            (Elab::Union(v), Elab::Union(v2)) => v.iter().any(|x| v2.iter().any(|y| x.overlap(y, env))),
+            (Elab::Union(v), _) => v.iter().any(|x| x.overlap(other, env)),
+            (_, Elab::Union(v)) => v.iter().any(|x| self.overlap(x, env)),
+            _ => self.subtype_of(other, &mut env.clone()) || other.subtype_of(self, &mut env.clone()),
+        }
+    }
+
     /// Instead of calling `Elab::union()` and over again, if you construct a union with several parts,
     /// call this after to simplify it in one pass
     pub fn simplify_unions<T: MainGroup>(mut self, env: &TempEnv<T>) -> Self {
@@ -62,55 +88,41 @@ impl Elab {
                 0 => self,
                 1 => v.pop().unwrap(),
                 _ => {
-                    let end = v.pop().unwrap();
-                    self.union(end, &mut env.clone())
+                    let mut env = env.clone();
+                    let mut rv: Vec<Elab> = Vec::new();
+                    for val in v.split_off(0) {
+                        let mut i = 0;
+                        let mut should_add = true;
+                        while i < rv.len() {
+                            let x = &rv[i];
+
+                            // If `val` covers `x`'s case, we don't need `x`
+                            if x.subtype_of(&val, &mut env) {
+                                rv.remove(i);
+                            } else {
+                                i += 1;
+                                // but if `x` covers `val`'s case, we don't need `val`
+                                if val.subtype_of(x, &mut env) {
+                                    should_add = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if should_add {
+                            rv.push(val);
+                        }
+                    }
+
+                    rv.sort_by(|x, y| x.partial_cmp(y).unwrap());
+
+                    if rv.len() == 1 {
+                        rv.pop().unwrap()
+                    } else {
+                        Elab::Union(rv)
+                    }
                 }
             },
             _ => self,
-        }
-    }
-
-    /// Don't construct a `Elab::Union` directly, use this function to simplify nested unions
-    /// Clone the environment
-    pub fn union<T: MainGroup>(self, other: Elab, env: &mut TempEnv<T>) -> Elab {
-        let self_vec = match self {
-            Elab::Union(v) => v,
-            x => vec![x],
-        };
-        let other_vec = match other {
-            Elab::Union(v) => v,
-            x => vec![x],
-        };
-
-        let mut rv: Vec<Elab> = Vec::new();
-        let iter = self_vec.into_iter().chain(other_vec);
-        for val in iter {
-            let mut i = 0;
-            let mut should_add = true;
-            while i < rv.len() {
-                let x = &rv[i];
-
-                // If `val` covers `x`'s case, we don't need `x`
-                if x.subtype_of(&val, env) {
-                    rv.remove(i);
-                } else {
-                    i += 1;
-                    // but if `x` covers `val`'s case, we don't need `val`
-                    if val.subtype_of(x, env) {
-                        should_add = false;
-                        break;
-                    }
-                }
-            }
-            if should_add {
-                rv.push(val);
-            }
-        }
-
-        if rv.len() == 1 {
-            rv.pop().unwrap()
-        } else {
-            Elab::Union(rv)
         }
     }
 
@@ -120,7 +132,7 @@ impl Elab {
         match self {
             Type | Unit | I32(_) | Builtin(_) | Tag(_) => false,
             Var(x, ty) => *x == s || ty.uses(s, env),
-            Fun(a, b, c) => a.uses(s, env) || b.uses(s, env) || c.uses(s, env),
+            Fun(v) => v.iter().any(|(a, b, c)| b.uses(s, env) || c.uses(s, env) || a.iter().any(|x| x.uses(s, env))),
             // We don't beta-reduce here
             App(x, y) | Pair(x, y) => x.uses(s, env) || y.uses(s, env),
             Binder(_, x) => x.uses(s, env),
@@ -151,11 +163,11 @@ impl Elab {
         match self {
             Type | Unit | I32(_) | Builtin(_) | Tag(_) => (),
             Var(_, ty) => ty.normal(env),
-            Fun(a, b, c) => {
-                a.normal(env);
+            Fun(v) => v.iter_mut().for_each(|(a, b, t)| {
+                a.iter_mut().for_each(|a| a.normal(env));
                 b.normal(env);
-                c.normal(env);
-            }
+                t.normal(env);
+            }),
             App(x, y) | Pair(x, y) => {
                 x.normal(env);
                 y.normal(env);
@@ -202,11 +214,24 @@ impl Elab {
                 // We recursively WHNF the head
                 f.whnf(env);
                 match &mut **f {
-                    Elab::Fun(args, body, _) => {
-                        args.do_match(&x, env);
-                        body.whnf(env);
-                        *self = body.cloned(env);
-                        true
+                    Elab::Fun(v) => {
+                        let mut rf = Vec::new();
+                        // split_off(0) is like drain(..) but doesn't borrow v
+                        for (mut args, mut body, _) in v.split_off(0) {
+                            if x.get_type(env).subtype_of(args.first().unwrap(), env) {
+                                let arg = args.remove(0);
+                                arg.do_match(&x, env);
+                                if args.is_empty() {
+                                    body.whnf(env);
+                                    *self = body;
+                                    return true
+                                } else {
+                                    rf.push((args, body, Elab::Type));
+                                }
+                            }
+                        }
+                        *self = Elab::Fun(rf);
+                        false
                     }
                     // Still not a function
                     _ => false,
@@ -250,19 +275,39 @@ impl Elab {
             Builtin(B::Int) => Type,
             Tag(t) => Tag(*t),
             Var(_, t) => t.cloned(&mut env.clone()),
-            Fun(from, _, to) => {
+            Fun(v) => {
                 let mut env = env.clone();
-                Fun(
-                    Box::new(from.cloned(&mut env)),
-                    Box::new(to.cloned(&mut env)),
-                    Box::new(Type),
-                )
+                Fun(v.iter().map(|(from, _, to)|
+                    (
+                        from.iter().map(|x| x.cloned(&mut env)).collect(),
+                        to.cloned(&mut env),
+                        Type
+                    ),
+                ).collect())
             }
             App(f, x) => match f.get_type(env) {
-                Fun(from, mut to, _) => {
-                    from.do_match(x, env);
-                    to.whnf(env);
-                    *to
+                Elab::Fun(v) => {
+                    let mut rf = Vec::new();
+                    let tx = x.get_type(env);
+                    for (args, to, _) in v {
+                        if tx.overlap(args.first().unwrap(), env) {
+                            let mut env2 = env.clone();
+                            let mut args: Vec<_> = args.iter().map(|x| x.cloned(&mut env2)).collect();
+                            let arg = args.remove(0);
+                            arg.do_match(&x, env);
+
+                            if args.is_empty() {
+                                let mut to = to.cloned(&mut env2);
+                                to.whnf(env);
+                                return to
+                            } else {
+                                let to = to.cloned(&mut env2);
+                                rf.push((args, to, Elab::Type));
+                            }
+                        }
+                    }
+                    debug_assert_ne!(rf.len(), 0, "None of {} matched {}", f.get_type(env).pretty(&env.bindings()).ansi_string(), tx.pretty(&env.bindings()).ansi_string());
+                    Elab::Fun(rf)
                 }
                 f @ Tag(_) | f @ App(_, _) => App(Box::new(f), Box::new(x.get_type(env))),
                 _ => panic!("not a function type"),
@@ -307,7 +352,8 @@ impl Elab {
         use Elab::*;
         match (self, other) {
             (Binder(s, _), _) => {
-                let other = other.cloned(&mut env.clone());
+                let mut other = other.cloned(&mut env.clone());
+                other.whnf(env);
                 #[cfg(feature = "logging")]
                 {
                     println!("Setting {}{}", env.bindings().resolve(*s), s.num());
@@ -376,11 +422,12 @@ impl Elab {
                 Binder(fresh, Box::new(t.cloned(env)))
             }
             // All these allow bound variables, so we have to make sure they're done in order
-            Fun(f, x, t) => {
-                let f = Box::new(f.cloned(env));
-                let x = Box::new(x.cloned(env));
-                let t = Box::new(t.cloned(env));
-                Fun(f, x, t)
+            Fun(v) => {
+                Fun(v.iter().map(|(a, b, c)| (
+                    a.iter().map(|x|x.cloned(env)).collect(),
+                    b.cloned(env),
+                    c.cloned(env),
+                )).collect())
             }
             Pair(x, y) => {
                 let x = Box::new(x.cloned(env));
@@ -435,36 +482,6 @@ impl Elab {
     }
 }
 
-/// Handles prettifying curried functions
-/// Does not yet prettify multiple args with the same type (`fun x y: Int => ...` is `fun (x: Int) (y: Int) => ...`)
-fn pretty_fun<'a>(mut args: Vec<Doc<'a>>, body: &'a Elab, ctx: &Bindings) -> Doc<'a> {
-    match body {
-        Elab::Fun(arg, body, _) => {
-            args.push(arg.pretty(ctx).nest(Prec::Atom));
-            pretty_fun(args, body, ctx)
-        }
-        _ => {
-            let until_body = Doc::start("fun")
-                .style(Style::Keyword)
-                .line()
-                .chain(Doc::intersperse(args, Doc::none().line()))
-                .indent()
-                .line()
-                .add("=>");
-            Doc::either(
-                until_body
-                    .clone()
-                    .line()
-                    .add("  ")
-                    .chain(body.pretty(ctx).indent())
-                    .group(),
-                until_body.space().chain(body.pretty(ctx).indent()).group(),
-            )
-            .prec(Prec::Term)
-        }
-    }
-}
-
 impl Pretty for Elab {
     type Context = Bindings;
     fn pretty(&self, ctx: &Bindings) -> Doc {
@@ -481,7 +498,44 @@ impl Pretty for Elab {
             Elab::I32(i) => Doc::start(i).style(Style::Literal),
             Elab::Type => Doc::start("Type"),
             Elab::Builtin(b) => Doc::start(b),
-            Elab::Fun(x, y, _) => pretty_fun(vec![x.pretty(ctx).nest(Prec::Atom)], y, ctx),
+            Elab::Fun(v) if v.len() == 1 => {
+                let (args, body, _) = v.first().unwrap();
+                let until_body = Doc::start("fun")
+                    .style(Style::Keyword)
+                    .line()
+                    .chain(Doc::intersperse(args.iter().map(|x| x.pretty(ctx)), Doc::none().line()))
+                    .indent()
+                    .line()
+                    .add("=>");
+                Doc::either(
+                    until_body
+                        .clone()
+                        .line()
+                        .add("  ")
+                        .chain(body.pretty(ctx).indent())
+                        .group(),
+                    until_body.space().chain(body.pretty(ctx).indent()).group(),
+                )
+                .prec(Prec::Term)
+            },
+            Elab::Fun(v) => pretty_block("fun", v.iter().map(|(args, body, _)| {
+                let until_body = Doc::start("fun")
+                    .style(Style::Keyword)
+                    .line()
+                    .chain(Doc::intersperse(args.iter().map(|x| x.pretty(ctx)), Doc::none().line()))
+                    .indent()
+                    .line()
+                    .add("=>");
+                Doc::either(
+                    until_body
+                        .clone()
+                        .line()
+                        .add("  ")
+                        .chain(body.pretty(ctx).indent())
+                        .group(),
+                    until_body.space().chain(body.pretty(ctx).indent()).group(),
+                )
+            })),
             Elab::App(x, y) => x
                 .pretty(ctx)
                 .nest(Prec::App)
@@ -497,90 +551,26 @@ impl Pretty for Elab {
                 .prec(Prec::Atom),
             Elab::Tag(id) => id.pretty(ctx),
             Elab::StructIntern(i) => Doc::start("struct#").style(Style::Keyword).add(i.num()),
-            Elab::StructInline(v) => Doc::either(
-                Doc::start("struct")
-                    .style(Style::Keyword)
+            Elab::StructInline(v) => pretty_block("struct", v.iter().map(|(name, val)| {
+                name.pretty(ctx)
+                    .style(Style::Binder)
+                    .space()
+                    .add(":=")
                     .line()
-                    .chain(Doc::intersperse(
-                        v.iter().map(|(name, val)| {
-                            name.pretty(ctx)
-                                .style(Style::Binder)
-                                .space()
-                                .add(":=")
-                                .line()
-                                .chain(val.pretty(ctx))
-                                .group()
-                        }),
-                        Doc::none().line(),
-                    ))
+                    .chain(val.pretty(ctx))
                     .group()
-                    .indent(),
-                Doc::start("struct")
-                    .style(Style::Keyword)
+            })),
+            Elab::Block(v) => pretty_block("do", v.iter().map(|s| match s {
+                ElabStmt::Expr(e) => e.pretty(ctx),
+                ElabStmt::Def(name, val) => name
+                    .pretty(ctx)
+                    .style(Style::Binder)
                     .space()
-                    .add("{")
-                    .space()
-                    .chain(Doc::intersperse(
-                        v.iter().map(|(name, val)| {
-                            name.pretty(ctx)
-                                .style(Style::Binder)
-                                .space()
-                                .add(":=")
-                                .space()
-                                .chain(val.pretty(ctx))
-                                .group()
-                        }),
-                        Doc::start(";").space(),
-                    ))
-                    .space()
-                    .add("}")
-                    .group(),
-            )
-            .prec(Prec::Term),
-            Elab::Block(v) => Doc::either(
-                Doc::start("do")
-                    .style(Style::Keyword)
+                    .add(":=")
                     .line()
-                    .chain(Doc::intersperse(
-                        v.iter().map(|s| match s {
-                            ElabStmt::Expr(e) => e.pretty(ctx),
-                            ElabStmt::Def(name, val) => name
-                                .pretty(ctx)
-                                .style(Style::Binder)
-                                .space()
-                                .add(":=")
-                                .line()
-                                .chain(val.pretty(ctx))
-                                .group(),
-                        }),
-                        Doc::none().line(),
-                    ))
-                    .group()
-                    .indent(),
-                Doc::start("do")
-                    .style(Style::Keyword)
-                    .space()
-                    .add("{")
-                    .space()
-                    .chain(Doc::intersperse(
-                        v.iter().map(|s| match s {
-                            ElabStmt::Expr(e) => e.pretty(ctx),
-                            ElabStmt::Def(name, val) => name
-                                .pretty(ctx)
-                                .style(Style::Binder)
-                                .space()
-                                .add(":=")
-                                .space()
-                                .chain(val.pretty(ctx))
-                                .group(),
-                        }),
-                        Doc::start(";").space(),
-                    ))
-                    .space()
-                    .add("}")
+                    .chain(val.pretty(ctx))
                     .group(),
-            )
-            .prec(Prec::Term),
+            })),
             Elab::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).chain(m.pretty(ctx)),
             Elab::Union(v) => Doc::intersperse(
                 v.iter().map(|x| x.pretty(ctx)),

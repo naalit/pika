@@ -67,6 +67,14 @@ pub struct Lexer<'i> {
 }
 
 impl<'i> Lexer<'i> {
+    fn save(&self) -> (usize, std::iter::Peekable<std::str::Chars<'i>>) {
+        (self.pos, self.chars.clone())
+    }
+    fn load(&mut self, (pos, chars): (usize, std::iter::Peekable<std::str::Chars<'i>>)) {
+        self.pos = pos;
+        self.chars = chars;
+    }
+
     pub fn new(input: &'i str) -> Self {
         Lexer {
             chars: input.chars().peekable(),
@@ -94,6 +102,8 @@ impl<'i> Lexer<'i> {
     }
 
     fn handle_indent(&mut self) -> Option<Tok<'i>> {
+        let state = self.save();
+
         for i in self.indent.clone() {
             for _ in 0..i {
                 if self.peek() != Some(' ') {
@@ -118,6 +128,8 @@ impl<'i> Lexer<'i> {
 
                     self.indent.pop();
                     self.was_dedent = true;
+                    // Start the line over so we can tell if we have another dedent after this
+                    self.load(state);
                     return Some(Tok::Dedent);
                 } else {
                     self.next();

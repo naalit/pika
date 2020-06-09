@@ -16,6 +16,8 @@ pub enum TypeError {
     NotSubtype(Spanned<Elab>, Elab),
     /// `NotSubtype` with flipped span information
     NotSubtypeF(Elab, Spanned<Elab>),
+    /// No match branch matched
+    NoBranch(Elab, Vec<Spanned<Elab>>),
     /// Something that isn't a type was used as a type
     NotType(Spanned<Elab>),
     /// We couldn't find a type for the given variable
@@ -114,6 +116,26 @@ impl TypeError {
                 format!("first defined here"),
             )
             .with_label(file, y.span(), format!("redefined here")),
+            TypeError::NoBranch(sub, sups) => {
+                let mut e = Error::no_label(
+                    Doc::start("Type error: no branch matched the type '")
+                        .chain(sub.pretty(b).style(Style::None))
+                        .add("'")
+                        .style(Style::Bold),
+                );
+                for branch in sups {
+                    e = e.with_label(
+                        file,
+                        branch.span(),
+                        Doc::start("This branch has type '")
+                            .chain(branch.pretty(b).style(Style::None))
+                            .add("'")
+                            .style(Style::Note)
+                            .ansi_string(),
+                    );
+                }
+                e
+            }
         }
     }
 }
@@ -157,7 +179,10 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         Term::App(fi, x) => {
             let f = synth(fi, env)?;
             let x = match f.get_type(env) {
-                Elab::Fun(mut from, _, _) => {
+                Elab::Fun(v) => {
+                    // We check the argument against a union of first parameter types across all branches
+                    let from: Vec<_> = v.into_iter().map(|(mut x, _, _)| x.remove(0)).collect();
+                    let mut from = Elab::Union(from).simplify_unions(env);
                     from.whnf(env);
                     check(x, &from, env)?
                 }
@@ -193,16 +218,27 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
             };
             Ok(Elab::Project(Box::new(r), **m))
         }
-        Term::Fun(x, y) => {
-            // Make sure it's well typed before reducing it
-            let mut x = check(x, &Elab::Type, env)?;
-            x.whnf(env);
-            // Match it with itself to apply the types
-            x.match_types(&x, env);
-            let y = synth(y, env)?;
-            let mut to = y.get_type(env);
-            to.whnf(env);
-            Ok(Elab::Fun(Box::new(x), Box::new(y), Box::new(to)))
+        Term::Fun(iv) => {
+            let mut rv = Vec::new();
+            for (xs, y) in iv {
+                let mut rx = Vec::new();
+                for x in xs {
+                    // Make sure it's well typed before reducing it
+                    let mut x = check(x, &Elab::Type, env)?;
+                    x.whnf(env);
+                    // Match it with itself to apply the types
+                    x.match_types(&x, env);
+
+                    rx.push(x);
+                }
+
+                let y = synth(y, env)?;
+                let mut to = y.get_type(env);
+                to.whnf(env);
+
+                rv.push((rx, y, to))
+            }
+            Ok(Elab::Fun(rv))
         }
         Term::Block(v) => {
             let mut rv = Vec::new();
@@ -290,29 +326,186 @@ pub fn check<T: MainGroup>(
             ))
         }
 
-        (Term::Fun(x, b), Elab::Fun(y, to, _)) => {
-            // Make sure it's well typed before reducing it
-            let mut xr = check(x, &Elab::Type, env)?;
-            xr.whnf(env);
-            // Because patterns are types, match checking amounts to subtype checking
-            if y.subtype_of(&xr, &mut env.clone()) {
-                // Add bindings in the argument to the environment with types given by `y`
-                xr.match_types(y, env);
-                // Update the types of binders in `xr` based on the type `y`
-                xr.update_binders(y, env);
-
-                let mut to = to.cloned(&mut env.clone());
-                to.whnf(env);
-
-                let be = check(b, &to, env)?;
-
-                Ok(Elab::Fun(Box::new(xr), Box::new(be), Box::new(to)))
-            } else {
-                Err(TypeError::NotSubtypeF(
-                    y.cloned(&mut env.clone()),
-                    x.copy_span(xr),
-                ))
+        (Term::Fun(v), Elab::Fun(v2)) => {
+            // Start by typechecking all parameters of all branches and marking them as not used yet
+            let mut unused = Vec::new();
+            for (args, body) in v {
+                let mut ra = Vec::new();
+                for a in args {
+                    let mut e = check(a, &Elab::Type, env)?;
+                    e.whnf(env);
+                    ra.push((e, a.span()));
+                }
+                unused.push((ra, body));
             }
+
+            let mut env2 = env.clone();
+            let mut v2: Vec<_> = v2
+                .iter()
+                .map(|(x, y, z)| {
+                    (
+                        x.iter().map(|x| x.cloned(&mut env2)).collect::<Vec<_>>(),
+                        y.cloned(&mut env2),
+                        z.cloned(&mut env2),
+                    )
+                })
+                .collect();
+            let mut v = v.clone();
+
+            // If the value has more parameters than the type, we curry the result type into the function type
+            while v[0].0.len() > v2[0].0.len() {
+                v2 = v2
+                    .into_iter()
+                    .flat_map(|(mut arg, mut body, _)| {
+                        body.whnf(env);
+                        match body {
+                            Elab::Fun(v3) => v3
+                                .into_iter()
+                                .map(|(mut from, to, _)| {
+                                    arg.append(&mut from);
+                                    (
+                                        arg.iter().map(|x| x.cloned(&mut env2)).collect(),
+                                        to.cloned(&mut env2),
+                                        Elab::Type,
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                            _ => todo!("get a type error out of here somehow"),
+                        }
+                    })
+                    .collect();
+            }
+            // If the type has more parameters than the value
+            // So we add an extra parameter and apply it to the body
+            // `f : fun Int => Int = id Int` --> `f : fun Int => Int = fun x: => id Int x`
+            while v[0].0.len() < v2[0].0.len() {
+                for (arg, body) in &mut v {
+                    let extra_param = env.bindings_mut().create("_curry".to_string());
+                    arg.push(
+                        arg.last()
+                            .unwrap()
+                            .copy_span(Term::Binder(extra_param, None)),
+                    );
+                    *body = body.copy_span(Term::App(
+                        body.clone(),
+                        arg.last().unwrap().copy_span(Term::Var(extra_param)),
+                    ));
+                }
+            }
+            debug_assert_eq!(v[0].0.len(), v2[0].0.len());
+
+            // If the type has parameters with union types, flatten them into function branches so we can match more easily
+            let v2: Vec<(Vec<Elab>, Elab)> = v2
+                .into_iter()
+                .flat_map(|(from, to, _)| {
+                    from.into_iter()
+                        .map(|from| match from {
+                            Elab::Union(v) => v,
+                            from => vec![from],
+                        })
+                        .fold(vec![Vec::new()], |cases: Vec<Vec<Elab>>, arg_cases| {
+                            cases
+                                .into_iter()
+                                .flat_map(|x| {
+                                    arg_cases
+                                        .iter()
+                                        .map(|y| {
+                                            let mut x: Vec<_> =
+                                                x.iter().map(|x| x.cloned(&mut env2)).collect();
+                                            x.push(y.cloned(&mut env2));
+                                            x
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect()
+                        })
+                        .into_iter()
+                        .map(|x| (x, to.cloned(&mut env2)))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            // Only put the branches we need based on the type in `used`
+            let mut used: Vec<(Vec<(Elab, Span)>, Elab, Elab)> = Vec::new();
+            for (from, to) in v2 {
+                let mut errors: Vec<Vec<Spanned<Elab>>> =
+                    (0..from.len()).map(|_| Vec::new()).collect();
+
+                // Try the branches we already used first - they're higher priority
+                let mut passed = false;
+                for (args, _, _) in used.iter() {
+                    let mut all_subtype = true;
+                    // Go through the curried parameters and make sure each one matches
+                    for ((i, f), (a, span)) in from.iter().enumerate().zip(args) {
+                        if !f.subtype_of(&a, &mut env2) {
+                            errors[i].push(Spanned::new(a.cloned(&mut env2), *span));
+                            all_subtype = false;
+                            break;
+                        }
+                    }
+                    if all_subtype {
+                        passed = true;
+                        break;
+                    }
+                }
+                if passed {
+                    continue;
+                }
+
+                // Now try the unused branches
+                // We'll put any ones that didn't here and replace unused with it at the end
+                let mut unused_next = Vec::new();
+                let mut passed = false;
+                for (args, body) in unused {
+                    if passed {
+                        unused_next.push((args, body));
+                        continue;
+                    }
+                    let mut all_subtype = true;
+                    let mut ra = Vec::new();
+                    // Go through the curried parameters and make sure each one matches
+                    for ((i, f), (mut a, span)) in from.iter().enumerate().zip(args) {
+                        if !all_subtype {
+                        } else if !f.subtype_of(&a, &mut env2) {
+                            errors[i].push(Spanned::new(a.cloned(&mut env2), span));
+                            all_subtype = false;
+                        } else {
+                            // Add bindings in the argument to the environment with types given by `y`
+                            a.match_types(f, env);
+                            // Update the types of binders in `xr` based on the type `y`
+                            a.update_binders(f, env);
+                        }
+                        ra.push((a, span));
+                    }
+                    if all_subtype {
+                        passed = true;
+                        // If all the parameters matched, this branch of the type is covered, so no errors yet
+                        errors = Vec::new();
+
+                        let mut to = to.cloned(&mut env2);
+                        to.whnf(env);
+                        let body = check(body, &to, env)?;
+
+                        used.push((ra, body, to));
+                    } else {
+                        unused_next.push((ra, body));
+                    }
+                }
+                unused = unused_next;
+
+                for (i, v) in errors.into_iter().enumerate() {
+                    if !v.is_empty() {
+                        return Err(TypeError::NoBranch(from[i].cloned(&mut env2), v));
+                    }
+                }
+            }
+            // TODO give a warning if there's anything left in `unused`
+
+            Ok(Elab::Fun(
+                used.into_iter()
+                    .map(|(a, b, c)| (a.into_iter().map(|(x, _)| x).collect(), b, c))
+                    .collect(),
+            ))
         }
         (Term::App(f, x), Elab::App(tf, tx)) => {
             let f = check(f, tf, env)?;
@@ -378,7 +571,7 @@ impl Elab {
         }
     }
 
-    fn update_binders<T: MainGroup>(&mut self, other: &Elab, env: &mut TempEnv<T>) {
+    fn update_binders<T: MainGroup>(&mut self, other: &Elab, env: &TempEnv<T>) {
         use Elab::*;
         match (&mut *self, other) {
             // We don't want `x:y:T`, and we already called match_types()
@@ -458,7 +651,7 @@ impl Elab {
         match self {
             Elab::Type | Elab::Unit | Elab::Builtin(Builtin::Int) | Elab::Tag(_) => true,
             Elab::App(f, x) => f.is_type() && x.is_type(),
-            Elab::Fun(_, x, _) => x.is_type(),
+            Elab::Fun(_) => true, // TODO more specific
             Elab::Pair(x, y) => x.is_type() && y.is_type(),
             Elab::StructInline(v) => v.iter().all(|(_, x)| x.is_type()),
             Elab::Binder(_, _) => true,
@@ -477,7 +670,7 @@ impl Elab {
             Elab::Type => true,
             Elab::App(f, x) => f.is_type_type() && x.is_type_type(),
             Elab::Pair(x, y) => x.is_type_type() && y.is_type_type(),
-            Elab::Fun(_, x, _) => x.is_type_type(),
+            Elab::Fun(_) => true, // TODO more specific
             Elab::Binder(_, t) => t.is_type_type(),
             Elab::Var(_, t) => t.is_type_type(),
             Elab::Union(v) => v.iter().any(|x| x.is_type_type()),
@@ -523,20 +716,41 @@ impl Elab {
                 ax.subtype_of(bx, env) && ay.subtype_of(by, env)
             }
             // (Type -> (Type, Type)) <= ((Type, Type) -> Type)
-            (Elab::Fun(ax, ay, _), Elab::Fun(bx, by, _)) => {
-                if bx.subtype_of(ax, env) {
-                    // Matching in either direction works, we have to check alpha equality
-                    ax.match_types(bx, env);
+            (Elab::Fun(v_sub), Elab::Fun(v_sup)) => {
+                for (args_sup, to_sup, _) in v_sup.iter() {
+                    let mut found = false;
+                    for (args_sub, to_sub, _) in v_sub.iter() {
+                        let mut all_subtype = true;
+                        for (sup, sub) in args_sup.iter().zip(args_sub.iter()) {
+                            // Function parameters are contravariant
+                            if !sup.subtype_of(sub, env) {
+                                all_subtype = false;
+                                break;
+                            }
+                            // Matching in either direction works, we have to check alpha equality
+                            sub.match_types(sup, env);
+                        }
 
-                    // Since types are only in weak-head normal form, we have to reduce the spines to compare them
-                    let mut ay = ay.cloned(env);
-                    ay.whnf(env);
-                    let mut by = by.cloned(env);
-                    by.whnf(env);
-                    ay.subtype_of(&by, env)
-                } else {
-                    false
+                        if !all_subtype {
+                            break;
+                        }
+
+                        // Since types are only in weak-head normal form, we have to reduce the spines to compare them
+                        let mut to_sup = to_sup.cloned(env);
+                        to_sup.whnf(env);
+                        let mut to_sub = to_sub.cloned(env);
+                        to_sub.whnf(env);
+
+                        if to_sub.subtype_of(&to_sup, env) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return false;
+                    }
                 }
+                return true;
             }
             // Two variables that haven't been resolved yet, but refer to the same definition
             (Elab::Var(x, _), Elab::Var(y, _)) if y == x => true,

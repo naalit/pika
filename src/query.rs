@@ -1,5 +1,4 @@
 use crate::bicheck::*;
-use crate::binding::*;
 use crate::codegen::LowTy;
 use crate::codegen::*;
 use crate::common::*;
@@ -184,7 +183,7 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
     fn add_term(t: &Term, db: &impl MainGroup, v: &mut Vec<ScopeId>, scope: ScopeId) {
         match t {
             Term::Struct(s, _) => add_scope(db, v, ScopeId::Struct(*s, Box::new(scope))),
-            Term::App(a, b) | Term::Pair(a, b) | Term::Fun(a, b) | Term::The(a, b) => {
+            Term::App(a, b) | Term::Pair(a, b) | Term::The(a, b) => {
                 add_term(a, db, v, scope.clone());
                 add_term(b, db, v, scope);
             }
@@ -193,6 +192,10 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
                 Statement::Expr(x) | Statement::Def(Def(_, x)) => add_term(x, db, v, scope.clone()),
             }),
             Term::Union(t) => t.iter().for_each(|x| add_term(x, db, v, scope.clone())),
+            Term::Fun(t) => t.iter().for_each(|(args, body)| {
+                args.iter().for_each(|x| add_term(x, db, v, scope.clone()));
+                add_term(body, db, v, scope.clone());
+            }),
             Term::Unit
             | Term::Var(_)
             | Term::I32(_)

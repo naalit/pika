@@ -140,18 +140,31 @@ MultiBinder: Vec<Spanned<ParseTree<'input>>> = {
     },
 }
 
-SpanToo<T>: (T, Span) = {
-    <l:@L> <t:T> <r:@R> => (t, Span(l, r)),
+Branch: (Vec<Spanned<ParseTree<'input>>>, Spanned<ParseTree<'input>>) = {
+  // Standard single-line case
+  <MultiBinder> "=>" <Spanned<Term>>,
+  // Lots-of-parameters multi-line case used in pretty printing
+  // This one can't use the `a b c : T` shortcut, and it looks like:
+  // ```
+  // a := fun
+  //   (x:Int)
+  //   (y:Int)
+  //   (z:Int)
+  //     => x
+  //   (a:Int)
+  //   (b:Int)
+  //   (c:Int)
+  //     => b
+  //   z: => z
+  // ```
+  <(<Spanned<Atom>> "\n"+)+> INDENT "=>" <Spanned<Term>> "\n"+ DEDENT,
 }
 
 Fun: ParseTree<'input> = {
-    "fun" <a:MultiBinder> "=>" <b:SpanToo<Term>> => {
-        let (b, mut bs) = b;
-        a.into_iter().rfold(b, |b, a| {
-          bs.0 = a.span().1;
-          ParseTree::Fun(a, Spanned::new(b, bs))
-        })
-    },
+  // Single-line single-branch case
+  "fun" <Branch> => ParseTree::Fun(vec![<>]),
+
+  IBlock<"fun", Branch> => ParseTree::Fun(<>),
 }
 
 Atom: ParseTree<'input> = {

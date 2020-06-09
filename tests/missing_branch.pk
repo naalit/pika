@@ -1,0 +1,15 @@
+tag A
+tag B
+tag C
+AB := A | B
+ABC := A | B | C
+
+# This one's good (tested in `match.pk` with `Bool`s)
+f : fun AB => () = fun
+  A => ()
+  B => ()
+
+# This one is an error
+g : fun ABC => () = fun
+  A => ()
+  B => ()

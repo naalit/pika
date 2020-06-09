@@ -67,3 +67,22 @@ fn test_struct_env() {
         .stdout("(2, 3)\n")
         .success();
 }
+
+#[test]
+fn test_match() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/match.pk"])
+        .assert()
+        .stdout("(3, 4)\n")
+        .success();
+}
+
+#[test]
+fn test_missing_branch() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/missing_branch.pk"])
+        .assert()
+        .failure();
+}
