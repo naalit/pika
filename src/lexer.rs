@@ -18,13 +18,14 @@ pub enum LexError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tok<'i> {
-    Fun,           // "fun"
-    Type,          // "Type"
-    Int,           // "Int"
-    Struct,        // "struct"
-    Do,            // "do"
-    The,           // "the"
-    Tag,           // "tag"
+    Fun,    // "fun"
+    Type,   // "Type"
+    Int,    // "Int"
+    Struct, // "struct"
+    Do,     // "do"
+    The,    // "the"
+    Tag,    // "tag"
+
     Colon,         // ":"
     Semi,          // ";"
     Arrow,         // "=>"
@@ -39,6 +40,11 @@ pub enum Tok<'i> {
     Comma,         // ","
     Dot,           // "."
     Bar,           // "|"
+    Plus,          // "+"
+    Minus,         // "-"
+    Times,         // "*"
+    Div,           // "/"
+
     Indent,
     Dedent,
 }
@@ -249,6 +255,22 @@ impl<'i> Lexer<'i> {
                 self.next();
                 Tok::Bar
             }
+            '+' => {
+                self.next();
+                Tok::Plus
+            }
+            '-' => {
+                self.next();
+                Tok::Minus
+            }
+            '*' => {
+                self.next();
+                Tok::Times
+            }
+            '/' => {
+                self.next();
+                Tok::Div
+            }
             '=' => {
                 self.next();
                 if self.peek() == Some('>') {
@@ -358,6 +380,10 @@ impl<'i> fmt::Display for Tok<'i> {
             BraceClose => write!(f, "'}}'"),
             Colon => write!(f, "':'"),
             Bar => write!(f, "'|'"),
+            Plus => write!(f, "'+'"),
+            Minus => write!(f, "'-'"),
+            Times => write!(f, "'*'"),
+            Div => write!(f, "'/'"),
             Arrow => write!(f, "'=>'"),
             Equals => write!(f, "'='"),
 

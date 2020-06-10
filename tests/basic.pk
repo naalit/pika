@@ -14,3 +14,6 @@ two := suc one
 a := fun (t:) (x:t) => t
 b := fun (t:) (x:t) => x
 c : fun (t:Type) t => t = fun t x: => b (a t x) x
+
+# Can we do basic math?
+main := 3 + (4 / 2) #-> 5

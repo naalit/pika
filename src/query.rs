@@ -1,11 +1,10 @@
 use crate::bicheck::*;
-use crate::codegen::LowTy;
-use crate::codegen::*;
 use crate::common::*;
 use crate::elab::*;
 use crate::error::*;
 use crate::grammar::*;
 use crate::lexer::Lexer;
+use crate::low::*;
 use crate::term::*;
 use std::collections::HashMap;
 use std::sync::Arc;

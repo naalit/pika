@@ -258,6 +258,34 @@ impl Elab {
                         *self = Elab::Fun(rf);
                         false
                     }
+                    Elab::App(f, x2) => match &**f {
+                        // This needs to be a binary operator, since that's the only builtin that takes two arguments
+                        Elab::Builtin(b) => {
+                            // Since we need them as i32s, we need to WHNF the arguments as well
+                            x.whnf(env);
+                            x2.whnf(env);
+                            match (b, &**x2, &**x) {
+                                (Builtin::Add, Elab::I32(n), Elab::I32(m)) => {
+                                    *self = Elab::I32(n + m);
+                                    true
+                                }
+                                (Builtin::Sub, Elab::I32(n), Elab::I32(m)) => {
+                                    *self = Elab::I32(n - m);
+                                    true
+                                }
+                                (Builtin::Mul, Elab::I32(n), Elab::I32(m)) => {
+                                    *self = Elab::I32(n * m);
+                                    true
+                                }
+                                (Builtin::Div, Elab::I32(n), Elab::I32(m)) => {
+                                    *self = Elab::I32(n / m);
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    },
                     // Still not a function
                     _ => false,
                 }
@@ -291,15 +319,14 @@ impl Elab {
     }
 
     pub fn get_type<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Elab {
-        use crate::term::Builtin as B;
         use Elab::*;
         match self {
             Top => Type,
             Bottom => Type,
             Type => Type,
             Unit => Unit,
-            I32(i) => I32(*i), //Builtin(B::Int),
-            Builtin(B::Int) => Type,
+            I32(i) => I32(*i),
+            Builtin(b) => b.get_type(),
             Tag(t) => Tag(*t),
             Var(_, t) => t.cloned(&mut env.clone()),
             Fun(v) => {

@@ -1,15 +1,43 @@
 use crate::common::*;
+use crate::elab::Elab;
 use crate::error::Spanned;
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd)]
 pub enum Builtin {
     Int,
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+impl Builtin {
+    pub fn is_binop(&self) -> bool {
+        match self {
+            Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => true,
+            _ => false,
+        }
+    }
+
+    pub fn get_type(&self) -> Elab {
+        match self {
+            Builtin::Int => Elab::Type,
+            Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => Elab::Fun(vec![(
+                vec![Elab::Builtin(Builtin::Int), Elab::Builtin(Builtin::Int)],
+                Elab::Builtin(Builtin::Int),
+                Elab::Type,
+            )]),
+        }
+    }
 }
 
 impl std::fmt::Display for Builtin {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Builtin::Int => write!(f, "Int"),
+            Builtin::Add => write!(f, "(+)"),
+            Builtin::Sub => write!(f, "(-)"),
+            Builtin::Mul => write!(f, "(*)"),
+            Builtin::Div => write!(f, "(/)"),
         }
     }
 }

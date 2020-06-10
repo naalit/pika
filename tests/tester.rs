@@ -14,8 +14,9 @@ fn test_repl() {
 fn test_basic() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["build", "tests/basic.pk"])
+        .args(&["run", "tests/basic.pk"])
         .assert()
+        .stdout("5\n")
         .success();
 }
 

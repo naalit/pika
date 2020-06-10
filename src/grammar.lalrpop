@@ -31,6 +31,10 @@ extern {
         "|" => Tok::Bar,
         "," => Tok::Comma,
         "." => Tok::Dot,
+        "+" => Tok::Plus,
+        "-" => Tok::Minus,
+        "*" => Tok::Times,
+        "/" => Tok::Div,
         INT_LIT => Tok::LitInt(<i32>),
         NAME => Tok::Name(<&'input str>),
         INDENT => Tok::Indent,
@@ -117,7 +121,29 @@ Term: ParseTree<'input> = {
     Binder,
     // To allow e.g. (Some x:)
     <f:Spanned<App>> <x:Spanned<Binder>> => ParseTree::App(f, x),
+
+    BinOp<OpAdd>,
+    BinOp<OpSub>,
+    BinOp<OpMul>,
+    BinOp<OpDiv>,
+
     App,
+}
+
+OpAdd: Builtin = "+" => Builtin::Add;
+OpSub: Builtin = "-" => Builtin::Sub;
+OpMul: Builtin = "*" => Builtin::Mul;
+OpDiv: Builtin = "/" => Builtin::Div;
+
+BinOp<Op>: ParseTree<'input> = {
+  <lhs:Spanned<BinOp<Op>>> <op:Spanned<Op>> <rhs:Spanned<Atom>> => {
+    let op = op.copy_span(ParseTree::Builtin(*op));
+    ParseTree::App(lhs.copy_span(ParseTree::App(op, lhs.clone())), rhs)
+  },
+  <lhs:Spanned<Atom>> <op:Spanned<Op>> <rhs:Spanned<Atom>> => {
+    let op = op.copy_span(ParseTree::Builtin(*op));
+    ParseTree::App(lhs.copy_span(ParseTree::App(op, lhs.clone())), rhs)
+  },
 }
 
 App: ParseTree<'input> = {

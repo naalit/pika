@@ -5,6 +5,7 @@ mod common;
 mod elab;
 mod error;
 mod lexer;
+mod low;
 mod options;
 mod printing;
 mod query;
