@@ -139,10 +139,8 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         Term::Builtin(b) => Ok(Elab::Builtin(*b)),
         Term::Var(x) => {
             let ty = env
-                .db
-                .elab(env.scope.clone(), *x)
-                .map(|x| x.get_type(env))
-                .or_else(|| env.ty(*x).map(|x| x.cloned(&mut env.clone())))
+                .ty(*x)
+                .map(|x| x.cloned(&mut env.clone()))
                 .ok_or_else(|| TypeError::NotFound(t.copy_span(*x)))?;
             Ok(Elab::Var(*x, Box::new(ty)))
         }
@@ -175,7 +173,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                     from.whnf(env);
                     check(x, &from, env)?
                 }
-                Elab::Tag(_) | Elab::App(_, _) => synth(x, env)?,
+                Elab::Tag(_) | Elab::App(_, _) | Elab::Bottom => synth(x, env)?,
                 a => {
                     return Err(TypeError::NotFunction(
                         fi.copy_span(a.cloned(&mut env.clone())),

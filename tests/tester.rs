@@ -1,4 +1,5 @@
 use assert_cmd::*;
+use predicates::prelude::*;
 
 #[test]
 fn test_repl() {
@@ -7,7 +8,8 @@ fn test_repl() {
         .args(&["repl", "--color", "none"])
         .write_stdin("a := (fun i:Int => i) 12")
         .assert()
-        .stderr("--> a : Int = 12\n");
+        .stderr("--> a : Int = 12\n")
+        .success();
 }
 
 #[test]
@@ -96,4 +98,39 @@ fn test_missing_branch() {
         .args(&["build", "tests/missing_branch.pk"])
         .assert()
         .failure();
+}
+
+#[test]
+fn test_fib() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/fib.pk"])
+        .assert()
+        .stdout("610\n")
+        .success();
+}
+
+#[test]
+fn test_fib_intepret() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["repl"])
+        .write_stdin(
+            r#"fib := fun { 0 => 1; 1 => 1; i:Int => (fib (i - 1)) + (fib (i - 2)) }
+main := fib 14
+"#,
+        )
+        .assert()
+        .stderr(predicate::str::contains("610"))
+        .success();
+}
+
+#[test]
+fn test_unordered_struct() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/unordered_struct.pk"])
+        .assert()
+        .stdout("(6, 720)\n")
+        .success();
 }

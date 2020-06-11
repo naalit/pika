@@ -46,6 +46,7 @@ pub struct TempEnv<'a, T: MainGroup> {
     pub scope: ScopeId,
     pub vals: HashMap<Sym, Arc<Elab>>,
     pub tys: HashMap<Sym, Arc<Elab>>,
+    pub low_tys: HashMap<Sym, LowTy>,
 }
 impl<'a, T: MainGroup> Clone for TempEnv<'a, T> {
     fn clone(&self) -> TempEnv<'a, T> {
@@ -53,6 +54,7 @@ impl<'a, T: MainGroup> Clone for TempEnv<'a, T> {
             scope: self.scope.clone(),
             vals: self.vals.clone(),
             tys: self.tys.clone(),
+            low_tys: self.low_tys.clone(),
             bindings: self.bindings.clone(),
             db: self.db,
         }
@@ -98,21 +100,40 @@ impl<'a, T: MainGroup> TempEnv<'a, T> {
             .push(Arc::new((x, mono, ty)));
     }
 
-    /// Get a value from the environment
+    /// Get a value from the environment. Checks the database if we don't have it
     pub fn val(&self, s: Sym) -> Option<Arc<Elab>> {
-        self.vals.get(&s).cloned()
+        self.vals
+            .get(&s)
+            .cloned()
+            .or_else(|| self.db.elab(self.scope(), s))
     }
     /// Set a value in the environment. It should be in WHNF
     pub fn set_val(&mut self, k: Sym, v: Elab) {
         self.vals.insert(k, Arc::new(v));
     }
-    /// Get the type of a symbol from the environment
+    /// Get the type of a symbol from the environment. Checks the database if we don't have it
     pub fn ty(&self, s: Sym) -> Option<Arc<Elab>> {
-        self.tys.get(&s).cloned()
+        self.tys.get(&s).cloned().or_else(|| {
+            self.db
+                .elab(self.scope(), s)
+                .map(|x| Arc::new(x.get_type(&mut self.clone())))
+        })
     }
     /// Set the type of a symbol in the environment. It should be in WHNF
     pub fn set_ty(&mut self, k: Sym, v: Elab) {
         self.tys.insert(k, Arc::new(v));
+    }
+
+    /// Get the type of a symbol from the environment. Checks the database if we don't have it
+    pub fn low_ty(&self, s: Sym) -> Option<LowTy> {
+        self.low_tys
+            .get(&s)
+            .cloned()
+            .or_else(|| self.db.low_ty(self.scope(), s).ok())
+    }
+    /// Set the type of a symbol in the environment. It should be in WHNF
+    pub fn set_low_ty(&mut self, k: Sym, v: LowTy) {
+        self.low_tys.insert(k, v);
     }
 }
 
@@ -162,14 +183,13 @@ pub trait MainGroup: MainExt + salsa::Database {
     /// Gets a definition, type-checked and elaborated
     fn elab(&self, scope: ScopeId, s: Sym) -> Option<Arc<Elab>>;
 
-    /// Gets a definition in Weak-Head Normal Form
-    fn val(&self, scope: ScopeId, s: Sym) -> Option<Arc<Elab>>;
-
     /// If the given definition exists, get the name it would be given in code generation
     fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String>;
 
     /// Lower a definition to a LowIR function with no arguments
     fn low_fun(&self, scope: ScopeId, s: Sym) -> Result<LowFun, LowError>;
+
+    fn low_ty(&self, scope: ScopeId, s: Sym) -> Result<LowTy, LowError>;
 
     /// Lower a file to a LowIR module
     fn low_mod(&self, file: FileId) -> LowMod;
@@ -258,8 +278,20 @@ pub enum LowError {
     Polymorphic,
 }
 
+fn low_ty(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowTy, LowError> {
+    let elab = db.elab(scope.clone(), s).ok_or(LowError::NoElab)?;
+
+    let mut env = db.temp_env(scope.clone());
+    // We don't want the struct defs, since we'll inline it if there are any
+    env.tys = HashMap::new();
+    let ty = elab.low_ty_of(&mut env).ok_or(LowError::Polymorphic)?;
+    Ok(ty)
+}
+
 fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowError> {
     let elab = db.elab(scope.clone(), s).ok_or(LowError::NoElab)?;
+
+    let ret_ty = db.low_ty(scope.clone(), s)?;
 
     let name = db.mangle(scope.clone(), s).ok_or(LowError::NoElab)?;
 
@@ -267,7 +299,6 @@ fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowErr
     // We don't want the struct defs, since we'll inline it if there are any
     env.tys = HashMap::new();
     let body = elab.as_low(&mut env).ok_or(LowError::Polymorphic)?;
-    let ret_ty = body.get_type(&env);
 
     Ok(LowFun { name, ret_ty, body })
 }
@@ -341,17 +372,13 @@ fn term(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
     r
 }
 
-fn val(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
-    let x = db.elab(scope.clone(), s)?;
-    let mut env = db.temp_env(scope);
-    let mut x = x.cloned(&mut env.clone());
-    x.whnf(&mut env);
-    Some(Arc::new(x))
-}
-
 fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
     let term = db.term(scope.clone(), s)?;
-    let e = synth(&term, &mut db.temp_env(scope.clone()));
+    let mut env = db.temp_env(scope.clone());
+    // If it calls itself recursively, assume it could be anything.
+    // We'll run `simplify_unions` on it later, which should get rid of Bottom if there's a base case
+    env.set_ty(s, Elab::Bottom);
+    let e = synth(&term, &mut env);
     match e {
         Ok(e) => Some(Arc::new(e)),
         Err(e) => {
@@ -424,6 +451,7 @@ impl MainExt for MainDatabase {
             scope,
             vals: HashMap::new(),
             tys,
+            low_tys: HashMap::new(),
         }
     }
 

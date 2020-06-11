@@ -2,11 +2,12 @@
 //! Unfortunately, Inkwell is impossible to integrate with Salsa, for two reasons:
 //! - Everything uses lifetimes, and Salsa currently doesn't support those *at all*
 //! - Most things aren't thread safe, which Salsa requires
+//!
 //! So, in Salsa, we convert terms into LowIR, which is supposed to be very close to LLVM.
 //! We convert that into LLVM outside of Salsa, and hopefully that requires hardly any work - most should be done in Salsa.
 
 use crate::{common::*, low::*};
-pub use inkwell::context::Context;
+use inkwell::context::Context;
 use inkwell::{basic_block::BasicBlock, builder::Builder, module::Module, types::*, values::*};
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
@@ -158,6 +159,7 @@ impl LowTy {
     }
 }
 
+/// Gets the `undef` value of a given type
 fn undef_of(x: BasicTypeEnum) -> BasicValueEnum {
     match x {
         BasicTypeEnum::ArrayType(x) => x.get_undef().into(),
@@ -260,7 +262,13 @@ impl LowIR {
             LowIR::Local(var) => *ctx.locals.get(var).expect("Used nonexistent local"),
             LowIR::Global(_, _, name) => ctx
                 .builder
-                .build_call(module.get_function(name).unwrap(), &[], name)
+                .build_call(
+                    module
+                        .get_function(name)
+                        .unwrap_or_else(|| panic!("No {}", name)),
+                    &[],
+                    name,
+                )
                 .as_any_value_enum(),
             LowIR::TypedGlobal(ty, name) => {
                 let ty = LowTy::Struct(vec![ty.clone(), LowTy::Unit])
@@ -697,13 +705,22 @@ impl LowIR {
 }
 
 impl LowFun {
-    /// Add the function definition represented by this `LowFun` to the passed LLVM `Module`
-    fn codegen<'ctx>(&self, ctx: &mut CodegenCtx<'ctx>, module: &Module<'ctx>) {
-        let fun = module.add_function(
+    /// Add the function declaration represented by this `LowFun` to the passed LLVM `Module`
+    fn declare<'ctx>(&self, ctx: &CodegenCtx<'ctx>, module: &Module<'ctx>) -> FunctionValue<'ctx> {
+        module.add_function(
             &self.name,
             self.ret_ty.llvm_fn_type(&ctx.context, &[]),
             None,
-        );
+        )
+    }
+
+    /// Actually put the code in this `LowFun` into `fun`
+    fn codegen<'ctx>(
+        &self,
+        ctx: &mut CodegenCtx<'ctx>,
+        fun: FunctionValue<'ctx>,
+        module: &Module<'ctx>,
+    ) {
         let entry = ctx.context.append_basic_block(fun, "entry");
         ctx.builder.position_at_end(entry);
         let ret_val: BasicValueEnum = self.body.codegen(ctx, module).try_into().unwrap();
@@ -715,8 +732,10 @@ impl LowMod {
     /// Convert this `LowMod` into an LLVM `Module`
     pub fn codegen<'ctx>(&self, ctx: &mut CodegenCtx<'ctx>) -> Module<'ctx> {
         let module = ctx.context.create_module(&self.name);
-        for i in self.funs.iter() {
-            i.codegen(ctx, &module);
+        // Add all the declarations first so recursive and unordered functions work
+        let funs: Vec<_> = self.funs.iter().map(|x| x.declare(ctx, &module)).collect();
+        for (i, fun) in self.funs.iter().zip(funs) {
+            i.codegen(ctx, fun, &module);
         }
         module
     }

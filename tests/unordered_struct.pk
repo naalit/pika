@@ -1,0 +1,9 @@
+s := struct
+  a := fact 3 # 6
+  fact := fun
+    1 => 1
+    i:Int => i * (fact (i - 1))
+  b := fact a # 720
+
+# (6, 720)
+main := (s.a, s.b)

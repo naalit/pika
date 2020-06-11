@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::error::FILES;
+use crate::{elab::Elab, error::FILES};
 use regex::Regex;
 use rustyline::{
     completion::Completer,
@@ -49,7 +49,7 @@ fn match_regex<'l>(
     slices
         .into_iter()
         .flat_map(|(slice, old_style)| {
-            if old_style != Style::None && old_style != Style::Comment && !overrides {
+            if old_style == Style::Comment || (old_style != Style::None && !overrides) {
                 return vec![(slice, old_style)];
             }
             let mut slices = Vec::new();
@@ -113,14 +113,16 @@ impl Validator for ReplHelper {
             Ok(ValidationResult::Incomplete)
         } else {
             let l: Vec<_> = ctx.input().lines().collect();
-            if (l.first().unwrap().trim().is_empty() && !ctx.input().ends_with('\n'))
-                || (!l.last().unwrap().contains('#')
-                    && (ctx.input().trim().ends_with("do")
-                        || ctx.input().trim().ends_with("struct")
-                        || ctx.input().trim().ends_with("fun")
-                        || ctx.input().trim().ends_with("=>")
-                        || ctx.input().trim().ends_with("=")))
-            {
+            let first_line = l.first().unwrap().trim();
+            let is_multiline = first_line.is_empty()
+                || (!first_line.contains('#')
+                    && (first_line.ends_with("do")
+                        || first_line.ends_with("struct")
+                        || first_line.ends_with("fun")
+                        || first_line.ends_with("=>")
+                        || first_line.ends_with("=")
+                        || first_line.ends_with(":")));
+            if is_multiline && !ctx.input().ends_with('\n') {
                 Ok(ValidationResult::Incomplete)
             } else {
                 Ok(ValidationResult::Valid(None))
@@ -181,10 +183,8 @@ pub fn run_repl(options: &Options) {
 
                             let mut env = db.temp_env(ScopeId::File(file));
                             let ty = elab.get_type(&mut env);
-                            let mut val = db
-                                .val(ScopeId::File(file), **s)
-                                .unwrap()
-                                .cloned(&mut env.clone());
+                            env.set_val(**s, Elab::Var(**s, Box::new(ty.cloned(&mut env.clone()))));
+                            let mut val = elab.cloned(&mut env.clone());
                             val.normal(&mut env);
 
                             let b = db.bindings();

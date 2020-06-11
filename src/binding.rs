@@ -145,10 +145,16 @@ impl Bindings {
         let mut env = NEnv::new(self);
         t.into_iter()
             .map(|ParseDef(lhs, rhs)| {
+                let lhs = lhs.copy_span(env.create(&lhs));
+                (lhs, rhs)
+            })
+            // Define everything in the scope before resolving right hand sides
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(lhs, rhs)| {
                 let rhs = rhs
                     .resolve_names(&mut env)
                     .map_err(|x| NameError(x.copy_span(x.to_string())))?;
-                let lhs = lhs.copy_span(env.create(&lhs));
                 Ok(Def(lhs, rhs))
             })
             .collect()
@@ -303,10 +309,13 @@ impl<'p> STree<'p> {
                 Struct(iv) => {
                     env.push();
                     let mut rv = Vec::new();
+                    // Declare all the names first, then resolve names in rhs's
+                    let iv: Vec<_> = iv
+                        .into_iter()
+                        .map(|(name, val)| (name.copy_span(env.create(*name)), val))
+                        .collect();
                     for (name, val) in iv {
                         let val = val.resolve_names(env)?;
-                        // Still not recursive
-                        let name = name.copy_span(env.create(*name));
                         rv.push((name, val));
                     }
                     env.pop();

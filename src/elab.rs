@@ -32,6 +32,7 @@ impl ElabStmt {
 }
 
 /// The language of elaborated terms, which have enough type information to reconstruct types pretty easily
+///
 /// For a term to get to here, it must be well typed
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
 pub enum Elab {
@@ -158,7 +159,6 @@ impl Elab {
             Fun(v) => v.iter().any(|(a, b, c)| {
                 b.uses(s, env) || c.uses(s, env) || a.iter().any(|x| x.uses(s, env))
             }),
-            // We don't beta-reduce here
             App(x, y) | Pair(x, y) => x.uses(s, env) || y.uses(s, env),
             Binder(_, x) => x.uses(s, env),
             StructIntern(i) => {
@@ -226,11 +226,15 @@ impl Elab {
                 .collect::<Vec<_>>()
                 .into_iter()
                 .any(|x| x),
-            Elab::Var(x, _) => {
-                if let Some(t) = env.db.val(env.scope(), *x).or_else(|| env.val(*x)) {
-                    if &*t != self {
-                        *self = t.cloned(&mut env.clone());
-                        return self.whnf(env);
+            Elab::Var(x, ty) => {
+                if let Some(t) = env.val(*x) {
+                    match &*t {
+                        // Update to the new type, but don't re-look-up the var
+                        Elab::Var(y, new_ty) if x == y => **ty = new_ty.cloned(env),
+                        _ => {
+                            *self = t.cloned(env);
+                            return self.whnf(env);
+                        }
                     }
                 }
                 false
@@ -240,9 +244,10 @@ impl Elab {
                 f.whnf(env);
                 match &mut **f {
                     Elab::Fun(v) => {
+                        x.whnf(env);
                         let mut rf = Vec::new();
                         // split_off(0) is like drain(..) but doesn't borrow v
-                        for (mut args, mut body, _) in v.split_off(0) {
+                        for (mut args, mut body, to) in v.split_off(0) {
                             if x.get_type(env).subtype_of(args.first().unwrap(), env) {
                                 let arg = args.remove(0);
                                 arg.do_match(&x, env);
@@ -251,12 +256,12 @@ impl Elab {
                                     *self = body;
                                     return true;
                                 } else {
-                                    rf.push((args, body, Elab::Type));
+                                    rf.push((args, body, to));
                                 }
                             }
                         }
                         *self = Elab::Fun(rf);
-                        false
+                        true
                     }
                     Elab::App(f, x2) => match &**f {
                         // This needs to be a binary operator, since that's the only builtin that takes two arguments
@@ -318,6 +323,17 @@ impl Elab {
         }
     }
 
+    /// Like `get_type()`, but looks up actual types for recursive calls. Should only be used after type checking.
+    pub fn get_type_rec<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Elab {
+        match (self.get_type(env), self) {
+            (Elab::Bottom, Elab::Var(s, _)) => env.db.elab(env.scope(), *s).unwrap().get_type(env),
+            (x, _) => x,
+        }
+    }
+
+    /// Gets the "best" type of `self`.
+    ///
+    /// Note: It doesn't look things up in `env`, it only uses it for cloning.
     pub fn get_type<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Elab {
         use Elab::*;
         match self {
@@ -343,7 +359,7 @@ impl Elab {
                     .collect())
             }
             App(f, x) => match f.get_type(env) {
-                Elab::Fun(v) => {
+                Fun(v) => {
                     let mut rf = Vec::new();
                     let tx = x.get_type(env);
                     for (args, to, _) in v {
@@ -360,7 +376,7 @@ impl Elab {
                                 return to;
                             } else {
                                 let to = to.cloned(&mut env2);
-                                rf.push((args, to, Elab::Type));
+                                rf.push((args, to, Type));
                             }
                         }
                     }
@@ -371,9 +387,11 @@ impl Elab {
                         f.get_type(env).pretty(&env.bindings()).ansi_string(),
                         tx.pretty(&env.bindings()).ansi_string()
                     );
-                    Elab::Fun(rf)
+                    Fun(rf)
                 }
                 f @ Tag(_) | f @ App(_, _) => App(Box::new(f), Box::new(x.get_type(env))),
+                // This triggers with recursive functions
+                Bottom => Bottom,
                 _ => panic!("not a function type"),
             },
             Pair(x, y) => Pair(Box::new(x.get_type(env)), Box::new(y.get_type(env))),
@@ -420,7 +438,11 @@ impl Elab {
                 other.whnf(env);
                 #[cfg(feature = "logging")]
                 {
-                    println!("Setting {}{}", env.bindings().resolve(*s), s.num());
+                    println!(
+                        "Setting {} := {}",
+                        s.pretty(&env.bindings()).ansi_string(),
+                        other.pretty(&env.bindings()).ansi_string()
+                    );
                 }
                 env.set_val(*s, other);
             }
@@ -442,18 +464,18 @@ impl Elab {
         use Elab::*;
         match self {
             Var(s, t) => {
-                if let Some(x) = env.val(*s) {
-                    // Here's how this happens:
+                if let Some(x) = env.vals.get(s).cloned() {
+                    // Here's how this (`x == self`) happens:
                     // 1. We come up with a Elab using, say, x3. That Elab gets stored in Salsa's database.
                     // 2. We reset the Bindings, define x0, x1, and x2, and ask for the Elab again.
                     // 3. Salsa gives us the Elab from the database, which references x3. We call cloned() on it.
                     // 4. We see a bound variable, x3, and define a fresh variable to replace it with. The fresh variable is now also x3.
                     // 5. Now we want to replace x3 with x3, so we better not call cloned() recursively or we'll get stuck in a loop.
                     // Note, though, that this is expected behaviour and doesn't need fixing.
-                    if &*x == self {
-                        Var(*s, Box::new(t.cloned(env)))
-                    } else {
-                        x.cloned(env)
+                    match &*x {
+                        // We get and clone the new type, but we don't re-look-up the var
+                        Elab::Var(y, t) if s == y => Var(*s, Box::new(t.cloned(env))),
+                        _ => x.cloned(env),
                     }
                 } else {
                     // Free variable
@@ -575,7 +597,7 @@ impl Pretty for Elab {
                     .style(Style::Keyword)
                     .line()
                     .chain(Doc::intersperse(
-                        args.iter().map(|x| x.pretty(ctx)),
+                        args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
                         Doc::none().line(),
                     ))
                     .indent()
@@ -599,7 +621,7 @@ impl Pretty for Elab {
                         .style(Style::Keyword)
                         .line()
                         .chain(Doc::intersperse(
-                            args.iter().map(|x| x.pretty(ctx)),
+                            args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
                             Doc::none().line(),
                         ))
                         .indent()
