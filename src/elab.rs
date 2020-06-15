@@ -180,146 +180,156 @@ impl Elab {
     }
 
     /// Reduce to full normal form, essentially recursively calling whnf()
-    pub fn normal<T: MainGroup>(&mut self, env: &mut TempEnv<T>) {
+    pub fn normal<T: MainGroup>(self, env: &mut TempEnv<T>) -> Self {
         // Call whnf()
-        self.whnf(env);
+        let s = self.whnf(env);
         // And recurse
         use Elab::*;
-        match self {
-            Type | Unit | I32(_) | Builtin(_) | Tag(_) | Bottom | Top => (),
-            Var(_, ty) => ty.normal(env),
-            Fun(v) => v.iter_mut().for_each(|(a, b, t)| {
-                a.iter_mut().for_each(|a| a.normal(env));
-                b.normal(env);
-                t.normal(env);
-            }),
-            App(x, y) | Pair(x, y) => {
-                x.normal(env);
-                y.normal(env);
+        match s {
+            Var(s, mut ty) => {
+                // Reuse the Box
+                *ty = ty.normal(env);
+                Var(s, ty)
             }
-            Binder(_, x) => x.normal(env),
-            StructIntern(_) => (),
-            StructInline(v) => v.iter_mut().for_each(|(_, x)| x.normal(env)),
-            Project(r, _) => r.normal(env),
-            Block(v) => v.iter_mut().for_each(|x| match x {
-                ElabStmt::Def(_, e) => e.normal(env),
-                ElabStmt::Expr(e) => e.normal(env),
-            }),
-            Union(v) => v.iter_mut().for_each(|x| x.normal(env)),
+            Fun(v) => Fun(v
+                .into_iter()
+                .map(|(a, b, t)| {
+                    (
+                        a.into_iter().map(|a| a.normal(env)).collect(),
+                        b.normal(env),
+                        t.normal(env),
+                    )
+                })
+                .collect()),
+            App(mut x, mut y) => {
+                // Reuse Boxes
+                *x = x.normal(env);
+                *y = y.normal(env);
+                App(x, y)
+            }
+            Pair(mut x, mut y) => {
+                // Reuse Boxes
+                *x = x.normal(env);
+                *y = y.normal(env);
+                Pair(x, y)
+            }
+            Binder(s, mut x) => {
+                *x = x.normal(env);
+                Binder(s, x)
+            }
+            StructInline(v) => {
+                StructInline(v.into_iter().map(|(s, x)| (s, x.normal(env))).collect())
+            }
+            Project(mut r, m) => {
+                *r = r.normal(env);
+                Project(r, m)
+            }
+            Block(v) => Block(
+                v.into_iter()
+                    .map(|x| match x {
+                        ElabStmt::Def(s, e) => ElabStmt::Def(s, e.normal(env)),
+                        ElabStmt::Expr(e) => ElabStmt::Expr(e.normal(env)),
+                    })
+                    .collect(),
+            ),
+            Union(v) => Union(v.into_iter().map(|x| x.normal(env)).collect()).simplify_unions(env),
+            x => x,
         }
     }
 
-    /// Reduce to Weak-Head Normal Form, in place
-    /// Returns whether the top-level structure changed
+    /// Reduce to Weak-Head Normal Form
     ///
     /// This is like actual normal form, but we only perform one level of beta- or projection-reduction
     /// So we're guaranteed not to have `(\x.t)u` at the top level, but we could have e.g. `(\x.(\y.t)u)`
     /// This is the form we store types in, so if you need to compare types you'll need to call `whnf` recursively
-    pub fn whnf<T: MainGroup>(&mut self, env: &mut TempEnv<T>) -> bool {
+    pub fn whnf<T: MainGroup>(self, env: &mut TempEnv<T>) -> Self {
         match self {
             // Binders don't count as forms
-            Elab::Binder(_, t) => t.whnf(env),
+            Elab::Binder(s, mut t) => {
+                // Reuse the Box
+                *t = t.whnf(env);
+                Elab::Binder(s, t)
+            }
             // Unions don't either (no head)
-            Elab::Union(v) => v
-                .iter_mut()
-                .map(|x| x.whnf(env))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .any(|x| x),
+            // (TODO somehow reuse the Vec)
+            Elab::Union(v) => Elab::Union(v.into_iter().map(|x| x.whnf(env)).collect()),
             Elab::Var(x, ty) => {
-                if let Some(t) = env.val(*x) {
+                if let Some(t) = env.val(x) {
                     match &*t {
                         // Update to the new type, but don't re-look-up the var
-                        Elab::Var(y, new_ty) if x == y => **ty = new_ty.cloned(env),
-                        _ => {
-                            *self = t.cloned(env);
-                            return self.whnf(env);
+                        Elab::Var(y, new_ty) if x == *y => {
+                            Elab::Var(x, Box::new(new_ty.cloned(env)))
                         }
+                        _ => t.cloned(env).whnf(env),
                     }
+                } else {
+                    Elab::Var(x, ty)
                 }
-                false
             }
-            Elab::App(f, x) => {
+            Elab::App(mut f, mut x) => {
                 // We recursively WHNF the head
-                f.whnf(env);
-                match &mut **f {
+                *f = f.whnf(env);
+                match *f {
                     Elab::Fun(v) => {
-                        x.whnf(env);
+                        let x = x.whnf(env);
                         let mut rf = Vec::new();
-                        // split_off(0) is like drain(..) but doesn't borrow v
-                        for (mut args, mut body, to) in v.split_off(0) {
+                        for (mut args, body, to) in v {
                             if x.get_type(env).subtype_of(args.first().unwrap(), env) {
                                 let arg = args.remove(0);
                                 arg.do_match(&x, env);
                                 if args.is_empty() {
-                                    body.whnf(env);
-                                    *self = body;
-                                    return true;
+                                    return body.whnf(env);
                                 } else {
                                     rf.push((args, body, to));
                                 }
                             }
                         }
-                        *self = Elab::Fun(rf);
-                        true
+                        Elab::Fun(rf)
                     }
-                    Elab::App(f, x2) => match &**f {
+                    Elab::App(f2, mut x2) => match &*f2 {
                         // This needs to be a binary operator, since that's the only builtin that takes two arguments
                         Elab::Builtin(b) => {
                             // Since we need them as i32s, we need to WHNF the arguments as well
-                            x.whnf(env);
-                            x2.whnf(env);
-                            match (b, &**x2, &**x) {
-                                (Builtin::Add, Elab::I32(n), Elab::I32(m)) => {
-                                    *self = Elab::I32(n + m);
-                                    true
-                                }
-                                (Builtin::Sub, Elab::I32(n), Elab::I32(m)) => {
-                                    *self = Elab::I32(n - m);
-                                    true
-                                }
-                                (Builtin::Mul, Elab::I32(n), Elab::I32(m)) => {
-                                    *self = Elab::I32(n * m);
-                                    true
-                                }
-                                (Builtin::Div, Elab::I32(n), Elab::I32(m)) => {
-                                    *self = Elab::I32(n / m);
-                                    true
-                                }
-                                _ => false,
+                            // And we'd like to reuse these Boxes as well
+                            *x = x.whnf(env);
+                            *x2 = x2.whnf(env);
+                            match (b, &*x2, &*x) {
+                                (Builtin::Add, Elab::I32(n), Elab::I32(m)) => Elab::I32(n + m),
+                                (Builtin::Sub, Elab::I32(n), Elab::I32(m)) => Elab::I32(n - m),
+                                (Builtin::Mul, Elab::I32(n), Elab::I32(m)) => Elab::I32(n * m),
+                                (Builtin::Div, Elab::I32(n), Elab::I32(m)) => Elab::I32(n / m),
+                                _ => Elab::App(Box::new(Elab::App(f2, x2)), x),
                             }
                         }
-                        _ => false,
+                        _ => Elab::App(Box::new(Elab::App(f2, x2)), x),
                     },
                     // Still not a function
-                    _ => false,
+                    _ => Elab::App(f, x),
                 }
             }
             Elab::Project(r, m) => {
                 // We recursively WHNF the head
-                r.whnf(env);
-                match &**r {
+                let r = r.whnf(env);
+                match r {
                     Elab::StructIntern(i) => {
-                        let scope = ScopeId::Struct(*i, Box::new(env.scope()));
+                        let scope = ScopeId::Struct(i, Box::new(env.scope()));
                         for i in env.db.symbols(scope.clone()).iter() {
-                            if i.raw() == *m {
+                            if i.raw() == m {
                                 let val = env.db.elab(scope.clone(), **i).unwrap();
-                                *self = val.cloned(&mut env.clone());
-                                return true;
+                                return val.cloned(&mut env.clone());
                             }
                         }
                         panic!("not found")
                     }
                     Elab::StructInline(v) => {
-                        let (_, val) = v.iter().find(|(name, _)| name.raw() == *m).unwrap();
-                        *self = val.cloned(&mut env.clone());
-                        true
+                        let (_, val) = v.into_iter().find(|(name, _)| name.raw() == m).unwrap();
+                        return val;
                     }
                     // Still not a record
-                    _ => false,
+                    _ => Elab::Project(Box::new(r), m),
                 }
             }
-            _ => false,
+            x => x,
         }
     }
 
@@ -371,8 +381,7 @@ impl Elab {
                             arg.do_match(&x, env);
 
                             if args.is_empty() {
-                                let mut to = to.cloned(&mut env2);
-                                to.whnf(env);
+                                let to = to.cloned(&mut env2).whnf(env);
                                 return to;
                             } else {
                                 let to = to.cloned(&mut env2);
@@ -434,8 +443,7 @@ impl Elab {
         use Elab::*;
         match (self, other) {
             (Binder(s, _), _) => {
-                let mut other = other.cloned(&mut env.clone());
-                other.whnf(env);
+                let other = other.cloned(&mut env.clone()).whnf(env);
                 #[cfg(feature = "logging")]
                 {
                     println!(

@@ -169,8 +169,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                 Elab::Fun(v) => {
                     // We check the argument against a union of first parameter types across all branches
                     let from: Vec<_> = v.into_iter().map(|(mut x, _, _)| x.remove(0)).collect();
-                    let mut from = Elab::Union(from).simplify_unions(env);
-                    from.whnf(env);
+                    let from = Elab::Union(from).whnf(env).simplify_unions(env);
                     check(x, &from, env)?
                 }
                 Elab::Tag(_) | Elab::App(_, _) | Elab::Bottom => synth(x, env)?,
@@ -211,8 +210,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                 let mut rx = Vec::new();
                 for x in xs {
                     // Make sure it's well typed before reducing it
-                    let mut x = check(x, &Elab::Type, env)?;
-                    x.whnf(env);
+                    let x = check(x, &Elab::Type, env)?.whnf(env);
                     // Match it with itself to apply the types
                     x.match_types(&x, env);
 
@@ -220,8 +218,8 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                 }
 
                 let y = synth(y, env)?;
-                let mut to = y.get_type(env);
-                to.whnf(env);
+                // get_type() should always produce WHNF, so we don't need whnf() here
+                let to = y.get_type(env);
 
                 rv.push((rx, y, to))
             }
@@ -240,11 +238,11 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                         }
                     }
                     Statement::Def(Def(name, val)) => {
-                        let mut val = synth(val, env)?;
+                        let val = synth(val, env)?;
                         let ty = val.get_type(env);
                         env.set_ty(**name, ty);
                         // Blocks can be dependent!
-                        val.whnf(env);
+                        let val = val.whnf(env);
                         env.set_val(**name, val.cloned(&mut env.clone()));
                         rv.push(ElabStmt::Def(**name, val));
                     }
@@ -254,14 +252,12 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         }
         Term::The(ty, u) => {
             // Make sure it's well typed before reducing it
-            let mut ty = check(ty, &Elab::Type, env)?;
-            ty.whnf(env);
+            let ty = check(ty, &Elab::Type, env)?.whnf(env);
             let ue = check(u, &ty, env)?;
             Ok(ue)
         }
         Term::Binder(x, Some(ty)) => {
-            let mut ty = check(ty, &Elab::Type, env)?;
-            ty.whnf(env);
+            let ty = check(ty, &Elab::Type, env)?.whnf(env);
             Ok(Elab::Binder(*x, Box::new(ty)))
         }
         Term::Union(iv) => {
@@ -294,9 +290,7 @@ pub fn check<T: MainGroup>(
 
     match (&**term, typ) {
         (Term::Pair(x, y), Elab::Pair(tx, ty)) => {
-            let (mut tx, mut ty) = (tx.cloned(env), ty.cloned(env));
-            tx.whnf(env);
-            ty.whnf(env);
+            let (tx, ty) = (tx.cloned(env).whnf(env), ty.cloned(env).whnf(env));
             // TODO dependent pairs don't really work
             check(x, &tx, env)?;
             check(y, &ty, env)
@@ -315,8 +309,7 @@ pub fn check<T: MainGroup>(
             for (args, body) in v {
                 let mut ra = Vec::new();
                 for a in args {
-                    let mut e = check(a, &Elab::Type, env)?;
-                    e.whnf(env);
+                    let e = check(a, &Elab::Type, env)?.whnf(env);
                     ra.push((e, a.span()));
                 }
                 unused.push((ra, body));
@@ -339,8 +332,8 @@ pub fn check<T: MainGroup>(
             while v[0].0.len() > v2[0].0.len() {
                 v2 = v2
                     .into_iter()
-                    .flat_map(|(mut arg, mut body, _)| {
-                        body.whnf(env);
+                    .flat_map(|(mut arg, body, _)| {
+                        let body = body.whnf(env);
                         match body {
                             Elab::Fun(v3) => v3
                                 .into_iter()
@@ -465,8 +458,7 @@ pub fn check<T: MainGroup>(
                         // If all the parameters matched, this branch of the type is covered, so no errors yet
                         errors = Vec::new();
 
-                        let mut to = to.cloned(&mut env2);
-                        to.whnf(env);
+                        let to = to.cloned(&mut env2).whnf(env);
                         let body = check(body, &to, env)?;
 
                         used.push((ra, body, to));
@@ -678,10 +670,8 @@ impl Elab {
                         }
 
                         // Since types are only in weak-head normal form, we have to reduce the spines to compare them
-                        let mut to_sup = to_sup.cloned(env);
-                        to_sup.whnf(env);
-                        let mut to_sub = to_sub.cloned(env);
-                        to_sub.whnf(env);
+                        let to_sup = to_sup.cloned(env).whnf(env);
+                        let to_sub = to_sub.cloned(env).whnf(env);
 
                         if to_sub.subtype_of(&to_sup, env) {
                             found = true;

@@ -277,8 +277,7 @@ impl Elab {
 
                 for (args, _, _) in v {
                     for (pat, ty) in args.iter().zip(&arg_tys) {
-                        let mut pat = pat.cloned(&mut env);
-                        pat.whnf(&mut env);
+                        let pat = pat.cloned(&mut env).whnf(&mut env);
                         pat.compile_match(&mut env, &mut Vec::new(), &ty, LowIR::Unit);
                     }
                 }
@@ -328,12 +327,11 @@ impl Elab {
                         }
                     } else {
                         // Inline it
-                        let mut s = self.cloned(&mut env.clone());
-                        // Only recurse if it actually did something
-                        if s.whnf(env) {
-                            s.low_ty_of(env)?
-                        } else {
-                            return None;
+                        let s = self.cloned(&mut env.clone()).whnf(env);
+                        // Only recurse if it actually did something (it's not an App anymore)
+                        match s {
+                            Elab::App(_, _) => return None,
+                            s => s.low_ty_of(env)?,
                         }
                     }
                 }
@@ -612,8 +610,7 @@ impl Elab {
                             let did_match = args.iter().enumerate().fold(
                                 LowIR::BoolConst(true),
                                 |acc, (i, x)| {
-                                    let mut x = x.cloned(env);
-                                    x.whnf(env);
+                                    let x = x.cloned(env).whnf(env);
                                     let x = x.compile_match(
                                         env,
                                         &mut need_phi,
@@ -688,9 +685,9 @@ impl Elab {
             Elab::App(f, x) => match f.get_type_rec(env) {
                 Elab::Fun(v) => {
                     let (mut args, _) = crate::elab::unionize_ty(v, env);
-                    let mut from = args.remove(0);
+                    let from = args.remove(0);
                     // In case it has variables that already have values etc.
-                    from.normal(env);
+                    let from = from.normal(env);
 
                     // We borrow both the function and the argument
                     if let Some(f) = f.as_low(env) {
@@ -706,43 +703,43 @@ impl Elab {
                                 if let Some((mono, ty)) = env.mono(*name, x) {
                                     return Some(LowIR::TypedGlobal(ty, mono));
                                 } else {
-                                    let mut s = self.cloned(&mut env.clone());
-                                    // Only recurse if it actually did something
-                                    if s.whnf(env) {
-                                        let mut low = s.as_low(env)?;
-                                        let ty = s.low_ty_of(env)?;
-                                        match &mut low {
-                                            LowIR::Closure {
-                                                fun_name, upvalues, ..
-                                            } if upvalues.is_empty() => {
-                                                *fun_name = Doc::start("$mono$")
-                                                    .chain(name.pretty(&env.bindings()))
-                                                    .add("$")
-                                                    .chain(x.pretty(&env.bindings()))
-                                                    .raw_string();
-                                                env.set_mono(
-                                                    *name,
-                                                    x.cloned(&mut env.clone()),
-                                                    fun_name.to_string(),
-                                                    ty,
-                                                );
-                                            }
-                                            _ => (),
-                                        };
-                                        low
-                                    } else {
-                                        return None;
+                                    let s = self.cloned(&mut env.clone()).whnf(env);
+                                    // Only recurse if it actually did something (it's not an App anymore)
+                                    match s {
+                                        Elab::App(_, _) => return None,
+                                        s => {
+                                            let mut low = s.as_low(env)?;
+                                            let ty = s.low_ty_of(env)?;
+                                            match &mut low {
+                                                LowIR::Closure {
+                                                    fun_name, upvalues, ..
+                                                } if upvalues.is_empty() => {
+                                                    *fun_name = Doc::start("$mono$")
+                                                        .chain(name.pretty(&env.bindings()))
+                                                        .add("$")
+                                                        .chain(x.pretty(&env.bindings()))
+                                                        .raw_string();
+                                                    env.set_mono(
+                                                        *name,
+                                                        x.cloned(&mut env.clone()),
+                                                        fun_name.to_string(),
+                                                        ty,
+                                                    );
+                                                }
+                                                _ => (),
+                                            };
+                                            low
+                                        }
                                     }
                                 }
                             }
                             _ => {
                                 // Inline it
-                                let mut s = self.cloned(&mut env.clone());
-                                // Only recurse if it actually did something
-                                if s.whnf(env) {
-                                    s.as_low(env)?
-                                } else {
-                                    return None;
+                                let s = self.cloned(&mut env.clone()).whnf(env);
+                                // Only recurse if it actually did something (it's not an App anymore)
+                                match s {
+                                    Elab::App(_, _) => return None,
+                                    s => s.as_low(env)?,
                                 }
                             }
                         }

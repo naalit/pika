@@ -184,8 +184,7 @@ pub fn run_repl(options: &Options) {
                             let mut env = db.temp_env(ScopeId::File(file));
                             let ty = elab.get_type(&mut env);
                             env.set_val(**s, Elab::Var(**s, Box::new(ty.cloned(&mut env.clone()))));
-                            let mut val = elab.cloned(&mut env.clone());
-                            val.normal(&mut env);
+                            let val = elab.cloned(&mut env.clone()).normal(&mut env);
 
                             let b = db.bindings();
                             let b = b.read().unwrap();
