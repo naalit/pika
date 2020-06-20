@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 pub type LexResult<'i> = Result<(usize, Tok<'i>, usize), Spanned<LexError>>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LexError {
     Tabs,
     InvalidToken,
@@ -107,11 +107,14 @@ impl<'i> Lexer<'i> {
         &self.input[self.last..self.pos]
     }
 
-    fn handle_indent(&mut self) -> Option<Tok<'i>> {
+    fn handle_indent(&mut self) -> Option<Result<Tok<'i>, LexError>> {
         let state = self.save();
 
         for i in self.indent.clone() {
             for _ in 0..i {
+                if self.peek() == Some('\t') {
+                    return Some(Err(LexError::Tabs));
+                }
                 if self.peek() != Some(' ') {
                     // If the line is blank, we don't care. Skip it and do the next one.
                     if self.peek() == Some('\n') {
@@ -136,7 +139,7 @@ impl<'i> Lexer<'i> {
                     self.was_dedent = true;
                     // Start the line over so we can tell if we have another dedent after this
                     self.load(state);
-                    return Some(Tok::Dedent);
+                    return Some(Ok(Tok::Dedent));
                 } else {
                     self.next();
                 }
@@ -151,7 +154,11 @@ impl<'i> Lexer<'i> {
                 self.next();
                 *self.indent.last_mut().unwrap() += 1;
             }
-            return Some(Tok::Indent);
+            return Some(Ok(Tok::Indent));
+        }
+
+        if self.peek() == Some('\t') {
+            return Some(Err(LexError::Tabs));
         }
 
         None
@@ -315,8 +322,10 @@ impl<'i> std::iter::Iterator for Lexer<'i> {
         self.last = self.pos;
 
         if self.was_newline {
-            if let Some(r) = self.handle_indent() {
-                return Some(Ok((self.last, r, self.pos)));
+            match self.handle_indent() {
+                Some(Ok(r)) => return Some(Ok((self.last, r, self.pos))),
+                Some(Err(e)) => return Some(Err(Spanned::new(e, Span(self.last, self.pos)))),
+                None => (),
             }
         }
 
@@ -327,16 +336,20 @@ impl<'i> std::iter::Iterator for Lexer<'i> {
             return None;
         } else {
             let tok = self.next_tok();
+            // Suppress a newline before an indent token, to make the grammar simpler
             if tok.as_ref().map_or(false, |x| x.1 == Tok::Newline) {
                 let p = self.save();
                 let z = self.indent.clone();
-                if self.handle_indent().map_or(false, |x| x == Tok::Indent) {
-                    return Some(Ok((self.last, Tok::Indent, self.pos)));
-                } else {
-                    self.was_dedent = false;
-                    self.was_newline = true;
-                    self.load(p);
-                    self.indent = z;
+                match self.handle_indent() {
+                    Some(Ok(Tok::Indent)) => return Some(Ok((self.last, Tok::Indent, self.pos))),
+                    Some(Err(e)) => return Some(Err(Spanned::new(e, Span(self.last, self.pos)))),
+                    _ => {
+                        // It wasn't an indent or tab error, so reset to before we called handle_indent() and emit the newline
+                        self.was_dedent = false;
+                        self.was_newline = true;
+                        self.load(p);
+                        self.indent = z;
+                    }
                 }
             }
             Some(tok)
@@ -347,7 +360,7 @@ impl<'i> std::iter::Iterator for Lexer<'i> {
 impl LexError {
     pub fn to_string(&self) -> String {
         match self {
-            LexError::Tabs => "Found tab character, please use spaces".to_string(),
+            LexError::Tabs => "Found tab character, please use spaces for indentation".to_string(),
             LexError::InvalidToken => "Invalid token".to_string(),
             LexError::InvalidLiteral => "Invalid literal".to_string(),
             LexError::CarriageReturn => {
