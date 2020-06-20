@@ -46,17 +46,13 @@ fn main() {
                         .add("<input>".to_string(), buf.clone());
                     db.set_source(file, std::sync::Arc::new(buf));
 
-                    for i in db.symbols(ScopeId::File(file)).iter() {
-                        db.elab(ScopeId::File(file), **i);
-                    }
+                    // The primary query, which calls others
+                    let module = db.low_mod(file);
 
-                    // If we have type errors, don't start lowering
                     if db.has_errors() {
                         db.emit_errors();
                         std::process::exit(1)
                     }
-
-                    let module = db.low_mod(file);
 
                     if options.command == Command::Run || options.show_llvm {
                         // Generate LLVM

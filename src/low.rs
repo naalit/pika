@@ -192,8 +192,7 @@ impl Elab {
             }
             // We compile records in either "module mode" or "struct mode"
             // Inline structs (ones that weren't in the original code) are always compiled in struct mode
-            // Interned structs (ones that were in the original code) are compiled in struct mode if they use local variables
-            // Otherwise, they're compiled in module mode
+            // Interned structs (ones that were in the original code) are compiled in module mode
             // Currently, structs compiled in "struct mode" have ordered definitions and don't allow recursion
             Elab::StructInline(iv) => {
                 let mut rv = Vec::new();
@@ -209,10 +208,10 @@ impl Elab {
             Elab::StructIntern(id) => {
                 let scope = ScopeId::Struct(*id, Box::new(env.scope()));
 
-                if env.tys.keys().any(|t| self.uses(*t, env)) {
-                    // Uses local variables, so we can't make its members globals
-                    return scope.inline(env.db).low_ty_of(env);
-                }
+                debug_assert!(
+                    !env.low_tys.keys().any(|t| self.uses(*t, env)),
+                    "Typechecker failed to inline capturing struct"
+                );
 
                 // Compile it in "module mode": all members are global functions, like top-level definitions
                 let mut rv = Vec::new();
@@ -414,8 +413,7 @@ impl Elab {
             }
             // We compile records in either "module mode" or "struct mode"
             // Inline structs (ones that weren't in the original code) are always compiled in struct mode
-            // Interned structs (ones that were in the original code) are compiled in struct mode if they use local variables
-            // Otherwise, they're compiled in module mode
+            // Interned structs (ones that were in the original code) are compiled in module mode
             Elab::StructInline(iv) => {
                 let mut rv = Vec::new();
                 for (name, val) in iv {
@@ -431,10 +429,10 @@ impl Elab {
             Elab::StructIntern(id) => {
                 let scope = ScopeId::Struct(*id, Box::new(env.scope()));
 
-                if env.tys.keys().any(|t| self.uses(*t, env)) {
-                    // Uses local variables, so we can't make its members globals
-                    return scope.inline(env.db).as_low(env);
-                }
+                debug_assert!(
+                    !env.low_tys.keys().any(|t| self.uses(*t, env)),
+                    "Typechecker failed to inline capturing struct"
+                );
 
                 // Compile it in "module mode": all members are global functions, like top-level definitions
                 let mut rv = Vec::new();

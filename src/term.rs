@@ -76,6 +76,19 @@ pub enum Term {
     Union(Vec<STerm>),                            // x | y
 }
 impl Term {
+    pub fn uses(&self, s: Sym) -> bool {
+        match self {
+            Term::Var(x) if *x == s => true,
+            Term::Fun(v) => v
+                .iter()
+                .any(|(args, v)| args.iter().any(|x| x.uses(s)) || v.uses(s)),
+            Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.uses(s) || u.uses(s),
+            Term::Binder(_, Some(t)) | Term::Project(t, _) => t.uses(s),
+            Term::Struct(_, v) => v.iter().any(|(_, t)| t.uses(s)),
+            _ => false,
+        }
+    }
+
     pub fn traverse(&self, f: impl Fn(&Term) + Copy) {
         f(self);
         match self {

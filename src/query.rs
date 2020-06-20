@@ -145,8 +145,6 @@ pub trait MainExt {
 
     fn monos_mut(&self) -> RwLockWriteGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
 
-    fn set_struct_env<T: MainGroup>(&self, st: StructId, env: &TempEnv<T>);
-
     /// Return a new handle to the global bindings object held by the database
     fn bindings(&self) -> Arc<RwLock<Bindings>>;
 
@@ -157,10 +155,8 @@ pub trait MainExt {
     /// Create a temporary environment associated with the given scope
     fn temp_env<'a>(&'a self, scope: ScopeId) -> TempEnv<'a, Self::DB>;
 
-    /// Do whatever needs to be done after name resolution
-    ///
-    /// Currently, this is just adding structs to the struct table
-    fn process_defs(&self, file: FileId, v: &Vec<Def>);
+    /// Add a module to the struct table
+    fn add_mod(&self, id: StructId, file: FileId, defs: &Vec<(Spanned<Sym>, STerm)>);
 
     /// Get a handle to the struct table
     fn struct_defs(&self, file: FileId, id: StructId) -> Option<Arc<Vec<Def>>>;
@@ -255,6 +251,9 @@ fn mangle(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<String> {
 }
 
 fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
+    for s in db.symbols(ScopeId::File(file)).iter() {
+        db.elab(ScopeId::File(file), **s);
+    }
     let funs = db
         .child_scopes(file)
         .iter()
@@ -315,7 +314,7 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
 
             let parser = DefsParser::new();
             let s = db.source(file);
-            let r = Arc::new(match parser.parse(&s, Lexer::new(&s)) {
+            Arc::new(match parser.parse(&s, Lexer::new(&s)) {
                 Ok(x) => db
                     .bindings()
                     .write()
@@ -334,9 +333,7 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
                     db.error(Error::from_lalrpop(e, file));
                     Vec::new()
                 }
-            });
-            db.process_defs(file, &r);
-            r
+            })
         }
         ScopeId::Struct(id, _) => db
             .struct_defs(scope.file(), id)
@@ -389,13 +386,12 @@ fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
 }
 
 #[salsa::database(MainStorage)]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MainDatabase {
     runtime: salsa::Runtime<MainDatabase>,
     bindings: Arc<RwLock<Bindings>>,
     errors: RwLock<Vec<Error>>,
     scopes: RwLock<HashMap<(FileId, StructId), Arc<Vec<Def>>>>,
-    struct_envs: RwLock<HashMap<(FileId, StructId), HashMap<Sym, Arc<Elab>>>>,
     monos: RwLock<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>,
 }
 
@@ -434,23 +430,12 @@ impl MainExt for MainDatabase {
     }
 
     fn temp_env<'a>(&'a self, scope: ScopeId) -> TempEnv<'a, Self> {
-        let tys = match &scope {
-            ScopeId::Struct(st, _) => self
-                .struct_envs
-                .read()
-                .unwrap()
-                .get(&(scope.file(), *st))
-                .cloned()
-                .unwrap_or_else(HashMap::new),
-            ScopeId::File(_) => HashMap::new(),
-        };
-
         TempEnv {
             db: self,
             bindings: self.bindings(),
             scope,
             vals: HashMap::new(),
-            tys,
+            tys: HashMap::new(),
             low_tys: HashMap::new(),
         }
     }
@@ -463,32 +448,18 @@ impl MainExt for MainDatabase {
         self.errors.write().unwrap().push(error);
     }
 
-    fn process_defs(&self, file: FileId, defs: &Vec<Def>) {
-        // let mut scopes = self.scopes.write().unwrap();
-        let scopes = &self.scopes;
-        for Def(_, val) in defs {
-            val.traverse(|t| match t {
-                Term::Struct(id, v) => {
-                    let v = v
-                        .iter()
-                        .map(|(name, val)| Def(name.clone(), val.clone()))
-                        .collect();
-                    scopes.write().unwrap().insert((file, *id), Arc::new(v));
-                }
-                _ => (),
-            })
-        }
+    fn add_mod(&self, id: StructId, file: FileId, defs: &Vec<(Spanned<Sym>, STerm)>) {
+        let defs = defs
+            .iter()
+            .map(|(name, val)| Def(name.clone(), val.clone()))
+            .collect();
+        self.scopes
+            .write()
+            .unwrap()
+            .insert((file, id), Arc::new(defs));
     }
 
     fn struct_defs(&self, file: FileId, id: StructId) -> Option<Arc<Vec<Def>>> {
         self.scopes.read().unwrap().get(&(file, id)).cloned()
-    }
-
-    fn set_struct_env<T: MainGroup>(&self, st: StructId, env: &TempEnv<T>) {
-        let file = env.scope.file();
-        self.struct_envs
-            .write()
-            .unwrap()
-            .insert((file, st), env.tys.clone());
     }
 }

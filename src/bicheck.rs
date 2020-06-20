@@ -153,15 +153,30 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
             let y = synth(y, env)?;
             Ok(Elab::Pair(Box::new(x), Box::new(y)))
         }
-        Term::Struct(id, _) => {
-            env.db.set_struct_env(*id, env);
-            let scope = ScopeId::Struct(*id, Box::new(env.scope()));
+        Term::Struct(id, iv) => {
+            if env.tys.keys().any(|k| t.uses(*k)) {
+                // If it captures local variables, we compile in "struct mode"
+                let mut rv = Vec::new();
+                for (k, v) in iv {
+                    let v = synth(v, env)?;
+                    let t = v.get_type(env);
+                    env.set_ty(**k, t);
+                    rv.push((**k, v));
+                }
 
-            for sym in env.db.symbols(scope.clone()).iter() {
-                env.db.elab(scope.clone(), **sym);
+                Ok(Elab::StructInline(rv))
+            } else {
+                // Otherwise, compile in Salsa-enabled "module mode"
+                let scope = ScopeId::Struct(*id, Box::new(env.scope()));
+                env.db.add_mod(*id, env.scope.file(), iv);
+
+                // Record any type errors inside the module
+                for sym in env.db.symbols(scope.clone()).iter() {
+                    env.db.elab(scope.clone(), **sym);
+                }
+
+                Ok(Elab::StructIntern(*id))
             }
-
-            Ok(Elab::StructIntern(*id))
         }
         Term::App(fi, x) => {
             let f = synth(fi, env)?;
