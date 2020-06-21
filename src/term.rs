@@ -20,11 +20,11 @@ impl Builtin {
 
     pub fn get_type(&self) -> Elab {
         match self {
-            Builtin::Int => Elab::Type,
+            Builtin::Int => Elab::Type(0),
             Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => Elab::Fun(vec![(
                 vec![Elab::Builtin(Builtin::Int), Elab::Builtin(Builtin::Int)],
                 Elab::Builtin(Builtin::Int),
-                Elab::Type,
+                Elab::Type(0),
             )]),
         }
     }
@@ -63,7 +63,7 @@ pub enum Term {
     Binder(Sym, Option<STerm>),                   // x: T
     Var(Sym),                                     // a
     I32(i32),                                     // 3
-    Type,                                         // Type
+    Type(u32),                                    // Type0
     Builtin(Builtin),                             // Int
     Fun(Vec<(Vec<STerm>, STerm)>),                // fun { a b => x; c d => y }
     App(STerm, STerm),                            // f x
@@ -128,7 +128,8 @@ impl Pretty for Term {
             Term::Binder(x, None) => x.pretty(ctx).add(":").style(Style::Binder).prec(Prec::Term),
             Term::Var(s) => s.pretty(ctx),
             Term::I32(i) => Doc::start(i).style(Style::Literal),
-            Term::Type => Doc::start("Type"),
+            Term::Type(0) => Doc::start("Type"),
+            Term::Type(i) => Doc::start("Type").add(i),
             Term::Builtin(b) => Doc::start(b),
             Term::Fun(v) if v.len() == 1 => {
                 let (args, body) = v.first().unwrap();

@@ -9,13 +9,16 @@ use crate::term::*;
 pub enum TypeError {
     /// We couldn't synthesize a type for the given term
     Synth(STerm),
+    WrongArity(usize, usize, Elab, Span),
     /// We tried to apply the given term, but it's not a function
-    /// The `Elab` here is the type
-    NotFunction(Spanned<Elab>),
+    /// The `Elab` here is the type, the `Term` is the argument we tried to apply it to
+    NotFunction(Spanned<Elab>, Spanned<Term>),
     /// The first Elab needs to be a subtype of the second one, but it's not
     NotSubtype(Spanned<Elab>, Elab),
     /// `NotSubtype` with flipped span information
     NotSubtypeF(Elab, Spanned<Elab>),
+    /// `NotSubtype(_, TypeN)`
+    WrongUniverse(Spanned<Elab>, u32, u32),
     /// No match branch matched
     NoBranch(Elab, Vec<Spanned<Elab>>),
     /// We couldn't find a type for the given variable
@@ -38,14 +41,60 @@ impl TypeError {
                 t.span(),
                 "try adding an annotation here",
             ),
-            TypeError::NotFunction(t) => Error::new(
+            TypeError::NotFunction(f, x) => Error::new(
                 file,
                 Doc::start("Type error: not a function: '")
-                    .chain(t.unbind().pretty(b).style(Style::None))
+                    .chain(f.unbind().pretty(b).style(Style::None))
                     .add("'")
                     .style(Style::Bold),
-                t.span(),
-                "Not a function",
+                f.span(),
+                Doc::start("this was applied to '")
+                    .chain(x.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Note),
+            ),
+            TypeError::WrongArity(expected, found, ty, span) => Error::new(
+                file,
+                Doc::start("Type error: mismatched arity: expected function with ")
+                    .add(expected)
+                    .add(if expected == 1 {
+                        " parameter"
+                    } else {
+                        " parameters"
+                    })
+                    .add(", found function with ")
+                    .add(found)
+                    .add(if found == 1 {
+                        " parameter"
+                    } else {
+                        " parameters"
+                    })
+                    .style(Style::Bold),
+                span,
+                Doc::start("expected type '")
+                    .chain(ty.unbind().pretty(b).style(Style::None))
+                    .add("' with ")
+                    .add(expected)
+                    .add(if expected == 1 {
+                        " parameter"
+                    } else {
+                        " parameters"
+                    }),
+            ),
+            TypeError::WrongUniverse(sub, m, n) => Error::new(
+                file,
+                Doc::start("Type error: type '")
+                    .chain(sub.unbind().pretty(b).style(Style::None))
+                    .add("' is not in universe ")
+                    .add(n)
+                    .add(" and so is not a subtype of Type")
+                    .add(n)
+                    .style(Style::Bold),
+                sub.span(),
+                Doc::start("this has type '")
+                    .chain(sub.unbind().pretty(b).style(Style::None))
+                    .add("', which is in universe ")
+                    .add(m),
             ),
             TypeError::NotSubtype(sub, sup) => Error::new(
                 file,
@@ -135,7 +184,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
     println!("synth ({})", t.pretty(&*env.bindings()).ansi_string());
 
     match &**t {
-        Term::Type => Ok(Elab::Type),
+        Term::Type(i) => Ok(Elab::Type(*i)),
         Term::Builtin(b) => Ok(Elab::Builtin(*b)),
         Term::Var(x) => {
             let ty = env
@@ -156,6 +205,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         Term::Struct(id, iv) => {
             if env.tys.keys().any(|k| t.uses(*k)) {
                 // If it captures local variables, we compile in "struct mode"
+                // TODO a note in "not found" error messages here that structs that capture variables are ordered
                 let mut rv = Vec::new();
                 for (k, v) in iv {
                     let v = synth(v, env)?;
@@ -191,6 +241,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                 a => {
                     return Err(TypeError::NotFunction(
                         fi.copy_span(a.cloned(&mut env.clone())),
+                        x.clone(),
                     ))
                 }
             };
@@ -225,7 +276,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                 let mut rx = Vec::new();
                 for x in xs {
                     // Make sure it's well typed before reducing it
-                    let x = check(x, &Elab::Type, env)?.whnf(env);
+                    let x = synth(x, env)?.whnf(env);
                     // Match it with itself to apply the types
                     x.match_types(&x, env);
 
@@ -267,18 +318,19 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         }
         Term::The(ty, u) => {
             // Make sure it's well typed before reducing it
-            let ty = check(ty, &Elab::Type, env)?.whnf(env);
+            let ty = synth(ty, env)?.whnf(env);
             let ue = check(u, &ty, env)?;
             Ok(ue)
         }
         Term::Binder(x, Some(ty)) => {
-            let ty = check(ty, &Elab::Type, env)?.whnf(env);
+            let ty = synth(ty, env)?.whnf(env);
             Ok(Elab::Binder(*x, Box::new(ty)))
         }
+        Term::Binder(x, None) => Ok(Elab::Binder(*x, Box::new(Elab::Top))),
         Term::Union(iv) => {
             let mut rv = Vec::new();
             for val in iv {
-                let val = check(val, &Elab::Type, env)?;
+                let val = synth(val, env)?;
                 rv.push(val);
             }
             Ok(Elab::Union(rv).simplify_unions(env))
@@ -312,24 +364,13 @@ pub fn check<T: MainGroup>(
         }
 
         // As far as we know, it could be any type
-        (Term::Binder(s, None), _) if typ.subtype_of(&Elab::Type, &mut env.clone()) => {
+        (Term::Binder(s, None), _) /*if typ.subtype_of(&Elab::Type, &mut env.clone())*/ => {
             // As far as we know, it could be anything, so it's `Top`
             // We'll narrow it down with `update_binders()` later, if we can
             Ok(Elab::Binder(*s, Box::new(Elab::Top)))
         }
 
         (Term::Fun(v), Elab::Fun(v2)) => {
-            // Start by typechecking all parameters of all branches and marking them as not used yet
-            let mut unused = Vec::new();
-            for (args, body) in v {
-                let mut ra = Vec::new();
-                for a in args {
-                    let e = check(a, &Elab::Type, env)?.whnf(env);
-                    ra.push((e, a.span()));
-                }
-                unused.push((ra, body));
-            }
-
             let mut env2 = env.clone();
             let mut v2: Vec<_> = v2
                 .iter()
@@ -343,6 +384,8 @@ pub fn check<T: MainGroup>(
                 .collect();
             let mut v = v.clone();
 
+            // To propagate a type error out of several nested closures
+            let mut error: Option<TypeError> = None;
             // If the value has more parameters than the type, we curry the result type into the function type
             while v[0].0.len() > v2[0].0.len() {
                 v2 = v2
@@ -357,21 +400,38 @@ pub fn check<T: MainGroup>(
                                     (
                                         arg.iter().map(|x| x.cloned(&mut env2)).collect(),
                                         to.cloned(&mut env2),
-                                        Elab::Type,
+                                        to.get_type(&mut env2),
                                     )
                                 })
                                 .collect::<Vec<_>>(),
-                            _ => todo!("get a type error out of here somehow"),
+                            _ => {
+                                error = Some(TypeError::WrongArity(
+                                    arg.len(),
+                                    v[0].0.len(),
+                                    typ.cloned(&mut env2),
+                                    term.span(),
+                                ));
+                                Vec::new()
+                            }
                         }
                     })
                     .collect();
+                if error.is_some() {
+                    break;
+                }
             }
+            if let Some(e) = error {
+                return Err(e);
+            }
+
             // If the type has more parameters than the value
             // So we add an extra parameter and apply it to the body
             // `f : fun Int => Int = id Int` --> `f : fun Int => Int = fun x: => id Int x`
+            // We store the arity before this transformation for error messages
+            let initial_arity = v[0].0.len();
             while v[0].0.len() < v2[0].0.len() {
                 for (arg, body) in &mut v {
-                    let extra_param = env.bindings_mut().create("_curry".to_string());
+                    let extra_param = env.bindings_mut().create("$curry".to_string());
                     arg.push(
                         arg.last()
                             .unwrap()
@@ -415,6 +475,17 @@ pub fn check<T: MainGroup>(
                         .collect::<Vec<_>>()
                 })
                 .collect();
+
+            // Start by typechecking all parameters of all branches and marking them as not used yet
+            let mut unused = Vec::new();
+            for (args, body) in v {
+                let mut ra = Vec::new();
+                for a in args {
+                    let e = synth(&a, env)?.whnf(env);
+                    ra.push((e, a.span()));
+                }
+                unused.push((ra, body));
+            }
 
             // Only put the branches we need based on the type in `used`
             let mut used: Vec<(Vec<(Elab, Span)>, Elab, Elab)> = Vec::new();
@@ -474,7 +545,20 @@ pub fn check<T: MainGroup>(
                         errors = Vec::new();
 
                         let to = to.cloned(&mut env2).whnf(env);
-                        let body = check(body, &to, env)?;
+                        let body = match check(&body, &to, env) {
+                            Ok(x) => x,
+                            Err(TypeError::NotFunction(f, x)) => match &*x {
+                                // We added a parameter for currying, but it didn't work
+                                Term::Var(s) if env.bindings().resolve(*s) == "$curry" => return Err(TypeError::WrongArity(
+                                    from.len(),
+                                    initial_arity,
+                                    typ.cloned(&mut env2),
+                                    term.span(),
+                                )),
+                                _ => return Err(TypeError::NotFunction(f, x)),
+                            }
+                            Err(e) => return Err(e),
+                        };
 
                         used.push((ra, body, to));
                     } else {
@@ -502,13 +586,11 @@ pub fn check<T: MainGroup>(
             let x = check(x, tx, env)?;
             Ok(Elab::App(Box::new(f), Box::new(x)))
         }
-        (Term::App(f, x), Elab::Type) if f.tag_head(env) => {
-            let f = check(f, &Elab::Type, env)?;
-            let x = check(x, &Elab::Type, env)?;
+        (Term::App(f, x), Elab::Type(i)) if f.tag_head(env) => {
+            let f = check(f, &Elab::Type(*i), env)?;
+            let x = check(x, &Elab::Type(*i), env)?;
             Ok(Elab::App(Box::new(f), Box::new(x)))
         }
-        // With singleton types, everything well-typed is a type
-        (_, Elab::Type) => synth(term, env),
         (_, _) => {
             let t = synth(term, env)?;
             let ty = t.get_type(env);
@@ -516,10 +598,17 @@ pub fn check<T: MainGroup>(
             if ty.subtype_of(&typ, &mut env.clone()) {
                 Ok(t)
             } else {
-                Err(TypeError::NotSubtype(
-                    term.copy_span(ty.cloned(&mut env.clone())),
-                    typ.cloned(&mut env.clone()),
-                ))
+                match typ.unbind() {
+                    Elab::Type(i) => Err(TypeError::WrongUniverse(
+                        term.copy_span(ty.cloned(&mut env.clone())),
+                        ty.universe(env) - 1,
+                        *i,
+                    )),
+                    _ => Err(TypeError::NotSubtype(
+                        term.copy_span(ty.cloned(&mut env.clone())),
+                        typ.cloned(&mut env.clone()),
+                    )),
+                }
             }
         }
     }
@@ -722,8 +811,11 @@ impl Elab {
             }
             (Elab::Union(v), _) => v.iter().all(|x| x.subtype_of(sup, env)),
             (_, Elab::Union(v)) => v.iter().any(|x| self.subtype_of(x, env)),
+            // Higher universes contain lower ones
+            (Elab::Type(a), Elab::Type(b)) => b >= a,
             // Due to singleton types, pretty much everything (except unions) can be its own type, so everything can be a type of types
-            (_, Elab::Type) => true,
+            // So if it's in universe `N+1` or below, all it's values are in universe `N`, so it's a subtype of `TypeN`
+            (_, Elab::Type(i)) => self.universe(env) <= i + 1,
             _ => false,
         }
     }

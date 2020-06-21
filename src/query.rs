@@ -214,7 +214,7 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
             Term::Unit
             | Term::Var(_)
             | Term::I32(_)
-            | Term::Type
+            | Term::Type(_)
             | Term::Builtin(_)
             | Term::Binder(_, None)
             | Term::Tag(_) => (),

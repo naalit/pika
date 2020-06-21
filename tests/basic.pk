@@ -11,8 +11,8 @@ one := suc zero
 two := suc one
 
 # How good are we at propagating types?
-a := fun (t:) (x:t) => t
-b := fun (t:) (x:t) => x
+a := fun (t:Type) (x:t) => t
+b := fun (t:Type) (x:t) => x
 c : fun (t:Type) t => t = fun t x: => b (a t x) x
 
 # Can we do basic math?

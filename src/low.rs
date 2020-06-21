@@ -172,8 +172,6 @@ pub enum LowIR {
 impl Elab {
     pub fn low_ty_of<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Option<LowTy> {
         Some(match self {
-            // Type erasure
-            _ if self.get_type(env) == Elab::Type => LowTy::Unit,
             // We don't actually care what tag it is if it's not in a union
             Elab::Tag(_) => LowTy::Unit,
             Elab::Unit => LowTy::Unit,
@@ -373,6 +371,8 @@ impl Elab {
                     upvalues: vec![LowTy::Int(32)],
                 }),
             },
+            // Type erasure
+            Elab::Builtin(Builtin::Int) | Elab::Type(_) | Elab::Union(_) => LowTy::Unit,
             _ => panic!("ah"),
         })
     }
@@ -382,8 +382,6 @@ impl Elab {
     /// Most work should be done here and not in `LowIR::codegen()`, since we want Salsa memoization
     pub fn as_low<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Option<LowIR> {
         Some(match self {
-            // Type erasure
-            _ if self.get_type(env) == Elab::Type => LowIR::Unit,
             // We don't actually care what tag it is if it's not in a union
             Elab::Tag(_) => LowIR::Unit,
             Elab::Unit => LowIR::Unit,
@@ -804,6 +802,8 @@ impl Elab {
                     }),
                 }
             }
+            // Type erasure
+            Elab::Builtin(Builtin::Int) | Elab::Type(_) | Elab::Union(_) => LowIR::Unit,
             _ => panic!("{:?} not supported (ir)", self),
         })
     }
@@ -816,7 +816,7 @@ impl Elab {
             Elab::Var(_, _) => false,
             Elab::Pair(x, y) => x.is_concrete(env) && y.is_concrete(env),
             Elab::StructInline(v) => v.iter().all(|(_, x)| x.is_concrete(env)),
-            Elab::Type
+            Elab::Type(_)
             | Elab::Unit
             | Elab::Builtin(_)
             // Not a type, but concrete, I guess? this should be unreachable
@@ -881,7 +881,7 @@ impl Elab {
             },
             Elab::Union(v) => LowTy::Union(v.iter().map(|x| x.as_low_ty(env)).collect()),
             // Type erasure
-            Elab::Type => LowTy::Unit,
+            Elab::Type(_) => LowTy::Unit,
             // We don't actually care what tag it is if it's not in a union
             Elab::Tag(_) => LowTy::Unit,
             _ => panic!(
@@ -907,7 +907,6 @@ impl Elab {
             Elab::Binder(_, t) => t,
             t => t,
         };
-        // TODO check if union case matches - needed for unions as non-first parameter
         match (self, ty) {
             // TODO var case that checks both `env` and `need_phi`
             (Elab::Binder(x, t), _) => {
@@ -1018,7 +1017,7 @@ impl Elab {
             // Don't bind anything
             // Once patterns can fail, these will be more interesting
             // TODO that
-            (Elab::Type, _)
+            (Elab::Type(_), _)
             | (Elab::Builtin(_), _)
             | (Elab::Unit, _)
             | (Elab::Tag(_), _)

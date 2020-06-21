@@ -202,7 +202,7 @@ pub enum ParseTree<'p> {
     Binder(&'p str, Option<STree<'p>>),         // x: T
     Var(&'p str),                               // a
     I32(i32),                                   // 3
-    Type,                                       // Type
+    Type(u32),                                  // Type0
     Builtin(Builtin),                           // Int
     Fun(Vec<(Vec<STree<'p>>, STree<'p>)>),      // fn { a b => x; c d => y }
     App(STree<'p>, STree<'p>),                  // f x
@@ -274,7 +274,7 @@ impl<'p> STree<'p> {
         Ok(Spanned::new(
             match self.force_unwrap() {
                 Unit => Term::Unit,
-                Type => Term::Type,
+                Type(i) => Term::Type(i),
                 Builtin(b) => Term::Builtin(b),
                 I32(i) => Term::I32(i),
                 Var(x) => Term::Var(env.get(x).ok_or(Spanned::new(x, span))?),

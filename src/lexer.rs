@@ -9,22 +9,25 @@ pub type LexResult<'i> = Result<(usize, Tok<'i>, usize), Spanned<LexError>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LexError {
+    /// Tabs instead of spaces
     Tabs,
     InvalidToken,
-    InvalidLiteral,
+    InvalidLiteral(String),
+    /// `\r` without `\n`
     CarriageReturn,
+    /// An error from the parser - since `LexError` is our "user error" type for LALRPOP errors, we need to carry custom parser errors here too
     Other(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tok<'i> {
-    Fun,    // "fun"
-    Type,   // "Type"
-    Int,    // "Int"
-    Struct, // "struct"
-    Do,     // "do"
-    The,    // "the"
-    Tag,    // "tag"
+    Fun,       // "fun"
+    Type(u32), // "Type0"
+    Int,       // "Int"
+    Struct,    // "struct"
+    Do,        // "do"
+    The,       // "the"
+    Tag,       // "tag"
 
     Colon,         // ":"
     Semi,          // ";"
@@ -123,7 +126,7 @@ impl<'i> Lexer<'i> {
                     } else if self.peek() == Some('\r') {
                         self.next();
                         if self.next() != Some('\n') {
-                            todo!("give an error");
+                            return Some(Err(LexError::CarriageReturn));
                         }
                         return self.handle_indent();
                     } else if self.peek() == Some('#') {
@@ -191,20 +194,24 @@ impl<'i> Lexer<'i> {
             if c.map_or(false, |c| c.is_numeric()) {
                 self.next();
             } else {
-                break Tok::LitInt(
-                    i32::from_str(self.slice())
-                        .map_err(|_| Spanned::new(LexError::InvalidLiteral, self.span()))?,
-                );
+                break Tok::LitInt(i32::from_str(self.slice()).map_err(|e| {
+                    Spanned::new(LexError::InvalidLiteral(e.to_string()), self.span())
+                })?);
             }
         })
     }
 
     fn lex_name(&mut self) -> Tok<'i> {
         fn ident<'i>(s: &'i str) -> Tok<'i> {
+            if s.len() > 4 && &s[0..4] == "Type" {
+                if let Ok(i) = s[4..].parse() {
+                    return Tok::Type(i);
+                }
+            }
             match &*s {
                 "fun" => Tok::Fun,
                 "struct" => Tok::Struct,
-                "Type" => Tok::Type,
+                "Type" => Tok::Type(0),
                 "Int" => Tok::Int,
                 "the" => Tok::The,
                 "do" => Tok::Do,
@@ -362,7 +369,7 @@ impl LexError {
         match self {
             LexError::Tabs => "Found tab character, please use spaces for indentation".to_string(),
             LexError::InvalidToken => "Invalid token".to_string(),
-            LexError::InvalidLiteral => "Invalid literal".to_string(),
+            LexError::InvalidLiteral(e) => format!("Invalid literal: {}", e),
             LexError::CarriageReturn => {
                 "Expected newline '\\n' after carriage return '\\r'".to_string()
             }
@@ -378,7 +385,8 @@ impl<'i> fmt::Display for Tok<'i> {
         match self {
             Fun => write!(f, "'fun'"),
             Int => write!(f, "'Int'"),
-            Type => write!(f, "'Type'"),
+            Type(0) => write!(f, "'Type'"),
+            Type(i) => write!(f, "'Type{}'", i),
             Struct => write!(f, "'struct'"),
             The => write!(f, "'the'"),
             Do => write!(f, "'do'"),

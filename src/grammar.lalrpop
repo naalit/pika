@@ -13,7 +13,7 @@ extern {
 
     enum Tok<'input> {
         "fun" => Tok::Fun,
-        "Type" => Tok::Type,
+        TYPE => Tok::Type(<u32>),
         "Int" => Tok::Int,
         "struct" => Tok::Struct,
         "the" => Tok::The,
@@ -218,7 +218,7 @@ Atom: ParseTree<'input> = {
     "(" ")" => ParseTree::Unit,
     "(" <a:STerm> "," <b:STerm> ")" => ParseTree::Pair(a, b),
     Builtin => ParseTree::Builtin(<>),
-    "Type" => ParseTree::Type,
+    TYPE => ParseTree::Type(<>),
     Int => ParseTree::I32(<>),
     Var => ParseTree::Var(<>),
     "(" <Term> ")",

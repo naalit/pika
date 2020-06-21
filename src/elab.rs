@@ -40,7 +40,7 @@ pub enum Elab {
     Binder(Sym, BElab),                // x: T
     Var(Sym, BElab),                   // (a, T) --> the T a
     I32(i32),                          // 3
-    Type,                              // Type
+    Type(u32),                         // Type0
     Builtin(Builtin),                  // Int
     Fun(Vec<(Vec<Elab>, Elab, Elab)>), // fun { a b => the T x; c d => the U y }
     App(BElab, BElab),                 // f x
@@ -154,7 +154,7 @@ impl Elab {
     pub fn uses<T: MainGroup>(&self, s: Sym, env: &TempEnv<T>) -> bool {
         use Elab::*;
         match self {
-            Type | Unit | I32(_) | Builtin(_) | Tag(_) | Top | Bottom => false,
+            Type(_) | Unit | I32(_) | Builtin(_) | Tag(_) | Top | Bottom => false,
             Var(x, ty) => *x == s || ty.uses(s, env),
             Fun(v) => v.iter().any(|(a, b, c)| {
                 b.uses(s, env) || c.uses(s, env) || a.iter().any(|x| x.uses(s, env))
@@ -347,9 +347,9 @@ impl Elab {
     pub fn get_type<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Elab {
         use Elab::*;
         match self {
-            Top => Type,
-            Bottom => Type,
-            Type => Type,
+            Top => Top,
+            Bottom => Type(0),
+            Type(i) => Type(i + 1),
             Unit => Unit,
             I32(i) => I32(*i),
             Builtin(b) => b.get_type(),
@@ -363,7 +363,7 @@ impl Elab {
                         (
                             from.iter().map(|x| x.cloned(&mut env)).collect(),
                             to.cloned(&mut env),
-                            Type,
+                            to.get_type(&mut env),
                         )
                     })
                     .collect())
@@ -384,8 +384,9 @@ impl Elab {
                                 let to = to.cloned(&mut env2).whnf(env);
                                 return to;
                             } else {
+                                let t = to.get_type(&mut env2);
                                 let to = to.cloned(&mut env2);
-                                rf.push((args, to, Type));
+                                rf.push((args, to, t));
                             }
                         }
                     }
@@ -433,7 +434,60 @@ impl Elab {
                 ElabStmt::Expr(e) => e.get_type(env),
             },
             // Unions can only be types, and the type of a union doesn't mean that much
-            Union(_) => Type,
+            Union(_) => Type(self.universe(env)),
+        }
+    }
+
+    /// What's the lowest universe this is definitely in - `self : TypeN`?
+    pub fn universe<T: MainGroup>(&self, env: &TempEnv<T>) -> u32 {
+        match self {
+            Elab::Unit | Elab::I32(_) | Elab::Builtin(_) => 0,
+            Elab::Tag(_) => 0,
+            Elab::Bottom => 0,
+            // TODO get rid of top
+            Elab::Top => u32::MAX,
+            Elab::Type(i) => i + 1,
+            Elab::Binder(_, t) => t.universe(env),
+            Elab::Var(_, t) => t.universe(env).saturating_sub(1),
+            Elab::Pair(x, y) => x.universe(env).max(y.universe(env)),
+            Elab::App(_, _) => match self.get_type(&mut env.clone()) {
+                Elab::App(f, x) => f.universe(env).max(x.universe(env)).saturating_sub(1),
+                x => x.universe(env).saturating_sub(1),
+            },
+            Elab::Union(v) => v.iter().map(|x| x.universe(env)).max().unwrap_or(0),
+            Elab::StructInline(v) => v.iter().map(|(_, x)| x.universe(env)).max().unwrap_or(0),
+            Elab::StructIntern(id) => env
+                .db
+                .symbols(ScopeId::Struct(*id, Box::new(env.scope())))
+                .iter()
+                .map(|x| {
+                    env.db
+                        .elab(ScopeId::Struct(*id, Box::new(env.scope())), **x)
+                        .map_or(0, |x| x.universe(env))
+                })
+                .max()
+                .unwrap_or(0),
+            Elab::Fun(v) => v
+                .iter()
+                .map(|(_, _, t)| t.universe(env).saturating_sub(1))
+                .max()
+                .unwrap_or(0),
+            Elab::Project(r, m) => {
+                if let Elab::StructInline(v) = r.get_type(&mut env.clone()) {
+                    v.iter()
+                        .find(|(s, _)| s.raw() == *m)
+                        .unwrap()
+                        .1
+                        .universe(env)
+                        .saturating_sub(1)
+                } else {
+                    unreachable!()
+                }
+            }
+            Elab::Block(_) => self
+                .get_type(&mut env.clone())
+                .universe(env)
+                .saturating_sub(1),
         }
     }
 
@@ -493,7 +547,7 @@ impl Elab {
             Top => Top,
             Bottom => Bottom,
             Unit => Unit,
-            Type => Type,
+            Type(i) => Type(*i),
             I32(i) => I32(*i),
             Builtin(b) => Builtin(*b),
             Tag(t) => Tag(*t),
@@ -597,7 +651,8 @@ impl Pretty for Elab {
             Elab::Top => Doc::start("Any"),
             Elab::Var(s, _) => s.pretty(ctx),
             Elab::I32(i) => Doc::start(i).style(Style::Literal),
-            Elab::Type => Doc::start("Type"),
+            Elab::Type(0) => Doc::start("Type"),
+            Elab::Type(i) => Doc::start("Type").add(i),
             Elab::Builtin(b) => Doc::start(b),
             Elab::Fun(v) if v.len() == 1 => {
                 let (args, body, _) = v.first().unwrap();
