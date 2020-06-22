@@ -231,7 +231,8 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         Term::App(fi, x) => {
             let f = synth(fi, env)?;
             let x = match f.get_type(env) {
-                Elab::Fun(v) => {
+                Elab::Fun(cl, v) => {
+                    env.add_clos(&cl);
                     // We check the argument against a union of first parameter types across all branches
                     let from: Vec<_> = v.into_iter().map(|(mut x, _, _)| x.remove(0)).collect();
                     let from = Elab::Union(from).whnf(env).simplify_unions(env);
@@ -289,7 +290,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
 
                 rv.push((rx, y, to))
             }
-            Ok(Elab::Fun(rv))
+            Ok(Elab::Fun(env.clos(t), rv))
         }
         Term::Block(v) => {
             let mut rv = Vec::new();
@@ -370,7 +371,8 @@ pub fn check<T: MainGroup>(
             Ok(Elab::Binder(*s, Box::new(Elab::Top)))
         }
 
-        (Term::Fun(v), Elab::Fun(v2)) => {
+        (Term::Fun(v), Elab::Fun(cl, v2)) => {
+            env.add_clos(cl);
             let mut env2 = env.clone();
             let mut v2: Vec<_> = v2
                 .iter()
@@ -393,17 +395,20 @@ pub fn check<T: MainGroup>(
                     .flat_map(|(mut arg, body, _)| {
                         let body = body.whnf(env);
                         match body {
-                            Elab::Fun(v3) => v3
-                                .into_iter()
-                                .map(|(mut from, to, _)| {
-                                    arg.append(&mut from);
-                                    (
-                                        arg.iter().map(|x| x.cloned(&mut env2)).collect(),
-                                        to.cloned(&mut env2),
-                                        to.get_type(&mut env2),
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
+                            Elab::Fun(cl, v3) => {
+                                env.add_clos(&cl);
+                                v3
+                                    .into_iter()
+                                    .map(|(mut from, to, _)| {
+                                        arg.append(&mut from);
+                                        (
+                                            arg.iter().map(|x| x.cloned(&mut env2)).collect(),
+                                            to.cloned(&mut env2),
+                                            to.get_type(&mut env2),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                            }
                             _ => {
                                 error = Some(TypeError::WrongArity(
                                     arg.len(),
@@ -576,6 +581,7 @@ pub fn check<T: MainGroup>(
             // TODO give a warning if there's anything left in `unused`
 
             Ok(Elab::Fun(
+                env.clos(term),
                 used.into_iter()
                     .map(|(a, b, c)| (a.into_iter().map(|(x, _)| x).collect(), b, c))
                     .collect(),
@@ -754,7 +760,9 @@ impl Elab {
                 ax.subtype_of(bx, env) && ay.subtype_of(by, env)
             }
             // (Type -> (Type, Type)) <= ((Type, Type) -> Type)
-            (Elab::Fun(v_sub), Elab::Fun(v_sup)) => {
+            (Elab::Fun(cl_a, v_sub), Elab::Fun(cl_b, v_sup)) => {
+                env.add_clos(cl_a);
+                env.add_clos(cl_b);
                 for (args_sup, to_sup, _) in v_sup.iter() {
                     let mut found = false;
                     for (args_sub, to_sub, _) in v_sub.iter() {

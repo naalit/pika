@@ -239,7 +239,7 @@ impl Elab {
                     ElabStmt::Def(_, _) => LowTy::Unit,
                 }
             }
-            Elab::Fun(v) => {
+            Elab::Fun(cl, v) => {
                 if v.iter().any(|(args, _, ret)| {
                     !ret.is_concrete(env) || args.iter().any(|x| !x.is_concrete(env))
                 }) {
@@ -267,7 +267,7 @@ impl Elab {
 
                 let arg_tys: Vec<_> = arg_tys
                     .into_iter()
-                    .map(|v| Elab::Union(v).simplify_unions(env))
+                    .map(|v| Elab::Union(v).whnf(env).simplify_unions(env))
                     .collect();
 
                 let mut env = env.clone();
@@ -288,15 +288,15 @@ impl Elab {
                     assert_eq!(i, ret_ty);
                 }
 
-                // Now curry the arguments
-                // Using env2 to avoid things we defined in pattern matching
-                let upvalues: Vec<_> = env2
+                // Use the closure we already created for upvalues
+                let upvalues: Vec<_> = cl
                     .tys
                     .iter()
-                    .filter(|(s, _)| self.uses(**s, &env))
-                    .map(|(_, t)| t.as_low_ty(&env))
+                    .filter(|(_, t)| **t != Elab::Bottom)
+                    .map(|(_, t)| t.cloned(&mut env).whnf(&mut env).as_low_ty(&env))
                     .collect();
 
+                // Now curry the arguments
                 let arg_tys: Vec<_> = arg_tys.into_iter().map(|x| x.as_low_ty(&env)).collect();
                 let mut i = arg_tys.len();
                 arg_tys
@@ -315,7 +315,7 @@ impl Elab {
                     })
             }
             Elab::App(f, x) => match f.get_type_rec(env) {
-                Elab::Fun(_) => {
+                Elab::Fun(_, _) => {
                     if let Some(f) = f.low_ty_of(env) {
                         match f {
                             LowTy::ClosOwn { to, .. } => *to,
@@ -470,7 +470,7 @@ impl Elab {
                     LowIR::Let(name, Box::new(val), Box::new(acc))
                 })
             }
-            Elab::Fun(branches) => {
+            Elab::Fun(cl, branches) => {
                 if branches.iter().any(|(args, _, ret)| {
                     !ret.is_concrete(env) || args.iter().any(|x| !x.is_concrete(env))
                 }) {
@@ -494,7 +494,7 @@ impl Elab {
 
                 let arg_tys: Vec<_> = arg_tys
                     .into_iter()
-                    .map(|v| Elab::Union(v).simplify_unions(env))
+                    .map(|v| Elab::Union(v).whnf(env).simplify_unions(env))
                     .collect();
 
                 // Compile the final body - do pattern matching etc.
@@ -642,15 +642,15 @@ impl Elab {
                         })
                 };
 
-                // Now curry the arguments
-                // Using env2 to avoid things we defined in pattern matching
-                let upvalues: Vec<_> = env2
+                // Use the closure we already created for upvalues
+                let upvalues: Vec<_> = cl
                     .tys
                     .iter()
-                    .filter(|(s, _)| body.uses(**s))
-                    .map(|(s, t)| (*s, t.as_low_ty(env)))
+                    .filter(|(_, t)| **t != Elab::Bottom)
+                    .map(|(k, t)| (*k, t.cloned(env).whnf(env).as_low_ty(env)))
                     .collect();
 
+                // Now curry the arguments
                 let arg_tys: Vec<_> = arg_tys.into_iter().map(|x| x.as_low_ty(env)).collect();
                 let mut i = arg_tys.len();
                 arg_tys
@@ -679,7 +679,8 @@ impl Elab {
                     })
             }
             Elab::App(f, x) => match f.get_type_rec(env) {
-                Elab::Fun(v) => {
+                Elab::Fun(cl, v) => {
+                    env.add_clos(&cl);
                     let (mut args, _) = crate::elab::unionize_ty(v, env);
                     let from = args.remove(0);
                     // In case it has variables that already have values etc.
@@ -825,7 +826,7 @@ impl Elab {
             | Elab::Bottom
             | Elab::Tag(_) => true,
             Elab::Binder(_, t) => t.is_concrete(env),
-            Elab::Fun(v) => v.iter().all(|(a, b, _)| a.iter().all(|a|a.is_concrete(env)) && b.is_concrete(env)),
+            Elab::Fun(_, v) => v.iter().all(|(a, b, _)| a.iter().all(|a|a.is_concrete(env)) && b.is_concrete(env)),
             Elab::Union(v) => v.iter().all(|x| x.is_concrete(env)),
             Elab::App(f, x) => f.is_concrete(env) && x.is_concrete(env),
             // This shouldn't happen unless the first param is neutral and thus not concrete
@@ -841,25 +842,28 @@ impl Elab {
             Elab::Builtin(Builtin::Int) | Elab::I32(_) => LowTy::Int(32),
             Elab::Unit => LowTy::Unit,
             Elab::Binder(_, t) => t.as_low_ty(env),
-            Elab::Fun(v) => {
-                let mut env2 = env.clone();
+            Elab::Fun(cl, v) => {
+                let mut env = env.clone();
+                env.add_clos(&cl);
                 let (from, to) = crate::elab::unionize_ty(
                     v.iter()
                         .map(|(a, b, c)| {
                             (
-                                a.iter().map(|x| x.cloned(&mut env2)).collect(),
-                                b.cloned(&mut env2),
-                                c.cloned(&mut env2),
+                                a.iter()
+                                    .map(|x| x.cloned(&mut env).whnf(&mut env))
+                                    .collect(),
+                                b.cloned(&mut env).whnf(&mut env),
+                                c.cloned(&mut env),
                             )
                         })
                         .collect(),
-                    env,
+                    &env,
                 );
 
-                let to = to.as_low_ty(env);
+                let to = to.as_low_ty(&env);
 
                 from.into_iter().rfold(to, |ret, arg| {
-                    let arg = arg.as_low_ty(env);
+                    let arg = arg.as_low_ty(&env);
                     LowTy::ClosRef {
                         from: Box::new(arg),
                         to: Box::new(ret),
@@ -1021,7 +1025,7 @@ impl Elab {
             | (Elab::Builtin(_), _)
             | (Elab::Unit, _)
             | (Elab::Tag(_), _)
-            | (Elab::Fun(_), _) => LowIR::BoolConst(true),
+            | (Elab::Fun(_, _), _) => LowIR::BoolConst(true),
             _ => panic!(
                 "pattern {} can't be compiled yet",
                 self.pretty(&env.bindings()).ansi_string()
@@ -1060,42 +1064,6 @@ impl Builtin {
 }
 
 impl LowIR {
-    /// Analogous to `Elab::uses()`
-    fn uses(&self, s: Sym) -> bool {
-        match self {
-            LowIR::IntConst(_)
-            | LowIR::SizedIntConst(_, _)
-            | LowIR::Unit
-            | LowIR::BoolConst(_)
-            | LowIR::Unreachable
-            | LowIR::Branch(_) => false,
-            LowIR::BoolOp { lhs, rhs, .. }
-            | LowIR::CompOp { lhs, rhs, .. }
-            | LowIR::IntOp { lhs, rhs, .. } => lhs.uses(s) || rhs.uses(s),
-            LowIR::Let(s2, x, y) => *s2 != s && (x.uses(s) || y.uses(s)),
-            LowIR::Local(x) => *x == s,
-            LowIR::Global(_, _, _) => false,
-            LowIR::TypedGlobal(_, _) => false,
-            LowIR::Struct(v) => v.iter().any(|(_, x)| x.uses(s)),
-            LowIR::Project(r, _) => r.uses(s),
-            LowIR::ClosureBorrow(x) => x.uses(s),
-            LowIR::Closure { upvalues, .. } => upvalues.iter().any(|(x, _)| *x == s),
-            LowIR::Variant(_, _, x) => x.uses(s),
-            LowIR::Switch(x, v) => x.uses(s) || v.iter().any(|x| x.uses(s)),
-            LowIR::MultiSwitch {
-                switch_on,
-                cases,
-                blocks,
-            } => {
-                switch_on.uses(s)
-                    || cases.iter().any(|(_, x)| x.uses(s))
-                    || blocks.iter().any(|(_, _, x)| x.uses(s))
-            }
-            LowIR::If { cond, yes, no } => cond.uses(s) || yes.uses(s) || no.uses(s),
-            LowIR::Call(f, x) => f.uses(s) || x.uses(s),
-        }
-    }
-
     fn cast<T: MainGroup>(self, from: &Elab, to: &Elab, env: &mut TempEnv<'_, T>) -> Self {
         match (from, to) {
             (cur, ty) if cur == ty => self,

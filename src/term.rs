@@ -21,11 +21,14 @@ impl Builtin {
     pub fn get_type(&self) -> Elab {
         match self {
             Builtin::Int => Elab::Type(0),
-            Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => Elab::Fun(vec![(
-                vec![Elab::Builtin(Builtin::Int), Elab::Builtin(Builtin::Int)],
-                Elab::Builtin(Builtin::Int),
-                Elab::Type(0),
-            )]),
+            Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => Elab::Fun(
+                Clos::default(),
+                vec![(
+                    vec![Elab::Builtin(Builtin::Int), Elab::Builtin(Builtin::Int)],
+                    Elab::Builtin(Builtin::Int),
+                    Elab::Type(0),
+                )],
+            ),
         }
     }
 }
@@ -81,11 +84,49 @@ impl Term {
             Term::Var(x) if *x == s => true,
             Term::Fun(v) => v
                 .iter()
+                .filter(|(args, b)| !args.iter().any(|x| x.binds(s)) && !b.binds(s))
                 .any(|(args, v)| args.iter().any(|x| x.uses(s)) || v.uses(s)),
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.uses(s) || u.uses(s),
             Term::Binder(_, Some(t)) | Term::Project(t, _) => t.uses(s),
             Term::Struct(_, v) => v.iter().any(|(_, t)| t.uses(s)),
-            _ => false,
+            Term::Block(v) => v.iter().any(|x| match x {
+                Statement::Expr(e) => e.uses(s),
+                Statement::Def(Def(_, e)) => e.uses(s),
+            }),
+            Term::Unit
+            | Term::I32(_)
+            | Term::Type(_)
+            | Term::Builtin(_)
+            | Term::Tag(_)
+            | Term::Var(_)
+            | Term::Binder(_, None)
+            // Unions can't bind variables
+            | Term::Union(_) => false,
+        }
+    }
+
+    pub fn binds(&self, s: Sym) -> bool {
+        match self {
+            Term::Binder(x, _) if *x == s => true,
+            Term::Fun(v) => v
+                .iter()
+                .any(|(args, v)| args.iter().any(|x| x.binds(s)) || v.binds(s)),
+            Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.binds(s) || u.binds(s),
+            Term::Binder(_, Some(t)) | Term::Project(t, _) => t.binds(s),
+            Term::Struct(_, v) => v.iter().any(|(x, t)| **x == s || t.binds(s)),
+            Term::Block(v) => v.iter().any(|x| match x {
+                Statement::Expr(e) => e.binds(s),
+                Statement::Def(Def(x, e)) => **x == s || e.binds(s),
+            }),
+            Term::Unit
+            | Term::I32(_)
+            | Term::Type(_)
+            | Term::Builtin(_)
+            | Term::Tag(_)
+            | Term::Var(_)
+            | Term::Binder(_, None)
+            // Unions can't bind variables
+            | Term::Union(_) => false,
         }
     }
 
