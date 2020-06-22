@@ -18,8 +18,8 @@ To that end, some things Pika has/will have:
 - No implicit heap allocation
   - On GPUs, for example, there is no heap
 - Ownership
-  - More or less like Rust, except:
-  - Function parameters are borrowed by default
+  - Quantitative Type Theory, so values can be erased (e.g. types, multiplicity 0), move-only (multiplicity 1), or copiable (Rust `Copy`, multiplicity ω)
+  - We'll also have borrows and mutability more or less like Rust, but hopefully we can avoid any lifetime annotations, those are annoying and confusing
   - The compiler decides to pass by reference or by value based on size, regardless of borrowing
 - No runtime
 
@@ -48,10 +48,17 @@ two := suc one
 
 # Functions are curried, so `const T a` returns a function that ignores its argument and returns `a`
 const : fun (t:Type) t t => t = fun _ a b: => a
+a := one Int (const Int 12) 2 # returns 12
+
+# Functions can pattern-match and recurse (no mutual recursion yet, though)
+fib := fun
+  0 => 1
+  1 => 1
+  i:Int => (fib (i - 1)) + (fib (i - 2))
 
 # `pika run path-to-this-file.pk` will compile it with LLVM and print out the value of `main`
-# It should be 12
-main = one Int (const Int 12) 9
+# It should be 610
+main := fib 14
 ```
 
 #### Why "Pika"?
