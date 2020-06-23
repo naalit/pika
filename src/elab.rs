@@ -1,6 +1,33 @@
 use crate::common::*;
 use crate::term::{Builtin, Term};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+pub struct Cloner {
+    bindings: Arc<RwLock<Bindings>>,
+    map: HashMap<Sym, Sym>,
+}
+impl Cloner {
+    pub fn new(bindings: &impl HasBindings) -> Self {
+        Cloner {
+            bindings: bindings.bindings_ref().clone(),
+            map: HashMap::new(),
+        }
+    }
+
+    pub fn set(&mut self, from: Sym, to: Sym) {
+        self.map.insert(from, to);
+    }
+
+    pub fn get(&self, s: Sym) -> Option<Sym> {
+        self.map.get(&s).copied()
+    }
+}
+impl HasBindings for Cloner {
+    fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
+        &self.bindings
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
 pub enum ElabStmt {
@@ -8,13 +35,13 @@ pub enum ElabStmt {
     Expr(Elab),
 }
 impl ElabStmt {
-    pub fn cloned<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Self {
+    pub fn cloned(&self, cln: &mut Cloner) -> Self {
         match self {
             ElabStmt::Def(s, x) => {
-                let fresh = env.bindings_mut().fresh(*s);
+                let fresh = cln.bindings_mut().fresh(*s);
                 #[cfg(feature = "logging")]
                 {
-                    let b = &env.bindings();
+                    let b = &cln.bindings();
                     println!(
                         "Renaming {}{} to {}{}",
                         b.resolve(*s),
@@ -23,11 +50,10 @@ impl ElabStmt {
                         fresh.num()
                     );
                 }
-                let ty = x.get_type(env);
-                env.set_val(*s, Elab::Var(fresh, Box::new(ty)));
-                ElabStmt::Def(fresh, x.cloned(env))
+                cln.set(*s, fresh);
+                ElabStmt::Def(fresh, x.cloned(cln))
             }
-            ElabStmt::Expr(x) => ElabStmt::Expr(x.cloned(env)),
+            ElabStmt::Expr(x) => ElabStmt::Expr(x.cloned(cln)),
         }
     }
 }
@@ -38,17 +64,18 @@ pub struct Clos {
     pub vals: Vec<(Sym, Arc<Elab>)>,
 }
 impl Clos {
-    pub fn cloned<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Self {
+    /// We need to rename anything stored in the closure, too, since it can use local variables
+    pub fn cloned(&self, cln: &mut Cloner) -> Self {
         Clos {
             tys: self
                 .tys
                 .iter()
-                .map(|(k, v)| (*k, Arc::new(v.cloned(env))))
+                .map(|(k, v)| (*k, Arc::new(v.cloned(cln))))
                 .collect(),
             vals: self
                 .vals
                 .iter()
-                .map(|(k, v)| (*k, Arc::new(v.cloned(env))))
+                .map(|(k, v)| (*k, Arc::new(v.cloned(cln))))
                 .collect(),
         }
     }
@@ -337,9 +364,9 @@ impl Elab {
                     match &*t {
                         // Update to the new type, but don't re-look-up the var
                         Elab::Var(y, new_ty) if x == *y => {
-                            Elab::Var(x, Box::new(new_ty.cloned(env)))
+                            Elab::Var(x, Box::new(new_ty.cloned(&mut Cloner::new(&env)).whnf(env)))
                         }
-                        _ => t.cloned(env).whnf(env),
+                        _ => t.cloned(&mut Cloner::new(&env)).whnf(env),
                     }
                 } else {
                     *ty = ty.whnf(env);
@@ -398,7 +425,7 @@ impl Elab {
                         for i in env.db.symbols(scope.clone()).iter() {
                             if i.raw() == m {
                                 let val = env.db.elab(scope.clone(), **i).unwrap();
-                                return val.cloned(&mut env.clone());
+                                return val.cloned(&mut Cloner::new(&env));
                             }
                         }
                         panic!("not found")
@@ -442,8 +469,6 @@ impl Elab {
     }
 
     /// Gets the "best" type of `self`.
-    ///
-    /// Note: It doesn't look things up in `env`, it only uses it for cloning.
     pub fn get_type<T: MainGroup>(&self, env: &TempEnv<T>) -> Elab {
         use Elab::*;
         match self {
@@ -454,17 +479,17 @@ impl Elab {
             I32(i) => I32(*i),
             Builtin(b) => b.get_type(),
             Tag(t) => Tag(*t),
-            Var(_, t) => t.cloned(&mut env.clone()),
+            Var(_, t) => t.cloned(&mut Cloner::new(&env)),
             Fun(cl, v) => {
-                let mut env = env.clone();
+                let mut cln = Cloner::new(&env);
                 Fun(
-                    cl.cloned(&mut env),
+                    cl.cloned(&mut cln),
                     v.iter()
                         .map(|(from, _, to)| {
                             (
-                                from.iter().map(|x| x.cloned(&mut env)).collect(),
-                                to.cloned(&mut env),
-                                to.get_type(&mut env),
+                                from.iter().map(|x| x.cloned(&mut cln)).collect(),
+                                to.cloned(&mut cln),
+                                to.get_type(&mut env.clone()),
                             )
                         })
                         .collect(),
@@ -476,20 +501,21 @@ impl Elab {
                     let tx = x.get_type(env);
                     let mut env2 = env.clone();
                     env2.add_clos(&cl);
+                    let mut cln = Cloner::new(&env);
 
                     for (args, to, _) in v {
                         if tx.overlap(args.first().unwrap(), &env2) {
                             let mut args: Vec<_> =
-                                args.iter().map(|x| x.cloned(&mut env2)).collect();
+                                args.iter().map(|x| x.cloned(&mut cln)).collect();
                             let arg = args.remove(0);
                             arg.do_match(&x, &mut env2);
 
                             if args.is_empty() {
-                                let to = to.cloned(&mut env2).whnf(&mut env2);
+                                let to = to.cloned(&mut cln).whnf(&mut env2);
                                 return to;
                             } else {
-                                let t = to.get_type(&mut env2);
-                                let to = to.cloned(&mut env2);
+                                let t = to.get_type(env);
+                                let to = to.cloned(&mut cln);
                                 rf.push((args, to, t));
                             }
                         }
@@ -528,7 +554,7 @@ impl Elab {
                         .find(|(n, _)| n.raw() == *m)
                         .unwrap()
                         .1
-                        .cloned(&mut env.clone())
+                        .cloned(&mut Cloner::new(env))
                 } else {
                     panic!("not a struct type")
                 }
@@ -601,7 +627,7 @@ impl Elab {
         use Elab::*;
         match (self, other) {
             (Binder(s, _), _) => {
-                let other = other.cloned(&mut env.clone()).whnf(env);
+                let other = other.cloned(&mut Cloner::new(env)).whnf(env);
                 #[cfg(feature = "logging")]
                 {
                     println!(
@@ -626,11 +652,11 @@ impl Elab {
 
     /// Clones `self`. Unlike a normal clone, we freshen any bound variables (but not free variables)
     /// This means that other code doesn't have to worry about capture-avoidance, we do it here for free
-    pub fn cloned<T: MainGroup>(&self, env: &mut TempEnv<T>) -> Self {
+    pub fn cloned(&self, cln: &mut Cloner) -> Self {
         use Elab::*;
         match self {
             Var(s, t) => {
-                if let Some(x) = env.vals.get(s).cloned() {
+                if let Some(x) = cln.get(*s) {
                     // Here's how this (`x == self`) happens:
                     // 1. We come up with a Elab using, say, x3. That Elab gets stored in Salsa's database.
                     // 2. We reset the Bindings, define x0, x1, and x2, and ask for the Elab again.
@@ -638,16 +664,14 @@ impl Elab {
                     // 4. We see a bound variable, x3, and define a fresh variable to replace it with. The fresh variable is now also x3.
                     // 5. Now we want to replace x3 with x3, so we better not call cloned() recursively or we'll get stuck in a loop.
                     // Note, though, that this is expected behaviour and doesn't need fixing.
-                    match &*x {
-                        // We get and clone the new type, but we don't re-look-up the var
-                        Elab::Var(y, t) if s == y => Var(*s, Box::new(t.cloned(env))),
-                        x @ Elab::Var(_, _) => x.cloned(env),
-                        // We don't perform substitution except for renaming
-                        _ => Var(*s, Box::new(t.cloned(env))),
+                    if x == *s {
+                        Var(x, Box::new(t.cloned(cln)))
+                    } else {
+                        Var(x, Box::new(t.cloned(cln))).cloned(cln)
                     }
                 } else {
                     // Free variable
-                    Var(*s, Box::new(t.cloned(env)))
+                    Var(*s, Box::new(t.cloned(cln)))
                 }
             }
             Top => Top,
@@ -657,14 +681,14 @@ impl Elab {
             I32(i) => I32(*i),
             Builtin(b) => Builtin(*b),
             Tag(t) => Tag(*t),
-            App(f, x) => App(Box::new(f.cloned(env)), Box::new(x.cloned(env))),
+            App(f, x) => App(Box::new(f.cloned(cln)), Box::new(x.cloned(cln))),
             // Rename bound variables
             // This case runs before any that depend on it, and the Elab has unique names
             Binder(s, t) => {
-                let fresh = env.bindings_mut().fresh(*s);
+                let fresh = cln.bindings_mut().fresh(*s);
                 #[cfg(feature = "logging")]
                 {
-                    let b = &env.bindings();
+                    let b = &cln.bindings();
                     println!(
                         "Renaming {}{} to {}{}",
                         b.resolve(*s),
@@ -673,55 +697,41 @@ impl Elab {
                         fresh.num()
                     );
                 }
-                let t2 = t.cloned(env);
-                env.set_val(*s, Var(fresh, Box::new(t2)));
-                Binder(fresh, Box::new(t.cloned(env)))
+                cln.set(*s, fresh);
+                Binder(fresh, Box::new(t.cloned(cln)))
             }
             // All these allow bound variables, so we have to make sure they're done in order
             Fun(cl, v) => Fun(
-                cl.cloned(env),
+                cl.cloned(cln),
                 v.iter()
                     .map(|(a, b, c)| {
                         (
-                            a.iter().map(|x| x.cloned(env)).collect(),
-                            b.cloned(env),
-                            c.cloned(env),
+                            a.iter().map(|x| x.cloned(cln)).collect(),
+                            b.cloned(cln),
+                            c.cloned(cln),
                         )
                     })
                     .collect(),
             ),
             Pair(x, y) => {
-                let x = Box::new(x.cloned(env));
-                let y = Box::new(y.cloned(env));
+                let x = Box::new(x.cloned(cln));
+                let y = Box::new(y.cloned(cln));
                 Pair(x, y)
             }
             StructIntern(i) => {
-                // Make sure renames propagate to any local variables we use in the struct
-                if env.vals.keys().any(|k| self.uses(*k, env)) {
-                    let scope = ScopeId::Struct(*i, Box::new(env.scope()));
-                    // TODO rename definitions
-                    StructInline(
-                        env.db
-                            .symbols(scope.clone())
-                            .iter()
-                            .filter_map(|x| {
-                                Some((**x, env.db.elab(scope.clone(), **x)?.cloned(env)))
-                            })
-                            .collect(),
-                    )
-                } else {
-                    // It doesn't capture any locals (that we're renaming), so we can leave it
-                    StructIntern(*i)
-                }
+                // The typechecker only creates a StructIntern if it doesn't capture any local variables, so we don't need to propagate renames into it
+                // And we don't need to rename things inside it, because we'll do that when we access them
+                // So we don't need to do anything here
+                StructIntern(*i)
             }
             StructInline(v) => StructInline(
                 v.into_iter()
                     .map(|(name, val)| {
-                        let val = val.cloned(env);
-                        let fresh = env.bindings_mut().fresh(*name);
+                        let val = val.cloned(cln);
+                        let fresh = cln.bindings_mut().fresh(*name);
                         #[cfg(feature = "logging")]
                         {
-                            let b = &env.bindings();
+                            let b = &cln.bindings();
                             println!(
                                 "Renaming {}{} to {}{}",
                                 b.resolve(*name),
@@ -730,15 +740,14 @@ impl Elab {
                                 fresh.num()
                             );
                         }
-                        let ty = val.get_type(env);
-                        env.set_val(*name, Var(fresh, Box::new(ty)));
+                        cln.set(*name, fresh);
                         (fresh, val)
                     })
                     .collect(),
             ),
-            Project(r, m) => Project(Box::new(r.cloned(env)), *m),
-            Block(v) => Block(v.iter().map(|x| x.cloned(env)).collect()),
-            Union(v) => Union(v.iter().map(|x| x.cloned(env)).collect()),
+            Project(r, m) => Project(Box::new(r.cloned(cln)), *m),
+            Block(v) => Block(v.iter().map(|x| x.cloned(cln)).collect()),
+            Union(v) => Union(v.iter().map(|x| x.cloned(cln)).collect()),
         }
     }
 }

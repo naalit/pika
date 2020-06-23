@@ -183,11 +183,13 @@ pub fn run_repl(options: &Options) {
 
                             let mut env = db.temp_env(ScopeId::File(file));
                             let ty = elab.get_type(&mut env);
-                            env.set_val(**s, Elab::Var(**s, Box::new(ty.cloned(&mut env.clone()))));
-                            let val = elab.cloned(&mut env.clone()).whnf(&mut env);
+                            env.set_val(
+                                **s,
+                                Elab::Var(**s, Box::new(ty.cloned(&mut Cloner::new(&env)))),
+                            );
+                            let val = elab.cloned(&mut Cloner::new(&env)).normal(&mut env);
 
                             let b = db.bindings();
-                            let b = b.read().unwrap();
                             let doc = Doc::either(
                                 s.pretty(&b)
                                     .style(Style::Binder)

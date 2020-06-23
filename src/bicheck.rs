@@ -189,8 +189,9 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         Term::Var(x) => {
             let ty = env
                 .ty(*x)
-                .map(|x| x.cloned(&mut env.clone()))
-                .ok_or_else(|| TypeError::NotFound(t.copy_span(*x)))?;
+                .map(|x| x.cloned(&mut Cloner::new(&env)))
+                .ok_or_else(|| TypeError::NotFound(t.copy_span(*x)))?
+                .whnf(env);
             Ok(Elab::Var(*x, Box::new(ty)))
         }
         Term::I32(i) => Ok(Elab::I32(*i)),
@@ -241,7 +242,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                 Elab::Tag(_) | Elab::App(_, _) | Elab::Bottom => synth(x, env)?,
                 a => {
                     return Err(TypeError::NotFunction(
-                        fi.copy_span(a.cloned(&mut env.clone())),
+                        fi.copy_span(a.cloned(&mut Cloner::new(&env))),
                         x.clone(),
                     ))
                 }
@@ -254,18 +255,18 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
             match &r.get_type(env) {
                 Elab::StructInline(v) => {
                     if let Some((_, val)) = v.iter().find(|(name, _)| name.raw() == **m) {
-                        val.cloned(&mut env.clone())
+                        val.cloned(&mut Cloner::new(&env))
                     } else {
                         return Err(TypeError::NoSuchField(
                             m.clone(),
-                            rt.cloned(&mut env.clone()),
+                            rt.cloned(&mut Cloner::new(&env)),
                         ));
                     }
                 }
                 _ => {
                     return Err(TypeError::NoSuchField(
                         m.clone(),
-                        rt.cloned(&mut env.clone()),
+                        rt.cloned(&mut Cloner::new(&env)),
                     ))
                 }
             };
@@ -310,7 +311,7 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                         env.set_ty(**name, ty);
                         // Blocks can be dependent!
                         let val = val.whnf(env);
-                        env.set_val(**name, val.cloned(&mut env.clone()));
+                        env.set_val(**name, val.cloned(&mut Cloner::new(&env)));
                         rv.push(ElabStmt::Def(**name, val));
                     }
                 }
@@ -358,7 +359,8 @@ pub fn check<T: MainGroup>(
 
     match (&**term, typ) {
         (Term::Pair(x, y), Elab::Pair(tx, ty)) => {
-            let (tx, ty) = (tx.cloned(env).whnf(env), ty.cloned(env).whnf(env));
+            let mut cln = Cloner::new(env);
+            let (tx, ty) = (tx.cloned(&mut cln).whnf(env), ty.cloned(&mut cln).whnf(env));
             // TODO dependent pairs don't really work
             check(x, &tx, env)?;
             check(y, &ty, env)
@@ -373,14 +375,14 @@ pub fn check<T: MainGroup>(
 
         (Term::Fun(v), Elab::Fun(cl, v2)) => {
             env.add_clos(cl);
-            let mut env2 = env.clone();
+            let mut cln = Cloner::new(env);
             let mut v2: Vec<_> = v2
                 .iter()
                 .map(|(x, y, z)| {
                     (
-                        x.iter().map(|x| x.cloned(&mut env2)).collect::<Vec<_>>(),
-                        y.cloned(&mut env2),
-                        z.cloned(&mut env2),
+                        x.iter().map(|x| x.cloned(&mut cln)).collect::<Vec<_>>(),
+                        y.cloned(&mut cln),
+                        z.cloned(&mut cln),
                     )
                 })
                 .collect();
@@ -402,9 +404,9 @@ pub fn check<T: MainGroup>(
                                     .map(|(mut from, to, _)| {
                                         arg.append(&mut from);
                                         (
-                                            arg.iter().map(|x| x.cloned(&mut env2)).collect(),
-                                            to.cloned(&mut env2),
-                                            to.get_type(&mut env2),
+                                            arg.iter().map(|x| x.cloned(&mut cln)).collect(),
+                                            to.cloned(&mut cln),
+                                            to.get_type(env),
                                         )
                                     })
                                     .collect::<Vec<_>>()
@@ -413,7 +415,7 @@ pub fn check<T: MainGroup>(
                                 error = Some(TypeError::WrongArity(
                                     arg.len(),
                                     v[0].0.len(),
-                                    typ.cloned(&mut env2),
+                                    typ.cloned(&mut cln),
                                     term.span(),
                                 ));
                                 Vec::new()
@@ -467,8 +469,8 @@ pub fn check<T: MainGroup>(
                                         .iter()
                                         .map(|y| {
                                             let mut x: Vec<_> =
-                                                x.iter().map(|x| x.cloned(&mut env2)).collect();
-                                            x.push(y.cloned(&mut env2));
+                                                x.iter().map(|x| x.cloned(&mut cln)).collect();
+                                            x.push(y.cloned(&mut cln));
                                             x
                                         })
                                         .collect::<Vec<_>>()
@@ -476,7 +478,7 @@ pub fn check<T: MainGroup>(
                                 .collect()
                         })
                         .into_iter()
-                        .map(|x| (x, to.cloned(&mut env2)))
+                        .map(|x| (x, to.cloned(&mut cln)))
                         .collect::<Vec<_>>()
                 })
                 .collect();
@@ -504,8 +506,8 @@ pub fn check<T: MainGroup>(
                     let mut all_subtype = true;
                     // Go through the curried parameters and make sure each one matches
                     for ((i, f), (a, span)) in from.iter().enumerate().zip(args) {
-                        if !f.subtype_of(&a, &mut env2) {
-                            errors[i].push(Spanned::new(a.cloned(&mut env2), *span));
+                        if !f.subtype_of(&a, env) {
+                            errors[i].push(Spanned::new(a.cloned(&mut cln), *span));
                             all_subtype = false;
                             break;
                         }
@@ -533,14 +535,15 @@ pub fn check<T: MainGroup>(
                     // Go through the curried parameters and make sure each one matches
                     for ((i, f), (mut a, span)) in from.iter().enumerate().zip(args) {
                         if !all_subtype {
-                        } else if !f.subtype_of(&a, &mut env2) {
-                            errors[i].push(Spanned::new(a.cloned(&mut env2), span));
+                        } else if !f.subtype_of(&a, env) {
+                            errors[i].push(Spanned::new(a.cloned(&mut cln), span));
                             all_subtype = false;
                         } else {
-                            // Add bindings in the argument to the environment with types given by `y`
-                            a.match_types(f, env);
                             // Update the types of binders in `xr` based on the type `y`
                             a.update_binders(f, env);
+                            // Add bindings in the argument to the environment with types given by `y`
+                            a.match_types(f, env);
+                            a = a.whnf(env);
                         }
                         ra.push((a, span));
                     }
@@ -549,7 +552,7 @@ pub fn check<T: MainGroup>(
                         // If all the parameters matched, this branch of the type is covered, so no errors yet
                         errors = Vec::new();
 
-                        let to = to.cloned(&mut env2).whnf(env);
+                        let to = to.cloned(&mut cln).whnf(env);
                         let body = match check(&body, &to, env) {
                             Ok(x) => x,
                             Err(TypeError::NotFunction(f, x)) => match &*x {
@@ -557,7 +560,7 @@ pub fn check<T: MainGroup>(
                                 Term::Var(s) if env.bindings().resolve(*s) == "$curry" => return Err(TypeError::WrongArity(
                                     from.len(),
                                     initial_arity,
-                                    typ.cloned(&mut env2),
+                                    typ.cloned(&mut cln),
                                     term.span(),
                                 )),
                                 _ => return Err(TypeError::NotFunction(f, x)),
@@ -574,7 +577,7 @@ pub fn check<T: MainGroup>(
 
                 for (i, v) in errors.into_iter().enumerate() {
                     if !v.is_empty() {
-                        return Err(TypeError::NoBranch(from[i].cloned(&mut env2), v));
+                        return Err(TypeError::NoBranch(from[i].cloned(&mut cln), v));
                     }
                 }
             }
@@ -606,13 +609,13 @@ pub fn check<T: MainGroup>(
             } else {
                 match typ.unbind() {
                     Elab::Type(i) => Err(TypeError::WrongUniverse(
-                        term.copy_span(ty.cloned(&mut env.clone())),
+                        term.copy_span(ty.cloned(&mut Cloner::new(&env))),
                         ty.universe(env) - 1,
                         *i,
                     )),
                     _ => Err(TypeError::NotSubtype(
-                        term.copy_span(ty.cloned(&mut env.clone())),
-                        typ.cloned(&mut env.clone()),
+                        term.copy_span(ty.cloned(&mut Cloner::new(&env))),
+                        typ.cloned(&mut Cloner::new(&env)),
                     )),
                 }
             }
@@ -629,7 +632,7 @@ impl Term {
                 .db
                 .elab(env.scope.clone(), *x)
                 .map(|x| x.get_type(&mut env.clone()))
-                .or_else(|| env.ty(*x).map(|x| x.cloned(&mut env.clone())))
+                .or_else(|| env.ty(*x).map(|x| x.cloned(&mut Cloner::new(&env))))
                 .map_or(false, |x| x.tag_head()),
             _ => false,
         }
@@ -654,7 +657,7 @@ impl Elab {
                 self.update_binders(t, env);
             }
             (Binder(_, t), _) => {
-                **t = other.cloned(&mut env.clone());
+                **t = other.cloned(&mut Cloner::new(&env));
             }
             (Pair(ax, ay), Pair(bx, by)) => {
                 ax.update_binders(bx, env);
@@ -684,7 +687,7 @@ impl Elab {
                     );
                 }
 
-                let t = t.cloned(&mut env.clone());
+                let t = t.cloned(&mut Cloner::new(&env));
                 env.set_ty(*na, t);
             }
             (Binder(s, t), _) => {
@@ -699,9 +702,9 @@ impl Elab {
                 }
 
                 // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
-                other.do_match(&Var(*s, Box::new(t.cloned(&mut env.clone()))), env);
+                other.do_match(&Var(*s, Box::new(t.cloned(&mut Cloner::new(&env)))), env);
 
-                let other = other.cloned(&mut env.clone());
+                let other = other.cloned(&mut Cloner::new(&env));
                 env.set_ty(*s, other);
             }
             (Var(x, _), _) => {
@@ -742,16 +745,22 @@ impl Elab {
                 .db
                 .elab(env.scope(), *x)
                 .unwrap()
-                .cloned(env)
+                .cloned(&mut Cloner::new(env))
                 .subtype_of(sup, env),
-            (_, Elab::Var(x, _)) if env.db.elab(env.scope(), *x).is_some() => {
-                self.subtype_of(&env.db.elab(env.scope(), *x).unwrap().cloned(env), env)
-            }
-            (Elab::Var(x, _), _) if env.vals.contains_key(x) => {
-                env.val(*x).unwrap().cloned(env).subtype_of(sup, env)
-            }
+            (_, Elab::Var(x, _)) if env.db.elab(env.scope(), *x).is_some() => self.subtype_of(
+                &env.db
+                    .elab(env.scope(), *x)
+                    .unwrap()
+                    .cloned(&mut Cloner::new(env)),
+                env,
+            ),
+            (Elab::Var(x, _), _) if env.vals.contains_key(x) => env
+                .val(*x)
+                .unwrap()
+                .cloned(&mut Cloner::new(env))
+                .subtype_of(sup, env),
             (_, Elab::Var(x, _)) if env.vals.contains_key(x) => {
-                self.subtype_of(&env.val(*x).unwrap().cloned(env), env)
+                self.subtype_of(&env.val(*x).unwrap().cloned(&mut Cloner::new(env)), env)
             }
             (Elab::App(f1, x1), Elab::App(f2, x2)) => {
                 f1.subtype_of(f2, env) && x1.subtype_of(x2, env)
@@ -782,8 +791,8 @@ impl Elab {
                         }
 
                         // Since types are only in weak-head normal form, we have to reduce the spines to compare them
-                        let to_sup = to_sup.cloned(env).whnf(env);
-                        let to_sub = to_sub.cloned(env).whnf(env);
+                        let to_sup = to_sup.cloned(&mut Cloner::new(env)).whnf(env);
+                        let to_sub = to_sub.cloned(&mut Cloner::new(env)).whnf(env);
 
                         if to_sub.subtype_of(&to_sup, env) {
                             found = true;

@@ -247,19 +247,18 @@ impl Elab {
                     return None;
                 }
 
-                let mut env2 = env.clone();
-
                 if v.is_empty() {
                     panic!("Empty");
                 }
 
+                let mut cln = Cloner::new(env);
                 let arg_tys = v.iter().fold(
                     (0..v.first().unwrap().0.len())
                         .map(|_| Vec::new())
                         .collect::<Vec<_>>(),
                     |mut acc, (from, _, _)| {
                         for (acc, from) in acc.iter_mut().zip(from.iter()) {
-                            acc.push(from.cloned(&mut env2));
+                            acc.push(from.cloned(&mut cln));
                         }
                         acc
                     },
@@ -271,17 +270,18 @@ impl Elab {
                     .collect();
 
                 let mut env = env.clone();
+                env.add_clos(&cl);
 
                 for (args, _, _) in v {
                     for (pat, ty) in args.iter().zip(&arg_tys) {
-                        let pat = pat.cloned(&mut env).whnf(&mut env);
+                        let pat = pat.cloned(&mut cln).whnf(&mut env);
                         pat.compile_match(&mut env, &mut Vec::new(), &ty, LowIR::Unit);
                     }
                 }
 
                 let ret_tys: Vec<_> = v
                     .iter()
-                    .map(|(_, body, _)| body.cloned(&mut env).low_ty_of(&mut env).unwrap())
+                    .map(|(_, body, _)| body.cloned(&mut cln).low_ty_of(&mut env).unwrap())
                     .collect();
                 let ret_ty = ret_tys.first().unwrap().clone();
                 for i in ret_tys {
@@ -293,7 +293,7 @@ impl Elab {
                     .tys
                     .iter()
                     .filter(|(_, t)| **t != Elab::Bottom)
-                    .map(|(_, t)| t.cloned(&mut env).whnf(&mut env).as_low_ty(&env))
+                    .map(|(_, t)| t.cloned(&mut cln).whnf(&mut env).as_low_ty(&env))
                     .collect();
 
                 // Now curry the arguments
@@ -324,7 +324,7 @@ impl Elab {
                         }
                     } else {
                         // Inline it
-                        let s = self.cloned(&mut env.clone()).whnf(env);
+                        let s = self.cloned(&mut Cloner::new(&env)).whnf(env);
                         // Only recurse if it actually did something (it's not an App anymore)
                         match s {
                             Elab::App(_, _) => return None,
@@ -478,15 +478,19 @@ impl Elab {
                     return None;
                 }
 
-                let mut env2 = env.clone();
+                env.add_clos(cl);
 
+                // A snapshot of the environment, so we know what was defined before the arguments matched
+                let env2 = env.clone();
+
+                let mut cln = Cloner::new(env);
                 let arg_tys = branches.iter().fold(
                     (0..branches.first().unwrap().0.len())
                         .map(|_| Vec::new())
                         .collect::<Vec<_>>(),
                     |mut acc, (from, _, _)| {
                         for (acc, from) in acc.iter_mut().zip(from.iter()) {
-                            acc.push(from.cloned(&mut env2));
+                            acc.push(from.cloned(&mut cln));
                         }
                         acc
                     },
@@ -596,6 +600,7 @@ impl Elab {
                     };
                     LowIR::Let(payload_var, Box::new(payload), Box::new(body))
                 } else {
+                    let mut cln = Cloner::new(env);
                     // Not a union, so no switch, just pattern matching with ifs
                     branches
                         .iter()
@@ -606,7 +611,7 @@ impl Elab {
                             let did_match = args.iter().enumerate().fold(
                                 LowIR::BoolConst(true),
                                 |acc, (i, x)| {
-                                    let x = x.cloned(env).whnf(env);
+                                    let x = x.cloned(&mut cln).whnf(env);
                                     let x = x.compile_match(
                                         env,
                                         &mut need_phi,
@@ -622,7 +627,7 @@ impl Elab {
                             );
                             // We're not going to use actual phis, so just rename the variables back
                             let body = need_phi.into_iter().fold(
-                                body.cloned(env).as_low(env).unwrap(),
+                                body.cloned(&mut cln).as_low(env).unwrap(),
                                 |body, (fresh, original)| {
                                     LowIR::Let(
                                         original,
@@ -647,7 +652,7 @@ impl Elab {
                     .tys
                     .iter()
                     .filter(|(_, t)| **t != Elab::Bottom)
-                    .map(|(k, t)| (*k, t.cloned(env).whnf(env).as_low_ty(env)))
+                    .map(|(k, t)| (*k, t.cloned(&mut cln).whnf(env).as_low_ty(env)))
                     .collect();
 
                 // Now curry the arguments
@@ -700,7 +705,7 @@ impl Elab {
                                 if let Some((mono, ty)) = env.mono(*name, x) {
                                     return Some(LowIR::TypedGlobal(ty, mono));
                                 } else {
-                                    let s = self.cloned(&mut env.clone()).whnf(env);
+                                    let s = self.cloned(&mut Cloner::new(&env)).whnf(env);
                                     // Only recurse if it actually did something (it's not an App anymore)
                                     match s {
                                         Elab::App(_, _) => return None,
@@ -718,7 +723,7 @@ impl Elab {
                                                         .raw_string();
                                                     env.set_mono(
                                                         *name,
-                                                        x.cloned(&mut env.clone()),
+                                                        x.cloned(&mut Cloner::new(&env)),
                                                         fun_name.to_string(),
                                                         ty,
                                                     );
@@ -732,7 +737,7 @@ impl Elab {
                             }
                             _ => {
                                 // Inline it
-                                let s = self.cloned(&mut env.clone()).whnf(env);
+                                let s = self.cloned(&mut Cloner::new(&env)).whnf(env);
                                 // Only recurse if it actually did something (it's not an App anymore)
                                 match s {
                                     Elab::App(_, _) => return None,
@@ -812,7 +817,9 @@ impl Elab {
     /// Is this a concrete type, i.e., we don't need to monomorphize it?
     pub fn is_concrete<T: MainGroup>(&self, env: &TempEnv<T>) -> bool {
         match self {
-            Elab::Var(s, _) if env.db.elab(env.scope(), *s).is_some() => env.db.elab(env.scope(), *s).unwrap().is_concrete(env),
+            Elab::Var(s, _) if env.db.elab(env.scope(), *s).is_some() => {
+                env.db.elab(env.scope(), *s).unwrap().is_concrete(env)
+            }
             Elab::Var(s, _) if env.vals.contains_key(s) => env.val(*s).unwrap().is_concrete(env),
             Elab::Var(_, _) => false,
             Elab::Pair(x, y) => x.is_concrete(env) && y.is_concrete(env),
@@ -820,19 +827,18 @@ impl Elab {
             Elab::Type(_)
             | Elab::Unit
             | Elab::Builtin(_)
-            // Not a type, but concrete, I guess? this should be unreachable
             | Elab::I32(_)
             | Elab::StructIntern(_)
             | Elab::Bottom
             | Elab::Tag(_) => true,
             Elab::Binder(_, t) => t.is_concrete(env),
-            Elab::Fun(_, v) => v.iter().all(|(a, b, _)| a.iter().all(|a|a.is_concrete(env)) && b.is_concrete(env)),
+            Elab::Fun(_, v) => v
+                .iter()
+                .all(|(a, b, _)| a.iter().all(|a| a.is_concrete(env)) && b.is_concrete(env)),
             Elab::Union(v) => v.iter().all(|x| x.is_concrete(env)),
             Elab::App(f, x) => f.is_concrete(env) && x.is_concrete(env),
             // This shouldn't happen unless the first param is neutral and thus not concrete
-            Elab::Project(_, _)
-            | Elab::Block(_)
-            | Elab::Top => false,
+            Elab::Project(_, _) | Elab::Block(_) | Elab::Top => false,
         }
     }
 
@@ -845,15 +851,16 @@ impl Elab {
             Elab::Fun(cl, v) => {
                 let mut env = env.clone();
                 env.add_clos(&cl);
+                let mut cln = Cloner::new(&env);
                 let (from, to) = crate::elab::unionize_ty(
                     v.iter()
                         .map(|(a, b, c)| {
                             (
                                 a.iter()
-                                    .map(|x| x.cloned(&mut env).whnf(&mut env))
+                                    .map(|x| x.cloned(&mut cln).whnf(&mut env))
                                     .collect(),
-                                b.cloned(&mut env).whnf(&mut env),
-                                c.cloned(&mut env),
+                                b.cloned(&mut cln).whnf(&mut env),
+                                c.cloned(&mut cln),
                             )
                         })
                         .collect(),

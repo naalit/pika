@@ -27,7 +27,7 @@ impl ScopeId {
 
     /// Inline the members of this scope into a StructInline
     pub fn inline(&self, db: &impl MainGroup) -> Elab {
-        let mut env = db.temp_env(self.clone());
+        let mut env = Cloner::new(db);
         let v = db
             .symbols(self.clone())
             .iter()
@@ -48,6 +48,11 @@ pub struct TempEnv<'a, T: MainGroup> {
     pub tys: HashMap<Sym, Arc<Elab>>,
     pub low_tys: HashMap<Sym, LowTy>,
 }
+impl<'a, T: MainGroup> HasBindings for TempEnv<'a, T> {
+    fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
+        &self.bindings
+    }
+}
 impl<'a, T: MainGroup> Clone for TempEnv<'a, T> {
     fn clone(&self) -> TempEnv<'a, T> {
         TempEnv {
@@ -63,18 +68,6 @@ impl<'a, T: MainGroup> Clone for TempEnv<'a, T> {
 impl<'a, T: MainGroup> TempEnv<'a, T> {
     pub fn scope(&self) -> ScopeId {
         self.scope.clone()
-    }
-
-    /// Locks the global bindings object and returns a write guard
-    /// Careful: you can't access the bindings from anywhere else if you're holding this object!
-    pub fn bindings_mut(&mut self) -> RwLockWriteGuard<Bindings> {
-        self.bindings.write().unwrap()
-    }
-
-    /// Locks the global bindings object and returns a read guard
-    /// Unlike bindings_mut(), you can still access the bindings *immutably* from other places while this object is alive
-    pub fn bindings(&self) -> RwLockReadGuard<Bindings> {
-        self.bindings.read().unwrap()
     }
 
     /// Gets the monomorphization for the given named function with the given parameter type, if one exists
@@ -138,15 +131,12 @@ impl<'a, T: MainGroup> TempEnv<'a, T> {
 }
 
 /// Since queries can't access the database directly, this defines the interface they can use for accessing it
-pub trait MainExt {
+pub trait MainExt: HasBindings {
     type DB: MainGroup;
 
     fn monos(&self) -> RwLockReadGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
 
     fn monos_mut(&self) -> RwLockWriteGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
-
-    /// Return a new handle to the global bindings object held by the database
-    fn bindings(&self) -> Arc<RwLock<Bindings>>;
 
     /// Report an error to the user
     /// After calling this, queries should attempt to recover as much as possible and continue on
@@ -246,7 +236,6 @@ fn mangle(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<String> {
     // We might mangle types too later
 
     let b = db.bindings();
-    let b = b.read().unwrap();
     Some(format!("{}${}_{}", b.resolve(s), s.num(), scope.file()))
 }
 
@@ -310,15 +299,13 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
     let r = match scope {
         ScopeId::File(file) => {
             // We reset the bindings when we get all the definitions so they're more reproducible and thus memoizable
-            db.bindings().write().unwrap().reset();
+            db.bindings_mut().reset();
 
             let parser = DefsParser::new();
             let s = db.source(file);
             Arc::new(match parser.parse(&s, Lexer::new(&s)) {
                 Ok(x) => db
-                    .bindings()
-                    .write()
-                    .unwrap()
+                    .bindings_mut()
                     .resolve_defs(x)
                     .into_iter()
                     .filter_map(|x| match x {
@@ -345,7 +332,7 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
         if let Some(s) = seen.iter().find(|x| ***x == sym.raw()) {
             db.error(
                 TypeError::DuplicateField(s.clone(), sym.copy_span(sym.raw()))
-                    .to_error(scope.file(), &db.bindings().read().unwrap()),
+                    .to_error(scope.file(), &db.bindings()),
             );
         } else {
             seen.push(sym.copy_span(sym.raw()));
@@ -379,7 +366,7 @@ fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
     match e {
         Ok(e) => Some(Arc::new(e)),
         Err(e) => {
-            db.error(e.to_error(scope.file(), &db.bindings().read().unwrap()));
+            db.error(e.to_error(scope.file(), &db.bindings()));
             None
         }
     }
@@ -419,6 +406,12 @@ impl salsa::Database for MainDatabase {
     }
 }
 
+impl HasBindings for MainDatabase {
+    fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
+        &self.bindings
+    }
+}
+
 impl MainExt for MainDatabase {
     type DB = Self;
 
@@ -432,16 +425,12 @@ impl MainExt for MainDatabase {
     fn temp_env<'a>(&'a self, scope: ScopeId) -> TempEnv<'a, Self> {
         TempEnv {
             db: self,
-            bindings: self.bindings(),
+            bindings: self.bindings.clone(),
             scope,
             vals: HashMap::new(),
             tys: HashMap::new(),
             low_tys: HashMap::new(),
         }
-    }
-
-    fn bindings(&self) -> Arc<RwLock<Bindings>> {
-        self.bindings.clone()
     }
 
     fn error(&self, error: Error) {

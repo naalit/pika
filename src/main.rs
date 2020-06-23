@@ -78,7 +78,7 @@ fn main() {
                         }
 
                         if options.command == Command::Run {
-                            let main_raw = db.bindings().write().unwrap().raw("main".to_string());
+                            let main_raw = db.bindings_mut().raw("main".to_string());
                             if let Some(main) = db
                                 .symbols(ScopeId::File(file))
                                 .iter()
@@ -123,7 +123,7 @@ fn main() {
                                     x => {
                                         eprintln!(
                                             "Error: Main can't return {}!",
-                                            x.pretty(&*db.bindings().read().unwrap()).ansi_string()
+                                            x.pretty(&*db.bindings()).ansi_string()
                                         );
                                         std::process::exit(1)
                                     }
