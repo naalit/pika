@@ -1,5 +1,6 @@
 use crate::bicheck::*;
-use crate::common::*;
+use crate::binding::*;
+use crate::common::{FileId, HasBindings, HasDatabase};
 use crate::elab::*;
 use crate::error::*;
 use crate::grammar::*;
@@ -26,107 +27,15 @@ impl ScopeId {
     }
 
     /// Inline the members of this scope into a StructInline
-    pub fn inline(&self, db: &impl MainGroup) -> Elab {
-        let mut env = Cloner::new(db);
+    pub fn inline(&self, db: &impl HasDatabase) -> Elab {
+        let mut cln = Cloner::new(db);
         let v = db
+            .database()
             .symbols(self.clone())
             .iter()
-            .filter_map(|s| Some((**s, db.elab(self.clone(), **s)?.cloned(&mut env))))
+            .filter_map(|s| Some((**s, db.database().elab(self.clone(), **s)?.cloned(&mut cln))))
             .collect();
         Elab::StructInline(v)
-    }
-}
-
-/// An environment to store temporary mappings of symbols to types or Elabs
-/// Used, for instance, for renaming bound variables and typing functions
-pub struct TempEnv<'a, T: MainGroup> {
-    pub db: &'a T,
-    bindings: Arc<RwLock<Bindings>>,
-    /// A TempEnv is associated with a scope, and stores the ScopeId
-    pub scope: ScopeId,
-    pub vals: HashMap<Sym, Arc<Elab>>,
-    pub tys: HashMap<Sym, Arc<Elab>>,
-    pub low_tys: HashMap<Sym, LowTy>,
-}
-impl<'a, T: MainGroup> HasBindings for TempEnv<'a, T> {
-    fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
-        &self.bindings
-    }
-}
-impl<'a, T: MainGroup> Clone for TempEnv<'a, T> {
-    fn clone(&self) -> TempEnv<'a, T> {
-        TempEnv {
-            scope: self.scope.clone(),
-            vals: self.vals.clone(),
-            tys: self.tys.clone(),
-            low_tys: self.low_tys.clone(),
-            bindings: self.bindings.clone(),
-            db: self.db,
-        }
-    }
-}
-impl<'a, T: MainGroup> TempEnv<'a, T> {
-    pub fn scope(&self) -> ScopeId {
-        self.scope.clone()
-    }
-
-    /// Gets the monomorphization for the given named function with the given parameter type, if one exists
-    pub fn mono(&self, f: Sym, x: &Elab) -> Option<(String, LowTy)> {
-        let mut cloned = self.clone();
-        self.db
-            .monos()
-            .get(&f)?
-            .iter()
-            .find(|v| {
-                let (k, _, _) = &***v;
-                x.subtype_of(k, &mut cloned)
-            })
-            .map(|x| (x.1.clone(), x.2.clone()))
-    }
-
-    /// Registers a monomorphization for the given named function with the given parameter type
-    pub fn set_mono(&mut self, f: Sym, x: Elab, mono: String, ty: LowTy) {
-        self.db
-            .monos_mut()
-            .entry(f)
-            .or_insert_with(Vec::new)
-            .push(Arc::new((x, mono, ty)));
-    }
-
-    /// Get a value from the environment. Checks the database if we don't have it
-    pub fn val(&self, s: Sym) -> Option<Arc<Elab>> {
-        self.vals
-            .get(&s)
-            .cloned()
-            .or_else(|| self.db.elab(self.scope(), s))
-    }
-    /// Set a value in the environment. It should be in WHNF
-    pub fn set_val(&mut self, k: Sym, v: Elab) {
-        self.vals.insert(k, Arc::new(v));
-    }
-    /// Get the type of a symbol from the environment. Checks the database if we don't have it
-    pub fn ty(&self, s: Sym) -> Option<Arc<Elab>> {
-        self.tys.get(&s).cloned().or_else(|| {
-            self.db
-                .elab(self.scope(), s)
-                .map(|x| Arc::new(x.get_type(&mut self.clone())))
-        })
-    }
-    /// Set the type of a symbol in the environment. It should be in WHNF
-    pub fn set_ty(&mut self, k: Sym, v: Elab) {
-        self.tys.insert(k, Arc::new(v));
-    }
-
-    /// Get the type of a symbol from the environment. Checks the database if we don't have it
-    pub fn low_ty(&self, s: Sym) -> Option<LowTy> {
-        self.low_tys
-            .get(&s)
-            .cloned()
-            .or_else(|| self.db.low_ty(self.scope(), s).ok())
-    }
-    /// Set the type of a symbol in the environment. It should be in WHNF
-    pub fn set_low_ty(&mut self, k: Sym, v: LowTy) {
-        self.low_tys.insert(k, v);
     }
 }
 
@@ -141,9 +50,6 @@ pub trait MainExt: HasBindings {
     /// Report an error to the user
     /// After calling this, queries should attempt to recover as much as possible and continue on
     fn error(&self, e: Error);
-
-    /// Create a temporary environment associated with the given scope
-    fn temp_env<'a>(&'a self, scope: ScopeId) -> TempEnv<'a, Self::DB>;
 
     /// Add a module to the struct table
     fn add_mod(&self, id: StructId, file: FileId, defs: &Vec<(Spanned<Sym>, STerm)>);
@@ -269,10 +175,9 @@ pub enum LowError {
 fn low_ty(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowTy, LowError> {
     let elab = db.elab(scope.clone(), s).ok_or(LowError::NoElab)?;
 
-    let mut env = db.temp_env(scope.clone());
-    // We don't want the struct defs, since we'll inline it if there are any
-    env.tys = HashMap::new();
-    let ty = elab.low_ty_of(&mut env).ok_or(LowError::Polymorphic)?;
+    let scoped = (scope, db);
+    let mut lctx = LCtx::new(&scoped);
+    let ty = elab.low_ty_of(&mut lctx).ok_or(LowError::Polymorphic)?;
     Ok(ty)
 }
 
@@ -283,10 +188,9 @@ fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowErr
 
     let name = db.mangle(scope.clone(), s).ok_or(LowError::NoElab)?;
 
-    let mut env = db.temp_env(scope.clone());
-    // We don't want the struct defs, since we'll inline it if there are any
-    env.tys = HashMap::new();
-    let body = elab.as_low(&mut env).ok_or(LowError::Polymorphic)?;
+    let scoped = (scope, db);
+    let mut lctx = LCtx::new(&scoped);
+    let body = elab.as_low(&mut lctx).ok_or(LowError::Polymorphic)?;
 
     Ok(LowFun { name, ret_ty, body })
 }
@@ -358,11 +262,13 @@ fn term(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
 
 fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
     let term = db.term(scope.clone(), s)?;
-    let mut env = db.temp_env(scope.clone());
+
+    let scoped = (scope.clone(), db);
+    let mut tctx = TCtx::new(&scoped);
     // If it calls itself recursively, assume it could be anything.
     // We'll run `simplify_unions` on it later, which should get rid of Bottom if there's a base case
-    env.set_ty(s, Elab::Bottom);
-    let e = synth(&term, &mut env);
+    tctx.set_ty(s, Elab::Bottom);
+    let e = synth(&term, &mut tctx);
     match e {
         Ok(e) => Some(Arc::new(e)),
         Err(e) => {
@@ -420,17 +326,6 @@ impl MainExt for MainDatabase {
     }
     fn monos_mut(&self) -> RwLockWriteGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>> {
         self.monos.write().unwrap()
-    }
-
-    fn temp_env<'a>(&'a self, scope: ScopeId) -> TempEnv<'a, Self> {
-        TempEnv {
-            db: self,
-            bindings: self.bindings.clone(),
-            scope,
-            vals: HashMap::new(),
-            tys: HashMap::new(),
-            low_tys: HashMap::new(),
-        }
     }
 
     fn error(&self, error: Error) {

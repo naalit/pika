@@ -1,5 +1,13 @@
-use crate::common::*;
-use crate::{elab::Elab, error::FILES};
+use crate::binding::Sym;
+use crate::common::{termcolor, HasBindings};
+use crate::elab::Cloner;
+use crate::options::Options;
+use crate::printing::*;
+use crate::query::{MainDatabase, MainGroup, ScopeId};
+use crate::{
+    elab::{ECtx, Elab},
+    error::FILES,
+};
 use regex::Regex;
 use rustyline::{
     completion::Completer,
@@ -181,13 +189,14 @@ pub fn run_repl(options: &Options) {
                                 first = false;
                             }
 
-                            let mut env = db.temp_env(ScopeId::File(file));
-                            let ty = elab.get_type(&mut env);
-                            env.set_val(
+                            let scoped = (ScopeId::File(file), &db);
+                            let mut ectx = ECtx::new(&scoped);
+                            let ty = elab.get_type(&ectx);
+                            ectx.set_val(
                                 **s,
-                                Elab::Var(**s, Box::new(ty.cloned(&mut Cloner::new(&env)))),
+                                Elab::Var(**s, Box::new(ty.cloned(&mut Cloner::new(&ectx)))),
                             );
-                            let val = elab.cloned(&mut Cloner::new(&env)).normal(&mut env);
+                            let val = elab.cloned(&mut Cloner::new(&ectx)).normal(&mut ectx);
 
                             let b = db.bindings();
                             let doc = Doc::either(

@@ -14,10 +14,14 @@ mod term;
 use lalrpop_util::lalrpop_mod;
 lalrpop_mod!(pub grammar);
 
-use crate::common::*;
+use crate::common::HasBindings;
 use crate::error::FILES;
+use crate::options::*;
+use crate::printing::*;
+use crate::query::*;
 use crate::repl::*;
 use arg::Args;
+use elab::ECtx;
 use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
@@ -89,16 +93,17 @@ fn main() {
                                     .create_jit_execution_engine(inkwell::OptimizationLevel::None)
                                     .expect("Failed to create LLVM execution engine");
 
-                                let mut env = db.temp_env(ScopeId::File(file));
+                                let scoped = (ScopeId::File(file), &db);
+                                let mut ectx = ECtx::new(&scoped);
 
                                 use crate::elab::Elab;
                                 use crate::term::Builtin;
                                 match db
                                     .elab(ScopeId::File(file), **main)
                                     .unwrap()
-                                    .get_type(&mut db.temp_env(ScopeId::File(file)))
+                                    .get_type(&ectx)
                                 {
-                                    x if x.subtype_of(&Elab::Builtin(Builtin::Int), &mut env) => unsafe {
+                                    x if x.subtype_of(&Elab::Builtin(Builtin::Int), &mut ectx) => unsafe {
                                         let main_fun: inkwell::execution_engine::JitFunction<
                                             unsafe extern "C" fn() -> i32,
                                         > = engine.get_function(&main_mangled).unwrap();
@@ -110,7 +115,7 @@ fn main() {
                                             Box::new(Elab::Builtin(Builtin::Int)),
                                             Box::new(Elab::Builtin(Builtin::Int)),
                                         ),
-                                        &mut env,
+                                        &mut ectx,
                                     ) =>
                                     unsafe {
                                         // Rust aligns (i32, i32) differently than LLVM does, so values .1 and .3 in the result are padding

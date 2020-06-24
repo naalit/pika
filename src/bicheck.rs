@@ -3,6 +3,7 @@ use crate::common::*;
 use crate::elab::*;
 use crate::error::*;
 use crate::term::*;
+use std::ops::{Deref, DerefMut};
 
 /// An error produced in type checking
 #[derive(Debug, PartialEq, Eq)]
@@ -178,20 +179,79 @@ impl TypeError {
     }
 }
 
+pub struct TCtx<'a, T: MainGroup> {
+    pub tys: HashMap<Sym, Arc<Elab>>,
+    pub ectx: ECtx<'a, T>,
+}
+impl<'a, T: MainGroup> From<ECtx<'a, T>> for TCtx<'a, T> {
+    fn from(ectx: ECtx<'a, T>) -> Self {
+        TCtx {
+            tys: HashMap::new(),
+            ectx,
+        }
+    }
+}
+impl<'a, T: MainGroup> TCtx<'a, T> {
+    pub fn new(db: &'a (impl Scoped + HasDatabase<DB = T>)) -> Self {
+        TCtx {
+            tys: HashMap::new(),
+            ectx: ECtx::new(db),
+        }
+    }
+
+    pub fn ty(&self, k: Sym) -> Option<Arc<Elab>> {
+        self.tys.get(&k).cloned().or_else(|| {
+            self.database()
+                .elab(self.scope(), k)
+                .map(|x| Arc::new(x.get_type(self)))
+        })
+    }
+    pub fn set_ty(&mut self, k: Sym, v: Elab) {
+        self.tys.insert(k, Arc::new(v));
+    }
+}
+impl<'a, T: MainGroup> Scoped for TCtx<'a, T> {
+    fn scope(&self) -> ScopeId {
+        self.ectx.scope()
+    }
+}
+impl<'a, T: MainGroup> HasBindings for TCtx<'a, T> {
+    fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
+        self.database().bindings_ref()
+    }
+}
+impl<'a, T: MainGroup> HasDatabase for TCtx<'a, T> {
+    type DB = T;
+    fn database(&self) -> &dyn MainGroupP<DB = Self::DB> {
+        self.ectx.database()
+    }
+}
+impl<'a, T: MainGroup> Deref for TCtx<'a, T> {
+    type Target = ECtx<'a, T>;
+    fn deref(&self) -> &ECtx<'a, T> {
+        &self.ectx
+    }
+}
+impl<'a, T: MainGroup> DerefMut for TCtx<'a, T> {
+    fn deref_mut(&mut self) -> &mut ECtx<'a, T> {
+        &mut self.ectx
+    }
+}
+
 /// Attempts to come up with a type for a term, returning the elaborated term
-pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, TypeError> {
+pub fn synth<T: MainGroup>(t: &STerm, tctx: &mut TCtx<T>) -> Result<Elab, TypeError> {
     #[cfg(feature = "logging")]
-    println!("synth ({})", t.pretty(&*env.bindings()).ansi_string());
+    println!("synth ({})", t.pretty(&*tctx.bindings()).ansi_string());
 
     match &**t {
         Term::Type(i) => Ok(Elab::Type(*i)),
         Term::Builtin(b) => Ok(Elab::Builtin(*b)),
         Term::Var(x) => {
-            let ty = env
+            let ty = tctx
                 .ty(*x)
-                .map(|x| x.cloned(&mut Cloner::new(&env)))
+                .map(|x| x.cloned(&mut Cloner::new(&tctx)))
                 .ok_or_else(|| TypeError::NotFound(t.copy_span(*x)))?
-                .whnf(env);
+                .whnf(tctx);
             Ok(Elab::Var(*x, Box::new(ty)))
         }
         Term::I32(i) => Ok(Elab::I32(*i)),
@@ -199,50 +259,50 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         Term::Tag(t) => Ok(Elab::Tag(*t)),
         Term::Pair(x, y) => {
             // TODO I don't think this covers dependent pairs
-            let x = synth(x, env)?;
-            let y = synth(y, env)?;
+            let x = synth(x, tctx)?;
+            let y = synth(y, tctx)?;
             Ok(Elab::Pair(Box::new(x), Box::new(y)))
         }
         Term::Struct(id, iv) => {
-            if env.tys.keys().any(|k| t.uses(*k)) {
+            if tctx.tys.keys().any(|k| t.uses(*k)) {
                 // If it captures local variables, we compile in "struct mode"
                 // TODO a note in "not found" error messages here that structs that capture variables are ordered
                 let mut rv = Vec::new();
                 for (k, v) in iv {
-                    let v = synth(v, env)?;
-                    let t = v.get_type(env);
-                    env.set_ty(**k, t);
+                    let v = synth(v, tctx)?;
+                    let t = v.get_type(tctx);
+                    tctx.set_ty(**k, t);
                     rv.push((**k, v));
                 }
 
                 Ok(Elab::StructInline(rv))
             } else {
                 // Otherwise, compile in Salsa-enabled "module mode"
-                let scope = ScopeId::Struct(*id, Box::new(env.scope()));
-                env.db.add_mod(*id, env.scope.file(), iv);
+                let scope = ScopeId::Struct(*id, Box::new(tctx.scope()));
+                tctx.database().add_mod(*id, tctx.scope().file(), iv);
 
                 // Record any type errors inside the module
-                for sym in env.db.symbols(scope.clone()).iter() {
-                    env.db.elab(scope.clone(), **sym);
+                for sym in tctx.database().symbols(scope.clone()).iter() {
+                    tctx.database().elab(scope.clone(), **sym);
                 }
 
                 Ok(Elab::StructIntern(*id))
             }
         }
         Term::App(fi, x) => {
-            let f = synth(fi, env)?;
-            let x = match f.get_type(env) {
+            let f = synth(fi, tctx)?;
+            let x = match f.get_type(tctx) {
                 Elab::Fun(cl, v) => {
-                    env.add_clos(&cl);
+                    tctx.add_clos(&cl);
                     // We check the argument against a union of first parameter types across all branches
                     let from: Vec<_> = v.into_iter().map(|(mut x, _, _)| x.remove(0)).collect();
-                    let from = Elab::Union(from).whnf(env).simplify_unions(env);
-                    check(x, &from, env)?
+                    let from = Elab::Union(from).whnf(tctx).simplify_unions(tctx);
+                    check(x, &from, tctx)?
                 }
-                Elab::Tag(_) | Elab::App(_, _) | Elab::Bottom => synth(x, env)?,
+                Elab::Tag(_) | Elab::App(_, _) | Elab::Bottom => synth(x, tctx)?,
                 a => {
                     return Err(TypeError::NotFunction(
-                        fi.copy_span(a.cloned(&mut Cloner::new(&env))),
+                        fi.copy_span(a.cloned(&mut Cloner::new(&tctx))),
                         x.clone(),
                     ))
                 }
@@ -250,23 +310,23 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
             Ok(Elab::App(Box::new(f), Box::new(x)))
         }
         Term::Project(r, m) => {
-            let r = synth(r, env)?;
-            let rt = r.get_type(env);
-            match &r.get_type(env) {
+            let r = synth(r, tctx)?;
+            let rt = r.get_type(tctx);
+            match &r.get_type(tctx) {
                 Elab::StructInline(v) => {
                     if let Some((_, val)) = v.iter().find(|(name, _)| name.raw() == **m) {
-                        val.cloned(&mut Cloner::new(&env))
+                        val.cloned(&mut Cloner::new(&tctx))
                     } else {
                         return Err(TypeError::NoSuchField(
                             m.clone(),
-                            rt.cloned(&mut Cloner::new(&env)),
+                            rt.cloned(&mut Cloner::new(&tctx)),
                         ));
                     }
                 }
                 _ => {
                     return Err(TypeError::NoSuchField(
                         m.clone(),
-                        rt.cloned(&mut Cloner::new(&env)),
+                        rt.cloned(&mut Cloner::new(&tctx)),
                     ))
                 }
             };
@@ -278,20 +338,20 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                 let mut rx = Vec::new();
                 for x in xs {
                     // Make sure it's well typed before reducing it
-                    let x = synth(x, env)?.whnf(env);
+                    let x = synth(x, tctx)?.whnf(tctx);
                     // Match it with itself to apply the types
-                    x.match_types(&x, env);
+                    x.match_types(&x, tctx);
 
                     rx.push(x);
                 }
 
-                let y = synth(y, env)?;
+                let y = synth(y, tctx)?;
                 // get_type() should always produce WHNF, so we don't need whnf() here
-                let to = y.get_type(env);
+                let to = y.get_type(tctx);
 
                 rv.push((rx, y, to))
             }
-            Ok(Elab::Fun(env.clos(t), rv))
+            Ok(Elab::Fun(tctx.clos(t), rv))
         }
         Term::Block(v) => {
             let mut rv = Vec::new();
@@ -299,19 +359,20 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
                 match &v[i] {
                     Statement::Expr(t) => {
                         if i + 1 != v.len() {
-                            rv.push(ElabStmt::Expr(check(t, &Elab::Unit, env)?));
+                            rv.push(ElabStmt::Expr(check(t, &Elab::Unit, tctx)?));
                         } else {
                             // last value
-                            rv.push(ElabStmt::Expr(synth(t, env)?));
+                            rv.push(ElabStmt::Expr(synth(t, tctx)?));
                         }
                     }
                     Statement::Def(Def(name, val)) => {
-                        let val = synth(val, env)?;
-                        let ty = val.get_type(env);
-                        env.set_ty(**name, ty);
+                        let val = synth(val, tctx)?;
+                        let ty = val.get_type(tctx);
+                        tctx.set_ty(**name, ty);
                         // Blocks can be dependent!
-                        let val = val.whnf(env);
-                        env.set_val(**name, val.cloned(&mut Cloner::new(&env)));
+                        let val = val.whnf(tctx);
+                        let val2 = val.cloned(&mut Cloner::new(&tctx));
+                        tctx.set_val(**name, val2);
                         rv.push(ElabStmt::Def(**name, val));
                     }
                 }
@@ -320,22 +381,22 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
         }
         Term::The(ty, u) => {
             // Make sure it's well typed before reducing it
-            let ty = synth(ty, env)?.whnf(env);
-            let ue = check(u, &ty, env)?;
+            let ty = synth(ty, tctx)?.whnf(tctx);
+            let ue = check(u, &ty, tctx)?;
             Ok(ue)
         }
         Term::Binder(x, Some(ty)) => {
-            let ty = synth(ty, env)?.whnf(env);
+            let ty = synth(ty, tctx)?.whnf(tctx);
             Ok(Elab::Binder(*x, Box::new(ty)))
         }
         Term::Binder(x, None) => Ok(Elab::Binder(*x, Box::new(Elab::Top))),
         Term::Union(iv) => {
             let mut rv = Vec::new();
             for val in iv {
-                let val = synth(val, env)?;
+                let val = synth(val, tctx)?;
                 rv.push(val);
             }
-            Ok(Elab::Union(rv).simplify_unions(env))
+            Ok(Elab::Union(rv).simplify_unions(tctx))
         }
         _ => Err(TypeError::Synth(t.clone())),
     }
@@ -345,11 +406,11 @@ pub fn synth<T: MainGroup>(t: &STerm, env: &mut TempEnv<T>) -> Result<Elab, Type
 pub fn check<T: MainGroup>(
     term: &STerm,
     typ: &Elab,
-    env: &mut TempEnv<T>,
+    tctx: &mut TCtx<T>,
 ) -> Result<Elab, TypeError> {
     #[cfg(feature = "logging")]
     {
-        let b = &env.bindings();
+        let b = &tctx.bindings();
         println!(
             "check ({}) :: ({})",
             term.pretty(b).ansi_string(),
@@ -359,23 +420,23 @@ pub fn check<T: MainGroup>(
 
     match (&**term, typ) {
         (Term::Pair(x, y), Elab::Pair(tx, ty)) => {
-            let mut cln = Cloner::new(env);
-            let (tx, ty) = (tx.cloned(&mut cln).whnf(env), ty.cloned(&mut cln).whnf(env));
+            let mut cln = Cloner::new(tctx);
+            let (tx, ty) = (tx.cloned(&mut cln).whnf(tctx), ty.cloned(&mut cln).whnf(tctx));
             // TODO dependent pairs don't really work
-            check(x, &tx, env)?;
-            check(y, &ty, env)
+            check(x, &tx, tctx)?;
+            check(y, &ty, tctx)
         }
 
         // As far as we know, it could be any type
-        (Term::Binder(s, None), _) /*if typ.subtype_of(&Elab::Type, &mut env.clone())*/ => {
+        (Term::Binder(s, None), _) /*if typ.subtype_of(&Elab::Type, &mut tctx.clone())*/ => {
             // As far as we know, it could be anything, so it's `Top`
             // We'll narrow it down with `update_binders()` later, if we can
             Ok(Elab::Binder(*s, Box::new(Elab::Top)))
         }
 
         (Term::Fun(v), Elab::Fun(cl, v2)) => {
-            env.add_clos(cl);
-            let mut cln = Cloner::new(env);
+            tctx.add_clos(cl);
+            let mut cln = Cloner::new(tctx);
             let mut v2: Vec<_> = v2
                 .iter()
                 .map(|(x, y, z)| {
@@ -395,10 +456,10 @@ pub fn check<T: MainGroup>(
                 v2 = v2
                     .into_iter()
                     .flat_map(|(mut arg, body, _)| {
-                        let body = body.whnf(env);
+                        let body = body.whnf(tctx);
                         match body {
                             Elab::Fun(cl, v3) => {
-                                env.add_clos(&cl);
+                                tctx.add_clos(&cl);
                                 v3
                                     .into_iter()
                                     .map(|(mut from, to, _)| {
@@ -406,7 +467,7 @@ pub fn check<T: MainGroup>(
                                         (
                                             arg.iter().map(|x| x.cloned(&mut cln)).collect(),
                                             to.cloned(&mut cln),
-                                            to.get_type(env),
+                                            to.get_type(tctx),
                                         )
                                     })
                                     .collect::<Vec<_>>()
@@ -438,7 +499,7 @@ pub fn check<T: MainGroup>(
             let initial_arity = v[0].0.len();
             while v[0].0.len() < v2[0].0.len() {
                 for (arg, body) in &mut v {
-                    let extra_param = env.bindings_mut().create("$curry".to_string());
+                    let extra_param = tctx.bindings_mut().create("$curry".to_string());
                     arg.push(
                         arg.last()
                             .unwrap()
@@ -488,7 +549,7 @@ pub fn check<T: MainGroup>(
             for (args, body) in v {
                 let mut ra = Vec::new();
                 for a in args {
-                    let e = synth(&a, env)?.whnf(env);
+                    let e = synth(&a, tctx)?.whnf(tctx);
                     ra.push((e, a.span()));
                 }
                 unused.push((ra, body));
@@ -506,7 +567,7 @@ pub fn check<T: MainGroup>(
                     let mut all_subtype = true;
                     // Go through the curried parameters and make sure each one matches
                     for ((i, f), (a, span)) in from.iter().enumerate().zip(args) {
-                        if !f.subtype_of(&a, env) {
+                        if !f.subtype_of(&a, tctx) {
                             errors[i].push(Spanned::new(a.cloned(&mut cln), *span));
                             all_subtype = false;
                             break;
@@ -535,15 +596,15 @@ pub fn check<T: MainGroup>(
                     // Go through the curried parameters and make sure each one matches
                     for ((i, f), (mut a, span)) in from.iter().enumerate().zip(args) {
                         if !all_subtype {
-                        } else if !f.subtype_of(&a, env) {
+                        } else if !f.subtype_of(&a, tctx) {
                             errors[i].push(Spanned::new(a.cloned(&mut cln), span));
                             all_subtype = false;
                         } else {
                             // Update the types of binders in `xr` based on the type `y`
-                            a.update_binders(f, env);
-                            // Add bindings in the argument to the environment with types given by `y`
-                            a.match_types(f, env);
-                            a = a.whnf(env);
+                            a.update_binders(f, &mut Cloner::new(tctx));
+                            // Add bindings in the argument to the tctxironment with types given by `y`
+                            a.match_types(f, tctx);
+                            a = a.whnf(tctx);
                         }
                         ra.push((a, span));
                     }
@@ -552,12 +613,12 @@ pub fn check<T: MainGroup>(
                         // If all the parameters matched, this branch of the type is covered, so no errors yet
                         errors = Vec::new();
 
-                        let to = to.cloned(&mut cln).whnf(env);
-                        let body = match check(&body, &to, env) {
+                        let to = to.cloned(&mut cln).whnf(tctx);
+                        let body = match check(&body, &to, tctx) {
                             Ok(x) => x,
                             Err(TypeError::NotFunction(f, x)) => match &*x {
                                 // We added a parameter for currying, but it didn't work
-                                Term::Var(s) if env.bindings().resolve(*s) == "$curry" => return Err(TypeError::WrongArity(
+                                Term::Var(s) if tctx.bindings().resolve(*s) == "$curry" => return Err(TypeError::WrongArity(
                                     from.len(),
                                     initial_arity,
                                     typ.cloned(&mut cln),
@@ -584,38 +645,38 @@ pub fn check<T: MainGroup>(
             // TODO give a warning if there's anything left in `unused`
 
             Ok(Elab::Fun(
-                env.clos(term),
+                tctx.clos(term),
                 used.into_iter()
                     .map(|(a, b, c)| (a.into_iter().map(|(x, _)| x).collect(), b, c))
                     .collect(),
             ))
         }
         (Term::App(f, x), Elab::App(tf, tx)) => {
-            let f = check(f, tf, env)?;
-            let x = check(x, tx, env)?;
+            let f = check(f, tf, tctx)?;
+            let x = check(x, tx, tctx)?;
             Ok(Elab::App(Box::new(f), Box::new(x)))
         }
-        (Term::App(f, x), Elab::Type(i)) if f.tag_head(env) => {
-            let f = check(f, &Elab::Type(*i), env)?;
-            let x = check(x, &Elab::Type(*i), env)?;
+        (Term::App(f, x), Elab::Type(i)) if f.tag_head(tctx) => {
+            let f = check(f, &Elab::Type(*i), tctx)?;
+            let x = check(x, &Elab::Type(*i), tctx)?;
             Ok(Elab::App(Box::new(f), Box::new(x)))
         }
         (_, _) => {
-            let t = synth(term, env)?;
-            let ty = t.get_type(env);
+            let t = synth(term, tctx)?;
+            let ty = t.get_type(tctx);
             // Is it guaranteed to be a `typ`?
-            if ty.subtype_of(&typ, &mut env.clone()) {
+            if ty.subtype_of(&typ, &mut tctx.clone()) {
                 Ok(t)
             } else {
                 match typ.unbind() {
                     Elab::Type(i) => Err(TypeError::WrongUniverse(
-                        term.copy_span(ty.cloned(&mut Cloner::new(&env))),
-                        ty.universe(env) - 1,
+                        term.copy_span(ty.cloned(&mut Cloner::new(&tctx))),
+                        ty.universe(tctx) - 1,
                         *i,
                     )),
                     _ => Err(TypeError::NotSubtype(
-                        term.copy_span(ty.cloned(&mut Cloner::new(&env))),
-                        typ.cloned(&mut Cloner::new(&env)),
+                        term.copy_span(ty.cloned(&mut Cloner::new(&tctx))),
+                        typ.cloned(&mut Cloner::new(&tctx)),
                     )),
                 }
             }
@@ -624,15 +685,15 @@ pub fn check<T: MainGroup>(
 }
 
 impl Term {
-    fn tag_head<T: MainGroup>(&self, env: &TempEnv<T>) -> bool {
+    fn tag_head<T: MainGroup>(&self, tctx: &TCtx<T>) -> bool {
         match self {
             Term::Tag(_) => true,
-            Term::App(f, _) => f.tag_head(env),
-            Term::Var(x) => env
-                .db
-                .elab(env.scope.clone(), *x)
-                .map(|x| x.get_type(&mut env.clone()))
-                .or_else(|| env.ty(*x).map(|x| x.cloned(&mut Cloner::new(&env))))
+            Term::App(f, _) => f.tag_head(tctx),
+            Term::Var(x) => tctx
+                .database()
+                .elab(tctx.scope(), *x)
+                .map(|x| x.get_type(tctx))
+                .or_else(|| tctx.ty(*x).map(|x| x.cloned(&mut Cloner::new(&tctx))))
                 .map_or(false, |x| x.tag_head()),
             _ => false,
         }
@@ -649,51 +710,51 @@ impl Elab {
         }
     }
 
-    fn update_binders<T: MainGroup>(&mut self, other: &Elab, env: &TempEnv<T>) {
+    fn update_binders(&mut self, other: &Elab, cln: &mut Cloner) {
         use Elab::*;
         match (&mut *self, other) {
             // We don't want `x:y:T`, and we already called match_types()
             (_, Binder(_, t)) => {
-                self.update_binders(t, env);
+                self.update_binders(t, cln);
             }
             (Binder(_, t), _) => {
-                **t = other.cloned(&mut Cloner::new(&env));
+                **t = other.cloned(cln);
             }
             (Pair(ax, ay), Pair(bx, by)) => {
-                ax.update_binders(bx, env);
-                ay.update_binders(by, env);
+                ax.update_binders(bx, cln);
+                ay.update_binders(by, cln);
             }
             (App(af, ax), App(bf, bx)) => {
-                af.update_binders(bf, env);
-                ax.update_binders(bx, env);
+                af.update_binders(bf, cln);
+                ax.update_binders(bx, cln);
             }
             _ => (),
         }
     }
 
     /// Like do_match(), but fills in the types instead of Elabs
-    pub fn match_types<T: MainGroup>(&self, other: &Elab, env: &mut TempEnv<T>) {
+    pub fn match_types<T: MainGroup>(&self, other: &Elab, tctx: &mut TCtx<T>) {
         use Elab::*;
         match (self, other) {
             // Since we match it against itself to apply binder types
             (Binder(na, _), Binder(nb, t)) if na == nb => {
                 #[cfg(feature = "logging")]
                 {
-                    let b = &env.bindings();
+                    let b = &tctx.bindings();
                     println!(
-                        "env: {} : {}",
+                        "tctx: {} : {}",
                         self.pretty(b).ansi_string(),
                         t.pretty(b).ansi_string()
                     );
                 }
 
-                let t = t.cloned(&mut Cloner::new(&env));
-                env.set_ty(*na, t);
+                let t = t.cloned(&mut Cloner::new(&tctx));
+                tctx.set_ty(*na, t);
             }
             (Binder(s, t), _) => {
                 #[cfg(feature = "logging")]
                 {
-                    let b = &env.bindings();
+                    let b = &tctx.bindings();
                     println!(
                         "type: {} : {}",
                         self.pretty(b).ansi_string(),
@@ -702,23 +763,50 @@ impl Elab {
                 }
 
                 // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
-                other.do_match(&Var(*s, Box::new(t.cloned(&mut Cloner::new(&env)))), env);
+                other.do_match(
+                    &Var(*s, Box::new(t.cloned(&mut Cloner::new(&tctx)))),
+                    &mut tctx.ectx,
+                );
 
-                let other = other.cloned(&mut Cloner::new(&env));
-                env.set_ty(*s, other);
+                let other = other.cloned(&mut Cloner::new(&tctx));
+                tctx.set_ty(*s, other);
             }
             (Var(x, _), _) => {
-                if let Some(x) = env.val(*x) {
-                    x.match_types(other, env);
+                if let Some(x) = tctx.val(*x) {
+                    x.match_types(other, tctx);
                 }
             }
             (Pair(ax, ay), Pair(bx, by)) => {
-                ax.match_types(bx, env);
-                ay.match_types(by, env);
+                ax.match_types(bx, tctx);
+                ay.match_types(by, tctx);
             }
             (App(af, ax), App(bf, bx)) => {
-                af.match_types(bf, env);
-                ax.match_types(bx, env);
+                af.match_types(bf, tctx);
+                ax.match_types(bx, tctx);
+            }
+            _ => (),
+        }
+    }
+
+    pub fn alpha_match<T: MainGroup>(&self, other: &Elab, ectx: &mut ECtx<T>) {
+        use Elab::*;
+        match (self, other) {
+            (Binder(s, t), _) => {
+                // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
+                other.do_match(&Var(*s, Box::new(t.cloned(&mut Cloner::new(&ectx)))), ectx);
+            }
+            (Var(x, _), _) => {
+                if let Some(x) = ectx.val(*x) {
+                    x.alpha_match(other, ectx);
+                }
+            }
+            (Pair(ax, ay), Pair(bx, by)) => {
+                ax.alpha_match(bx, ectx);
+                ay.alpha_match(by, ectx);
+            }
+            (App(af, ax), App(bf, bx)) => {
+                af.alpha_match(bf, ectx);
+                ax.alpha_match(bx, ectx);
             }
             _ => (),
         }
@@ -726,7 +814,7 @@ impl Elab {
 
     /// <=; every `self` is also a `sup`
     /// Not that this is *the* way to check type equality
-    pub fn subtype_of<T: MainGroup>(&self, sup: &Elab, env: &mut TempEnv<T>) -> bool {
+    pub fn subtype_of<T: MainGroup>(&self, sup: &Elab, ectx: &mut ECtx<T>) -> bool {
         match (self, sup) {
             (Elab::Bottom, _) => true,
             (_, Elab::Top) => true,
@@ -734,56 +822,58 @@ impl Elab {
             (Elab::I32(_), Elab::Builtin(Builtin::Int)) => true,
             (Elab::StructInline(sub), Elab::StructInline(sup)) => {
                 // We DON'T do record subtyping, that's confusing and hard to compile efficiently
-                sup.iter().all(|(n, sup)| sub.iter().find(|(n2, _)| n2.raw() == n.raw()).map_or(false, |(_, sub)| sub.subtype_of(sup, env)))
+                sup.iter().all(|(n, sup)| sub.iter().find(|(n2, _)| n2.raw() == n.raw()).map_or(false, |(_, sub)| sub.subtype_of(sup, ectx)))
                     // so make sure there aren't any extra fields
                     && sub.iter().all(|(n, _)| sup.iter().any(|(n2, _)| n2.raw() == n.raw()))
             }
             (Elab::Tag(x), Elab::Tag(y)) if x == y => true,
             (Elab::Builtin(b), Elab::Builtin(c)) if b == c => true,
             (Elab::Unit, Elab::Unit) => true,
-            (Elab::Var(x, _), _) if env.db.elab(env.scope(), *x).is_some() => env
-                .db
-                .elab(env.scope(), *x)
+            (Elab::Var(x, _), _) if ectx.database().elab(ectx.scope(), *x).is_some() => ectx
+                .database()
+                .elab(ectx.scope(), *x)
                 .unwrap()
-                .cloned(&mut Cloner::new(env))
-                .subtype_of(sup, env),
-            (_, Elab::Var(x, _)) if env.db.elab(env.scope(), *x).is_some() => self.subtype_of(
-                &env.db
-                    .elab(env.scope(), *x)
-                    .unwrap()
-                    .cloned(&mut Cloner::new(env)),
-                env,
-            ),
-            (Elab::Var(x, _), _) if env.vals.contains_key(x) => env
+                .cloned(&mut Cloner::new(ectx))
+                .subtype_of(sup, ectx),
+            (_, Elab::Var(x, _)) if ectx.database().elab(ectx.scope(), *x).is_some() => self
+                .subtype_of(
+                    &ectx
+                        .database()
+                        .elab(ectx.scope(), *x)
+                        .unwrap()
+                        .cloned(&mut Cloner::new(ectx)),
+                    ectx,
+                ),
+            (Elab::Var(x, _), _) if ectx.vals.contains_key(x) => ectx
                 .val(*x)
                 .unwrap()
-                .cloned(&mut Cloner::new(env))
-                .subtype_of(sup, env),
-            (_, Elab::Var(x, _)) if env.vals.contains_key(x) => {
-                self.subtype_of(&env.val(*x).unwrap().cloned(&mut Cloner::new(env)), env)
+                .cloned(&mut Cloner::new(ectx))
+                .subtype_of(sup, ectx),
+            (_, Elab::Var(x, _)) if ectx.vals.contains_key(x) => {
+                self.subtype_of(&ectx.val(*x).unwrap().cloned(&mut Cloner::new(ectx)), ectx)
             }
             (Elab::App(f1, x1), Elab::App(f2, x2)) => {
-                f1.subtype_of(f2, env) && x1.subtype_of(x2, env)
+                f1.subtype_of(f2, ectx) && x1.subtype_of(x2, ectx)
             }
             (Elab::Pair(ax, ay), Elab::Pair(bx, by)) => {
-                ax.subtype_of(bx, env) && ay.subtype_of(by, env)
+                ax.subtype_of(bx, ectx) && ay.subtype_of(by, ectx)
             }
             // (Type -> (Type, Type)) <= ((Type, Type) -> Type)
             (Elab::Fun(cl_a, v_sub), Elab::Fun(cl_b, v_sup)) => {
-                env.add_clos(cl_a);
-                env.add_clos(cl_b);
+                ectx.add_clos(cl_a);
+                ectx.add_clos(cl_b);
                 for (args_sup, to_sup, _) in v_sup.iter() {
                     let mut found = false;
                     for (args_sub, to_sub, _) in v_sub.iter() {
                         let mut all_subtype = true;
                         for (sup, sub) in args_sup.iter().zip(args_sub.iter()) {
                             // Function parameters are contravariant
-                            if !sup.subtype_of(sub, env) {
+                            if !sup.subtype_of(sub, ectx) {
                                 all_subtype = false;
                                 break;
                             }
                             // Matching in either direction works, we have to check alpha equality
-                            sub.match_types(sup, env);
+                            sub.alpha_match(sup, ectx);
                         }
 
                         if !all_subtype {
@@ -791,10 +881,10 @@ impl Elab {
                         }
 
                         // Since types are only in weak-head normal form, we have to reduce the spines to compare them
-                        let to_sup = to_sup.cloned(&mut Cloner::new(env)).whnf(env);
-                        let to_sub = to_sub.cloned(&mut Cloner::new(env)).whnf(env);
+                        let to_sup = to_sup.cloned(&mut Cloner::new(ectx)).whnf(ectx);
+                        let to_sub = to_sub.cloned(&mut Cloner::new(ectx)).whnf(ectx);
 
-                        if to_sub.subtype_of(&to_sup, env) {
+                        if to_sub.subtype_of(&to_sup, ectx) {
                             found = true;
                             break;
                         }
@@ -807,8 +897,8 @@ impl Elab {
             }
             // Two variables that haven't been resolved yet, but refer to the same definition
             (Elab::Var(x, _), Elab::Var(y, _)) if y == x => true,
-            (Elab::Binder(_, t), _) => t.subtype_of(sup, env),
-            (_, Elab::Binder(_, t)) => self.subtype_of(t, env),
+            (Elab::Binder(_, t), _) => t.subtype_of(sup, ectx),
+            (_, Elab::Binder(_, t)) => self.subtype_of(t, ectx),
             (Elab::Union(sub), Elab::Union(sup)) => {
                 // If each type in `sub` has a supertype in `sup`, we're good
                 let mut sub: Vec<_> = sub.iter().collect();
@@ -817,7 +907,7 @@ impl Elab {
                     while i < sub.len() {
                         let x = sub[i];
 
-                        if x.subtype_of(&sup, env) {
+                        if x.subtype_of(&sup, ectx) {
                             sub.remove(i);
                         } else {
                             i += 1;
@@ -826,13 +916,13 @@ impl Elab {
                 }
                 sub.is_empty()
             }
-            (Elab::Union(v), _) => v.iter().all(|x| x.subtype_of(sup, env)),
-            (_, Elab::Union(v)) => v.iter().any(|x| self.subtype_of(x, env)),
+            (Elab::Union(v), _) => v.iter().all(|x| x.subtype_of(sup, ectx)),
+            (_, Elab::Union(v)) => v.iter().any(|x| self.subtype_of(x, ectx)),
             // Higher universes contain lower ones
             (Elab::Type(a), Elab::Type(b)) => b >= a,
             // Due to singleton types, pretty much everything (except unions) can be its own type, so everything can be a type of types
             // So if it's in universe `N+1` or below, all it's values are in universe `N`, so it's a subtype of `TypeN`
-            (_, Elab::Type(i)) => self.universe(env) <= i + 1,
+            (_, Elab::Type(i)) => self.universe(ectx) <= i + 1,
             _ => false,
         }
     }
