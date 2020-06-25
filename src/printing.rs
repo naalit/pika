@@ -21,6 +21,7 @@ pub enum Style {
     Symbol,
     Special,
     Bold,
+    BoldRed,
     Note,
     Comment,
     None,
@@ -34,6 +35,7 @@ impl Style {
             Style::Symbol => spec(Color::Green, false),
             Style::Special => spec(Color::Blue, true),
             Style::Bold => ColorSpec::new().set_bold(true).clone(),
+            Style::BoldRed => spec(Color::Red, true),
             Style::Note => spec(Color::Blue, false),
             Style::Comment => ColorSpec::new()
                 .set_fg(Some(Color::Black))
@@ -178,6 +180,15 @@ impl<'a> Doc<'a> {
                     .append(RcDoc::text(s).annotate(Style::Symbol.spec())),
                 ..self
             }
+        }
+    }
+
+    /// Appends an object to the `Doc`, using the `Debug` formatter
+    pub fn debug<D: std::fmt::Debug>(self, x: D) -> Self {
+        let s = format!("{:?}", x);
+        Doc {
+            doc: self.doc.append(RcDoc::text(s)),
+            ..self
         }
     }
 

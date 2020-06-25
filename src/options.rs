@@ -1,3 +1,4 @@
+use crate::common::*;
 use arg::Args;
 use codespan_reporting::term::termcolor;
 
@@ -16,7 +17,23 @@ impl std::str::FromStr for Command {
             "build" => Ok(Command::Build),
             "run" => Ok(Command::Run),
             _ => {
-                eprintln!("Unknown command: {}", s);
+                let printer = Printer::new(termcolor::ColorChoice::Auto, 80);
+                printer
+                    .print(
+                        Doc::start("error")
+                            .style(Style::BoldRed)
+                            .add(": Unknown command: '")
+                            .add(s)
+                            .add("'")
+                            .style(Style::Bold)
+                            .line()
+                            .chain(
+                                Doc::start("help: valid commands are 'repl', 'run', and 'build'")
+                                    .style(Style::Note),
+                            )
+                            .hardline(),
+                    )
+                    .unwrap();
                 Err(())
             }
         }

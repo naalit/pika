@@ -1,0 +1,12 @@
+f := fun
+  2 => 0
+  i:Int => 1
+
+# Up until recently, Pika would type g `fun i:Int => 0`
+# and b was `b : 0 = 1`
+# We could pass it to h and get unsoundness
+# This tests for regression on that issue
+g := fun i:Int => f i
+b := g 3 # b = 1
+h := fun 0 => ()
+z := h b # type error! b isn't 0

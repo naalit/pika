@@ -36,9 +36,40 @@ fn main() {
             Command::Build | Command::Run => {
                 let start_time = Instant::now();
 
+                let printer = Printer::new(options.color.0, 80);
+
                 let mut db = MainDatabase::default();
                 for i in &options.input_files {
-                    let mut file = File::open(i).unwrap();
+                    let mut file = File::open(i).unwrap_or_else(|e| match e.kind() {
+                        std::io::ErrorKind::NotFound => {
+                            printer
+                                .print(
+                                    Doc::start("error")
+                                        .style(Style::BoldRed)
+                                        .add(": File not found: '")
+                                        .add(i)
+                                        .add("'")
+                                        .style(Style::Bold)
+                                        .hardline(),
+                                )
+                                .unwrap();
+                            std::process::exit(1);
+                        }
+                        _ => {
+                            printer
+                                .print(
+                                    Doc::start("error")
+                                        .style(Style::BoldRed)
+                                        .add(": Error opening file: '")
+                                        .add(e)
+                                        .add("'")
+                                        .style(Style::Bold)
+                                        .hardline(),
+                                )
+                                .unwrap();
+                            std::process::exit(1);
+                        }
+                    });
                     let mut buf = String::new();
                     file.read_to_string(&mut buf).expect("Error reading file");
                     if !buf.ends_with('\n') {
@@ -69,17 +100,27 @@ fn main() {
                         }
 
                         if let Err(e) = llvm.verify() {
-                            eprintln!(
-                                "{}",
-                                Doc::start("Verification error:")
-                                    .style(Style::Bold)
-                                    .line()
-                                    .add(e.to_string())
-                                    .ansi_string()
-                            );
+                            printer
+                                .print(
+                                    Doc::start("error")
+                                        .style(Style::BoldRed)
+                                        .add(": LLVM verification error: ")
+                                        .style(Style::Bold)
+                                        .line()
+                                        .add(e.to_string())
+                                        .hardline(),
+                                )
+                                .unwrap();
                             std::process::exit(1);
                         } else {
-                            eprintln!("Build successful in {:?}", Instant::now() - start_time);
+                            printer
+                                .print(
+                                    Doc::start("Build successful in ")
+                                        .debug(Instant::now() - start_time)
+                                        .style(Style::Bold)
+                                        .hardline(),
+                                )
+                                .unwrap();
                         }
 
                         if options.command == Command::Run {
@@ -127,27 +168,63 @@ fn main() {
                                         println!("({}, {})", result.0, result.2);
                                     }
                                     x => {
-                                        eprintln!(
-                                            "Error: Main can't return {}!",
-                                            x.pretty(&db).ansi_string()
-                                        );
+                                        printer.print(
+                                            Doc::start("error")
+                                                .style(Style::BoldRed)
+                                                .add(": `main` can't return '")
+                                                .chain(x.pretty(&db).group().style(Style::None))
+                                                .add("'")
+                                                .style(Style::Bold)
+                                                .line()
+                                                .chain(Doc::start("help: `main` can return either 'Int' or '(Int, Int)'").style(Style::Note))
+                                                .hardline()
+                                        ).unwrap();
                                         std::process::exit(1)
                                     }
                                 }
                             } else {
-                                eprintln!("Run command specified but no `main` found!");
+                                printer
+                                    .print(
+                                        Doc::start("error")
+                                            .style(Style::BoldRed)
+                                            .add(": `run` command specified but no `main` found!")
+                                            .style(Style::Bold)
+                                            .hardline(),
+                                    )
+                                    .unwrap();
                                 std::process::exit(1)
                             }
                         }
                     } else {
-                        eprintln!("Build successful in {:?}", Instant::now() - start_time);
+                        printer
+                            .print(
+                                Doc::start("Build successful in ")
+                                    .debug(Instant::now() - start_time)
+                                    .style(Style::Bold)
+                                    .hardline(),
+                            )
+                            .unwrap();
                     }
                 }
             }
         },
-        Err(err) => {
-            eprintln!("{}", err);
-            std::process::exit(1)
-        }
+        Err(err) => match err {
+            // We already emitted the error in the FromStr impl
+            arg::ParseError::InvalidArgValue(_, _) => std::process::exit(1),
+            err => {
+                let printer = Printer::new(termcolor::ColorChoice::Auto, 80);
+                printer
+                    .print(
+                        Doc::start("error")
+                            .style(Style::BoldRed)
+                            .add(": ")
+                            .add(err)
+                            .hardline()
+                            .style(Style::Bold),
+                    )
+                    .unwrap();
+                std::process::exit(1);
+            }
+        },
     }
 }

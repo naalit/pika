@@ -198,7 +198,6 @@ impl Elab {
             Elab::Union(v) => {
                 for i in v {
                     i.check_affine(actx)?;
-                    // actx.with_rmult(Zero, |actx| i.check_affine(actx));
                 }
             }
             Elab::Builtin(_)

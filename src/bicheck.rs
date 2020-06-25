@@ -382,8 +382,7 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                         let ty = val.get_type(tctx);
                         tctx.set_ty(**name, ty);
                         // Blocks can be dependent!
-                        let val = val.whnf(tctx);
-                        let val2 = val.cloned(&mut Cloner::new(&tctx));
+                        let val2 = val.cloned(&mut Cloner::new(&tctx)).whnf(tctx);
                         tctx.set_val(**name, val2);
                         rv.push(ElabStmt::Def(**name, val));
                     }
@@ -849,6 +848,13 @@ impl Elab {
                     // so make sure there aren't any extra fields
                     && sub.iter().all(|(n, _)| sup.iter().any(|(n2, _)| n2.raw() == n.raw()))
             }
+            (Elab::StructIntern(id), _) => ScopeId::Struct(*id, Box::new(ectx.scope()))
+                .inline(ectx)
+                .subtype_of(sup, ectx),
+            (_, Elab::StructIntern(id)) => self.subtype_of(
+                &ScopeId::Struct(*id, Box::new(ectx.scope())).inline(ectx),
+                ectx,
+            ),
             (Elab::Tag(x), Elab::Tag(y)) if x == y => true,
             (Elab::Builtin(b), Elab::Builtin(c)) if b == c => true,
             (Elab::Unit, Elab::Unit) => true,

@@ -274,10 +274,7 @@ impl Elab {
     pub fn low_ty_of(&self, lctx: &mut LCtx) -> Option<LowTy> {
         Some(match self {
             // Guaranteed erasure for multiplicity-0 types
-            _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => {
-                eprintln!("Erasing {}", self.pretty(lctx).ansi_string());
-                LowTy::Unit
-            }
+            _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => LowTy::Unit,
             // We don't actually care what tag it is if it's not in a union
             Elab::Tag(_) => LowTy::Unit,
             Elab::Unit => LowTy::Unit,

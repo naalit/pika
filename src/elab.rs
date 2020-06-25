@@ -439,29 +439,46 @@ impl Elab {
                 match *f {
                     Elab::Fun(cl, v) => {
                         ectx.add_clos(&cl);
-                        let x = x.whnf(ectx);
                         let tx = x.get_type(ectx);
                         let mut rf = Vec::new();
+                        // If we find a branch that *might* match before one that *does*, we set this
+                        let mut fuzzy = false;
                         for (mut args, body, to) in v {
+                            // Guaranteed to match
                             if tx.subtype_of(args.first().unwrap(), ectx) {
-                                let arg = args.remove(0);
-                                arg.do_match(&x, ectx);
-                                if args.is_empty() {
+                                args.first().unwrap().do_match(&x, ectx);
+                                if !fuzzy && args.len() == 1 {
                                     return body.whnf(ectx);
                                 } else {
                                     rf.push((args, body, to));
                                 }
+                            } else if tx.overlap(args.first().unwrap(), ectx) {
+                                // Might match
+                                fuzzy = true;
+                                rf.push((args, body, to));
                             }
                         }
-                        // If we passed in a move-only argument, it now captures it, so it's move-only
-                        Elab::Fun(
-                            Clos {
-                                is_move: cl.is_move || tx.multiplicity(ectx) == Mult::One,
-                                ..cl
-                            },
-                            rf,
-                        )
-                        .whnf(ectx)
+                        assert_ne!(rf.len(), 0, "none matched");
+                        if fuzzy {
+                            Elab::App(Box::new(Elab::Fun(cl, rf)), x)
+                        } else {
+                            let rf = rf
+                                .into_iter()
+                                .map(|(mut a, b, c)| {
+                                    a.remove(0);
+                                    (a, b, c)
+                                })
+                                .collect();
+                            // If we passed in a move-only argument, it now captures it, so it's move-only
+                            Elab::Fun(
+                                Clos {
+                                    is_move: cl.is_move || tx.multiplicity(ectx) == Mult::One,
+                                    ..cl
+                                },
+                                rf,
+                            )
+                            .whnf(ectx)
+                        }
                     }
                     Elab::App(f2, x2) => match &*f2 {
                         // This needs to be a binary operator, since that's the only builtin that takes two arguments
@@ -568,6 +585,7 @@ impl Elab {
                     let mut ectx = ECtx::new(env);
                     ectx.add_clos(&cl);
                     let mut cln = Cloner::new(&env);
+                    let mut fuzzy = false;
 
                     for (args, to, _) in v {
                         if tx.overlap(args.first().unwrap(), &ectx) {
@@ -576,10 +594,13 @@ impl Elab {
                             let arg = args.remove(0);
                             arg.do_match(&x, &mut ectx);
 
-                            if args.is_empty() {
+                            // Only commit to this branch if it's guaranteed to match first
+                            if !fuzzy && args.is_empty() && tx.subtype_of(&arg, &mut ectx) {
                                 let to = to.cloned(&mut cln).whnf(&mut ectx);
                                 return to;
                             } else {
+                                // It could potentially match, but we're not sure
+                                fuzzy = true;
                                 let t = to.get_type(env);
                                 let to = to.cloned(&mut cln);
                                 rf.push((args, to, t));
@@ -593,6 +614,12 @@ impl Elab {
                         f.get_type(env).pretty(env).ansi_string(),
                         tx.pretty(env).ansi_string()
                     );
+                    if rf[0].0.is_empty() {
+                        return Elab::Union(
+                            rf.into_iter().map(|(a, b, c)| b.whnf(&mut ectx)).collect(),
+                        )
+                        .simplify_unions(&ectx);
+                    }
                     // If we passed in a move-only argument, it now captures it, so it's move-only
                     Fun(
                         Clos {

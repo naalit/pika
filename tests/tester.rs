@@ -161,3 +161,12 @@ fn test_affine_fail_fun() {
         .assert()
         .failure();
 }
+
+#[test]
+fn test_match_reduction_fail() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/match_reduction_fail.pk"])
+        .assert()
+        .failure();
+}
