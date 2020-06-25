@@ -1,16 +1,19 @@
 use crate::bicheck::TCtx;
 use crate::common::*;
-use crate::term::{Builtin, Term};
+use crate::{
+    affine::Mult,
+    term::{Builtin, STerm},
+};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// The evaluation context
-pub struct ECtx<'a, T: MainGroup> {
-    database: &'a dyn MainGroupP<DB = T>,
+pub struct ECtx<'a> {
+    database: &'a dyn MainGroupP,
     scope: ScopeId,
     pub vals: HashMap<Sym, Arc<Elab>>,
 }
-impl<'a, T: MainGroup> Clone for ECtx<'a, T> {
+impl<'a> Clone for ECtx<'a> {
     fn clone(&self) -> Self {
         ECtx {
             database: self.database,
@@ -19,8 +22,8 @@ impl<'a, T: MainGroup> Clone for ECtx<'a, T> {
         }
     }
 }
-impl<'a, T: MainGroup> ECtx<'a, T> {
-    pub fn new(db: &'a (impl Scoped + HasDatabase<DB = T>)) -> Self {
+impl<'a> ECtx<'a> {
+    pub fn new(db: &'a (impl Scoped + HasDatabase)) -> Self {
         ECtx {
             scope: db.scope(),
             database: db.database(),
@@ -38,18 +41,17 @@ impl<'a, T: MainGroup> ECtx<'a, T> {
         self.vals.insert(k, Arc::new(v));
     }
 }
-impl<'a, T: MainGroup> HasBindings for ECtx<'a, T> {
+impl<'a> HasBindings for ECtx<'a> {
     fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
         self.database.bindings_ref()
     }
 }
-impl<'a, T: MainGroup> HasDatabase for ECtx<'a, T> {
-    type DB = T;
-    fn database(&self) -> &dyn MainGroupP<DB = Self::DB> {
+impl<'a> HasDatabase for ECtx<'a> {
+    fn database(&self) -> &dyn MainGroupP {
         self.database
     }
 }
-impl<'a, T: MainGroup> Scoped for ECtx<'a, T> {
+impl<'a> Scoped for ECtx<'a> {
     fn scope(&self) -> ScopeId {
         self.scope.clone()
     }
@@ -114,6 +116,8 @@ impl ElabStmt {
 pub struct Clos {
     pub tys: Vec<(Sym, Arc<Elab>)>,
     pub vals: Vec<(Sym, Arc<Elab>)>,
+    pub is_move: bool,
+    pub span: Span,
 }
 impl Clos {
     /// We need to rename anything stored in the closure, too, since it can use local variables
@@ -122,18 +126,20 @@ impl Clos {
             tys: self
                 .tys
                 .iter()
-                .map(|(k, v)| (*k, Arc::new(v.cloned(cln))))
+                .map(|(k, v)| (cln.get(*k).unwrap_or(*k), Arc::new(v.cloned(cln))))
                 .collect(),
             vals: self
                 .vals
                 .iter()
-                .map(|(k, v)| (*k, Arc::new(v.cloned(cln))))
+                .map(|(k, v)| (cln.get(*k).unwrap_or(*k), Arc::new(v.cloned(cln))))
                 .collect(),
+            is_move: self.is_move,
+            span: self.span,
         }
     }
 }
-impl<'a, T: MainGroup> TCtx<'a, T> {
-    pub fn clos(&self, t: &Term) -> Clos {
+impl<'a> TCtx<'a> {
+    pub fn clos(&self, t: &STerm, is_move: bool) -> Clos {
         let tys: Vec<_> = self
             .tys
             .iter()
@@ -144,7 +150,12 @@ impl<'a, T: MainGroup> TCtx<'a, T> {
             .iter()
             .filter_map(|(k, _)| Some((*k, self.ectx.vals.get(k)?.clone())))
             .collect();
-        Clos { tys, vals }
+        Clos {
+            tys,
+            vals,
+            is_move,
+            span: t.span(),
+        }
     }
 
     pub fn add_clos(&mut self, clos: &Clos) {
@@ -152,7 +163,7 @@ impl<'a, T: MainGroup> TCtx<'a, T> {
         self.ectx.vals.extend(clos.vals.iter().cloned());
     }
 }
-impl<'a, T: MainGroup> ECtx<'a, T> {
+impl<'a> ECtx<'a> {
     pub fn add_clos(&mut self, clos: &Clos) {
         self.vals.extend(clos.vals.iter().cloned());
     }
@@ -165,28 +176,25 @@ impl<'a, T: MainGroup> ECtx<'a, T> {
 pub enum Elab {
     Unit,                                    // ()
     Binder(Sym, BElab),                      // x: T
-    Var(Sym, BElab),                         // (a, T) --> the T a
-    I32(i32),                                // 3
-    Type(u32),                               // Type0
-    Builtin(Builtin),                        // Int
+    Var(Span, Sym, BElab), // (a, T) --> the T a; we need the span for "moved variable" errors
+    I32(i32),              // 3
+    Type(u32),             // Type0
+    Builtin(Builtin),      // Int
     Fun(Clos, Vec<(Vec<Elab>, Elab, Elab)>), // fun { a b => the T x; c d => the U y }
-    App(BElab, BElab),                       // f x
-    Pair(BElab, BElab),                      // x, y
-    Tag(TagId),                              // tag X
-    StructIntern(StructId),                  // struct { x := 3 }
-    StructInline(Vec<(Sym, Elab)>),          // struct { x := 3 }
-    Project(BElab, RawSym),                  // r.m
-    Block(Vec<ElabStmt>),                    // do { x; y }
-    Union(Vec<Elab>),                        // x | y
+    App(BElab, BElab),     // f x
+    Pair(BElab, BElab),    // x, y
+    Tag(TagId),            // tag X
+    StructIntern(StructId), // struct { x := 3 }
+    StructInline(Vec<(Sym, Elab)>), // struct { x := 3 }
+    Project(BElab, RawSym), // r.m
+    Block(Vec<ElabStmt>),  // do { x; y }
+    Union(Vec<Elab>),      // x | y
     Bottom,
     Top,
 }
 type BElab = Box<Elab>;
 
-pub fn unionize_ty<T: MainGroup>(
-    v: Vec<(Vec<Elab>, Elab, Elab)>,
-    ectx: &ECtx<T>,
-) -> (Vec<Elab>, Elab) {
+pub fn unionize_ty(v: Vec<(Vec<Elab>, Elab, Elab)>, ectx: &ECtx) -> (Vec<Elab>, Elab) {
     let len = v.first().unwrap().0.len();
     let (args, ret) = v.into_iter().fold(
         ((0..len).map(|_| Vec::new()).collect::<Vec<_>>(), Vec::new()),
@@ -218,7 +226,7 @@ impl Elab {
     /// Are there any values that occupy both types `self` and `other`?
     /// Bottom doesn't count, of course, since it's not a value
     /// The same as "could a value of type `other` match `self`?" or vice versa
-    pub fn overlap<T: MainGroup>(&self, other: &Elab, ectx: &ECtx<T>) -> bool {
+    pub fn overlap(&self, other: &Elab, ectx: &ECtx) -> bool {
         match (self, other) {
             (Elab::Union(v), Elab::Union(v2)) => {
                 v.iter().any(|x| v2.iter().any(|y| x.overlap(y, ectx)))
@@ -234,7 +242,7 @@ impl Elab {
 
     /// Instead of calling `Elab::union()` and over again, if you construct a union with several parts,
     /// call this after to simplify it in one pass
-    pub fn simplify_unions<T: MainGroup>(mut self, ectx: &ECtx<T>) -> Self {
+    pub fn simplify_unions(mut self, ectx: &ECtx) -> Self {
         match &mut self {
             Elab::Union(v) => match v.len() {
                 0 => self,
@@ -284,7 +292,7 @@ impl Elab {
         use Elab::*;
         match self {
             Type(_) | Unit | I32(_) | Builtin(_) | Tag(_) | Top | Bottom => false,
-            Var(x, ty) => *x == s || ty.uses(s),
+            Var(_, x, ty) => *x == s || ty.uses(s),
             Fun(_, v) => v.iter().any(|(a, b, c)| {
                 !a.iter().any(|x| x.binds(s))
                     && !b.binds(s)
@@ -316,7 +324,7 @@ impl Elab {
                 .iter()
                 .any(|(a, b, c)| b.binds(s) || c.binds(s) || a.iter().any(|x| x.binds(s))),
             App(x, y) | Pair(x, y) => x.binds(s) || y.binds(s),
-            Var(_, ty) => ty.binds(s),
+            Var(_, _, ty) => ty.binds(s),
             StructIntern(_) => false,
             StructInline(v) => v.iter().any(|(x, e)| *x == s || e.binds(s)),
             Project(r, _) => r.binds(s),
@@ -329,16 +337,16 @@ impl Elab {
     }
 
     /// Reduce to full normal form, essentially recursively calling whnf()
-    pub fn normal<T: MainGroup>(self, ectx: &mut ECtx<T>) -> Self {
+    pub fn normal(self, ectx: &mut ECtx) -> Self {
         // Call whnf()
         let s = self.whnf(ectx);
         // And recurse
         use Elab::*;
         match s {
-            Var(s, mut ty) => {
+            Var(sp, s, mut ty) => {
                 // Reuse the Box
                 *ty = ty.normal(ectx);
-                Var(s, ty)
+                Var(sp, s, ty)
             }
             Fun(c, v) => Fun(
                 c,
@@ -395,7 +403,7 @@ impl Elab {
     /// This is like actual normal form, but we only perform one level of beta- or projection-reduction
     /// So we're guaranteed not to have `(\x.t)u` at the top level, but we could have e.g. `(\x.(\y.t)u)`
     /// This is the form we store types in, so if you need to compare types you'll need to call `whnf` recursively
-    pub fn whnf<T: MainGroup>(self, ectx: &mut ECtx<T>) -> Self {
+    pub fn whnf(self, ectx: &mut ECtx) -> Self {
         match self {
             // Binders don't count as forms
             Elab::Binder(s, mut t) => {
@@ -406,11 +414,12 @@ impl Elab {
             // Unions don't either (no head)
             // (TODO somehow reuse the Vec)
             Elab::Union(v) => Elab::Union(v.into_iter().map(|x| x.whnf(ectx)).collect()),
-            Elab::Var(x, mut ty) => {
+            Elab::Var(sp, x, mut ty) => {
                 if let Some(t) = ectx.val(x) {
                     match &*t {
                         // Update to the new type, but don't re-look-up the var
-                        Elab::Var(y, new_ty) if x == *y => Elab::Var(
+                        Elab::Var(sp, y, new_ty) if x == *y => Elab::Var(
+                            *sp,
                             x,
                             Box::new(new_ty.cloned(&mut Cloner::new(&ectx)).whnf(ectx)),
                         ),
@@ -418,7 +427,7 @@ impl Elab {
                     }
                 } else {
                     *ty = ty.whnf(ectx);
-                    Elab::Var(x, ty)
+                    Elab::Var(sp, x, ty)
                 }
             }
             Elab::App(mut f, mut x) => {
@@ -431,9 +440,10 @@ impl Elab {
                     Elab::Fun(cl, v) => {
                         ectx.add_clos(&cl);
                         let x = x.whnf(ectx);
+                        let tx = x.get_type(ectx);
                         let mut rf = Vec::new();
                         for (mut args, body, to) in v {
-                            if x.get_type(ectx).subtype_of(args.first().unwrap(), ectx) {
+                            if tx.subtype_of(args.first().unwrap(), ectx) {
                                 let arg = args.remove(0);
                                 arg.do_match(&x, ectx);
                                 if args.is_empty() {
@@ -443,7 +453,15 @@ impl Elab {
                                 }
                             }
                         }
-                        Elab::Fun(cl, rf).whnf(ectx)
+                        // If we passed in a move-only argument, it now captures it, so it's move-only
+                        Elab::Fun(
+                            Clos {
+                                is_move: cl.is_move || tx.multiplicity(ectx) == Mult::One,
+                                ..cl
+                            },
+                            rf,
+                        )
+                        .whnf(ectx)
                     }
                     Elab::App(f2, x2) => match &*f2 {
                         // This needs to be a binary operator, since that's the only builtin that takes two arguments
@@ -509,7 +527,7 @@ impl Elab {
     /// Like `get_type()`, but looks up actual types for recursive calls. Should only be used after type checking.
     pub fn get_type_rec(&self, env: &(impl Scoped + HasDatabase)) -> Elab {
         match (self.get_type(env), self) {
-            (Elab::Bottom, Elab::Var(s, _)) => {
+            (Elab::Bottom, Elab::Var(_, s, _)) => {
                 env.database().elab(env.scope(), *s).unwrap().get_type(env)
             }
             (x, _) => x,
@@ -527,7 +545,7 @@ impl Elab {
             I32(i) => I32(*i),
             Builtin(b) => b.get_type(),
             Tag(t) => Tag(*t),
-            Var(_, t) => t.cloned(&mut Cloner::new(&env)),
+            Var(_, _, t) => t.cloned(&mut Cloner::new(&env)),
             Fun(cl, v) => {
                 let mut cln = Cloner::new(&env);
                 Fun(
@@ -572,10 +590,18 @@ impl Elab {
                         rf.len(),
                         0,
                         "None of {} matched {}",
-                        f.get_type(env).pretty(&env.bindings()).ansi_string(),
-                        tx.pretty(&env.bindings()).ansi_string()
+                        f.get_type(env).pretty(env).ansi_string(),
+                        tx.pretty(env).ansi_string()
                     );
-                    Fun(cl, rf).whnf(&mut ectx)
+                    // If we passed in a move-only argument, it now captures it, so it's move-only
+                    Fun(
+                        Clos {
+                            is_move: cl.is_move || tx.multiplicity(env) == Mult::One,
+                            ..cl
+                        },
+                        rf,
+                    )
+                    .whnf(&mut ectx)
                 }
                 f @ Tag(_) | f @ App(_, _) => App(Box::new(f), Box::new(x.get_type(env))),
                 // This triggers with recursive functions
@@ -628,7 +654,7 @@ impl Elab {
             Elab::Top => u32::MAX,
             Elab::Type(i) => i + 1,
             Elab::Binder(_, t) => t.universe(env),
-            Elab::Var(_, t) => t.universe(env).saturating_sub(1),
+            Elab::Var(_, _, t) => t.universe(env).saturating_sub(1),
             Elab::Pair(x, y) => x.universe(env).max(y.universe(env)),
             Elab::App(_, _) => match self.get_type(env) {
                 Elab::App(f, x) => f.universe(env).max(x.universe(env)).saturating_sub(1),
@@ -670,7 +696,7 @@ impl Elab {
 
     /// Adds substitutions created by matching `other` with `self` (`self` is the pattern) to `ctx`
     /// Does not check if it's a valid match, that's the typechecker's job
-    pub fn do_match<T: MainGroup>(&self, other: &Elab, ectx: &mut ECtx<T>) {
+    pub fn do_match(&self, other: &Elab, ectx: &mut ECtx) {
         use Elab::*;
         match (self, other) {
             (Binder(s, _), _) => {
@@ -702,7 +728,7 @@ impl Elab {
     pub fn cloned(&self, cln: &mut Cloner) -> Self {
         use Elab::*;
         match self {
-            Var(s, t) => {
+            Var(sp, s, t) => {
                 if let Some(x) = cln.get(*s) {
                     // Here's how this (`x == self`) happens:
                     // 1. We come up with a Elab using, say, x3. That Elab gets stored in Salsa's database.
@@ -712,13 +738,13 @@ impl Elab {
                     // 5. Now we want to replace x3 with x3, so we better not call cloned() recursively or we'll get stuck in a loop.
                     // Note, though, that this is expected behaviour and doesn't need fixing.
                     if x == *s {
-                        Var(x, Box::new(t.cloned(cln)))
+                        Var(*sp, x, Box::new(t.cloned(cln)))
                     } else {
-                        Var(x, Box::new(t.cloned(cln))).cloned(cln)
+                        Var(*sp, x, Box::new(t.cloned(cln))).cloned(cln)
                     }
                 } else {
                     // Free variable
-                    Var(*s, Box::new(t.cloned(cln)))
+                    Var(*sp, *s, Box::new(t.cloned(cln)))
                 }
             }
             Top => Top,
@@ -800,8 +826,7 @@ impl Elab {
 }
 
 impl Pretty for Elab {
-    type Context = Bindings;
-    fn pretty(&self, ctx: &Bindings) -> Doc {
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
         match self {
             Elab::Unit => Doc::start("()").style(Style::Literal),
             Elab::Binder(x, t) => x
@@ -813,23 +838,27 @@ impl Pretty for Elab {
                 .prec(Prec::Term),
             Elab::Bottom => Doc::start("Empty"),
             Elab::Top => Doc::start("Any"),
-            Elab::Var(s, _) => s.pretty(ctx),
+            Elab::Var(_, s, _) => s.pretty(ctx),
             Elab::I32(i) => Doc::start(i).style(Style::Literal),
             Elab::Type(0) => Doc::start("Type"),
             Elab::Type(i) => Doc::start("Type").add(i),
             Elab::Builtin(b) => Doc::start(b),
-            Elab::Fun(_, v) if v.len() == 1 => {
+            Elab::Fun(cl, v) if v.len() == 1 => {
                 let (args, body, _) = v.first().unwrap();
-                let until_body = Doc::start("fun")
-                    .style(Style::Keyword)
-                    .line()
-                    .chain(Doc::intersperse(
-                        args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
-                        Doc::none().line(),
-                    ))
-                    .indent()
-                    .line()
-                    .add("=>");
+                let until_body = if cl.is_move {
+                    Doc::start("move").space().add("fun")
+                } else {
+                    Doc::start("fun")
+                }
+                .style(Style::Keyword)
+                .line()
+                .chain(Doc::intersperse(
+                    args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
+                    Doc::none().line(),
+                ))
+                .indent()
+                .line()
+                .add("=>");
                 Doc::either(
                     until_body
                         .clone()
@@ -841,19 +870,23 @@ impl Pretty for Elab {
                 )
                 .prec(Prec::Term)
             }
-            Elab::Fun(_, v) => pretty_block(
+            Elab::Fun(cl, v) => pretty_block(
                 "fun",
                 v.iter().map(|(args, body, _)| {
-                    let until_body = Doc::start("fun")
-                        .style(Style::Keyword)
-                        .line()
-                        .chain(Doc::intersperse(
-                            args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
-                            Doc::none().line(),
-                        ))
-                        .indent()
-                        .line()
-                        .add("=>");
+                    let until_body = if cl.is_move {
+                        Doc::start("move").space().add("fun")
+                    } else {
+                        Doc::start("fun")
+                    }
+                    .style(Style::Keyword)
+                    .line()
+                    .chain(Doc::intersperse(
+                        args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
+                        Doc::none().line(),
+                    ))
+                    .indent()
+                    .line()
+                    .add("=>");
                     Doc::either(
                         until_body
                             .clone()

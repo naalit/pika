@@ -3,6 +3,7 @@ pub use pretty::RcDoc;
 use std::sync::Arc;
 use termcolor::*;
 
+use crate::common::HasBindings;
 pub use termcolor::{Color, ColorChoice, ColorSpec};
 
 #[derive(PartialOrd, PartialEq, Eq, Ord, Clone, Copy)]
@@ -263,6 +264,5 @@ fn spec(col: Color, bold: bool) -> ColorSpec {
 }
 
 pub trait Pretty {
-    type Context;
-    fn pretty(&self, ctx: &Self::Context) -> Doc;
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc;
 }

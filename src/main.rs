@@ -1,3 +1,4 @@
+mod affine;
 mod bicheck;
 mod binding;
 mod codegen;
@@ -128,7 +129,7 @@ fn main() {
                                     x => {
                                         eprintln!(
                                             "Error: Main can't return {}!",
-                                            x.pretty(&*db.bindings()).ansi_string()
+                                            x.pretty(&db).ansi_string()
                                         );
                                         std::process::exit(1)
                                     }

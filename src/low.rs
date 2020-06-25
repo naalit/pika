@@ -2,16 +2,16 @@
 //! The process of lowering to LowIR uses Salsa
 //! In `codegen`, we use Inkwell to convert LowIR into LLVM outside of the Salsa framework
 
-use crate::{common::*, elab::*, term::Builtin};
+use crate::{affine::Mult, common::*, term::Builtin};
 use lazy_static::lazy_static;
 use std::ops::{Deref, DerefMut};
 use std::sync::RwLock;
 
-pub struct LCtx<'a, T: MainGroup> {
+pub struct LCtx<'a> {
     pub low_tys: HashMap<Sym, LowTy>,
-    pub ectx: ECtx<'a, T>,
+    pub ectx: ECtx<'a>,
 }
-impl<'a, T: MainGroup> Clone for LCtx<'a, T> {
+impl<'a> Clone for LCtx<'a> {
     fn clone(&self) -> Self {
         LCtx {
             low_tys: self.low_tys.clone(),
@@ -19,16 +19,16 @@ impl<'a, T: MainGroup> Clone for LCtx<'a, T> {
         }
     }
 }
-impl<'a, T: MainGroup> From<ECtx<'a, T>> for LCtx<'a, T> {
-    fn from(ectx: ECtx<'a, T>) -> Self {
+impl<'a> From<ECtx<'a>> for LCtx<'a> {
+    fn from(ectx: ECtx<'a>) -> Self {
         LCtx {
             low_tys: HashMap::new(),
             ectx,
         }
     }
 }
-impl<'a, T: MainGroup> LCtx<'a, T> {
-    pub fn new(db: &'a (impl Scoped + HasDatabase<DB = T>)) -> Self {
+impl<'a> LCtx<'a> {
+    pub fn new(db: &'a (impl Scoped + HasDatabase)) -> Self {
         LCtx {
             low_tys: HashMap::new(),
             ectx: ECtx::new(db),
@@ -67,31 +67,46 @@ impl<'a, T: MainGroup> LCtx<'a, T> {
             .or_insert_with(Vec::new)
             .push(Arc::new((x, mono, ty)));
     }
+
+    pub fn add_clos(&mut self, clos: &Clos) {
+        let low_tys: Vec<_> = clos
+            .tys
+            .iter()
+            .filter_map(|(k, v)| {
+                if **v != Elab::Bottom {
+                    Some((*k, v.as_low_ty(self)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.low_tys.extend(low_tys);
+        self.ectx.vals.extend(clos.vals.iter().cloned());
+    }
 }
-impl<'a, T: MainGroup> Scoped for LCtx<'a, T> {
+impl<'a> Scoped for LCtx<'a> {
     fn scope(&self) -> ScopeId {
         self.ectx.scope()
     }
 }
-impl<'a, T: MainGroup> HasBindings for LCtx<'a, T> {
+impl<'a> HasBindings for LCtx<'a> {
     fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
         self.database().bindings_ref()
     }
 }
-impl<'a, T: MainGroup> HasDatabase for LCtx<'a, T> {
-    type DB = T;
-    fn database(&self) -> &dyn MainGroupP<DB = Self::DB> {
+impl<'a> HasDatabase for LCtx<'a> {
+    fn database(&self) -> &dyn MainGroupP {
         self.ectx.database()
     }
 }
-impl<'a, T: MainGroup> Deref for LCtx<'a, T> {
-    type Target = ECtx<'a, T>;
-    fn deref(&self) -> &ECtx<'a, T> {
+impl<'a> Deref for LCtx<'a> {
+    type Target = ECtx<'a>;
+    fn deref(&self) -> &ECtx<'a> {
         &self.ectx
     }
 }
-impl<'a, T: MainGroup> DerefMut for LCtx<'a, T> {
-    fn deref_mut(&mut self) -> &mut ECtx<'a, T> {
+impl<'a> DerefMut for LCtx<'a> {
+    fn deref_mut(&mut self) -> &mut ECtx<'a> {
         &mut self.ectx
     }
 }
@@ -256,13 +271,18 @@ pub enum LowIR {
 }
 
 impl Elab {
-    pub fn low_ty_of<T: MainGroup>(&self, lctx: &mut LCtx<T>) -> Option<LowTy> {
+    pub fn low_ty_of(&self, lctx: &mut LCtx) -> Option<LowTy> {
         Some(match self {
+            // Guaranteed erasure for multiplicity-0 types
+            _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => {
+                eprintln!("Erasing {}", self.pretty(lctx).ansi_string());
+                LowTy::Unit
+            }
             // We don't actually care what tag it is if it's not in a union
             Elab::Tag(_) => LowTy::Unit,
             Elab::Unit => LowTy::Unit,
             Elab::I32(_) => LowTy::Int(32),
-            Elab::Var(x, ty) => {
+            Elab::Var(_, x, ty) => {
                 if ty.is_concrete(lctx) {
                     return lctx.low_ty(*x);
                 } else {
@@ -421,10 +441,7 @@ impl Elab {
                 Elab::App(_, _) => LowTy::Struct(vec![f.low_ty_of(lctx)?, x.low_ty_of(lctx)?]),
                 // Ignore the tag if we have other data
                 Elab::Tag(_) => x.low_ty_of(lctx)?,
-                x => panic!(
-                    "not function type: {}",
-                    x.pretty(&lctx.bindings()).ansi_string()
-                ),
+                x => panic!("not function type: {}", x.pretty(lctx).ansi_string()),
             },
             Elab::Project(r, m) => {
                 let ty = r.get_type(lctx);
@@ -466,13 +483,15 @@ impl Elab {
     /// Convert to LowIR, within the Salsa framework. Returns `None` if it's polymorphic
     ///
     /// Most work should be done here and not in `LowIR::codegen()`, since we want Salsa memoization
-    pub fn as_low<T: MainGroup>(&self, lctx: &mut LCtx<T>) -> Option<LowIR> {
+    pub fn as_low(&self, lctx: &mut LCtx) -> Option<LowIR> {
         Some(match self {
+            // Guaranteed erasure for multiplicity-0 types
+            _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => LowIR::Unit,
             // We don't actually care what tag it is if it's not in a union
             Elab::Tag(_) => LowIR::Unit,
             Elab::Unit => LowIR::Unit,
             Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
-            Elab::Var(x, ty) => {
+            Elab::Var(_, x, ty) => {
                 if ty.is_concrete(lctx) {
                     return lctx
                         .database()
@@ -787,7 +806,7 @@ impl Elab {
                         LowIR::Call(Box::new(f), Box::new(x))
                     } else {
                         match &**f {
-                            Elab::Var(name, _) => {
+                            Elab::Var(_, name, _) => {
                                 if let Some((mono, ty)) = lctx.mono(*name, x) {
                                     return Some(LowIR::TypedGlobal(ty, mono));
                                 } else {
@@ -803,9 +822,9 @@ impl Elab {
                                                     fun_name, upvalues, ..
                                                 } if upvalues.is_empty() => {
                                                     *fun_name = Doc::start("$mono$")
-                                                        .chain(name.pretty(&lctx.bindings()))
+                                                        .chain(name.pretty(lctx))
                                                         .add("$")
-                                                        .chain(x.pretty(&lctx.bindings()))
+                                                        .chain(x.pretty(lctx))
                                                         .raw_string();
                                                     lctx.set_mono(
                                                         *name,
@@ -839,10 +858,7 @@ impl Elab {
                 }
                 // Ignore the tag if we have other data
                 Elab::Tag(_) => x.as_low(lctx)?,
-                x => panic!(
-                    "not function type: {}",
-                    x.pretty(&lctx.bindings()).ansi_string()
-                ),
+                x => panic!("not function type: {}", x.pretty(lctx).ansi_string()),
             },
             Elab::Project(r, m) => {
                 let ty = r.get_type(lctx);
@@ -901,15 +917,17 @@ impl Elab {
     }
 
     /// Is this a concrete type, i.e., we don't need to monomorphize it?
-    pub fn is_concrete<T: MainGroup>(&self, lctx: &LCtx<T>) -> bool {
+    pub fn is_concrete(&self, lctx: &LCtx) -> bool {
         match self {
-            Elab::Var(s, _) if lctx.database().elab(lctx.scope(), *s).is_some() => lctx
+            Elab::Var(_, s, _) if lctx.database().elab(lctx.scope(), *s).is_some() => lctx
                 .database()
                 .elab(lctx.scope(), *s)
                 .unwrap()
                 .is_concrete(lctx),
-            Elab::Var(s, _) if lctx.vals.contains_key(s) => lctx.val(*s).unwrap().is_concrete(lctx),
-            Elab::Var(_, _) => false,
+            Elab::Var(_, s, _) if lctx.vals.contains_key(s) => {
+                lctx.val(*s).unwrap().is_concrete(lctx)
+            }
+            Elab::Var(_, _, _) => false,
             Elab::Pair(x, y) => x.is_concrete(lctx) && y.is_concrete(lctx),
             Elab::StructInline(v) => v.iter().all(|(_, x)| x.is_concrete(lctx)),
             Elab::Type(_)
@@ -931,7 +949,7 @@ impl Elab {
     }
 
     /// Convert a `Elab` representing a type to the `LowTy` that Elabs of that type are stored as
-    pub fn as_low_ty<T: MainGroup>(&self, lctx: &LCtx<T>) -> LowTy {
+    pub fn as_low_ty(&self, lctx: &LCtx) -> LowTy {
         match self {
             Elab::Builtin(Builtin::Int) | Elab::I32(_) => LowTy::Int(32),
             Elab::Unit => LowTy::Unit,
@@ -983,19 +1001,16 @@ impl Elab {
             Elab::Type(_) => LowTy::Unit,
             // We don't actually care what tag it is if it's not in a union
             Elab::Tag(_) => LowTy::Unit,
-            _ => panic!(
-                "{} is not supported",
-                self.pretty(&lctx.bindings()).ansi_string()
-            ),
+            _ => panic!("{} is not supported", self.pretty(lctx).ansi_string()),
         }
     }
 
     /// Compile this pattern to code that binds all binders and returns whether it matched
     ///
     /// This function clones `param`, so it should be a `LowIR::Local`
-    fn compile_match<T: MainGroup>(
+    fn compile_match(
         &self,
-        lctx: &mut LCtx<T>,
+        lctx: &mut LCtx,
         // `(fresh var, original var)` so we can do `original = phi [fresh0 case0] [fresh1 case1]`
         need_phi: &mut Vec<(Sym, Sym)>,
         // The parameter type, which might need to be casted etc.
@@ -1123,7 +1138,7 @@ impl Elab {
             | (Elab::Fun(_, _), _) => LowIR::BoolConst(true),
             _ => panic!(
                 "pattern {} can't be compiled yet",
-                self.pretty(&lctx.bindings()).ansi_string()
+                self.pretty(lctx).ansi_string()
             ),
         }
     }
@@ -1159,7 +1174,7 @@ impl Builtin {
 }
 
 impl LowIR {
-    fn cast<T: MainGroup>(self, from: &Elab, to: &Elab, lctx: &mut LCtx<'_, T>) -> Self {
+    fn cast(self, from: &Elab, to: &Elab, lctx: &mut LCtx) -> Self {
         match (from, to) {
             (cur, ty) if cur == ty => self,
             (_, Elab::Binder(_, t)) => self.cast(from, t, lctx),
@@ -1199,7 +1214,7 @@ impl LowIR {
         }
     }
 
-    pub fn borrow<T: MainGroup>(self, lctx: &LCtx<T>) -> Self {
+    pub fn borrow(self, lctx: &LCtx) -> Self {
         if let LowTy::ClosOwn { .. } = self.get_type(lctx) {
             LowIR::ClosureBorrow(Box::new(self))
         } else {
@@ -1207,7 +1222,7 @@ impl LowIR {
         }
     }
 
-    pub fn get_type<T: MainGroup>(&self, lctx: &LCtx<T>) -> LowTy {
+    pub fn get_type(&self, lctx: &LCtx) -> LowTy {
         match self {
             LowIR::Unit => LowTy::Unit,
             LowIR::IntConst(_) => LowTy::Int(32),

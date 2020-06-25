@@ -69,24 +69,22 @@ impl Sym {
 }
 
 impl Pretty for TagId {
-    type Context = Bindings;
-    fn pretty(&self, ctx: &Bindings) -> Doc {
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
+        let ctx = ctx.bindings();
         let raw = ctx.tags[(self.0.get() - 1) as usize];
         let name = ctx.resolve_raw(raw).to_owned();
         Doc::start(name)
     }
 }
 impl Pretty for RawSym {
-    type Context = Bindings;
-    fn pretty(&self, ctx: &Bindings) -> Doc {
-        let name = ctx.resolve_raw(*self).to_owned();
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
+        let name = ctx.bindings().resolve_raw(*self).to_owned();
         Doc::start(name)
     }
 }
 impl Pretty for Sym {
-    type Context = Bindings;
-    fn pretty(&self, ctx: &Bindings) -> Doc {
-        let name = ctx.resolve(*self).to_owned();
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
+        let name = ctx.bindings().resolve(*self).to_owned();
         Doc::start(name)
     }
 }
@@ -197,21 +195,21 @@ pub struct ParseDef<'p>(pub Spanned<&'p str>, pub Spanned<ParseTree<'p>>);
 /// This is what the parser generates. All names are stored as string slices
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseTree<'p> {
-    Unit,                                       // ()
-    The(STree<'p>, STree<'p>),                  // the T x
-    Binder(&'p str, Option<STree<'p>>),         // x: T
-    Var(&'p str),                               // a
-    I32(i32),                                   // 3
-    Type(u32),                                  // Type0
-    Builtin(Builtin),                           // Int
-    Fun(Vec<(Vec<STree<'p>>, STree<'p>)>),      // fn { a b => x; c d => y }
-    App(STree<'p>, STree<'p>),                  // f x
-    Pair(STree<'p>, STree<'p>),                 // x, y
-    Struct(Vec<(Spanned<&'p str>, STree<'p>)>), // struct { x := 3 }
-    Tag(&'p str),                               // tag X
-    Project(STree<'p>, Spanned<&'p str>),       // r.m
-    Block(Vec<ParseStmt<'p>>),                  // do { x; y }
-    Union(Vec<STree<'p>>),                      // x | y
+    Unit,                                        // ()
+    The(STree<'p>, STree<'p>),                   // the T x
+    Binder(&'p str, Option<STree<'p>>),          // x: T
+    Var(&'p str),                                // a
+    I32(i32),                                    // 3
+    Type(u32),                                   // Type0
+    Builtin(Builtin),                            // Int
+    Fun(bool, Vec<(Vec<STree<'p>>, STree<'p>)>), // move? fn { a b => x; c d => y }
+    App(STree<'p>, STree<'p>),                   // f x
+    Pair(STree<'p>, STree<'p>),                  // x, y
+    Struct(Vec<(Spanned<&'p str>, STree<'p>)>),  // struct { x := 3 }
+    Tag(&'p str),                                // tag X
+    Project(STree<'p>, Spanned<&'p str>),        // r.m
+    Block(Vec<ParseStmt<'p>>),                   // do { x; y }
+    Union(Vec<STree<'p>>),                       // x | y
 }
 type STree<'p> = Spanned<ParseTree<'p>>;
 
@@ -284,7 +282,7 @@ impl<'p> STree<'p> {
                     let t = t.map(|t| t.resolve_names(env)).transpose()?;
                     Term::Binder(env.create(x), t)
                 }
-                Fun(iv) => {
+                Fun(m, iv) => {
                     let mut rv = Vec::new();
                     for (args, body) in iv {
                         env.push();
@@ -296,7 +294,7 @@ impl<'p> STree<'p> {
                         rv.push((ra, body));
                         env.pop();
                     }
-                    Term::Fun(rv)
+                    Term::Fun(m, rv)
                 }
                 App(f, x) => Term::App(f.resolve_names(env)?, x.resolve_names(env)?),
                 Pair(x, y) => {

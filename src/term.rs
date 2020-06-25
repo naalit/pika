@@ -68,7 +68,7 @@ pub enum Term {
     I32(i32),                                     // 3
     Type(u32),                                    // Type0
     Builtin(Builtin),                             // Int
-    Fun(Vec<(Vec<STerm>, STerm)>),                // fun { a b => x; c d => y }
+    Fun(bool, Vec<(Vec<STerm>, STerm)>),          // move? fun { a b => x; c d => y }
     App(STerm, STerm),                            // f x
     Pair(STerm, STerm),                           // x, y
     Tag(TagId),                                   // tag
@@ -82,7 +82,7 @@ impl Term {
     pub fn uses(&self, s: Sym) -> bool {
         match self {
             Term::Var(x) if *x == s => true,
-            Term::Fun(v) => v
+            Term::Fun(_, v) => v
                 .iter()
                 .filter(|(args, b)| !args.iter().any(|x| x.binds(s)) && !b.binds(s))
                 .any(|(args, v)| args.iter().any(|x| x.uses(s)) || v.uses(s)),
@@ -108,7 +108,7 @@ impl Term {
     pub fn binds(&self, s: Sym) -> bool {
         match self {
             Term::Binder(x, _) if *x == s => true,
-            Term::Fun(v) => v
+            Term::Fun(_, v) => v
                 .iter()
                 .any(|(args, v)| args.iter().any(|x| x.binds(s)) || v.binds(s)),
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.binds(s) || u.binds(s),
@@ -133,7 +133,7 @@ impl Term {
     pub fn traverse(&self, f: impl Fn(&Term) + Copy) {
         f(self);
         match self {
-            Term::Fun(v) => v.iter().for_each(|(args, v)| {
+            Term::Fun(_, v) => v.iter().for_each(|(args, v)| {
                 args.iter().for_each(|x| x.traverse(f));
                 v.traverse(f)
             }),
@@ -155,8 +155,7 @@ impl Term {
 }
 
 impl Pretty for Term {
-    type Context = Bindings;
-    fn pretty(&self, ctx: &Bindings) -> Doc {
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
         match self {
             Term::Unit => Doc::start("()").style(Style::Literal),
             Term::Binder(x, Some(t)) => x
@@ -172,18 +171,22 @@ impl Pretty for Term {
             Term::Type(0) => Doc::start("Type"),
             Term::Type(i) => Doc::start("Type").add(i),
             Term::Builtin(b) => Doc::start(b),
-            Term::Fun(v) if v.len() == 1 => {
+            Term::Fun(m, v) if v.len() == 1 => {
                 let (args, body) = v.first().unwrap();
-                let until_body = Doc::start("fun")
-                    .style(Style::Keyword)
-                    .line()
-                    .chain(Doc::intersperse(
-                        args.iter().map(|x| x.pretty(ctx)),
-                        Doc::none().line(),
-                    ))
-                    .indent()
-                    .line()
-                    .add("=>");
+                let until_body = if *m {
+                    Doc::start("move").space().add("fun")
+                } else {
+                    Doc::start("fun")
+                }
+                .style(Style::Keyword)
+                .line()
+                .chain(Doc::intersperse(
+                    args.iter().map(|x| x.pretty(ctx)),
+                    Doc::none().line(),
+                ))
+                .indent()
+                .line()
+                .add("=>");
                 Doc::either(
                     until_body
                         .clone()
@@ -195,19 +198,23 @@ impl Pretty for Term {
                 )
                 .prec(Prec::Term)
             }
-            Term::Fun(v) => pretty_block(
+            Term::Fun(m, v) => pretty_block(
                 "fun",
                 v.iter().map(|(args, body)| {
-                    let until_body = Doc::start("fun")
-                        .style(Style::Keyword)
-                        .line()
-                        .chain(Doc::intersperse(
-                            args.iter().map(|x| x.pretty(ctx)),
-                            Doc::none().line(),
-                        ))
-                        .indent()
-                        .line()
-                        .add("=>");
+                    let until_body = if *m {
+                        Doc::start("move").space().add("fun")
+                    } else {
+                        Doc::start("fun")
+                    }
+                    .style(Style::Keyword)
+                    .line()
+                    .chain(Doc::intersperse(
+                        args.iter().map(|x| x.pretty(ctx)),
+                        Doc::none().line(),
+                    ))
+                    .indent()
+                    .line()
+                    .add("=>");
                     Doc::either(
                         until_body
                             .clone()

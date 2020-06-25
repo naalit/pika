@@ -19,6 +19,7 @@ extern {
         "the" => Tok::The,
         "do" => Tok::Do,
         "tag" => Tok::Tag,
+        "move" => Tok::Move,
         ":" => Tok::Colon,
         ";" => Tok::Semi,
         "=>" => Tok::Arrow,
@@ -208,9 +209,9 @@ Branch: (Vec<Spanned<ParseTree<'input>>>, Spanned<ParseTree<'input>>) = {
 
 Fun: ParseTree<'input> = {
   // Single-line single-branch case
-  "fun" <Branch> => ParseTree::Fun(vec![<>]),
+  <m:"move"?> "fun" <b:Branch> => ParseTree::Fun(m.is_some(), vec![b]),
 
-  IBlock<"fun", Branch> => ParseTree::Fun(<>),
+  <m:"move"?> <b:IBlock<"fun", Branch>> => ParseTree::Fun(m.is_some(), b),
 }
 
 Atom: ParseTree<'input> = {

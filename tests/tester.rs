@@ -134,3 +134,30 @@ fn test_unordered_struct() {
         .stdout("(6, 720)\n")
         .success();
 }
+
+#[test]
+fn test_affine_pass() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/affine_pass.pk"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_affine_fail() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/affine_fail.pk"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_affine_fail_fun() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/affine_fail_fun.pk"])
+        .assert()
+        .failure();
+}

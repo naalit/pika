@@ -1,5 +1,5 @@
 use crate::binding::Sym;
-use crate::common::{termcolor, HasBindings};
+use crate::common::{termcolor, Span};
 use crate::elab::Cloner;
 use crate::options::Options;
 use crate::printing::*;
@@ -34,7 +34,7 @@ impl Default for ReplHelper {
         // We can do binders, etc. without actually lexing them, and ignore lexer errors
         ReplHelper {
             literal: Regex::new(r"((^|\s)\d+)|\(\)").unwrap(),
-            keyword: Regex::new(r"fun|struct|do|tag|the").unwrap(),
+            keyword: Regex::new(r"fun|struct|do|tag|the|move").unwrap(),
             symbol: Regex::new(r"=>|\.|=|:|\|").unwrap(),
             binder: Regex::new(r"([a-zA-Z_][a-zA-Z_0-9]*[\t ]*)+:").unwrap(),
             comment: Regex::new(r"#[^\n]*").unwrap(),
@@ -194,34 +194,37 @@ pub fn run_repl(options: &Options) {
                             let ty = elab.get_type(&ectx);
                             ectx.set_val(
                                 **s,
-                                Elab::Var(**s, Box::new(ty.cloned(&mut Cloner::new(&ectx)))),
+                                Elab::Var(
+                                    Span::empty(),
+                                    **s,
+                                    Box::new(ty.cloned(&mut Cloner::new(&ectx))),
+                                ),
                             );
                             let val = elab.cloned(&mut Cloner::new(&ectx)).normal(&mut ectx);
 
-                            let b = db.bindings();
                             let doc = Doc::either(
-                                s.pretty(&b)
+                                s.pretty(&db)
                                     .style(Style::Binder)
                                     .line()
                                     .add(":")
                                     .space()
-                                    .chain(ty.pretty(&b).group())
+                                    .chain(ty.pretty(&db).group())
                                     .line()
                                     .add("=")
                                     .space()
-                                    .chain(val.pretty(&b).group())
+                                    .chain(val.pretty(&db).group())
                                     .group()
                                     .indent(),
-                                s.pretty(&b)
+                                s.pretty(&db)
                                     .space()
                                     .add(":")
                                     .style(Style::Binder)
                                     .space()
-                                    .chain(ty.pretty(&b))
+                                    .chain(ty.pretty(&db))
                                     .space()
                                     .add("=")
                                     .space()
-                                    .chain(val.pretty(&b))
+                                    .chain(val.pretty(&db))
                                     .group(),
                             )
                             .hardline();

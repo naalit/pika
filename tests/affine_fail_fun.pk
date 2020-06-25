@@ -1,0 +1,6 @@
+make_affine_fun := fun (a:Type) (x:a) => fun Int => x
+
+use_fun := fun (a:Type) (x:a) => do
+  f := make_affine_fun a x
+  # This is an error, because `f` captures `x` (by move), so it's affine
+  (f 2, f 3)

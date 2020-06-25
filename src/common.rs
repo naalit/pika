@@ -1,7 +1,6 @@
 pub use crate::binding::*;
-pub use crate::elab::Cloner;
-pub use crate::elab::Clos;
-pub use crate::error::Error;
+pub use crate::elab::*;
+pub use crate::error::{Error, Span};
 pub use crate::options::*;
 pub use crate::printing::*;
 pub use crate::query::*;
@@ -33,7 +32,6 @@ impl<T: HasBindings> HasBindings for &mut T {
     }
 }
 
-pub use crate::elab::Elab;
 pub use crate::error::Spanned;
 use crate::low::{LowFun, LowMod, LowTy};
 use crate::term::{Def, STerm};
@@ -101,8 +99,7 @@ impl<T: MainGroup> MainGroupP for T {
 }
 
 pub trait HasDatabase: HasBindings {
-    type DB: MainGroup;
-    fn database(&self) -> &dyn MainGroupP<DB = Self::DB>;
+    fn database(&self) -> &dyn MainGroupP;
 }
 
 pub trait Scoped {
@@ -116,8 +113,7 @@ impl<T: MainGroup> HasBindings for (ScopeId, &T) {
     }
 }
 impl<T: MainGroup> HasDatabase for (ScopeId, &T) {
-    type DB = T::DB;
-    fn database(&self) -> &dyn MainGroupP<DB = T::DB> {
+    fn database(&self) -> &dyn MainGroupP {
         self.1
     }
 }

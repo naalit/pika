@@ -66,8 +66,18 @@ lazy_static! {
     );
 }
 
-#[derive(Clone, Debug, Copy, PartialEq, Hash, Eq)]
+#[derive(Clone, Debug, Copy, PartialEq, Hash, Eq, PartialOrd)]
 pub struct Span(pub usize, pub usize);
+impl Span {
+    pub fn empty() -> Self {
+        Span(0, 0)
+    }
+}
+impl Default for Span {
+    fn default() -> Self {
+        Span::empty()
+    }
+}
 impl Into<Range<usize>> for Span {
     fn into(self) -> Range<usize> {
         self.0..self.1

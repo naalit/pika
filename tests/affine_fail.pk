@@ -1,0 +1,3 @@
+f := fun (a:Type) (x:a) => do
+  y := x
+  x

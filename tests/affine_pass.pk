@@ -1,0 +1,18 @@
+# In types
+Pair := fun a:Type => (a, a)
+# With Copy types
+dup := fun i:Int => (i, i)
+
+g := fun t:Type => (t, t)
+# We can only use x once, but we can use it any number of times in types
+z := fun (t:Type) (x:t) (a:x) (b:x) => do
+  y : (x, x) = (a, b)
+  # There's our one use in a non-erased context
+  (y, x)
+
+# Since the result of this function only captures Copy things, it's itself Copy
+make_copy_fun := fun i:Int => fun Int => i
+
+use_fun := fun i:Int => do
+  f := make_copy_fun i
+  (f 2, f 3)

@@ -28,6 +28,7 @@ pub enum Tok<'i> {
     Do,        // "do"
     The,       // "the"
     Tag,       // "tag"
+    Move,      // "move"
 
     Colon,         // ":"
     Semi,          // ";"
@@ -216,6 +217,7 @@ impl<'i> Lexer<'i> {
                 "the" => Tok::The,
                 "do" => Tok::Do,
                 "tag" => Tok::Tag,
+                "move" => Tok::Move,
                 _ => Tok::Name(s),
             }
         }
@@ -391,6 +393,7 @@ impl<'i> fmt::Display for Tok<'i> {
             The => write!(f, "'the'"),
             Do => write!(f, "'do'"),
             Tag => write!(f, "'tag'"),
+            Move => write!(f, "'move'"),
 
             Dot => write!(f, "'.'"),
             Comma => write!(f, "','"),

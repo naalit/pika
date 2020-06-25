@@ -11,6 +11,8 @@ pub enum TypeError {
     /// We couldn't synthesize a type for the given term
     Synth(STerm),
     WrongArity(usize, usize, Elab, Span),
+    /// We wanted a `fun` but got a `move fun`
+    MoveOnlyFun(STerm, Elab),
     /// We tried to apply the given term, but it's not a function
     /// The `Elab` here is the type, the `Term` is the argument we tried to apply it to
     NotFunction(Spanned<Elab>, Spanned<Term>),
@@ -31,7 +33,7 @@ pub enum TypeError {
     DuplicateField(Spanned<RawSym>, Spanned<RawSym>),
 }
 impl TypeError {
-    pub fn to_error(self, file: FileId, b: &Bindings) -> Error {
+    pub fn to_error(self, file: FileId, b: &impl HasBindings) -> Error {
         match self {
             TypeError::Synth(t) => Error::new(
                 file,
@@ -41,6 +43,17 @@ impl TypeError {
                     .style(Style::Bold),
                 t.span(),
                 "try adding an annotation here",
+            ),
+            TypeError::MoveOnlyFun(f, ty) => Error::new(
+                file,
+                Doc::start("Type error: expected copiable function '")
+                    .chain(ty.unbind().pretty(b).style(Style::None).group())
+                    .add("', found move-only function")
+                    .style(Style::Bold),
+                f.span(),
+                Doc::start("try removing this ")
+                    .chain(Doc::start("move").style(Style::Keyword))
+                    .style(Style::Note),
             ),
             TypeError::NotFunction(f, x) => Error::new(
                 file,
@@ -179,20 +192,20 @@ impl TypeError {
     }
 }
 
-pub struct TCtx<'a, T: MainGroup> {
+pub struct TCtx<'a> {
     pub tys: HashMap<Sym, Arc<Elab>>,
-    pub ectx: ECtx<'a, T>,
+    pub ectx: ECtx<'a>,
 }
-impl<'a, T: MainGroup> From<ECtx<'a, T>> for TCtx<'a, T> {
-    fn from(ectx: ECtx<'a, T>) -> Self {
+impl<'a> From<ECtx<'a>> for TCtx<'a> {
+    fn from(ectx: ECtx<'a>) -> Self {
         TCtx {
             tys: HashMap::new(),
             ectx,
         }
     }
 }
-impl<'a, T: MainGroup> TCtx<'a, T> {
-    pub fn new(db: &'a (impl Scoped + HasDatabase<DB = T>)) -> Self {
+impl<'a> TCtx<'a> {
+    pub fn new(db: &'a (impl Scoped + HasDatabase)) -> Self {
         TCtx {
             tys: HashMap::new(),
             ectx: ECtx::new(db),
@@ -210,36 +223,35 @@ impl<'a, T: MainGroup> TCtx<'a, T> {
         self.tys.insert(k, Arc::new(v));
     }
 }
-impl<'a, T: MainGroup> Scoped for TCtx<'a, T> {
+impl<'a> Scoped for TCtx<'a> {
     fn scope(&self) -> ScopeId {
         self.ectx.scope()
     }
 }
-impl<'a, T: MainGroup> HasBindings for TCtx<'a, T> {
+impl<'a> HasBindings for TCtx<'a> {
     fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
         self.database().bindings_ref()
     }
 }
-impl<'a, T: MainGroup> HasDatabase for TCtx<'a, T> {
-    type DB = T;
-    fn database(&self) -> &dyn MainGroupP<DB = Self::DB> {
+impl<'a> HasDatabase for TCtx<'a> {
+    fn database(&self) -> &dyn MainGroupP {
         self.ectx.database()
     }
 }
-impl<'a, T: MainGroup> Deref for TCtx<'a, T> {
-    type Target = ECtx<'a, T>;
-    fn deref(&self) -> &ECtx<'a, T> {
+impl<'a> Deref for TCtx<'a> {
+    type Target = ECtx<'a>;
+    fn deref(&self) -> &ECtx<'a> {
         &self.ectx
     }
 }
-impl<'a, T: MainGroup> DerefMut for TCtx<'a, T> {
-    fn deref_mut(&mut self) -> &mut ECtx<'a, T> {
+impl<'a> DerefMut for TCtx<'a> {
+    fn deref_mut(&mut self) -> &mut ECtx<'a> {
         &mut self.ectx
     }
 }
 
 /// Attempts to come up with a type for a term, returning the elaborated term
-pub fn synth<T: MainGroup>(t: &STerm, tctx: &mut TCtx<T>) -> Result<Elab, TypeError> {
+pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
     #[cfg(feature = "logging")]
     println!("synth ({})", t.pretty(&*tctx.bindings()).ansi_string());
 
@@ -252,7 +264,7 @@ pub fn synth<T: MainGroup>(t: &STerm, tctx: &mut TCtx<T>) -> Result<Elab, TypeEr
                 .map(|x| x.cloned(&mut Cloner::new(&tctx)))
                 .ok_or_else(|| TypeError::NotFound(t.copy_span(*x)))?
                 .whnf(tctx);
-            Ok(Elab::Var(*x, Box::new(ty)))
+            Ok(Elab::Var(t.span(), *x, Box::new(ty)))
         }
         Term::I32(i) => Ok(Elab::I32(*i)),
         Term::Unit => Ok(Elab::Unit),
@@ -332,7 +344,7 @@ pub fn synth<T: MainGroup>(t: &STerm, tctx: &mut TCtx<T>) -> Result<Elab, TypeEr
             };
             Ok(Elab::Project(Box::new(r), **m))
         }
-        Term::Fun(iv) => {
+        Term::Fun(m, iv) => {
             let mut rv = Vec::new();
             for (xs, y) in iv {
                 let mut rx = Vec::new();
@@ -351,7 +363,7 @@ pub fn synth<T: MainGroup>(t: &STerm, tctx: &mut TCtx<T>) -> Result<Elab, TypeEr
 
                 rv.push((rx, y, to))
             }
-            Ok(Elab::Fun(tctx.clos(t), rv))
+            Ok(Elab::Fun(tctx.clos(t, *m), rv))
         }
         Term::Block(v) => {
             let mut rv = Vec::new();
@@ -403,11 +415,7 @@ pub fn synth<T: MainGroup>(t: &STerm, tctx: &mut TCtx<T>) -> Result<Elab, TypeEr
 }
 
 /// Checks the given term against the given type, returning the elaborated term
-pub fn check<T: MainGroup>(
-    term: &STerm,
-    typ: &Elab,
-    tctx: &mut TCtx<T>,
-) -> Result<Elab, TypeError> {
+pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeError> {
     #[cfg(feature = "logging")]
     {
         let b = &tctx.bindings();
@@ -434,7 +442,11 @@ pub fn check<T: MainGroup>(
             Ok(Elab::Binder(*s, Box::new(Elab::Top)))
         }
 
-        (Term::Fun(v), Elab::Fun(cl, v2)) => {
+        (Term::Fun(m, v), Elab::Fun(cl, v2)) => {
+            if *m && !cl.is_move {
+                return Err(TypeError::MoveOnlyFun(term.clone(), typ.cloned(&mut Cloner::new(tctx))));
+            }
+
             tctx.add_clos(cl);
             let mut cln = Cloner::new(tctx);
             let mut v2: Vec<_> = v2
@@ -645,7 +657,7 @@ pub fn check<T: MainGroup>(
             // TODO give a warning if there's anything left in `unused`
 
             Ok(Elab::Fun(
-                tctx.clos(term),
+                tctx.clos(term, *m),
                 used.into_iter()
                     .map(|(a, b, c)| (a.into_iter().map(|(x, _)| x).collect(), b, c))
                     .collect(),
@@ -685,7 +697,7 @@ pub fn check<T: MainGroup>(
 }
 
 impl Term {
-    fn tag_head<T: MainGroup>(&self, tctx: &TCtx<T>) -> bool {
+    fn tag_head(&self, tctx: &TCtx) -> bool {
         match self {
             Term::Tag(_) => true,
             Term::App(f, _) => f.tag_head(tctx),
@@ -701,11 +713,11 @@ impl Term {
 }
 
 impl Elab {
-    fn tag_head(&self) -> bool {
+    pub fn tag_head(&self) -> bool {
         match self {
             Elab::Tag(_) => true,
             Elab::App(f, _) => f.tag_head(),
-            Elab::Var(_, t) => t.tag_head(),
+            Elab::Var(_, _, t) => t.tag_head(),
             _ => false,
         }
     }
@@ -733,7 +745,7 @@ impl Elab {
     }
 
     /// Like do_match(), but fills in the types instead of Elabs
-    pub fn match_types<T: MainGroup>(&self, other: &Elab, tctx: &mut TCtx<T>) {
+    pub fn match_types(&self, other: &Elab, tctx: &mut TCtx) {
         use Elab::*;
         match (self, other) {
             // Since we match it against itself to apply binder types
@@ -764,14 +776,18 @@ impl Elab {
 
                 // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
                 other.do_match(
-                    &Var(*s, Box::new(t.cloned(&mut Cloner::new(&tctx)))),
+                    &Var(
+                        Span::empty(),
+                        *s,
+                        Box::new(t.cloned(&mut Cloner::new(&tctx))),
+                    ),
                     &mut tctx.ectx,
                 );
 
                 let other = other.cloned(&mut Cloner::new(&tctx));
                 tctx.set_ty(*s, other);
             }
-            (Var(x, _), _) => {
+            (Var(_, x, _), _) => {
                 if let Some(x) = tctx.val(*x) {
                     x.match_types(other, tctx);
                 }
@@ -788,14 +804,21 @@ impl Elab {
         }
     }
 
-    pub fn alpha_match<T: MainGroup>(&self, other: &Elab, ectx: &mut ECtx<T>) {
+    pub fn alpha_match(&self, other: &Elab, ectx: &mut ECtx) {
         use Elab::*;
         match (self, other) {
             (Binder(s, t), _) => {
                 // For alpha-equivalence - we need symbols in our body to match symbols in the other body if they're defined as the same
-                other.do_match(&Var(*s, Box::new(t.cloned(&mut Cloner::new(&ectx)))), ectx);
+                other.do_match(
+                    &Var(
+                        Span::empty(),
+                        *s,
+                        Box::new(t.cloned(&mut Cloner::new(&ectx))),
+                    ),
+                    ectx,
+                );
             }
-            (Var(x, _), _) => {
+            (Var(_, x, _), _) => {
                 if let Some(x) = ectx.val(*x) {
                     x.alpha_match(other, ectx);
                 }
@@ -814,7 +837,7 @@ impl Elab {
 
     /// <=; every `self` is also a `sup`
     /// Not that this is *the* way to check type equality
-    pub fn subtype_of<T: MainGroup>(&self, sup: &Elab, ectx: &mut ECtx<T>) -> bool {
+    pub fn subtype_of(&self, sup: &Elab, ectx: &mut ECtx) -> bool {
         match (self, sup) {
             (Elab::Bottom, _) => true,
             (_, Elab::Top) => true,
@@ -829,13 +852,13 @@ impl Elab {
             (Elab::Tag(x), Elab::Tag(y)) if x == y => true,
             (Elab::Builtin(b), Elab::Builtin(c)) if b == c => true,
             (Elab::Unit, Elab::Unit) => true,
-            (Elab::Var(x, _), _) if ectx.database().elab(ectx.scope(), *x).is_some() => ectx
+            (Elab::Var(_, x, _), _) if ectx.database().elab(ectx.scope(), *x).is_some() => ectx
                 .database()
                 .elab(ectx.scope(), *x)
                 .unwrap()
                 .cloned(&mut Cloner::new(ectx))
                 .subtype_of(sup, ectx),
-            (_, Elab::Var(x, _)) if ectx.database().elab(ectx.scope(), *x).is_some() => self
+            (_, Elab::Var(_, x, _)) if ectx.database().elab(ectx.scope(), *x).is_some() => self
                 .subtype_of(
                     &ectx
                         .database()
@@ -844,12 +867,12 @@ impl Elab {
                         .cloned(&mut Cloner::new(ectx)),
                     ectx,
                 ),
-            (Elab::Var(x, _), _) if ectx.vals.contains_key(x) => ectx
+            (Elab::Var(_, x, _), _) if ectx.vals.contains_key(x) => ectx
                 .val(*x)
                 .unwrap()
                 .cloned(&mut Cloner::new(ectx))
                 .subtype_of(sup, ectx),
-            (_, Elab::Var(x, _)) if ectx.vals.contains_key(x) => {
+            (_, Elab::Var(_, x, _)) if ectx.vals.contains_key(x) => {
                 self.subtype_of(&ectx.val(*x).unwrap().cloned(&mut Cloner::new(ectx)), ectx)
             }
             (Elab::App(f1, x1), Elab::App(f2, x2)) => {
@@ -858,8 +881,13 @@ impl Elab {
             (Elab::Pair(ax, ay), Elab::Pair(bx, by)) => {
                 ax.subtype_of(bx, ectx) && ay.subtype_of(by, ectx)
             }
-            // (Type -> (Type, Type)) <= ((Type, Type) -> Type)
-            (Elab::Fun(cl_a, v_sub), Elab::Fun(cl_b, v_sup)) => {
+            // (Type -> (Type, Type)) <: ((Type, Type) -> Type)
+            // `fun` <: `move fun`
+            (
+                Elab::Fun(cl_a @ Clos { is_move: false, .. }, v_sub),
+                Elab::Fun(cl_b @ Clos { is_move: false, .. }, v_sup),
+            )
+            | (Elab::Fun(cl_a, v_sub), Elab::Fun(cl_b @ Clos { is_move: true, .. }, v_sup)) => {
                 ectx.add_clos(cl_a);
                 ectx.add_clos(cl_b);
                 for (args_sup, to_sup, _) in v_sup.iter() {
@@ -896,7 +924,7 @@ impl Elab {
                 return true;
             }
             // Two variables that haven't been resolved yet, but refer to the same definition
-            (Elab::Var(x, _), Elab::Var(y, _)) if y == x => true,
+            (Elab::Var(_, x, _), Elab::Var(_, y, _)) if y == x => true,
             (Elab::Binder(_, t), _) => t.subtype_of(sup, ectx),
             (_, Elab::Binder(_, t)) => self.subtype_of(t, ectx),
             (Elab::Union(sub), Elab::Union(sup)) => {

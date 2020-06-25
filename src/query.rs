@@ -41,8 +41,6 @@ impl ScopeId {
 
 /// Since queries can't access the database directly, this defines the interface they can use for accessing it
 pub trait MainExt: HasBindings {
-    type DB: MainGroup;
-
     fn monos(&self) -> RwLockReadGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
 
     fn monos_mut(&self) -> RwLockWriteGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
@@ -103,7 +101,7 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
                 Statement::Expr(x) | Statement::Def(Def(_, x)) => add_term(x, db, v, scope.clone()),
             }),
             Term::Union(t) => t.iter().for_each(|x| add_term(x, db, v, scope.clone())),
-            Term::Fun(t) => t.iter().for_each(|(args, body)| {
+            Term::Fun(_, t) => t.iter().for_each(|(args, body)| {
                 args.iter().for_each(|x| add_term(x, db, v, scope.clone()));
                 add_term(body, db, v, scope.clone());
             }),
@@ -236,7 +234,7 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
         if let Some(s) = seen.iter().find(|x| ***x == sym.raw()) {
             db.error(
                 TypeError::DuplicateField(s.clone(), sym.copy_span(sym.raw()))
-                    .to_error(scope.file(), &db.bindings()),
+                    .to_error(scope.file(), db),
             );
         } else {
             seen.push(sym.copy_span(sym.raw()));
@@ -270,9 +268,16 @@ fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
     tctx.set_ty(s, Elab::Bottom);
     let e = synth(&term, &mut tctx);
     match e {
-        Ok(e) => Some(Arc::new(e)),
+        Ok(e) => {
+            if let Err(e) = e.check_affine(&mut crate::affine::ACtx::new(&scoped)) {
+                db.error(e);
+            }
+            // We let it go anyway so we don't get "type not found" errors when borrow checking fails
+            // We'll check if db.has_errors() before going too far
+            Some(Arc::new(e))
+        }
         Err(e) => {
-            db.error(e.to_error(scope.file(), &db.bindings()));
+            db.error(e.to_error(scope.file(), db));
             None
         }
     }
@@ -319,8 +324,6 @@ impl HasBindings for MainDatabase {
 }
 
 impl MainExt for MainDatabase {
-    type DB = Self;
-
     fn monos(&self) -> RwLockReadGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>> {
         self.monos.read().unwrap()
     }
