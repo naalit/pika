@@ -19,7 +19,6 @@ extern {
         "struct" => Tok::Struct,
         "the" => Tok::The,
         "do" => Tok::Do,
-        "tag" => Tok::Tag,
         "move" => Tok::Move,
         "of" => Tok::Of,
         "type" => Tok::Data,
@@ -90,10 +89,6 @@ Def: ParseDef<'input> = {
       } else {
         unreachable!()
       }
-    },
-    <t:Spanned<"tag">> <v:Spanned<Var>> => {
-        let span = Span(t.span().0, v.span().1);
-        ParseDef(v.clone(), Spanned::new(ParseTree::Tag(v.force_unwrap()), span))
     },
     <l:Spanned<Var>> ":" <t:STerm> INDENT "=" <r:STerm> "\n"+ DEDENT => {
         let span = Span(t.span().0, r.span().1);

@@ -275,8 +275,6 @@ impl Elab {
         Some(match self {
             // Guaranteed erasure for multiplicity-0 types
             _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => LowTy::Unit,
-            // We don't actually care what tag it is if it's not in a union
-            Elab::Tag(_) => LowTy::Unit,
             Elab::Unit => LowTy::Unit,
             Elab::I32(_) => LowTy::Int(32),
             Elab::Var(_, x, ty) => {
@@ -436,8 +434,6 @@ impl Elab {
                     }
                 }
                 Elab::App(_, _) => LowTy::Struct(vec![f.low_ty_of(lctx)?, x.low_ty_of(lctx)?]),
-                // Ignore the tag if we have other data
-                Elab::Tag(_) => x.low_ty_of(lctx)?,
                 x => panic!("not function type: {}", x.pretty(lctx).ansi_string()),
             },
             Elab::Project(r, m) => {
@@ -486,8 +482,6 @@ impl Elab {
         Some(match self {
             // Guaranteed erasure for multiplicity-0 types
             _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => LowIR::Unit,
-            // We don't actually care what tag it is if it's not in a union
-            Elab::Tag(_) => LowIR::Unit,
             Elab::Unit => LowIR::Unit,
             Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
             Elab::Var(_, x, ty) => {
@@ -855,8 +849,6 @@ impl Elab {
                     let fresh = lctx.bindings_mut().create("_".to_string());
                     LowIR::Struct(vec![(fresh, f.as_low(lctx)?), (fresh, f.as_low(lctx)?)])
                 }
-                // Ignore the tag if we have other data
-                Elab::Tag(_) => x.as_low(lctx)?,
                 x => panic!("not function type: {}", x.pretty(lctx).ansi_string()),
             },
             Elab::Project(r, m) => {
@@ -982,7 +974,7 @@ impl Elab {
                         })
                     }
                     // TODO `Pair a`
-                    _ => panic!("wrong type"), // TODO typecheck so it's `Data x y z` or `fun a b c => Data x y z`
+                    _ => panic!("wrong type"),
                 }
             }
             _ => panic!("{:?} not supported (ir)", self),
@@ -1009,7 +1001,6 @@ impl Elab {
             | Elab::I32(_)
             | Elab::StructIntern(_)
             | Elab::Bottom
-            | Elab::Tag(_)
             | Elab::Data(_, _, _)
             | Elab::Cons(_, _) => true,
             Elab::Binder(_, t) => t.is_concrete(lctx),
@@ -1074,15 +1065,13 @@ impl Elab {
             // Attach data to tags
             Elab::App(f, x) => match &**f {
                 // Ignore the tag
-                Elab::Tag(_) | Elab::Cons(_, _) => x.as_low_ty(lctx),
+                Elab::Cons(_, _) => x.as_low_ty(lctx),
                 Elab::App(_, _) => LowTy::Struct(vec![f.as_low_ty(lctx), x.as_low_ty(lctx)]),
                 _ => panic!("{:?} is not supported", f),
             },
             Elab::Union(v) => LowTy::Union(v.iter().map(|x| x.as_low_ty(lctx)).collect()),
             // Type erasure
             Elab::Type(_) => LowTy::Unit,
-            // We don't actually care what tag it is if it's not in a union
-            Elab::Tag(_) => LowTy::Unit,
             Elab::Data(_, s, _) => {
                 let scope = ScopeId::Struct(*s, Box::new(lctx.scope()));
                 LowTy::Union(
@@ -1292,7 +1281,7 @@ impl Elab {
             (Elab::App(f, x), Elab::App(tf, tx)) => match &**f {
                 // We know it matces, since the type is App and not Data
                 // TODO is it a struct at this point, though?
-                Elab::Tag(_) | Elab::Cons(_, _) => x.compile_match(lctx, need_phi, tx, param),
+                Elab::Cons(_, _) => x.compile_match(lctx, need_phi, tx, param),
                 Elab::App(_, _) => {
                     let f_param = LowIR::Project(Box::new(param.clone()), 0);
                     let x_param = LowIR::Project(Box::new(param), 1);
@@ -1318,7 +1307,6 @@ impl Elab {
             (Elab::Type(_), _)
             | (Elab::Builtin(_), _)
             | (Elab::Unit, _)
-            | (Elab::Tag(_), _)
             | (Elab::Fun(_, _), _)
             | (Elab::Data(_, _, _), _) => LowIR::BoolConst(true),
             _ => panic!(

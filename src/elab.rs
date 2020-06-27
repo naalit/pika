@@ -184,7 +184,6 @@ pub enum Elab {
     Fun(Clos, Vec<(Vec<Elab>, Elab, Elab)>), // fun { a b => the T x; c d => the U y }
     App(BElab, BElab),     // f x
     Pair(BElab, BElab),    // x, y
-    Tag(TagId),            // tag X
     Data(TypeId, StructId, BElab), // type D: T of ...
     Cons(TagId, BElab),    // C : D
     StructIntern(StructId), // struct { x := 3 }
@@ -393,7 +392,7 @@ impl Elab {
     pub fn uses(&self, s: Sym) -> bool {
         use Elab::*;
         match self {
-            Type(_) | Unit | I32(_) | Builtin(_) | Tag(_) | Top | Bottom => false,
+            Type(_) | Unit | I32(_) | Builtin(_) | Top | Bottom => false,
             Var(_, x, ty) => *x == s || ty.uses(s),
             Fun(_, v) => v.iter().any(|(a, b, c)| {
                 !a.iter().any(|x| x.binds(s))
@@ -422,7 +421,7 @@ impl Elab {
     pub fn binds(&self, s: Sym) -> bool {
         use Elab::*;
         match self {
-            Type(_) | Unit | I32(_) | Builtin(_) | Tag(_) | Top | Bottom => false,
+            Type(_) | Unit | I32(_) | Builtin(_) | Top | Bottom => false,
             Binder(x, ty) => *x == s || ty.binds(s),
             Fun(_, v) => v
                 .iter()
@@ -679,7 +678,6 @@ impl Elab {
             Unit => Unit,
             I32(i) => I32(*i),
             Builtin(b) => b.get_type(),
-            Tag(t) => Tag(*t),
             Var(_, _, t) => t.cloned(&mut Cloner::new(&env)),
             Data(_, _, t) | Cons(_, t) => t.cloned(&mut Cloner::new(&env)),
             Fun(cl, v) => {
@@ -749,7 +747,6 @@ impl Elab {
                     )
                     .whnf(&mut ectx)
                 }
-                f @ Tag(_) | f @ App(_, _) => App(Box::new(f), Box::new(x.get_type(env))),
                 // This triggers with recursive functions
                 Bottom => Bottom,
                 _ => panic!("not a function type"),
@@ -794,7 +791,6 @@ impl Elab {
     pub fn universe(&self, env: &(impl Scoped + HasDatabase)) -> u32 {
         match self {
             Elab::Unit | Elab::I32(_) | Elab::Builtin(_) => 0,
-            Elab::Tag(_) => 0,
             Elab::Bottom => 0,
             // TODO get rid of top
             Elab::Top => u32::MAX,
@@ -900,7 +896,6 @@ impl Elab {
             Type(i) => Type(*i),
             I32(i) => I32(*i),
             Builtin(b) => Builtin(*b),
-            Tag(t) => Tag(*t),
             App(f, x) => App(Box::new(f.cloned(cln)), Box::new(x.cloned(cln))),
             // Rename bound variables
             // This case runs before any that depend on it, and the Elab has unique names
@@ -1060,7 +1055,6 @@ impl Pretty for Elab {
                 .chain(y.pretty(ctx))
                 .add(")")
                 .prec(Prec::Atom),
-            Elab::Tag(id) => id.pretty(ctx),
             Elab::StructIntern(i) => Doc::start("struct#").style(Style::Keyword).add(i.num()),
             Elab::StructInline(v) => pretty_block(
                 "struct",

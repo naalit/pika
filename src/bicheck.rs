@@ -292,7 +292,6 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
         }
         Term::I32(i) => Ok(Elab::I32(*i)),
         Term::Unit => Ok(Elab::Unit),
-        Term::Tag(t) => Ok(Elab::Tag(*t)),
         Term::Pair(x, y) => {
             // TODO I don't think this covers dependent pairs
             let x = synth(x, tctx)?;
@@ -391,7 +390,7 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                         }
                     }
                 }
-                Elab::Tag(_) | Elab::App(_, _) | Elab::Bottom => synth(x, tctx)?,
+                Elab::Bottom => synth(x, tctx)?,
                 a => {
                     return Err(TypeError::NotFunction(
                         fi.copy_span(a.cloned(&mut Cloner::new(&tctx))),
@@ -823,16 +822,6 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                     .collect(),
             ))
         }
-        (Term::App(f, x), Elab::App(tf, tx)) if tf.tag_head() => {
-            let f = check(f, tf, tctx)?;
-            let x = check(x, tx, tctx)?;
-            Ok(Elab::App(Box::new(f), Box::new(x)))
-        }
-        (Term::App(f, x), Elab::Type(i)) if f.tag_head(tctx) => {
-            let f = check(f, &Elab::Type(*i), tctx)?;
-            let x = check(x, &Elab::Type(*i), tctx)?;
-            Ok(Elab::App(Box::new(f), Box::new(x)))
-        }
         (_, _) => {
             let t = synth(term, tctx)?;
             let ty = t.get_type(tctx);
@@ -856,32 +845,7 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
     }
 }
 
-impl Term {
-    fn tag_head(&self, tctx: &TCtx) -> bool {
-        match self {
-            Term::Tag(_) => true,
-            Term::App(f, _) => f.tag_head(tctx),
-            Term::Var(x) => tctx
-                .database()
-                .elab(tctx.scope(), *x)
-                .map(|x| x.get_type(tctx))
-                .or_else(|| tctx.ty(*x).map(|x| x.cloned(&mut Cloner::new(&tctx))))
-                .map_or(false, |x| x.tag_head()),
-            _ => false,
-        }
-    }
-}
-
 impl Elab {
-    pub fn tag_head(&self) -> bool {
-        match self {
-            Elab::Tag(_) => true,
-            Elab::App(f, _) => f.tag_head(),
-            Elab::Var(_, _, t) => t.tag_head(),
-            _ => false,
-        }
-    }
-
     fn update_binders(&mut self, other: &Elab, cln: &mut Cloner) {
         use Elab::*;
         match (&mut *self, other) {
@@ -1016,7 +980,6 @@ impl Elab {
                 &ScopeId::Struct(*id, Box::new(ectx.scope())).inline(ectx),
                 ectx,
             ),
-            (Elab::Tag(x), Elab::Tag(y)) if x == y => true,
             (Elab::Builtin(b), Elab::Builtin(c)) if b == c => true,
             (Elab::Unit, Elab::Unit) => true,
             (Elab::Var(_, x, _), _) if ectx.database().elab(ectx.scope(), *x).is_some() => ectx

@@ -103,7 +103,7 @@ impl Pretty for RawSym {
 impl Pretty for Sym {
     fn pretty(&self, ctx: &impl HasBindings) -> Doc {
         let name = ctx.bindings().resolve(*self).to_owned();
-        Doc::start(name).add(self.num())
+        Doc::start(name)
     }
 }
 
@@ -234,7 +234,6 @@ pub enum ParseTree<'p> {
     App(STree<'p>, STree<'p>),                   // f x
     Pair(STree<'p>, STree<'p>),                  // x, y
     Struct(Vec<(Spanned<&'p str>, STree<'p>)>),  // struct { x := 3 }
-    Tag(&'p str),                                // tag X
     Project(STree<'p>, Spanned<&'p str>),        // r.m
     Block(Vec<ParseStmt<'p>>),                   // do { x; y }
     Union(Vec<STree<'p>>),                       // x | y
@@ -376,7 +375,6 @@ impl<'p> STree<'p> {
                     env.pop();
                     Term::Struct(env.next_struct(), rv)
                 }
-                Tag(s) => Term::Tag(env.next_tag(s, None)),
                 Project(r, m) => Term::Project(
                     r.resolve_names(env)?,
                     m.copy_span(env.bindings.raw(m.to_string())),

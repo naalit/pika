@@ -27,7 +27,6 @@ pub enum Tok<'i> {
     Struct,    // "struct"
     Do,        // "do"
     The,       // "the"
-    Tag,       // "tag"
     Move,      // "move"
     Of,        // "of"
     Data,      // "type" - called Data because it's not "Type"
@@ -218,7 +217,6 @@ impl<'i> Lexer<'i> {
                 "Int" => Tok::Int,
                 "the" => Tok::The,
                 "do" => Tok::Do,
-                "tag" => Tok::Tag,
                 "move" => Tok::Move,
                 "of" => Tok::Of,
                 "type" => Tok::Data,
@@ -396,7 +394,6 @@ impl<'i> fmt::Display for Tok<'i> {
             Struct => write!(f, "'struct'"),
             The => write!(f, "'the'"),
             Do => write!(f, "'do'"),
-            Tag => write!(f, "'tag'"),
             Move => write!(f, "'move'"),
             Of => write!(f, "'of'"),
             Data => write!(f, "'type'"),

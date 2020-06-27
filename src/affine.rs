@@ -94,7 +94,6 @@ impl Elab {
                 f.multiplicity(env).min(x.multiplicity(env))
             }
             Elab::Pair(x, y) => x.multiplicity(env).min(y.multiplicity(env)),
-            Elab::Tag(_) => Many,
             Elab::Union(v) => v.iter().map(|x| x.multiplicity(env)).min().unwrap(),
             // In these two we know it's not concrete, but it's not erased, so it must be at least 1
             Elab::Var(_, _, _) => One,
@@ -210,7 +209,6 @@ impl Elab {
                 }
             }
             Elab::Builtin(_)
-            | Elab::Tag(_)
             | Elab::I32(_)
             | Elab::Type(_)
             | Elab::Bottom

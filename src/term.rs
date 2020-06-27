@@ -71,7 +71,6 @@ pub enum Term {
     Fun(bool, Vec<(Vec<STerm>, STerm)>),          // move? fun { a b => x; c d => y }
     App(STerm, STerm),                            // f x
     Pair(STerm, STerm),                           // x, y
-    Tag(TagId),                                   // tag
     Struct(StructId, Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
     /// Datatypes need a `StructId` too since they create a namespace
     Data(TypeId, StructId, STerm, Vec<(Spanned<Sym>, TagId, STerm)>), // type D: T of C: fun a => D
@@ -101,7 +100,6 @@ impl Term {
             | Term::I32(_)
             | Term::Type(_)
             | Term::Builtin(_)
-            | Term::Tag(_)
             | Term::Var(_)
             | Term::Binder(_, None)
             // Unions can't bind variables
@@ -127,7 +125,6 @@ impl Term {
             | Term::I32(_)
             | Term::Type(_)
             | Term::Builtin(_)
-            | Term::Tag(_)
             | Term::Var(_)
             | Term::Binder(_, None)
             | Term::Cons(_, _)
@@ -245,7 +242,6 @@ impl Pretty for Term {
                 .chain(y.pretty(ctx))
                 .add(")")
                 .prec(Prec::Atom),
-            Term::Tag(id) => id.pretty(ctx),
             Term::Struct(_, v) => pretty_block(
                 "struct",
                 v.iter().map(|(name, val)| {
