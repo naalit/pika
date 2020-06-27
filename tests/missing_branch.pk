@@ -1,15 +1,17 @@
-tag A
-tag B
-tag C
-AB := A | B
-ABC := A | B | C
+type ABC of
+  A
+  B
+  C
+
+# A subset of ABC
+AB := ABC.A | ABC.B
 
 # This one's good (tested in `match.pk` with `Bool`s)
 f : fun AB => () = fun
-  A => ()
-  B => ()
+  ABC.A => ()
+  ABC.B => ()
 
 # This one is an error
 g : fun ABC => () = fun
-  A => ()
-  B => ()
+  ABC.A => ()
+  ABC.B => ()

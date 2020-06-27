@@ -76,13 +76,21 @@ impl Elab {
                 })
                 .min()
                 .unwrap(),
-            _ if self.universe(env) != 0 => Zero,
+            // TODO let the user control data type multiplicities
+            Elab::Data(_, _, t) => {
+                if **t == Elab::Type(0) {
+                    One
+                } else {
+                    Zero
+                }
+            }
             Elab::Unit => Many,
             Elab::Binder(_, t) => t.multiplicity(env),
+            Elab::Cons(_, t) => t.multiplicity(env),
             Elab::I32(_) => Many,
             Elab::Builtin(Builtin::Int) => Many,
             Elab::App(f, x) => {
-                debug_assert!(f.tag_head(), "Not in WHNF!");
+                // debug_assert!(f.tag_head(), "Not in WHNF!");
                 f.multiplicity(env).min(x.multiplicity(env))
             }
             Elab::Pair(x, y) => x.multiplicity(env).min(y.multiplicity(env)),
@@ -97,9 +105,9 @@ impl Elab {
             Elab::StructIntern(_) => {
                 unreachable!("Right now, we always make a new struct for types")
             }
-            Elab::Builtin(_) => unreachable!(),
-            Elab::Top => unreachable!(),
-            Elab::Type(_) => unreachable!(),
+            Elab::Builtin(_) => Many,
+            Elab::Top => Zero,
+            Elab::Type(_) => Zero,
         }
     }
 
@@ -137,6 +145,7 @@ impl Elab {
                 }
             }
             Elab::Binder(_, t) => t.check_affine(actx)?,
+            Elab::Cons(_, t) => t.check_affine(actx)?,
             Elab::Fun(cl, v) => {
                 if !cl.is_move {
                     for (k, v) in cl.tys.iter() {
@@ -171,7 +180,7 @@ impl Elab {
             }
             // When we call `elab()` on each member, we'll check it
             // And we know it can't use local variables, so it won't matter what's in `actx`
-            Elab::StructIntern(_) => (),
+            Elab::StructIntern(_) | Elab::Data(_, _, _) => (),
             Elab::StructInline(v) => {
                 for (_, x) in v {
                     x.check_affine(actx)?;

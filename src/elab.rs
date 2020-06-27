@@ -57,6 +57,7 @@ impl<'a> Scoped for ECtx<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct Cloner {
     bindings: Arc<RwLock<Bindings>>,
     map: HashMap<Sym, Sym>,
@@ -184,6 +185,8 @@ pub enum Elab {
     App(BElab, BElab),     // f x
     Pair(BElab, BElab),    // x, y
     Tag(TagId),            // tag X
+    Data(TypeId, StructId, BElab), // type D: T of ...
+    Cons(TagId, BElab),    // C : D
     StructIntern(StructId), // struct { x := 3 }
     StructInline(Vec<(Sym, Elab)>), // struct { x := 3 }
     Project(BElab, RawSym), // r.m
@@ -233,6 +236,9 @@ impl Elab {
             }
             (Elab::Union(v), _) => v.iter().any(|x| x.overlap(other, ectx)),
             (_, Elab::Union(v)) => v.iter().any(|x| self.overlap(x, ectx)),
+            // If we're not sure what they are, they could overlap
+            (Elab::Var(_, _, _), Elab::Var(_, _, _)) => true,
+            (Elab::App(f1, x1), Elab::App(f2, x2)) => f1.overlap(f2, ectx) && x1.overlap(x2, ectx),
             _ => {
                 self.subtype_of(other, &mut ectx.clone())
                     || other.subtype_of(self, &mut ectx.clone())
@@ -240,48 +246,144 @@ impl Elab {
         }
     }
 
+    pub fn head(&self) -> &Elab {
+        match self {
+            Elab::App(f, _) => f.head(),
+            _ => self,
+        }
+    }
+
+    /// How many `App` nodes are there chained together left-associatively?
+    pub fn spine_len(&self) -> usize {
+        match self {
+            Elab::App(f, _) => f.spine_len() + 1,
+            _ => 0,
+        }
+    }
+
+    pub fn cons(&self) -> Option<TagId> {
+        match self {
+            Elab::Cons(id, _) => Some(*id),
+            Elab::App(f, _) => f.cons(),
+            _ => None,
+        }
+    }
+
     /// Instead of calling `Elab::union()` and over again, if you construct a union with several parts,
     /// call this after to simplify it in one pass
     pub fn simplify_unions(mut self, ectx: &ECtx) -> Self {
         match &mut self {
-            Elab::Union(v) => match v.len() {
-                0 => self,
-                1 => v.pop().unwrap(),
-                _ => {
-                    let mut ectx = ectx.clone();
-                    let mut rv: Vec<Elab> = Vec::new();
-                    for val in v.split_off(0) {
-                        let mut i = 0;
-                        let mut should_add = true;
-                        while i < rv.len() {
-                            let x = &rv[i];
+            Elab::Union(v) => {
+                match v.len() {
+                    0 => self,
+                    1 => v.pop().unwrap(),
+                    _ => {
+                        let mut ectx = ectx.clone();
+                        let mut rv: Vec<Elab> = Vec::new();
+                        let mut rv2: Vec<Elab> = Vec::new();
+                        let mut datas: Vec<Elab> = Vec::new();
+                        for val in v.split_off(0) {
+                            let mut i = 0;
+                            let mut should_add = true;
+                            while i < rv.len() {
+                                let x = &rv[i];
 
-                            // If `val` covers `x`'s case, we don't need `x`
-                            if x.subtype_of(&val, &mut ectx) {
-                                rv.remove(i);
-                            } else {
-                                i += 1;
-                                // but if `x` covers `val`'s case, we don't need `val`
-                                if val.subtype_of(x, &mut ectx) {
-                                    should_add = false;
-                                    break;
+                                // If `val` covers `x`'s case, we don't need `x`
+                                if x.subtype_of(&val, &mut ectx) {
+                                    rv.remove(i);
+                                } else {
+                                    i += 1;
+                                    // but if `x` covers `val`'s case, we don't need `val`
+                                    if val.subtype_of(x, &mut ectx) {
+                                        should_add = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if should_add {
+                                /// Helper function to get the datatype corresponding to a Cons or Cons applied to things
+                                fn data(val: &Elab) -> Option<&Elab> {
+                                    match &val {
+                                        Elab::Cons(_, t) => match &**t {
+                                            Elab::Data(_, _, _) => Some(&t),
+                                            Elab::Fun(_, v) => {
+                                                assert_eq!(v.len(), 1);
+                                                Some(&v[0].1)
+                                            }
+                                            _ => panic!("wrong type"),
+                                        },
+                                        Elab::App(f, _) => data(f),
+                                        _ => None,
+                                    }
+                                }
+
+                                if let Some(t) = data(&val) {
+                                    // If this is a datatype variant, we want to try to collapse the union into the datatype if we can
+                                    // So add it to `rv2`, the queue for checking if we have all variants of a datatype, instead of `rv`
+                                    // And also add the datatype to `datas`
+                                    if let Elab::Data(id, _, _) = t {
+                                        if !datas
+                                            .iter()
+                                            .find(|x| {
+                                                if let Elab::Data(a, _, _) = x {
+                                                    a == id
+                                                } else {
+                                                    panic!("wrong type")
+                                                }
+                                            })
+                                            .is_some()
+                                        {
+                                            datas.push(t.cloned(&mut Cloner::new(&ectx)));
+                                        }
+                                        // TODO what if rv2 already has this constructor? Maybe just use `rv`?
+                                        rv2.push(val);
+                                    } else {
+                                        panic!("wrong type");
+                                    }
+                                } else {
+                                    rv.push(val);
                                 }
                             }
                         }
-                        if should_add {
-                            rv.push(val);
+
+                        for i in datas {
+                            // Only reduce to the datatype if all variants of the datatype are in the union
+                            // TODO what if we have e.g. `Some 3` instead of `Some Int`? Right now it accepts that and reduces anyway, but it shouldn't.
+                            if let Elab::Data(did, sid, _) = &i {
+                                let scope = ScopeId::Struct(*sid, Box::new(ectx.scope()));
+                                if ectx.database().symbols(scope).iter().all(|x| {
+                                    rv2.iter().any(|y| match y.cons() {
+                                        Some(tid) => ectx.bindings().tag_name(tid) == x.raw(),
+                                        None => todo!("{}", y.pretty(&ectx).ansi_string()),
+                                    })
+                                }) {
+                                    rv2 = rv2
+                                        .into_iter()
+                                        .filter(|x| match x.cons() {
+                                            Some(id) => {
+                                                ectx.bindings().tag_to_type(id).unwrap() != *did
+                                            }
+                                            None => true,
+                                        })
+                                        .collect();
+                                    rv.push(i);
+                                }
+                            } else {
+                                panic!("wrong type");
+                            }
+                        }
+
+                        rv.append(&mut rv2);
+                        rv.sort_by(|x, y| x.partial_cmp(y).unwrap());
+
+                        if rv.len() == 1 {
+                            rv.pop().unwrap()
+                        } else {
+                            Elab::Union(rv)
                         }
                     }
-
-                    rv.sort_by(|x, y| x.partial_cmp(y).unwrap());
-
-                    if rv.len() == 1 {
-                        rv.pop().unwrap()
-                    } else {
-                        Elab::Union(rv)
-                    }
                 }
-            },
+            }
             _ => self,
         }
     }
@@ -301,6 +403,8 @@ impl Elab {
             }),
             App(x, y) | Pair(x, y) => x.uses(s) || y.uses(s),
             Binder(_, x) => x.uses(s),
+            // TODO outlaw locals in data types
+            Data(_, _, _) | Cons(_, _) => false,
             // Can't use local variables
             StructIntern(_) => false,
             StructInline(v) => v.iter().any(|(_, x)| x.uses(s)),
@@ -325,6 +429,8 @@ impl Elab {
                 .any(|(a, b, c)| b.binds(s) || c.binds(s) || a.iter().any(|x| x.binds(s))),
             App(x, y) | Pair(x, y) => x.binds(s) || y.binds(s),
             Var(_, _, ty) => ty.binds(s),
+            // TODO outlaw locals in data types
+            Data(_, _, _) | Cons(_, _) => false,
             StructIntern(_) => false,
             StructInline(v) => v.iter().any(|(x, e)| *x == s || e.binds(s)),
             Project(r, _) => r.binds(s),
@@ -379,6 +485,14 @@ impl Elab {
             StructInline(v) => {
                 StructInline(v.into_iter().map(|(s, x)| (s, x.normal(ectx))).collect())
             }
+            Data(a, b, mut t) => {
+                *t = t.normal(ectx);
+                Data(a, b, t)
+            }
+            Cons(id, mut t) => {
+                *t = t.normal(ectx);
+                Cons(id, t)
+            }
             Project(mut r, m) => {
                 *r = r.normal(ectx);
                 Project(r, m)
@@ -410,6 +524,10 @@ impl Elab {
                 // Reuse the Box
                 *t = t.whnf(ectx);
                 Elab::Binder(s, t)
+            }
+            Elab::Cons(id, mut t) => {
+                *t = t.whnf(ectx);
+                Elab::Cons(id, t)
             }
             // Unions don't either (no head)
             // (TODO somehow reuse the Vec)
@@ -443,7 +561,7 @@ impl Elab {
                         let mut rf = Vec::new();
                         // If we find a branch that *might* match before one that *does*, we set this
                         let mut fuzzy = false;
-                        for (mut args, body, to) in v {
+                        for (args, body, to) in v {
                             // Guaranteed to match
                             if tx.subtype_of(args.first().unwrap(), ectx) {
                                 args.first().unwrap().do_match(&x, ectx);
@@ -563,6 +681,7 @@ impl Elab {
             Builtin(b) => b.get_type(),
             Tag(t) => Tag(*t),
             Var(_, _, t) => t.cloned(&mut Cloner::new(&env)),
+            Data(_, _, t) | Cons(_, t) => t.cloned(&mut Cloner::new(&env)),
             Fun(cl, v) => {
                 let mut cln = Cloner::new(&env);
                 Fun(
@@ -616,7 +735,7 @@ impl Elab {
                     );
                     if rf[0].0.is_empty() {
                         return Elab::Union(
-                            rf.into_iter().map(|(a, b, c)| b.whnf(&mut ectx)).collect(),
+                            rf.into_iter().map(|(_, b, _)| b.whnf(&mut ectx)).collect(),
                         )
                         .simplify_unions(&ectx);
                     }
@@ -717,6 +836,7 @@ impl Elab {
                     unreachable!()
                 }
             }
+            Elab::Data(_, _, t) | Elab::Cons(_, t) => t.universe(env).saturating_sub(1),
             Elab::Block(_) => self.get_type(env).universe(env).saturating_sub(1),
         }
     }
@@ -845,6 +965,8 @@ impl Elab {
                     })
                     .collect(),
             ),
+            Data(a, b, t) => Data(*a, *b, Box::new(t.cloned(cln))),
+            Cons(id, t) => Cons(*id, Box::new(t.cloned(cln))),
             Project(r, m) => Project(Box::new(r.cloned(cln)), *m),
             Block(v) => Block(v.iter().map(|x| x.cloned(cln)).collect()),
             Union(v) => Union(v.iter().map(|x| x.cloned(cln)).collect()),
@@ -898,7 +1020,7 @@ impl Pretty for Elab {
                 .prec(Prec::Term)
             }
             Elab::Fun(cl, v) => pretty_block(
-                "fun",
+                if cl.is_move { "move fun" } else { "fun" },
                 v.iter().map(|(args, body, _)| {
                     let until_body = if cl.is_move {
                         Doc::start("move").space().add("fun")
@@ -952,6 +1074,12 @@ impl Pretty for Elab {
                         .group()
                 }),
             ),
+            Elab::Data(id, _, _) => Doc::start("type")
+                .style(Style::Keyword)
+                .space()
+                .chain(id.pretty(ctx).style(Style::Binder))
+                .group(),
+            Elab::Cons(id, _) => id.pretty(ctx),
             Elab::Block(v) => pretty_block(
                 "do",
                 v.iter().map(|s| match s {

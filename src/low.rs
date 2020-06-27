@@ -473,7 +473,9 @@ impl Elab {
             },
             // Type erasure
             Elab::Builtin(Builtin::Int) | Elab::Type(_) | Elab::Union(_) => LowTy::Unit,
-            _ => panic!("ah"),
+            Elab::Data(_, _, _) => LowTy::Unit,
+            Elab::Cons(_, t) => t.as_low_ty(lctx),
+            _ => panic!("couldn't low-ty {}", self.pretty(lctx).ansi_string()),
         })
     }
 
@@ -909,6 +911,80 @@ impl Elab {
             }
             // Type erasure
             Elab::Builtin(Builtin::Int) | Elab::Type(_) | Elab::Union(_) => LowIR::Unit,
+            Elab::Data(_, _, _) => LowIR::Unit,
+            Elab::Cons(id, t) => {
+                let mut t = t.cloned(&mut Cloner::new(lctx)).whnf(lctx);
+                match &mut t {
+                    Elab::Data(_, sid, _) => LowIR::Variant(
+                        lctx.database()
+                            .symbols(ScopeId::Struct(*sid, Box::new(lctx.scope())))
+                            .iter()
+                            .enumerate()
+                            .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
+                            .unwrap()
+                            .0 as u64,
+                        t.as_low_ty(lctx),
+                        Box::new(LowIR::Unit),
+                    ),
+                    Elab::Fun(_, v) => {
+                        assert_eq!(v.len(), 1);
+                        let (args, result, _) = v.pop().unwrap();
+                        let result = result.whnf(lctx);
+                        let idx = if let Elab::Data(_, sid, _) = &result {
+                            lctx.database()
+                                .symbols(ScopeId::Struct(*sid, Box::new(lctx.scope())))
+                                .iter()
+                                .enumerate()
+                                .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
+                                .unwrap()
+                                .0 as u64
+                        } else {
+                            panic!("wrong type {}", result.pretty(lctx).ansi_string());
+                        };
+                        let low_args: Vec<_> = args
+                            .iter()
+                            .enumerate()
+                            .map(|(i, x)| {
+                                (
+                                    lctx.bindings_mut().create(format!("_carg{}", i)),
+                                    x.as_low_ty(lctx),
+                                )
+                            })
+                            .collect();
+                        let body = LowIR::Variant(
+                            idx,
+                            result.as_low_ty(lctx),
+                            Box::new(LowIR::Struct(
+                                low_args
+                                    .iter()
+                                    .map(|(s, _)| (*s, LowIR::Local(*s)))
+                                    .collect(),
+                            )),
+                        );
+                        let mut i = low_args.len();
+                        low_args.iter().rfold(body, |body, (arg_name, arg_ty)| {
+                            // Thread parameters through closures as well
+                            i -= 1;
+                            let up = low_args
+                                .iter()
+                                .take(i)
+                                .map(|(x, y)| (*x, y.clone()))
+                                .collect();
+                            LowIR::Closure {
+                                fun_name: format!("$_cons_closure{}", next_closure()),
+                                attrs: Vec::new(),
+                                arg_name: *arg_name,
+                                arg_ty: arg_ty.clone(),
+                                ret_ty: body.get_type(lctx),
+                                body: Box::new(body),
+                                upvalues: up,
+                            }
+                        })
+                    }
+                    // TODO `Pair a`
+                    _ => panic!("wrong type"), // TODO typecheck so it's `Data x y z` or `fun a b c => Data x y z`
+                }
+            }
             _ => panic!("{:?} not supported (ir)", self),
         })
     }
@@ -933,7 +1009,9 @@ impl Elab {
             | Elab::I32(_)
             | Elab::StructIntern(_)
             | Elab::Bottom
-            | Elab::Tag(_) => true,
+            | Elab::Tag(_)
+            | Elab::Data(_, _, _)
+            | Elab::Cons(_, _) => true,
             Elab::Binder(_, t) => t.is_concrete(lctx),
             Elab::Fun(_, v) => v
                 .iter()
@@ -948,6 +1026,13 @@ impl Elab {
     /// Convert a `Elab` representing a type to the `LowTy` that Elabs of that type are stored as
     pub fn as_low_ty(&self, lctx: &LCtx) -> LowTy {
         match self {
+            Elab::Var(_, v, _) => {
+                if let Some(t) = lctx.database().elab(lctx.scope(), *v) {
+                    t.as_low_ty(lctx)
+                } else {
+                    panic!("Unbound variable has no LowTy")
+                }
+            }
             Elab::Builtin(Builtin::Int) | Elab::I32(_) => LowTy::Int(32),
             Elab::Unit => LowTy::Unit,
             Elab::Binder(_, t) => t.as_low_ty(lctx),
@@ -989,7 +1074,7 @@ impl Elab {
             // Attach data to tags
             Elab::App(f, x) => match &**f {
                 // Ignore the tag
-                Elab::Tag(_) => x.as_low_ty(lctx),
+                Elab::Tag(_) | Elab::Cons(_, _) => x.as_low_ty(lctx),
                 Elab::App(_, _) => LowTy::Struct(vec![f.as_low_ty(lctx), x.as_low_ty(lctx)]),
                 _ => panic!("{:?} is not supported", f),
             },
@@ -998,6 +1083,32 @@ impl Elab {
             Elab::Type(_) => LowTy::Unit,
             // We don't actually care what tag it is if it's not in a union
             Elab::Tag(_) => LowTy::Unit,
+            Elab::Data(_, s, _) => {
+                let scope = ScopeId::Struct(*s, Box::new(lctx.scope()));
+                LowTy::Union(
+                    lctx.database()
+                        .symbols(scope.clone())
+                        .iter()
+                        .map(|x| lctx.database().elab(scope.clone(), **x).unwrap())
+                        .map(|x| match x.get_type(lctx).whnf(&mut lctx.ectx.clone()) {
+                            Elab::Data(_, _, _) => LowTy::Unit,
+                            Elab::Fun(_, v) => {
+                                assert_eq!(v.len(), 1);
+                                LowTy::Struct(v[0].0.iter().map(|x| x.as_low_ty(lctx)).collect())
+                            }
+                            _ => panic!("wrong type"),
+                        })
+                        .collect(),
+                )
+            }
+            Elab::Cons(_, t) => match &**t {
+                t @ Elab::Data(_, _, _) => t.as_low_ty(lctx),
+                Elab::Fun(_, v) => {
+                    assert_eq!(v.len(), 1);
+                    v[0].1.as_low_ty(lctx)
+                }
+                _ => panic!("wrong type"),
+            },
             _ => panic!("{} is not supported", self.pretty(lctx).ansi_string()),
         }
     }
@@ -1019,6 +1130,80 @@ impl Elab {
             t => t,
         };
         match (self, ty) {
+            (Elab::Cons(id, t), _) => {
+                let sid = match &**t {
+                    Elab::Data(_, sid, _) => *sid,
+                    Elab::Fun(_, v) if v.len() == 1 => match &v[0].1 {
+                        Elab::Data(_, sid, _) => *sid,
+                        _ => panic!("wrong type"),
+                    },
+                    _ => panic!("wrong type"),
+                };
+                let tag_size = tag_width(
+                    &lctx
+                        .database()
+                        .symbols(ScopeId::Struct(sid, Box::new(lctx.scope()))),
+                );
+                if tag_size == 0 {
+                    LowIR::BoolConst(true)
+                } else {
+                    let idx = lctx
+                        .database()
+                        .symbols(ScopeId::Struct(sid, Box::new(lctx.scope())))
+                        .iter()
+                        .enumerate()
+                        .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
+                        .unwrap()
+                        .0 as u64;
+                    let tag = LowIR::Project(Box::new(param), 0);
+
+                    LowIR::CompOp {
+                        op: CompOp::Eq,
+                        lhs: Box::new(LowIR::SizedIntConst(tag_size, idx)),
+                        rhs: Box::new(tag.clone()),
+                    }
+                }
+            }
+            (Elab::App(f, x), Elab::Data(_, sid, _)) => {
+                let tid = f.cons().unwrap();
+                let scope = ScopeId::Struct(*sid, Box::new(lctx.scope()));
+                let sym = **lctx
+                    .database()
+                    .symbols(scope.clone())
+                    .iter()
+                    .find(|x| x.raw() == lctx.bindings().tag_name(tid))
+                    .unwrap();
+                let cty = lctx.database().elab(scope, sym).unwrap().get_type(lctx);
+                let (x_param, tx) = match cty {
+                    Elab::Fun(_, mut v) if v.len() == 1 => {
+                        let (mut args, _, _) = v.pop().unwrap();
+                        // We leave the type as `Data(...)` for the head, so we need to know where we are
+                        // If there aren't any `App`s ahead of us, we're at the first parameter
+                        let idx = f.spine_len();
+                        // param.payload[i]
+                        let x_param = LowIR::Project(
+                            Box::new(LowIR::Project(Box::new(param.clone()), 1)),
+                            idx,
+                        );
+                        let tx = args.remove(idx);
+                        (x_param, tx)
+                    }
+                    _ => panic!("wrong type"),
+                };
+
+                // TODO bitcast
+
+                // Leave the type as `Data(...)` for the head, so it can make sure the tag matches
+                // We also pass the parameter unchanged for the head, so it can extract the tag etc.
+                let f = f.compile_match(lctx, need_phi, ty, param);
+                let x = x.compile_match(lctx, need_phi, &tx, x_param);
+
+                LowIR::BoolOp {
+                    op: BoolOp::And,
+                    lhs: Box::new(f),
+                    rhs: Box::new(x),
+                }
+            }
             // TODO var case that checks both `lctx` and `need_phi`
             (Elab::Binder(x, t), _) => {
                 let fresh = lctx.bindings_mut().fresh(*x);
@@ -1105,7 +1290,9 @@ impl Elab {
                 }
             }
             (Elab::App(f, x), Elab::App(tf, tx)) => match &**f {
-                Elab::Tag(_) => x.compile_match(lctx, need_phi, tx, param),
+                // We know it matces, since the type is App and not Data
+                // TODO is it a struct at this point, though?
+                Elab::Tag(_) | Elab::Cons(_, _) => x.compile_match(lctx, need_phi, tx, param),
                 Elab::App(_, _) => {
                     let f_param = LowIR::Project(Box::new(param.clone()), 0);
                     let x_param = LowIR::Project(Box::new(param), 1);
@@ -1126,13 +1313,14 @@ impl Elab {
                 rhs: Box::new(param),
             },
             // Don't bind anything
-            // Once patterns can fail, these will be more interesting
-            // TODO that
+            // These don't need to check if they match, because something whose type matches it will always match
+            // and we checked that the type matches already, using a Union if it doesn't
             (Elab::Type(_), _)
             | (Elab::Builtin(_), _)
             | (Elab::Unit, _)
             | (Elab::Tag(_), _)
-            | (Elab::Fun(_, _), _) => LowIR::BoolConst(true),
+            | (Elab::Fun(_, _), _)
+            | (Elab::Data(_, _, _), _) => LowIR::BoolConst(true),
             _ => panic!(
                 "pattern {} can't be compiled yet",
                 self.pretty(lctx).ansi_string()
@@ -1141,11 +1329,13 @@ impl Elab {
     }
 }
 
-/// Get the width of the smallest IntType that can differentiate between all the things in `v`
-/// One of `i1, i8, i16, i32, i64`
+/// Get the width of the smallest IntType that can differentiate between all the things in `v`.
+/// One of `i1, i8, i16, i32, i64`, or 0 if no tag is needed.
 pub fn tag_width<T>(v: &[T]) -> u32 {
     let l = v.len();
-    if l <= 2 {
+    if l <= 1 {
+        0
+    } else if l <= 2 {
         1
     } else if l <= 256 {
         8
@@ -1205,7 +1395,11 @@ impl LowIR {
                         return LowIR::Variant(i as u64, to.as_low_ty(lctx), Box::new(r));
                     }
                 }
-                panic!("none matched");
+                panic!(
+                    "none matched {} --> {}",
+                    from.pretty(lctx).ansi_string(),
+                    to.pretty(lctx).ansi_string()
+                );
             }
             _ => self,
         }

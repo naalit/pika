@@ -4,6 +4,7 @@ use crate::binding::{ParseDef, ParseStmt};
 use crate::error::{Spanned, Span};
 use lalrpop_util::ParseError;
 use crate::lexer::Tok;
+use either::Either;
 
 grammar<'input>(input: &'input str);
 
@@ -20,6 +21,8 @@ extern {
         "do" => Tok::Do,
         "tag" => Tok::Tag,
         "move" => Tok::Move,
+        "of" => Tok::Of,
+        "type" => Tok::Data,
         ":" => Tok::Colon,
         ";" => Tok::Semi,
         "=>" => Tok::Arrow,
@@ -81,6 +84,13 @@ Block: ParseTree<'input> = {
 }
 
 Def: ParseDef<'input> = {
+    <a:Spanned<TypeDef>> => {
+      if let ParseTree::Data { name, .. } = &*a {
+        ParseDef(name.clone(), a)
+      } else {
+        unreachable!()
+      }
+    },
     <t:Spanned<"tag">> <v:Spanned<Var>> => {
         let span = Span(t.span().0, v.span().1);
         ParseDef(v.clone(), Spanned::new(ParseTree::Tag(v.force_unwrap()), span))
@@ -154,6 +164,62 @@ App: ParseTree<'input> = {
 
 Binder: ParseTree<'input> = {
     <x:Var> ":" <t:STerm?> => ParseTree::Binder(x, t),
+}
+
+Cons: (Spanned<&'input str>, Either<Spanned<ParseTree<'input>>, Vec<Spanned<ParseTree<'input>>>>) = {
+  // Some : fun [a:] a => Option a
+  <a:Spanned<Var>> ":" <b:STerm> => (a, Either::Left(b)),
+  // Lam Sym (Box Term)
+  <a:Spanned<Var>> <b:Spanned<Atom>*> => (a, Either::Right(b)),
+  // New struct { a := 3; b := 4 }
+  // This is only really needed with structs, other things you just parenthesize
+  <a:Spanned<Var>> <b:Spanned<Struct>> => (a, Either::Right(vec![b])),
+}
+
+TypeDef: ParseTree<'input> = {
+  // type Pair : fun Type => Type of New : fun [a:] a a => Pair a
+  "type" <name:Spanned<Var>> <ty:(":" <STerm>)?> "of" <c:Cons> => {
+    let ty = ty.unwrap_or_else(|| name.copy_span(ParseTree::Type(0)));
+    let (a, b) = c;
+    let b = b.map_right(|args| {
+      if args.is_empty() {
+        return name.copy_span(ParseTree::Var(*name));
+      }
+      let span = Span(
+        args.first().map_or(a.span(), |x| x.span()).0,
+        args.last().map_or(a.span(), |x| x.span()).1,
+      );
+      Spanned::new(ParseTree::Fun(false, vec![(args, name.copy_span(ParseTree::Var(*name)))]), span)
+    }).into_inner();
+    ParseTree::Data {
+      name,
+      ty,
+      cons: vec![(a, b)],
+    }
+  },
+  // type Option : fun Type => Type of { None : fun [a:] => Option a; Some : fun [a:] a => Option a }
+  "type" <name:Spanned<Var>> <ty:(":" <STerm>)?> <cons:IBlock<"of", Cons>> => {
+    let ty = ty.unwrap_or_else(|| name.copy_span(ParseTree::Type(0)));
+    let cons = cons.into_iter().map(|c| {
+      let (a, b) = c;
+      let b = b.map_right(|args| {
+        if args.is_empty() {
+          return name.copy_span(ParseTree::Var(*name));
+        }
+        let span = Span(
+          args.first().map_or(a.span(), |x| x.span()).0,
+          args.last().map_or(a.span(), |x| x.span()).1,
+        );
+        Spanned::new(ParseTree::Fun(false, vec![(args, name.copy_span(ParseTree::Var(*name)))]), span)
+      }).into_inner();
+      (a, b)
+    }).collect();
+    ParseTree::Data {
+      name,
+      ty,
+      cons,
+    }
+  },
 }
 
 /// a b c : T --> (a:T) (b:T) (c:T)

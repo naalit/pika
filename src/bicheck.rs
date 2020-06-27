@@ -10,6 +10,7 @@ use std::ops::{Deref, DerefMut};
 pub enum TypeError {
     /// We couldn't synthesize a type for the given term
     Synth(STerm),
+    ConsType(Spanned<Elab>, TypeId),
     WrongArity(usize, usize, Elab, Span),
     /// We wanted a `fun` but got a `move fun`
     MoveOnlyFun(STerm, Elab),
@@ -43,6 +44,29 @@ impl TypeError {
                     .style(Style::Bold),
                 t.span(),
                 "try adding an annotation here",
+            ),
+            TypeError::ConsType(t, id) => Error::new(
+                file,
+                Doc::start("Type error: invalid type for data constructor: '")
+                    .chain(t.pretty(b).style(Style::None))
+                    .add("'")
+                    .style(Style::Bold),
+                t.span(),
+                Doc::start("allowed types are '")
+                    .chain(id.pretty(b).style(Style::None))
+                    .add("' and '")
+                    .chain(
+                        Doc::start("fun")
+                            .style(Style::Keyword)
+                            .space()
+                            .add("...")
+                            .space()
+                            .add("=>")
+                            .space()
+                            .chain(id.pretty(b))
+                            .style(Style::None),
+                    )
+                    .style(Style::Note),
             ),
             TypeError::MoveOnlyFun(f, ty) => Error::new(
                 file,
@@ -301,6 +325,45 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                 Ok(Elab::StructIntern(*id))
             }
         }
+        Term::Data(tid, sid, ty, cons) => {
+            let scope = ScopeId::Struct(*sid, Box::new(tctx.scope()));
+            tctx.database().add_mod(
+                *sid,
+                tctx.scope().file(),
+                &cons
+                    .iter()
+                    .map(|(k, id, t)| (k.clone(), k.copy_span(Term::Cons(*id, t.clone()))))
+                    .collect(),
+            );
+
+            // Record any type errors in data constructors
+            // for sym in tctx.database().symbols(scope.clone()).iter() {
+            //     tctx.database().elab(scope.clone(), **sym);
+            // }
+
+            let ty = synth(ty, tctx)?;
+
+            Ok(Elab::Data(*tid, *sid, Box::new(ty)))
+        }
+        Term::Cons(id, ty) => {
+            let ty_span = ty.span();
+            let mut ty = synth(ty, tctx)?.whnf(tctx);
+            let did = tctx.bindings().tag_to_type(*id).unwrap();
+            match &mut ty {
+                Elab::Data(did2, _, _) if *did2 == did => (),
+                Elab::Fun(_, v) if v.len() == 1 => {
+                    let (a, b, c) = v.pop().unwrap();
+                    let b = b.whnf(tctx);
+                    v.push((a, b, c));
+                    match &v[0].1.head() {
+                        Elab::Data(did2, _, _) if *did2 == did => (),
+                        _ => return Err(TypeError::ConsType(Spanned::new(ty, ty_span), did)),
+                    }
+                }
+                _ => return Err(TypeError::ConsType(Spanned::new(ty, ty_span), did)),
+            };
+            Ok(Elab::Cons(*id, Box::new(ty)))
+        }
         Term::App(fi, x) => {
             let f = synth(fi, tctx)?;
             let x = match f.get_type(tctx) {
@@ -309,7 +372,24 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                     // We check the argument against a union of first parameter types across all branches
                     let from: Vec<_> = v.into_iter().map(|(mut x, _, _)| x.remove(0)).collect();
                     let from = Elab::Union(from).whnf(tctx).simplify_unions(tctx);
-                    check(x, &from, tctx)?
+                    match check(x, &from, tctx) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            // We allow narrowing data constructors to subtypes of their arguments, e.g. in patterns
+                            // So we allow you to apply it to a subtype of its arguments
+                            let head = f.head().cloned(&mut Cloner::new(tctx)).whnf(tctx);
+                            if let Elab::Cons(_, _) = head {
+                                let x = synth(x, tctx)?;
+                                if x.subtype_of(&from, tctx) {
+                                    x
+                                } else {
+                                    return Err(e);
+                                }
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
                 }
                 Elab::Tag(_) | Elab::App(_, _) | Elab::Bottom => synth(x, tctx)?,
                 a => {
@@ -335,12 +415,36 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                         ));
                     }
                 }
-                _ => {
-                    return Err(TypeError::NoSuchField(
-                        m.clone(),
-                        rt.cloned(&mut Cloner::new(&tctx)),
-                    ))
-                }
+                _ => match r.whnf(tctx) {
+                    Elab::Data(_, id, _) => {
+                        for s in tctx
+                            .database()
+                            .symbols(ScopeId::Struct(id, Box::new(tctx.scope())))
+                            .iter()
+                        {
+                            if s.raw() == **m {
+                                if let Some(e) = tctx
+                                    .database()
+                                    .elab(ScopeId::Struct(id, Box::new(tctx.scope())), **s)
+                                {
+                                    return Ok(e.cloned(&mut Cloner::new(tctx)));
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        return Err(TypeError::NoSuchField(
+                            m.clone(),
+                            rt.cloned(&mut Cloner::new(&tctx)),
+                        ));
+                    }
+                    _ => {
+                        return Err(TypeError::NoSuchField(
+                            m.clone(),
+                            rt.cloned(&mut Cloner::new(&tctx)),
+                        ))
+                    }
+                },
             };
             Ok(Elab::Project(Box::new(r), **m))
         }
@@ -398,6 +502,8 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
         }
         Term::Binder(x, Some(ty)) => {
             let ty = synth(ty, tctx)?.whnf(tctx);
+            // TODO switch to this everywhere instead of match_types(self)
+            tctx.set_ty(*x, ty.cloned(&mut Cloner::new(tctx)));
             Ok(Elab::Binder(*x, Box::new(ty)))
         }
         Term::Binder(x, None) => Ok(Elab::Binder(*x, Box::new(Elab::Top))),
@@ -531,26 +637,69 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                     from.into_iter()
                         .map(|from| match from {
                             Elab::Union(v) => v,
+                            // TODO better narrowing of GADTs based on type
+                            Elab::App(_, _) | Elab::Data(_, _, _) => match from.head() {
+                                Elab::Data(_, sid, _) => {
+                                    let scope = ScopeId::Struct(*sid, Box::new(tctx.scope()));
+                                    tctx.database()
+                                        .symbols(scope.clone())
+                                        .iter()
+                                        .filter_map(|x| tctx.database().elab(scope.clone(), **x))
+                                        .collect::<Vec<_>>()
+                                        .into_iter()
+                                        .filter_map(|cons| match cons.get_type(tctx) {
+                                            Elab::Fun(_, mut v) => {
+                                                if let Elab::Cons(_, _) = &*cons {
+
+                                                } else {
+                                                    panic!("not a constructor")
+                                                };
+                                                assert_eq!(v.len(), 1);
+                                                let (args, result, _) = v.pop().unwrap();
+                                                if result.overlap(&from, tctx) {
+                                                    // [a, b, c]
+                                                    // -> App(App(App(Cons(_), a), b), c)
+                                                    Some(args
+                                                        .into_iter()
+                                                        .fold(cons.cloned(&mut Cloner::new(tctx)), |f, x| Elab::App(Box::new(f), Box::new(x))))
+                                                } else {
+                                                    eprintln!("Skipping constructor {}: {} vs {}", cons.pretty(tctx).ansi_string(), result.pretty(tctx).ansi_string(), from.pretty(tctx).ansi_string());
+                                                    None
+                                                }
+                                            }
+                                            t if t.overlap(&from, tctx) => Some(cons.cloned(&mut Cloner::new(tctx))),
+                                            _ => None,
+                                        })
+                                        .collect()
+                                }
+                                _ => vec![from],
+                            }
                             from => vec![from],
                         })
-                        .fold(vec![Vec::new()], |cases: Vec<Vec<Elab>>, arg_cases| {
+                        //    fun (x:) (A | B) => x
+                        // -> cases[[]], arg_cases[[x:], [A, B]]
+                        // -> cases[[x2:]], arg_cases[[A, B]]
+                        // -> cases[[x3:, A], [x4:, B]], arg_cases[]
+                        // -> fun { x2: A => x3, x3: B => x3 }
+                        .fold(vec![(Cloner::new(tctx), Vec::new())], |cases: Vec<(Cloner, Vec<Elab>)>, arg_cases| {
                             cases
                                 .into_iter()
-                                .flat_map(|x| {
+                                .flat_map(|(mut cln, x)| {
                                     arg_cases
                                         .iter()
                                         .map(|y| {
+                                            let mut cln = cln.clone();
                                             let mut x: Vec<_> =
                                                 x.iter().map(|x| x.cloned(&mut cln)).collect();
                                             x.push(y.cloned(&mut cln));
-                                            x
+                                            (cln, x)
                                         })
                                         .collect::<Vec<_>>()
                                 })
                                 .collect()
                         })
                         .into_iter()
-                        .map(|x| (x, to.cloned(&mut cln)))
+                        .map(|(mut cln, x)| (x, to.cloned(&mut cln)))
                         .collect::<Vec<_>>()
                 })
                 .collect();
@@ -579,7 +728,7 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                     // Go through the curried parameters and make sure each one matches
                     for ((i, f), (a, span)) in from.iter().enumerate().zip(args) {
                         if !f.subtype_of(&a, tctx) {
-                            errors[i].push(Spanned::new(a.cloned(&mut cln), *span));
+                            errors[i].push(Spanned::new(a.cloned(&mut Cloner::new(tctx)), *span));
                             all_subtype = false;
                             break;
                         }
@@ -603,19 +752,30 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                         continue;
                     }
                     let mut all_subtype = true;
+                    let mut all_overlap = true;
                     let mut ra = Vec::new();
                     // Go through the curried parameters and make sure each one matches
                     for ((i, f), (mut a, span)) in from.iter().enumerate().zip(args) {
                         if !all_subtype {
-                        } else if !f.subtype_of(&a, tctx) {
-                            errors[i].push(Spanned::new(a.cloned(&mut cln), span));
-                            all_subtype = false;
-                        } else {
+                        } else if f.subtype_of(&a, tctx){
                             // Update the types of binders in `xr` based on the type `y`
                             a.update_binders(f, &mut Cloner::new(tctx));
-                            // Add bindings in the argument to the tctxironment with types given by `y`
+                            // Add bindings in the argument to the context with types given by `y`
                             a.match_types(f, tctx);
                             a = a.whnf(tctx);
+                        } else if f.overlap(&a, tctx) {
+                            // Still record the error in case nothing is a true subtype
+                            errors[i].push(Spanned::new(a.cloned(&mut Cloner::new(tctx)), span));
+                            // Update the types of binders in `xr` based on the type `y`
+                            a.update_binders(f, &mut Cloner::new(tctx));
+                            // Add bindings in the argument to the context with types given by `y`
+                            a.match_types(f, tctx);
+                            a = a.whnf(tctx);
+                            all_subtype = false;
+                        } else {
+                            errors[i].push(Spanned::new(a.cloned(&mut Cloner::new(tctx)), span));
+                            all_subtype = false;
+                            all_overlap = false;
                         }
                         ra.push((a, span));
                     }
@@ -623,8 +783,9 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                         passed = true;
                         // If all the parameters matched, this branch of the type is covered, so no errors yet
                         errors = Vec::new();
-
-                        let to = to.cloned(&mut cln).whnf(tctx);
+                    }
+                    if all_overlap {
+                        let to = to.cloned(&mut Cloner::new(tctx)).whnf(tctx);
                         let body = match check(&body, &to, tctx) {
                             Ok(x) => x,
                             Err(TypeError::NotFunction(f, x)) => match &*x {
@@ -662,7 +823,7 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                     .collect(),
             ))
         }
-        (Term::App(f, x), Elab::App(tf, tx)) => {
+        (Term::App(f, x), Elab::App(tf, tx)) if tf.tag_head() => {
             let f = check(f, tf, tctx)?;
             let x = check(x, tx, tctx)?;
             Ok(Elab::App(Box::new(f), Box::new(x)))
@@ -928,6 +1089,73 @@ impl Elab {
                     }
                 }
                 return true;
+            }
+            (Elab::Data(a, _, _), Elab::Data(b, _, _)) => a == b,
+            (Elab::Cons(a, _), Elab::Cons(b, _)) if a == b => true,
+            (Elab::Cons(_, t), Elab::Data(_, _, _)) => t.subtype_of(sup, ectx),
+            (Elab::Data(_, sid, _), _) => {
+                let scope = ScopeId::Struct(*sid, Box::new(ectx.scope()));
+                let mut cln = Cloner::new(ectx);
+                let sub =
+                    Elab::Union(
+                        ectx.database()
+                            .symbols(scope.clone())
+                            .iter()
+                            .filter_map(|s| {
+                                let x = ectx.database().elab(scope.clone(), **s)?;
+                                let x = x.cloned(&mut cln).whnf(ectx);
+                                match &x {
+                                    Elab::Cons(_, t) => match &**t {
+                                        Elab::Fun(_, v) => {
+                                            assert_eq!(v.len(), 1);
+                                            let (args, _, _) = &v[0];
+                                            let args: Vec<_> =
+                                                args.iter().map(|x| x.cloned(&mut cln)).collect();
+                                            Some(args.into_iter().fold(x, |f, x| {
+                                                Elab::App(Box::new(f), Box::new(x))
+                                            }))
+                                        }
+                                        Elab::Data(_, _, _) => Some(x),
+                                        _ => panic!("wrong type"),
+                                    },
+                                    _ => panic!("not cons"),
+                                }
+                            })
+                            .collect(),
+                    );
+                sub.subtype_of(sup, ectx)
+            }
+            (_, Elab::Data(_, sid, _)) => {
+                let scope = ScopeId::Struct(*sid, Box::new(ectx.scope()));
+                let mut cln = Cloner::new(ectx);
+                let sup =
+                    Elab::Union(
+                        ectx.database()
+                            .symbols(scope.clone())
+                            .iter()
+                            .filter_map(|s| {
+                                let x = ectx.database().elab(scope.clone(), **s)?;
+                                let x = x.cloned(&mut cln).whnf(ectx);
+                                match &x {
+                                    Elab::Cons(_, t) => match &**t {
+                                        Elab::Fun(_, v) => {
+                                            assert_eq!(v.len(), 1);
+                                            let (args, _, _) = &v[0];
+                                            let args: Vec<_> =
+                                                args.iter().map(|x| x.cloned(&mut cln)).collect();
+                                            Some(args.into_iter().fold(x, |f, x| {
+                                                Elab::App(Box::new(f), Box::new(x))
+                                            }))
+                                        }
+                                        Elab::Data(_, _, _) => Some(x),
+                                        _ => panic!("wrong type"),
+                                    },
+                                    _ => panic!("not cons"),
+                                }
+                            })
+                            .collect(),
+                    );
+                self.subtype_of(&sup, ectx)
             }
             // Two variables that haven't been resolved yet, but refer to the same definition
             (Elab::Var(_, x, _), Elab::Var(_, y, _)) if y == x => true,

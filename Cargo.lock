@@ -638,6 +638,7 @@ dependencies = [
  "arg",
  "assert_cmd",
  "codespan-reporting",
+ "either",
  "inkwell",
  "lalrpop",
  "lalrpop-util",

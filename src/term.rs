@@ -73,6 +73,9 @@ pub enum Term {
     Pair(STerm, STerm),                           // x, y
     Tag(TagId),                                   // tag
     Struct(StructId, Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
+    /// Datatypes need a `StructId` too since they create a namespace
+    Data(TypeId, StructId, STerm, Vec<(Spanned<Sym>, TagId, STerm)>), // type D: T of C: fun a => D
+    Cons(TagId, STerm),                           // C : T
     /// We use RawSym's here because it should work on any record with a field named this
     Project(STerm, Spanned<RawSym>), // r.m
     Block(Vec<Statement>),                        // do { x; y }
@@ -87,8 +90,9 @@ impl Term {
                 .filter(|(args, b)| !args.iter().any(|x| x.binds(s)) && !b.binds(s))
                 .any(|(args, v)| args.iter().any(|x| x.uses(s)) || v.uses(s)),
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.uses(s) || u.uses(s),
-            Term::Binder(_, Some(t)) | Term::Project(t, _) => t.uses(s),
+            Term::Binder(_, Some(t)) | Term::Project(t, _) | Term::Cons(_, t) => t.uses(s),
             Term::Struct(_, v) => v.iter().any(|(_, t)| t.uses(s)),
+            Term::Data(_, _, t, v) => t.uses(s) || v.iter().any(|(_, _, t)| t.uses(s)),
             Term::Block(v) => v.iter().any(|x| match x {
                 Statement::Expr(e) => e.uses(s),
                 Statement::Def(Def(_, e)) => e.uses(s),
@@ -114,6 +118,7 @@ impl Term {
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.binds(s) || u.binds(s),
             Term::Binder(_, Some(t)) | Term::Project(t, _) => t.binds(s),
             Term::Struct(_, v) => v.iter().any(|(x, t)| **x == s || t.binds(s)),
+            Term::Data(_, _, t, v) => t.uses(s) || v.iter().any(|(_, _, t)| t.uses(s)),
             Term::Block(v) => v.iter().any(|x| match x {
                 Statement::Expr(e) => e.binds(s),
                 Statement::Def(Def(x, e)) => **x == s || e.binds(s),
@@ -125,6 +130,7 @@ impl Term {
             | Term::Tag(_)
             | Term::Var(_)
             | Term::Binder(_, None)
+            | Term::Cons(_, _)
             // Unions can't bind variables
             | Term::Union(_) => false,
         }
@@ -252,6 +258,12 @@ impl Pretty for Term {
                         .group()
                 }),
             ),
+            Term::Data(id, _, _, _) => Doc::start("type")
+                .style(Style::Keyword)
+                .space()
+                .chain(id.pretty(ctx).style(Style::Binder))
+                .group(),
+            Term::Cons(id, _) => id.pretty(ctx),
             Term::Block(v) => pretty_block(
                 "do",
                 v.iter().map(|s| match s {

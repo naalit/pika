@@ -149,6 +149,9 @@ impl LowTy {
                 )
                 .as_basic_type_enum(),
             LowTy::Union(v) => {
+                if v.len() == 1 {
+                    return v[0].llvm(ctx);
+                }
                 let payload_type = v.iter().max_by_key(|x| x.size(ctx)).unwrap().llvm(ctx);
                 let tag_type = tag_type(&v, ctx).as_basic_type_enum();
                 ctx.struct_type(&[tag_type, payload_type], false)
@@ -438,6 +441,10 @@ impl LowIR {
                 } else {
                     unreachable!()
                 };
+
+                if v.len() <= 1 {
+                    return val.codegen(ctx, module);
+                }
 
                 let ty = ty.llvm(&ctx.context).into_struct_type();
                 let payload_type = ty.get_field_type_at_index(1).unwrap();

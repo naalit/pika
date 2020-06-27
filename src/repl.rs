@@ -34,7 +34,7 @@ impl Default for ReplHelper {
         // We can do binders, etc. without actually lexing them, and ignore lexer errors
         ReplHelper {
             literal: Regex::new(r"((^|\s)\d+)|\(\)").unwrap(),
-            keyword: Regex::new(r"fun|struct|do|tag|the|move").unwrap(),
+            keyword: Regex::new(r"fun|struct|do|tag|the|move|type|of").unwrap(),
             symbol: Regex::new(r"=>|\.|=|:|\|").unwrap(),
             binder: Regex::new(r"([a-zA-Z_][a-zA-Z_0-9]*[\t ]*)+:").unwrap(),
             comment: Regex::new(r"#[^\n]*").unwrap(),
@@ -127,6 +127,7 @@ impl Validator for ReplHelper {
                     && (first_line.ends_with("do")
                         || first_line.ends_with("struct")
                         || first_line.ends_with("fun")
+                        || first_line.ends_with("of")
                         || first_line.ends_with("=>")
                         || first_line.ends_with("=")
                         || first_line.ends_with(":")));

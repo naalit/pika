@@ -23,6 +23,7 @@ arg = "*"
 assert_cmd = "*"
 predicates = "*"
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "llvm10-0" }
+either = "*"
 
 [build-dependencies]
 lalrpop = "*"

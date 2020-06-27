@@ -29,6 +29,8 @@ pub enum Tok<'i> {
     The,       // "the"
     Tag,       // "tag"
     Move,      // "move"
+    Of,        // "of"
+    Data,      // "type" - called Data because it's not "Type"
 
     Colon,         // ":"
     Semi,          // ";"
@@ -218,6 +220,8 @@ impl<'i> Lexer<'i> {
                 "do" => Tok::Do,
                 "tag" => Tok::Tag,
                 "move" => Tok::Move,
+                "of" => Tok::Of,
+                "type" => Tok::Data,
                 _ => Tok::Name(s),
             }
         }
@@ -394,6 +398,8 @@ impl<'i> fmt::Display for Tok<'i> {
             Do => write!(f, "'do'"),
             Tag => write!(f, "'tag'"),
             Move => write!(f, "'move'"),
+            Of => write!(f, "'of'"),
+            Data => write!(f, "'type'"),
 
             Dot => write!(f, "'.'"),
             Comma => write!(f, "','"),

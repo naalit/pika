@@ -4,9 +4,19 @@ use crate::term::*;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+/// Like a Sym, but it identifies a data constructor
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
 pub struct TagId(NonZeroU32);
 impl TagId {
+    pub fn num(self) -> u32 {
+        self.0.get() - 1
+    }
+}
+
+/// Like a Sym, but it identifies a data type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
+pub struct TypeId(NonZeroU32);
+impl TypeId {
     pub fn num(self) -> u32 {
         self.0.get() - 1
     }
@@ -68,6 +78,14 @@ impl Sym {
     }
 }
 
+impl Pretty for TypeId {
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
+        let ctx = ctx.bindings();
+        let raw = ctx.tags[(self.0.get() - 1) as usize];
+        let name = ctx.resolve_raw(raw).to_owned();
+        Doc::start(name)
+    }
+}
 impl Pretty for TagId {
     fn pretty(&self, ctx: &impl HasBindings) -> Doc {
         let ctx = ctx.bindings();
@@ -85,7 +103,7 @@ impl Pretty for RawSym {
 impl Pretty for Sym {
     fn pretty(&self, ctx: &impl HasBindings) -> Doc {
         let name = ctx.bindings().resolve(*self).to_owned();
-        Doc::start(name)
+        Doc::start(name).add(self.num())
     }
 }
 
@@ -111,12 +129,22 @@ pub struct Bindings {
     strings: HashMap<String, RawSym>,
     string_pool: Vec<String>,
     nums: HashMap<RawSym, u32>,
+    /// Both `TagId`s and `TypeId`s use the same lookup table
     tags: Vec<RawSym>,
+    tag_to_type: Vec<Option<TypeId>>,
 }
 impl Bindings {
     /// Don't do this if you're holding symbols somewhere!
     pub fn reset(&mut self) {
         *self = Default::default();
+    }
+
+    pub fn tag_name(&self, t: TagId) -> RawSym {
+        self.tags[(t.0.get() - 1) as usize]
+    }
+
+    pub fn tag_to_type(&self, t: TagId) -> Option<TypeId> {
+        self.tag_to_type[(t.0.get() - 1) as usize]
     }
 
     /// Interns a string (or gets it if it's already interned), returning the RawSym to it
@@ -210,6 +238,12 @@ pub enum ParseTree<'p> {
     Project(STree<'p>, Spanned<&'p str>),        // r.m
     Block(Vec<ParseStmt<'p>>),                   // do { x; y }
     Union(Vec<STree<'p>>),                       // x | y
+    Data {
+        // type T of C a b
+        name: Spanned<&'p str>,                   // Pair
+        ty: STree<'p>,                            // fun Type => Type
+        cons: Vec<(Spanned<&'p str>, STree<'p>)>, // (MkPair, fun (a:Type) a a => Pair a)
+    },
 }
 type STree<'p> = Spanned<ParseTree<'p>>;
 
@@ -232,10 +266,18 @@ impl<'p, 'b> NEnv<'p, 'b> {
         }
     }
 
-    fn next_tag(&mut self, k: &'p str) -> TagId {
+    // The `TagId` and `TypeId` intern-spaces are the same
+    fn next_tag(&mut self, k: &'p str, ty: Option<TypeId>) -> TagId {
         let raw = self.bindings.raw(k.to_string());
         self.bindings.tags.push(raw);
+        self.bindings.tag_to_type.push(ty);
         TagId(NonZeroU32::new(self.bindings.tags.len() as u32).unwrap())
+    }
+    fn next_type(&mut self, k: &'p str) -> TypeId {
+        let raw = self.bindings.raw(k.to_string());
+        self.bindings.tags.push(raw);
+        self.bindings.tag_to_type.push(None);
+        TypeId(NonZeroU32::new(self.bindings.tags.len() as u32).unwrap())
     }
 
     fn next_struct(&mut self) -> StructId {
@@ -271,6 +313,21 @@ impl<'p> STree<'p> {
         let span = self.span();
         Ok(Spanned::new(
             match self.force_unwrap() {
+                Data { name, ty, cons } => {
+                    let id = env.next_type(*name);
+                    let st = env.next_struct();
+                    let ty = ty.resolve_names(env)?;
+
+                    let mut rv = Vec::new();
+                    for (name, ty) in cons {
+                        let tag = env.next_tag(*name, Some(id));
+                        let name = name.copy_span(env.create(*name));
+                        let ty = ty.resolve_names(env)?;
+                        rv.push((name, tag, ty));
+                    }
+
+                    Term::Data(id, st, ty, rv)
+                }
                 Unit => Term::Unit,
                 Type(i) => Term::Type(i),
                 Builtin(b) => Term::Builtin(b),
@@ -319,7 +376,7 @@ impl<'p> STree<'p> {
                     env.pop();
                     Term::Struct(env.next_struct(), rv)
                 }
-                Tag(s) => Term::Tag(env.next_tag(s)),
+                Tag(s) => Term::Tag(env.next_tag(s, None)),
                 Project(r, m) => Term::Project(
                     r.resolve_names(env)?,
                     m.copy_span(env.bindings.raw(m.to_string())),

@@ -1,12 +1,12 @@
-tag True
-tag False
-Bool := True | False
+type Bool of
+  True
+  False
 
 f : fun Int Bool => Int = fun
-  (i:) True => i
-  (_:) False => 4
+  (i:) Bool.True => i
+  (_:) Bool.False => 4
 
 b := fun x:Bool => f 23 x
 
 # (8, 4)
-main := (f 8 True, b False)
+main := (f 8 Bool.True, b Bool.False)

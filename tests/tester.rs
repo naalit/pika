@@ -170,3 +170,13 @@ fn test_match_reduction_fail() {
         .assert()
         .failure();
 }
+
+#[test]
+fn test_nominal() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/nominal.pk"])
+        .assert()
+        .stdout("(7, 0)\n")
+        .success();
+}

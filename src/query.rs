@@ -91,6 +91,8 @@ pub trait MainGroup: MainExt + salsa::Database {
 fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
     fn add_term(t: &Term, db: &impl MainGroup, v: &mut Vec<ScopeId>, scope: ScopeId) {
         match t {
+            // This is only used for lowering, and data constructors aren't lowered
+            Term::Data(_, _, _, _) => (),
             Term::Struct(s, _) => add_scope(db, v, ScopeId::Struct(*s, Box::new(scope))),
             Term::App(a, b) | Term::Pair(a, b) | Term::The(a, b) => {
                 add_term(a, db, v, scope.clone());
@@ -111,7 +113,8 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
             | Term::Type(_)
             | Term::Builtin(_)
             | Term::Binder(_, None)
-            | Term::Tag(_) => (),
+            | Term::Tag(_)
+            | Term::Cons(_, _) => (),
         }
     }
 

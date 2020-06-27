@@ -1,17 +1,22 @@
-# `Option`, but without unions
-tag None
-tag Some
+# `Option`, but without implicits
+type Option: fun Type => Type of
+  None : fun (a:Type) => Option a
+  Some : fun (a:Type) a => Option a
 
-unwrap : fun (t:Type) (Some t) => t = fun (_:) (Some x:) => x
+# This currently doesn't compile because GADTs don't work very well
+# Fixing it is waiting on unification
+unwrap_or : fun (t:Type) (Option t) t => t = fun
+  (_:) (Option.Some Type (a:)) (_:)  => a
+  (_:) (Option.None Type) (default:) => default
 
 # Unions
 f := fun (Int | ()) => ()
 g := fun (x: Int | ()) => f x
 
-# Combine them
-tag True
-tag False
-Bool := True | False
+# Booleans
+type Bool of
+  True
+  False
 
 Nat := fun (t:Type) (fun t => t) t => t
 zero : Nat = fun t f x: => x
@@ -19,19 +24,16 @@ suc : (fun Nat => Nat) = fun n t f x: => f (n t f x)
 one := suc zero
 two := suc one
 
-is_zero : (fun Nat => Bool) = fun n: => n Bool (fun Bool => False) True
+is_zero : (fun Nat => Bool) = fun n: => n Bool (fun Bool => Bool.False) Bool.True
 is_zero_zero := is_zero zero
 is_one_zero := is_zero one
 
-# Full options
-Option := fun a:Type => None | Some a
-
-s : Option Int = Some 3
-n : Option Int = None
+s : Option Int = Option.Some Int 3
+n : Option Int = Option.None Int
 
 k := g 3
 
 a := fun ((Int, Int) | Int | ()) => ()
 b := fun x: Int | () => a x
 
-main : Int = unwrap Int (Some 3)
+# main : Int = unwrap_or Int (Option.Some Int 3) 12

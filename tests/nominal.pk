@@ -1,0 +1,40 @@
+# Single-constructor
+type Point of New struct
+  x := Int
+  y := Int
+# Multi-constructor
+type Term of
+  Var Int
+  Lam Int Int
+  App Int Int
+# GADT
+type Pair : fun Type => Type of
+  MkPair : fun (a:Type) a a => Pair a
+# Nullary constructor
+type Bool of
+  True
+  False
+
+is_zero : fun Int => Bool
+ = fun
+   0  => Bool.True
+   _: => Bool.False
+
+not : fun Bool => Bool
+  = fun
+    Bool.True => Bool.False
+    Bool.False => Bool.True
+
+to_int : fun Bool => Int
+  = fun
+    Bool.True => 1
+    Bool.False => 0
+
+sum : fun Term => Int
+  = fun
+    (Term.Var i:) => i
+    (Term.App (a:) (b:)) => a + b
+    (Term.Lam (a:) (b:)) => a + b
+
+# (7, 0)
+main := (sum (Term.App 3 4), to_int (not (is_zero 0)))
