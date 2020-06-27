@@ -136,7 +136,16 @@ pub struct Bindings {
 impl Bindings {
     /// Don't do this if you're holding symbols somewhere!
     pub fn reset(&mut self) {
-        *self = Default::default();
+        let mut b = Bindings::default();
+        std::mem::swap(&mut b, self);
+        // We want the RawSyms to be the same
+        let Bindings {
+            strings,
+            string_pool,
+            ..
+        } = b;
+        self.strings = strings;
+        self.string_pool = string_pool;
     }
 
     pub fn tag_name(&self, t: TagId) -> RawSym {

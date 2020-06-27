@@ -683,7 +683,7 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                         .fold(vec![(Cloner::new(tctx), Vec::new())], |cases: Vec<(Cloner, Vec<Elab>)>, arg_cases| {
                             cases
                                 .into_iter()
-                                .flat_map(|(mut cln, x)| {
+                                .flat_map(|(cln, x)| {
                                     arg_cases
                                         .iter()
                                         .map(|y| {
