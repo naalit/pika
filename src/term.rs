@@ -23,11 +23,12 @@ impl Builtin {
             Builtin::Int => Elab::Type(0),
             Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => Elab::Fun(
                 Clos::default(),
+                vec![Elab::Builtin(Builtin::Int), Elab::Builtin(Builtin::Int)],
                 vec![(
                     vec![Elab::Builtin(Builtin::Int), Elab::Builtin(Builtin::Int)],
                     Elab::Builtin(Builtin::Int),
-                    Elab::Type(0),
                 )],
+                Box::new(Elab::Type(0)),
             ),
         }
     }
@@ -274,7 +275,7 @@ impl Pretty for Term {
                         .group(),
                 }),
             ),
-            Term::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).chain(m.pretty(ctx)),
+            Term::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).add(".").chain(m.pretty(ctx)),
             Term::The(t, x) => Doc::start("the")
                 .style(Style::Keyword)
                 .line()

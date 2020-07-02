@@ -4,7 +4,7 @@ use crate::{
     affine::Mult,
     term::{Builtin, STerm},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// The evaluation context
@@ -74,8 +74,25 @@ impl Cloner {
         self.map.insert(from, to);
     }
 
-    pub fn get(&self, s: Sym) -> Option<Sym> {
-        self.map.get(&s).copied()
+    /// Gets it from the rename map, or returns it as-is if there's no rename set for it.
+    /// This takes care of recursive renaming (x -> y -> z)
+    pub fn get(&self, s: Sym) -> Sym {
+        if let Some(k) = self.map.get(&s).copied() {
+            // Here's how this (`k == s`) happens:
+            // 1. We come up with a Elab using, say, x3. That Elab gets stored in Salsa's database.
+            // 2. We reset the Bindings, define x0, x1, and x2, and ask for the Elab again.
+            // 3. Salsa gives us the Elab from the database, which references x3. We call cloned() on it.
+            // 4. We see a bound variable, x3, and define a fresh variable to replace it with. The fresh variable is now also x3.
+            // 5. Now we want to replace x3 with x3, so we better not call get() recursively or we'll get stuck in a loop.
+            // Note, though, that this is expected behaviour and doesn't need fixing.
+            if k == s {
+                k
+            } else {
+                self.get(k)
+            }
+        } else {
+            s
+        }
     }
 }
 impl HasBindings for Cloner {
@@ -127,12 +144,12 @@ impl Clos {
             tys: self
                 .tys
                 .iter()
-                .map(|(k, v)| (cln.get(*k).unwrap_or(*k), Arc::new(v.cloned(cln))))
+                .map(|(k, v)| (cln.get(*k), Arc::new(v.cloned(cln))))
                 .collect(),
             vals: self
                 .vals
                 .iter()
-                .map(|(k, v)| (cln.get(*k).unwrap_or(*k), Arc::new(v.cloned(cln))))
+                .map(|(k, v)| (cln.get(*k), Arc::new(v.cloned(cln))))
                 .collect(),
             is_move: self.is_move,
             span: self.span,
@@ -175,48 +192,95 @@ impl<'a> ECtx<'a> {
 /// For a term to get to here, it must be well typed
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
 pub enum Elab {
-    Unit,                                    // ()
-    Binder(Sym, BElab),                      // x: T
+    Unit,                                                    // ()
+    Binder(Sym, BElab),                                      // x: T
     Var(Span, Sym, BElab), // (a, T) --> the T a; we need the span for "moved variable" errors
     I32(i32),              // 3
     Type(u32),             // Type0
     Builtin(Builtin),      // Int
-    Fun(Clos, Vec<(Vec<Elab>, Elab, Elab)>), // fun { a b => the T x; c d => the U y }
-    App(BElab, BElab),     // f x
-    Pair(BElab, BElab),    // x, y
-    Data(TypeId, StructId, BElab), // type D: T of ...
-    Cons(TagId, BElab),    // C : D
-    StructIntern(StructId), // struct { x := 3 }
-    StructInline(Vec<(Sym, Elab)>), // struct { x := 3 }
-    Project(BElab, RawSym), // r.m
-    Block(Vec<ElabStmt>),  // do { x; y }
-    Union(Vec<Elab>),      // x | y
-    Bottom,
-    Top,
+    Fun(Clos, Vec<Elab>, Vec<(Vec<Elab>, Elab)>, Box<Elab>), // Fun({x,y}, [T,U], [([a,b],x), ([c,d],y)], V) --> fun { a b => x; c d => y } :: fun T U => V
+    App(BElab, BElab),                                       // f x
+    Pair(BElab, BElab),                                      // x, y
+    Data(TypeId, StructId, BElab),                           // type D: T of ...
+    Cons(TagId, BElab),                                      // C : D
+    StructIntern(StructId),                                  // struct { x := 3 }
+    StructInline(Vec<(Sym, Elab)>),                          // struct { x := 3 }
+    Project(BElab, RawSym),                                  // r.m
+    Block(Vec<ElabStmt>),                                    // do { x; y }
+    Union(Vec<Elab>),                                        // x | y
+    Bottom,                                                  // empty
+    Top,                                                     // any
 }
 type BElab = Box<Elab>;
 
-pub fn unionize_ty(v: Vec<(Vec<Elab>, Elab, Elab)>, ectx: &ECtx) -> (Vec<Elab>, Elab) {
-    let len = v.first().unwrap().0.len();
-    let (args, ret) = v.into_iter().fold(
-        ((0..len).map(|_| Vec::new()).collect::<Vec<_>>(), Vec::new()),
-        |(mut accf, mut acct), (from, to, _)| {
-            for (accf, from) in accf.iter_mut().zip(from) {
-                accf.push(from);
-            }
-            acct.push(to);
-            (accf, acct)
-        },
-    );
-    let args = args
-        .into_iter()
-        .map(|v| Elab::Union(v).simplify_unions(ectx))
-        .collect();
-    let ret = Elab::Union(ret).simplify_unions(ectx);
-    (args, ret)
-}
-
 impl Elab {
+    /// Returns a list of all free variables in this term
+    pub fn fvs(&self, ectx: &ECtx) -> Vec<Sym> {
+        // Add the symbols currently bound in the environment to the bound list
+        let mut bound = ectx.vals.keys().copied().collect();
+        let mut free = Vec::new();
+        self.fvs_(&mut bound, &mut free);
+        // Instead of adding the symbols in the database to the bound list, just check afterwards
+        free.retain(|s| ectx.database().term(ectx.scope(), *s).is_none());
+        free
+    }
+
+    /// Helper for `fvs`
+    fn fvs_(&self, bound: &mut HashSet<Sym>, free: &mut Vec<Sym>) {
+        use Elab::*;
+        match self {
+            Type(_) | Unit | I32(_) | Builtin(_) | Top | Bottom => (),
+            Var(_, x, ty) => {
+                if !bound.contains(x) {
+                    free.push(*x);
+                }
+                ty.fvs_(bound, free);
+            }
+            Fun(cl, t, v, u) => {
+                for i in t {
+                    i.fvs_(bound, free);
+                }
+                for (a, b) in v {
+                    for (k, _) in &cl.vals {
+                        bound.insert(*k);
+                    }
+                    for x in a.iter() {
+                        x.fvs_(bound, free);
+                    }
+                    b.fvs_(bound, free);
+                }
+                u.fvs_(bound, free);
+            }
+            App(x, y) | Pair(x, y) => {
+                x.fvs_(bound, free);
+                y.fvs_(bound, free);
+            }
+            Binder(s, t) => {
+                t.fvs_(bound, free);
+                bound.insert(*s);
+            }
+            // TODO outlaw locals in data types
+            Data(_, _, _) | Cons(_, _) => (),
+            // Can't use local variables
+            StructIntern(_) => (),
+            StructInline(v) => {
+                for (k, v) in v {
+                    bound.insert(*k);
+                    v.fvs_(bound, free);
+                }
+            }
+            Project(r, _) => r.fvs_(bound, free),
+            Block(v) => v.iter().for_each(|x| match x {
+                ElabStmt::Def(x, e) => {
+                    bound.insert(*x);
+                    e.fvs_(bound, free);
+                }
+                ElabStmt::Expr(e) => e.fvs_(bound, free),
+            }),
+            Union(v) => v.iter().for_each(|x| x.fvs_(bound, free)),
+        }
+    }
+
     /// Binders are usually confusing in type errors, so you can get rid of them
     pub fn unbind(&self) -> &Self {
         match self {
@@ -304,8 +368,8 @@ impl Elab {
                                 fn data(val: &Elab) -> Option<&Elab> {
                                     match &val {
                                         Elab::Cons(_, t) => match &**t {
-                                            Elab::Data(_, _, _) => Some(&t),
-                                            Elab::Fun(_, v) => {
+                                            Elab::Data(_, _, _) | Elab::App(_, _) => Some(&t),
+                                            Elab::Fun(_, _, v, _) => {
                                                 assert_eq!(v.len(), 1);
                                                 Some(&v[0].1)
                                             }
@@ -337,7 +401,7 @@ impl Elab {
                                         // TODO what if rv2 already has this constructor? Maybe just use `rv`?
                                         rv2.push(val);
                                     } else {
-                                        panic!("wrong type");
+                                        rv.push(val);
                                     }
                                 } else {
                                     rv.push(val);
@@ -394,11 +458,10 @@ impl Elab {
         match self {
             Type(_) | Unit | I32(_) | Builtin(_) | Top | Bottom => false,
             Var(_, x, ty) => *x == s || ty.uses(s),
-            Fun(_, v) => v.iter().any(|(a, b, c)| {
+            Fun(_, _, v, _) => v.iter().any(|(a, b)| {
                 !a.iter().any(|x| x.binds(s))
                     && !b.binds(s)
-                    && !c.binds(s)
-                    && (b.uses(s) || c.uses(s) || a.iter().any(|x| x.uses(s)))
+                    && (b.uses(s) || a.iter().any(|x| x.uses(s)))
             }),
             App(x, y) | Pair(x, y) => x.uses(s) || y.uses(s),
             Binder(_, x) => x.uses(s),
@@ -423,9 +486,9 @@ impl Elab {
         match self {
             Type(_) | Unit | I32(_) | Builtin(_) | Top | Bottom => false,
             Binder(x, ty) => *x == s || ty.binds(s),
-            Fun(_, v) => v
+            Fun(_, _, v, _) => v
                 .iter()
-                .any(|(a, b, c)| b.binds(s) || c.binds(s) || a.iter().any(|x| x.binds(s))),
+                .any(|(a, b)| b.binds(s) || a.iter().any(|x| x.binds(s))),
             App(x, y) | Pair(x, y) => x.binds(s) || y.binds(s),
             Var(_, _, ty) => ty.binds(s),
             // TODO outlaw locals in data types
@@ -453,17 +516,21 @@ impl Elab {
                 *ty = ty.normal(ectx);
                 Var(sp, s, ty)
             }
-            Fun(c, v) => Fun(
+            Fun(c, t, v, mut u) => Fun(
                 c,
+                t.into_iter().map(|x| x.normal(ectx)).collect(),
                 v.into_iter()
-                    .map(|(a, b, t)| {
+                    .map(|(a, b)| {
                         (
                             a.into_iter().map(|a| a.normal(ectx)).collect(),
                             b.normal(ectx),
-                            t.normal(ectx),
                         )
                     })
                     .collect(),
+                {
+                    *u = u.normal(ectx);
+                    u
+                },
             ),
             App(mut x, mut y) => {
                 // Reuse Boxes
@@ -554,45 +621,57 @@ impl Elab {
                 // We need to make sure to apply all substitutions that aren't behind a closure
                 *x = x.whnf(ectx);
                 match *f {
-                    Elab::Fun(cl, v) => {
+                    Elab::Fun(cl, mut from, v, mut to) => {
                         ectx.add_clos(&cl);
                         let tx = x.get_type(ectx);
                         let mut rf = Vec::new();
                         // If we find a branch that *might* match before one that *does*, we set this
                         let mut fuzzy = false;
-                        for (args, body, to) in v {
+                        for (args, body) in v {
                             // Guaranteed to match
-                            if tx.subtype_of(args.first().unwrap(), ectx) {
+                            if x.has_type(args.first().unwrap(), ectx) {
                                 args.first().unwrap().do_match(&x, ectx);
                                 if !fuzzy && args.len() == 1 {
                                     return body.whnf(ectx);
                                 } else {
-                                    rf.push((args, body, to));
+                                    rf.push((args, body));
                                 }
                             } else if tx.overlap(args.first().unwrap(), ectx) {
                                 // Might match
                                 fuzzy = true;
-                                rf.push((args, body, to));
+                                rf.push((args, body));
+                            } else {
+                                #[cfg(feature = "logging")]
+                                eprintln!(
+                                    "warning: {} didn't match {}",
+                                    args.first().unwrap().pretty(ectx).ansi_string(),
+                                    x.pretty(ectx).ansi_string()
+                                );
                             }
                         }
                         assert_ne!(rf.len(), 0, "none matched");
                         if fuzzy {
-                            Elab::App(Box::new(Elab::Fun(cl, rf)), x)
+                            Elab::App(Box::new(Elab::Fun(cl, from, rf, to)), x)
                         } else {
                             let rf = rf
                                 .into_iter()
-                                .map(|(mut a, b, c)| {
+                                .map(|(mut a, b)| {
                                     a.remove(0);
-                                    (a, b, c)
+                                    (a, b)
                                 })
                                 .collect();
-                            // If we passed in a move-only argument, it now captures it, so it's move-only
+                            let arg_ty = from.remove(0);
+                            arg_ty.do_match(&x, ectx);
+                            *to = to.whnf(ectx);
                             Elab::Fun(
+                                // If we passed in a move-only argument, it now captures it, so it's move-only
                                 Clos {
                                     is_move: cl.is_move || tx.multiplicity(ectx) == Mult::One,
                                     ..cl
                                 },
+                                from,
                                 rf,
+                                to,
                             )
                             .whnf(ectx)
                         }
@@ -638,21 +717,23 @@ impl Elab {
                     _ => Elab::Project(Box::new(r), m),
                 }
             }
-            Elab::Fun(mut cl, v) => {
+            Elab::Fun(mut cl, from, v, to) => {
                 // Update the closure
                 for (k, val) in ectx.vals.iter() {
                     if !cl.vals.iter().any(|(s, _)| s == k)
-                        && !v.iter().any(|(a, b, c)| {
-                            b.binds(*k) || c.binds(*k) || a.iter().any(|x| x.binds(*k))
-                        })
-                        && v.iter().any(|(a, b, c)| {
-                            b.uses(*k) || c.uses(*k) || a.iter().any(|x| x.uses(*k))
-                        })
+                        && !v
+                            .iter()
+                            .any(|(a, b)| b.binds(*k) || a.iter().any(|x| x.binds(*k)))
+                        && (v
+                            .iter()
+                            .any(|(a, b)| b.uses(*k) || a.iter().any(|x| x.uses(*k)))
+                            || from.iter().any(|x| x.uses(*k))
+                            || to.uses(*k))
                     {
                         cl.vals.push((*k, val.clone()));
                     }
                 }
-                Elab::Fun(cl, v)
+                Elab::Fun(cl, from, v, to)
             }
             x => x,
         }
@@ -680,23 +761,20 @@ impl Elab {
             Builtin(b) => b.get_type(),
             Var(_, _, t) => t.cloned(&mut Cloner::new(&env)),
             Data(_, _, t) | Cons(_, t) => t.cloned(&mut Cloner::new(&env)),
-            Fun(cl, v) => {
+            Fun(cl, from, _, to) => {
                 let mut cln = Cloner::new(&env);
+                let args = from.iter().map(|x| x.cloned(&mut cln)).collect();
+                let to = to.cloned(&mut cln);
+                let to_t = to.get_type(env);
                 Fun(
                     cl.cloned(&mut cln),
-                    v.iter()
-                        .map(|(from, _, to)| {
-                            (
-                                from.iter().map(|x| x.cloned(&mut cln)).collect(),
-                                to.cloned(&mut cln),
-                                to.get_type(env),
-                            )
-                        })
-                        .collect(),
+                    from.iter().map(|x| x.cloned(&mut cln)).collect(),
+                    vec![(args, to)],
+                    Box::new(to_t),
                 )
             }
             App(f, x) => match f.get_type(env) {
-                Fun(cl, v) => {
+                Fun(cl, mut from, v, to) => {
                     let mut rf = Vec::new();
                     let tx = x.get_type(env);
                     let mut ectx = ECtx::new(env);
@@ -704,7 +782,7 @@ impl Elab {
                     let mut cln = Cloner::new(&env);
                     let mut fuzzy = false;
 
-                    for (args, to, _) in v {
+                    for (args, to) in v {
                         if tx.overlap(args.first().unwrap(), &ectx) {
                             let mut args: Vec<_> =
                                 args.iter().map(|x| x.cloned(&mut cln)).collect();
@@ -718,9 +796,8 @@ impl Elab {
                             } else {
                                 // It could potentially match, but we're not sure
                                 fuzzy = true;
-                                let t = to.get_type(env);
                                 let to = to.cloned(&mut cln);
-                                rf.push((args, to, t));
+                                rf.push((args, to));
                             }
                         }
                     }
@@ -733,22 +810,26 @@ impl Elab {
                     );
                     if rf[0].0.is_empty() {
                         return Elab::Union(
-                            rf.into_iter().map(|(_, b, _)| b.whnf(&mut ectx)).collect(),
+                            rf.into_iter().map(|(_, b)| b.whnf(&mut ectx)).collect(),
                         )
                         .simplify_unions(&ectx);
                     }
+                    from.remove(0);
                     // If we passed in a move-only argument, it now captures it, so it's move-only
                     Fun(
                         Clos {
                             is_move: cl.is_move || tx.multiplicity(env) == Mult::One,
                             ..cl
                         },
+                        from,
                         rf,
+                        to,
                     )
                     .whnf(&mut ectx)
                 }
                 // This triggers with recursive functions
                 Bottom => Bottom,
+                Top => Top,
                 _ => panic!("not a function type"),
             },
             Pair(x, y) => Pair(Box::new(x.get_type(env)), Box::new(y.get_type(env))),
@@ -815,11 +896,7 @@ impl Elab {
                 })
                 .max()
                 .unwrap_or(0),
-            Elab::Fun(_, v) => v
-                .iter()
-                .map(|(_, _, t)| t.universe(env).saturating_sub(1))
-                .max()
-                .unwrap_or(0),
+            Elab::Fun(_, _, _, to) => to.universe(env).saturating_sub(1),
             Elab::Project(r, m) => {
                 if let Elab::StructInline(v) = r.get_type(env) {
                     v.iter()
@@ -848,8 +925,8 @@ impl Elab {
                 {
                     println!(
                         "Setting {} := {}",
-                        s.pretty(&ectx.bindings()).ansi_string(),
-                        other.pretty(&ectx.bindings()).ansi_string()
+                        s.pretty(&ectx).ansi_string(),
+                        other.pretty(&ectx).ansi_string()
                     );
                 }
                 ectx.set_val(*s, other);
@@ -871,25 +948,7 @@ impl Elab {
     pub fn cloned(&self, cln: &mut Cloner) -> Self {
         use Elab::*;
         match self {
-            Var(sp, s, t) => {
-                if let Some(x) = cln.get(*s) {
-                    // Here's how this (`x == self`) happens:
-                    // 1. We come up with a Elab using, say, x3. That Elab gets stored in Salsa's database.
-                    // 2. We reset the Bindings, define x0, x1, and x2, and ask for the Elab again.
-                    // 3. Salsa gives us the Elab from the database, which references x3. We call cloned() on it.
-                    // 4. We see a bound variable, x3, and define a fresh variable to replace it with. The fresh variable is now also x3.
-                    // 5. Now we want to replace x3 with x3, so we better not call cloned() recursively or we'll get stuck in a loop.
-                    // Note, though, that this is expected behaviour and doesn't need fixing.
-                    if x == *s {
-                        Var(*sp, x, Box::new(t.cloned(cln)))
-                    } else {
-                        Var(*sp, x, Box::new(t.cloned(cln))).cloned(cln)
-                    }
-                } else {
-                    // Free variable
-                    Var(*sp, *s, Box::new(t.cloned(cln)))
-                }
-            }
+            Var(sp, s, t) => Var(*sp, cln.get(*s), Box::new(t.cloned(cln))),
             Top => Top,
             Bottom => Bottom,
             Unit => Unit,
@@ -916,17 +975,13 @@ impl Elab {
                 Binder(fresh, Box::new(t.cloned(cln)))
             }
             // All these allow bound variables, so we have to make sure they're done in order
-            Fun(cl, v) => Fun(
+            Fun(cl, from, v, to) => Fun(
                 cl.cloned(cln),
+                from.iter().map(|x| x.cloned(cln)).collect(),
                 v.iter()
-                    .map(|(a, b, c)| {
-                        (
-                            a.iter().map(|x| x.cloned(cln)).collect(),
-                            b.cloned(cln),
-                            c.cloned(cln),
-                        )
-                    })
+                    .map(|(a, b)| (a.iter().map(|x| x.cloned(cln)).collect(), b.cloned(cln)))
                     .collect(),
+                Box::new(to.cloned(cln)),
             ),
             Pair(x, y) => {
                 let x = Box::new(x.cloned(cln));
@@ -987,8 +1042,8 @@ impl Pretty for Elab {
             Elab::Type(0) => Doc::start("Type"),
             Elab::Type(i) => Doc::start("Type").add(i),
             Elab::Builtin(b) => Doc::start(b),
-            Elab::Fun(cl, v) if v.len() == 1 => {
-                let (args, body, _) = v.first().unwrap();
+            Elab::Fun(cl, _, v, _) if v.len() == 1 => {
+                let (args, body) = v.first().unwrap();
                 let until_body = if cl.is_move {
                     Doc::start("move").space().add("fun")
                 } else {
@@ -996,6 +1051,16 @@ impl Pretty for Elab {
                 }
                 .style(Style::Keyword)
                 .line()
+                .add("{{")
+                .line()
+                .chain(Doc::intersperse(
+                    cl.vals
+                        .iter()
+                        .map(|(k, v)| k.pretty(ctx).space().add(":=").space().chain(v.pretty(ctx))),
+                    Doc::start(",").space(),
+                ))
+                .line()
+                .add("}}")
                 .chain(Doc::intersperse(
                     args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
                     Doc::none().line(),
@@ -1014,23 +1079,27 @@ impl Pretty for Elab {
                 )
                 .prec(Prec::Term)
             }
-            Elab::Fun(cl, v) => pretty_block(
+            Elab::Fun(cl, _, v, _) => pretty_block(
                 if cl.is_move { "move fun" } else { "fun" },
-                v.iter().map(|(args, body, _)| {
-                    let until_body = if cl.is_move {
-                        Doc::start("move").space().add("fun")
-                    } else {
-                        Doc::start("fun")
-                    }
-                    .style(Style::Keyword)
-                    .line()
-                    .chain(Doc::intersperse(
-                        args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
-                        Doc::none().line(),
-                    ))
-                    .indent()
-                    .line()
-                    .add("=>");
+                v.iter().map(|(args, body)| {
+                    let until_body = Doc::none()
+                        .add("{{")
+                        .line()
+                        .chain(Doc::intersperse(
+                            cl.vals.iter().map(|(k, v)| {
+                                k.pretty(ctx).space().add(":=").space().chain(v.pretty(ctx))
+                            }),
+                            Doc::start(",").space(),
+                        ))
+                        .line()
+                        .add("}}")
+                        .chain(Doc::intersperse(
+                            args.iter().map(|x| x.pretty(ctx).nest(Prec::Atom)),
+                            Doc::none().line(),
+                        ))
+                        .indent()
+                        .line()
+                        .add("=>");
                     Doc::either(
                         until_body
                             .clone()
@@ -1088,7 +1157,7 @@ impl Pretty for Elab {
                         .group(),
                 }),
             ),
-            Elab::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).chain(m.pretty(ctx)),
+            Elab::Project(r, m) => r.pretty(ctx).nest(Prec::Atom).add(".").chain(m.pretty(ctx)),
             Elab::Union(v) => Doc::intersperse(
                 v.iter().map(|x| x.pretty(ctx)),
                 Doc::none().space().add("|").space(),

@@ -340,10 +340,12 @@ impl Elab {
                     ElabStmt::Def(_, _) => LowTy::Unit,
                 }
             }
-            Elab::Fun(cl, v) => {
-                if v.iter().any(|(args, _, ret)| {
-                    !ret.is_concrete(lctx) || args.iter().any(|x| !x.is_concrete(lctx))
-                }) {
+            Elab::Fun(cl, arg_tys, v, ret) => {
+                let mut lctx = lctx.clone();
+                lctx.add_clos(&cl);
+
+                let mut cln = Cloner::new(&lctx);
+                if !ret.is_concrete(&lctx) || arg_tys.iter().any(|x| !x.is_concrete(&lctx)) {
                     // Don't lower this function yet, wait until it's called
                     return None;
                 }
@@ -352,29 +354,8 @@ impl Elab {
                     panic!("Empty");
                 }
 
-                let mut cln = Cloner::new(lctx);
-                let arg_tys = v.iter().fold(
-                    (0..v.first().unwrap().0.len())
-                        .map(|_| Vec::new())
-                        .collect::<Vec<_>>(),
-                    |mut acc, (from, _, _)| {
-                        for (acc, from) in acc.iter_mut().zip(from.iter()) {
-                            acc.push(from.cloned(&mut cln));
-                        }
-                        acc
-                    },
-                );
-
-                let arg_tys: Vec<_> = arg_tys
-                    .into_iter()
-                    .map(|v| Elab::Union(v).whnf(lctx).simplify_unions(lctx))
-                    .collect();
-
-                let mut lctx = lctx.clone();
-                lctx.add_clos(&cl);
-
-                for (args, _, _) in v {
-                    for (pat, ty) in args.iter().zip(&arg_tys) {
+                for (args, _) in v {
+                    for (pat, ty) in args.iter().zip(arg_tys) {
                         let pat = pat.cloned(&mut cln).whnf(&mut lctx);
                         pat.compile_match(&mut lctx, &mut Vec::new(), &ty, LowIR::Unit);
                     }
@@ -382,7 +363,7 @@ impl Elab {
 
                 let ret_tys: Vec<_> = v
                     .iter()
-                    .map(|(_, body, _)| body.cloned(&mut cln).low_ty_of(&mut lctx).unwrap())
+                    .map(|(_, body)| body.cloned(&mut cln).low_ty_of(&mut lctx).unwrap())
                     .collect();
                 let ret_ty = ret_tys.first().unwrap().clone();
                 for i in ret_tys {
@@ -397,8 +378,8 @@ impl Elab {
                     .map(|(_, t)| t.cloned(&mut cln).whnf(&mut lctx).as_low_ty(&lctx))
                     .collect();
 
-                // Now curry the arguments
-                let arg_tys: Vec<_> = arg_tys.into_iter().map(|x| x.as_low_ty(&lctx)).collect();
+                // Now curry the argumentss
+                let arg_tys: Vec<_> = arg_tys.iter().map(|x| x.as_low_ty(&lctx)).collect();
                 let mut i = arg_tys.len();
                 arg_tys
                     .iter()
@@ -416,7 +397,7 @@ impl Elab {
                     })
             }
             Elab::App(f, x) => match f.get_type_rec(lctx) {
-                Elab::Fun(_, _) => {
+                Elab::Fun(_, _, _, _) => {
                     if let Some(f) = f.low_ty_of(lctx) {
                         match f {
                             LowTy::ClosOwn { to, .. } => *to,
@@ -470,7 +451,13 @@ impl Elab {
             // Type erasure
             Elab::Builtin(Builtin::Int) | Elab::Type(_) | Elab::Union(_) => LowTy::Unit,
             Elab::Data(_, _, _) => LowTy::Unit,
-            Elab::Cons(_, t) => t.as_low_ty(lctx),
+            Elab::Cons(_, t) => {
+                if t.is_concrete(lctx) {
+                    t.as_low_ty(lctx)
+                } else {
+                    return None;
+                }
+            }
             _ => panic!("couldn't low-ty {}", self.pretty(lctx).ansi_string()),
         })
     }
@@ -568,10 +555,8 @@ impl Elab {
                     LowIR::Let(name, Box::new(val), Box::new(acc))
                 })
             }
-            Elab::Fun(cl, branches) => {
-                if branches.iter().any(|(args, _, ret)| {
-                    !ret.is_concrete(lctx) || args.iter().any(|x| !x.is_concrete(lctx))
-                }) {
+            Elab::Fun(cl, arg_tys, branches, ret) => {
+                if !ret.is_concrete(lctx) || arg_tys.iter().any(|x| !x.is_concrete(lctx)) {
                     // Don't lower this function yet, wait until it's called
                     return None;
                 }
@@ -582,22 +567,6 @@ impl Elab {
                 let lctx2 = lctx.clone();
 
                 let mut cln = Cloner::new(lctx);
-                let arg_tys = branches.iter().fold(
-                    (0..branches.first().unwrap().0.len())
-                        .map(|_| Vec::new())
-                        .collect::<Vec<_>>(),
-                    |mut acc, (from, _, _)| {
-                        for (acc, from) in acc.iter_mut().zip(from.iter()) {
-                            acc.push(from.cloned(&mut cln));
-                        }
-                        acc
-                    },
-                );
-
-                let arg_tys: Vec<_> = arg_tys
-                    .into_iter()
-                    .map(|v| Elab::Union(v).whnf(lctx).simplify_unions(lctx))
-                    .collect();
 
                 // Compile the final body - do pattern matching etc.
                 let block_ids: Vec<_> = (0..branches.len()).map(|_| next_block()).collect();
@@ -618,13 +587,12 @@ impl Elab {
 
                         let block_id = next_block();
 
-                        // TODO clone lctx if needed
                         let which_matched: Vec<(usize, LowIR)> = branches
                             .iter()
                             .enumerate()
                             // Only check the variants that could potentially match
-                            .filter(|(_, (x, _, _))| x[0].overlap(&ty, &lctx2))
-                            .map(|(i, (args, _, _))| {
+                            .filter(|(_, (x, _))| x[0].overlap(&ty, &lctx2))
+                            .map(|(i, (args, _))| {
                                 let (arg, rest) = args.split_at(1);
                                 let arg = &arg[0];
 
@@ -702,7 +670,7 @@ impl Elab {
                     // Not a union, so no switch, just pattern matching with ifs
                     branches
                         .iter()
-                        .map(|(args, body, _)| {
+                        .map(|(args, body)| {
                             // Skip upcasting to union, because if the argument was a union type we wouldn't be here
 
                             let mut need_phi = Vec::new();
@@ -782,9 +750,8 @@ impl Elab {
                     })
             }
             Elab::App(f, x) => match f.get_type_rec(lctx) {
-                Elab::Fun(cl, v) => {
+                Elab::Fun(cl, mut args, _, _) => {
                     lctx.add_clos(&cl);
-                    let (mut args, _) = crate::elab::unionize_ty(v, lctx);
                     let from = args.remove(0);
                     // In case it has variables that already have values etc.
                     let from = from.normal(lctx);
@@ -905,6 +872,10 @@ impl Elab {
             Elab::Builtin(Builtin::Int) | Elab::Type(_) | Elab::Union(_) => LowIR::Unit,
             Elab::Data(_, _, _) => LowIR::Unit,
             Elab::Cons(id, t) => {
+                // We need to monomorphize polymorphic data constructors, too
+                if !t.is_concrete(lctx) {
+                    return None;
+                }
                 let mut t = t.cloned(&mut Cloner::new(lctx)).whnf(lctx);
                 match &mut t {
                     Elab::Data(_, sid, _) => LowIR::Variant(
@@ -918,9 +889,9 @@ impl Elab {
                         t.as_low_ty(lctx),
                         Box::new(LowIR::Unit),
                     ),
-                    Elab::Fun(_, v) => {
+                    Elab::Fun(_, _, v, _) => {
                         assert_eq!(v.len(), 1);
-                        let (args, result, _) = v.pop().unwrap();
+                        let (args, result) = v.pop().unwrap();
                         let result = result.whnf(lctx);
                         let idx = if let Elab::Data(_, sid, _) = &result {
                             lctx.database()
@@ -1004,9 +975,9 @@ impl Elab {
             | Elab::Data(_, _, _)
             | Elab::Cons(_, _) => true,
             Elab::Binder(_, t) => t.is_concrete(lctx),
-            Elab::Fun(_, v) => v
+            Elab::Fun(_, _, v, _) => v
                 .iter()
-                .all(|(a, b, _)| a.iter().all(|a| a.is_concrete(lctx)) && b.is_concrete(lctx)),
+                .all(|(a, b)| a.iter().all(|a| a.is_concrete(lctx)) && b.is_concrete(lctx)),
             Elab::Union(v) => v.iter().all(|x| x.is_concrete(lctx)),
             Elab::App(f, x) => f.is_concrete(lctx) && x.is_concrete(lctx),
             // This shouldn't happen unless the first param is neutral and thus not concrete
@@ -1018,37 +989,33 @@ impl Elab {
     pub fn as_low_ty(&self, lctx: &LCtx) -> LowTy {
         match self {
             Elab::Var(_, v, _) => {
-                if let Some(t) = lctx.database().elab(lctx.scope(), *v) {
+                if let Some(t) = lctx
+                    .database()
+                    .elab(lctx.scope(), *v)
+                    .or_else(|| lctx.val(*v))
+                {
                     t.as_low_ty(lctx)
                 } else {
-                    panic!("Unbound variable has no LowTy")
+                    panic!(
+                        "Unbound variable {} has no LowTy",
+                        v.pretty(lctx).ansi_string()
+                    )
                 }
             }
             Elab::Builtin(Builtin::Int) | Elab::I32(_) => LowTy::Int(32),
             Elab::Unit => LowTy::Unit,
             Elab::Binder(_, t) => t.as_low_ty(lctx),
-            Elab::Fun(cl, v) => {
+            Elab::Fun(cl, from, _, to) => {
                 let mut lctx = lctx.clone();
                 lctx.add_clos(&cl);
-                let mut cln = Cloner::new(&lctx);
-                let (from, to) = crate::elab::unionize_ty(
-                    v.iter()
-                        .map(|(a, b, c)| {
-                            (
-                                a.iter()
-                                    .map(|x| x.cloned(&mut cln).whnf(&mut lctx))
-                                    .collect(),
-                                b.cloned(&mut cln).whnf(&mut lctx),
-                                c.cloned(&mut cln),
-                            )
-                        })
-                        .collect(),
-                    &lctx,
-                );
 
-                let to = to.as_low_ty(&lctx);
+                // TODO do we need whnf here?
+                let to = to
+                    .cloned(&mut Cloner::new(&lctx))
+                    .whnf(&mut lctx)
+                    .as_low_ty(&lctx);
 
-                from.into_iter().rfold(to, |ret, arg| {
+                from.iter().rfold(to, |ret, arg| {
                     let arg = arg.as_low_ty(&lctx);
                     LowTy::ClosRef {
                         from: Box::new(arg),
@@ -1066,8 +1033,56 @@ impl Elab {
             Elab::App(f, x) => match &**f {
                 // Ignore the tag
                 Elab::Cons(_, _) => x.as_low_ty(lctx),
-                Elab::App(_, _) => LowTy::Struct(vec![f.as_low_ty(lctx), x.as_low_ty(lctx)]),
-                _ => panic!("{:?} is not supported", f),
+                _ => match f.head() {
+                    Elab::Cons(_, _) => LowTy::Struct(vec![f.as_low_ty(lctx), x.as_low_ty(lctx)]),
+                    Elab::Data(_, s, _) => {
+                        let scope = ScopeId::Struct(*s, Box::new(lctx.scope()));
+                        LowTy::Union(
+                            lctx.database()
+                                .symbols(scope.clone())
+                                .iter()
+                                .map(|x| lctx.database().elab(scope.clone(), **x).unwrap())
+                                .filter_map(|x| {
+                                    let mut lctx = lctx.clone();
+                                    let t = x.get_type(&lctx).whnf(&mut lctx);
+                                    // We unify here, so for
+                                    // ```
+                                    // type T: fun Type => Type of
+                                    //   A : fun Int => T Int
+                                    //   B : fun (a:Type) a => T a
+                                    // ```
+                                    // if you have a `T Bool`, we represent that as just `{{}, Bool}` since we know it's B and that a is Bool
+                                    let result = match &t {
+                                        Elab::Data(_, _, _) => &t,
+                                        Elab::Fun(_, _, v, _) => &v[0].1,
+                                        _ => panic!("wrong type"),
+                                    };
+                                    let mut tctx = crate::bicheck::TCtx::new(&lctx);
+                                    tctx.metas.extend(result.fvs(&tctx));
+                                    let mut tcons = Vec::new();
+                                    if !result.unify(self, &tctx, &mut tcons) {
+                                        return None;
+                                    }
+                                    for (k, v) in tcons {
+                                        lctx.set_val(k, v);
+                                    }
+
+                                    match &t {
+                                        Elab::Data(_, _, _) => Some(LowTy::Unit),
+                                        Elab::Fun(_, _, v, _) => {
+                                            assert_eq!(v.len(), 1);
+                                            Some(LowTy::Struct(
+                                                v[0].0.iter().map(|x| x.as_low_ty(&lctx)).collect(),
+                                            ))
+                                        }
+                                        _ => panic!("wrong type"),
+                                    }
+                                })
+                                .collect(),
+                        )
+                    }
+                    _ => panic!("{:?} is not supported", f),
+                },
             },
             Elab::Union(v) => LowTy::Union(v.iter().map(|x| x.as_low_ty(lctx)).collect()),
             // Type erasure
@@ -1081,7 +1096,7 @@ impl Elab {
                         .map(|x| lctx.database().elab(scope.clone(), **x).unwrap())
                         .map(|x| match x.get_type(lctx).whnf(&mut lctx.ectx.clone()) {
                             Elab::Data(_, _, _) => LowTy::Unit,
-                            Elab::Fun(_, v) => {
+                            Elab::Fun(_, _, v, _) => {
                                 assert_eq!(v.len(), 1);
                                 LowTy::Struct(v[0].0.iter().map(|x| x.as_low_ty(lctx)).collect())
                             }
@@ -1092,7 +1107,7 @@ impl Elab {
             }
             Elab::Cons(_, t) => match &**t {
                 t @ Elab::Data(_, _, _) => t.as_low_ty(lctx),
-                Elab::Fun(_, v) => {
+                Elab::Fun(_, _, v, _) => {
                     assert_eq!(v.len(), 1);
                     v[0].1.as_low_ty(lctx)
                 }
@@ -1122,7 +1137,7 @@ impl Elab {
             (Elab::Cons(id, t), _) => {
                 let sid = match &**t {
                     Elab::Data(_, sid, _) => *sid,
-                    Elab::Fun(_, v) if v.len() == 1 => match &v[0].1 {
+                    Elab::Fun(_, _, v, _) if v.len() == 1 => match &v[0].1.head() {
                         Elab::Data(_, sid, _) => *sid,
                         _ => panic!("wrong type"),
                     },
@@ -1151,46 +1166,6 @@ impl Elab {
                         lhs: Box::new(LowIR::SizedIntConst(tag_size, idx)),
                         rhs: Box::new(tag.clone()),
                     }
-                }
-            }
-            (Elab::App(f, x), Elab::Data(_, sid, _)) => {
-                let tid = f.cons().unwrap();
-                let scope = ScopeId::Struct(*sid, Box::new(lctx.scope()));
-                let sym = **lctx
-                    .database()
-                    .symbols(scope.clone())
-                    .iter()
-                    .find(|x| x.raw() == lctx.bindings().tag_name(tid))
-                    .unwrap();
-                let cty = lctx.database().elab(scope, sym).unwrap().get_type(lctx);
-                let (x_param, tx) = match cty {
-                    Elab::Fun(_, mut v) if v.len() == 1 => {
-                        let (mut args, _, _) = v.pop().unwrap();
-                        // We leave the type as `Data(...)` for the head, so we need to know where we are
-                        // If there aren't any `App`s ahead of us, we're at the first parameter
-                        let idx = f.spine_len();
-                        // param.payload[i]
-                        let x_param = LowIR::Project(
-                            Box::new(LowIR::Project(Box::new(param.clone()), 1)),
-                            idx,
-                        );
-                        let tx = args.remove(idx);
-                        (x_param, tx)
-                    }
-                    _ => panic!("wrong type"),
-                };
-
-                // TODO bitcast
-
-                // Leave the type as `Data(...)` for the head, so it can make sure the tag matches
-                // We also pass the parameter unchanged for the head, so it can extract the tag etc.
-                let f = f.compile_match(lctx, need_phi, ty, param);
-                let x = x.compile_match(lctx, need_phi, &tx, x_param);
-
-                LowIR::BoolOp {
-                    op: BoolOp::And,
-                    lhs: Box::new(f),
-                    rhs: Box::new(x),
                 }
             }
             // TODO var case that checks both `lctx` and `need_phi`
@@ -1278,7 +1253,7 @@ impl Elab {
                     rhs: Box::new(y),
                 }
             }
-            (Elab::App(f, x), Elab::App(tf, tx)) => match &**f {
+            (Elab::App(f, x), Elab::App(tf, tx)) if tf.cons().is_some() => match &**f {
                 // We know it matces, since the type is App and not Data
                 // TODO is it a struct at this point, though?
                 Elab::Cons(_, _) => x.compile_match(lctx, need_phi, tx, param),
@@ -1295,6 +1270,50 @@ impl Elab {
                 }
                 _ => panic!("not a function"),
             },
+            (Elab::App(f, x), _) => {
+                let sid = match ty.head() {
+                    Elab::Data(_, sid, _) => sid,
+                    _ => panic!("wrong type"),
+                };
+                let tid = f.cons().unwrap();
+                let scope = ScopeId::Struct(*sid, Box::new(lctx.scope()));
+                let sym = **lctx
+                    .database()
+                    .symbols(scope.clone())
+                    .iter()
+                    .find(|x| x.raw() == lctx.bindings().tag_name(tid))
+                    .unwrap();
+                let cty = lctx.database().elab(scope, sym).unwrap().get_type(lctx);
+                let (x_param, tx) = match cty {
+                    Elab::Fun(_, _, mut v, _) if v.len() == 1 => {
+                        let (mut args, _) = v.pop().unwrap();
+                        // We leave the type as `Data(...)` for the head, so we need to know where we are
+                        // If there aren't any `App`s ahead of us, we're at the first parameter
+                        let idx = f.spine_len();
+                        // param.payload[i]
+                        let x_param = LowIR::Project(
+                            Box::new(LowIR::Project(Box::new(param.clone()), 1)),
+                            idx,
+                        );
+                        let tx = args.remove(idx);
+                        (x_param, tx)
+                    }
+                    _ => panic!("wrong type"),
+                };
+
+                // TODO bitcast
+
+                // Leave the type as `Data(...)` for the head, so it can make sure the tag matches
+                // We also pass the parameter unchanged for the head, so it can extract the tag etc.
+                let f = f.compile_match(lctx, need_phi, ty, param);
+                let x = x.compile_match(lctx, need_phi, &tx, x_param);
+
+                LowIR::BoolOp {
+                    op: BoolOp::And,
+                    lhs: Box::new(f),
+                    rhs: Box::new(x),
+                }
+            }
             (Elab::I32(_), _) => LowIR::CompOp {
                 op: CompOp::Eq,
                 // This does the necessary bit-fiddling to make it a u64
@@ -1307,7 +1326,7 @@ impl Elab {
             (Elab::Type(_), _)
             | (Elab::Builtin(_), _)
             | (Elab::Unit, _)
-            | (Elab::Fun(_, _), _)
+            | (Elab::Fun(_, _, _, _), _)
             | (Elab::Data(_, _, _), _) => LowIR::BoolConst(true),
             _ => panic!(
                 "pattern {} can't be compiled yet",
@@ -1449,6 +1468,346 @@ impl LowIR {
             LowIR::Unreachable => LowTy::Never,
             LowIR::Branch(_) => LowTy::Never,
             LowIR::If { yes, .. } => yes.get_type(lctx),
+        }
+    }
+}
+
+impl Pretty for IntOp {
+    fn pretty(&self, _ctx: &impl HasBindings) -> Doc {
+        match self {
+            IntOp::Add => Doc::start("+"),
+            IntOp::Sub => Doc::start("-"),
+            IntOp::Mul => Doc::start("*"),
+            IntOp::Div => Doc::start("/"),
+        }
+    }
+}
+impl Pretty for BoolOp {
+    fn pretty(&self, _ctx: &impl HasBindings) -> Doc {
+        match self {
+            BoolOp::And => Doc::start("&&"),
+            BoolOp::Or => Doc::start("||"),
+        }
+    }
+}
+impl Pretty for CompOp {
+    fn pretty(&self, _ctx: &impl HasBindings) -> Doc {
+        match self {
+            CompOp::Eq => Doc::start("=="),
+        }
+    }
+}
+
+impl Pretty for Phi {
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
+        self.result
+            .pretty(ctx)
+            .space()
+            .add(":=")
+            .space()
+            .chain(Doc::start("phi").style(Style::Keyword))
+            .chain(Doc::intersperse(
+                self.incoming.iter().map(|(id, s)| {
+                    Doc::none()
+                        .space()
+                        .add("[")
+                        .space()
+                        .add(id.0)
+                        .space()
+                        .add("=>")
+                        .space()
+                        .chain(s.pretty(ctx))
+                        .space()
+                        .add("]")
+                }),
+                Doc::none(),
+            ))
+    }
+}
+
+impl Pretty for LowTy {
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
+        match self {
+            LowTy::Int(s) => Doc::start("u").add(s).style(Style::Keyword),
+            LowTy::VoidPtr => Doc::start("void*").style(Style::Keyword),
+            LowTy::Unit => Doc::start("()").style(Style::Keyword),
+            LowTy::ClosRef { from, to } => Doc::start("fun")
+                .style(Style::Keyword)
+                .add("(")
+                .chain(from.pretty(ctx))
+                .add(")")
+                .space()
+                .add("->")
+                .space()
+                .chain(to.pretty(ctx)),
+            LowTy::ClosOwn { from, to, upvalues } => Doc::start("fun")
+                .style(Style::Keyword)
+                .add("{")
+                .chain(Doc::intersperse(
+                    upvalues.iter().map(|x| x.pretty(ctx)),
+                    Doc::start(","),
+                ))
+                .add("}")
+                .add("(")
+                .chain(from.pretty(ctx))
+                .add(")")
+                .space()
+                .add("->")
+                .space()
+                .chain(to.pretty(ctx)),
+            LowTy::Struct(v) => Doc::start("{")
+                .chain(Doc::intersperse(
+                    v.iter().map(|x| x.pretty(ctx)),
+                    Doc::start(",").space(),
+                ))
+                .add("}"),
+            LowTy::Union(v) => Doc::start("(")
+                .chain(Doc::intersperse(
+                    v.iter().map(|x| x.pretty(ctx)),
+                    Doc::none().space().add("|").space(),
+                ))
+                .add(")"),
+            LowTy::Bool => Doc::start("bool").style(Style::Keyword),
+            LowTy::Never => Doc::start("!").style(Style::Keyword),
+        }
+    }
+}
+
+impl Pretty for LowIR {
+    fn pretty(&self, ctx: &impl HasBindings) -> Doc {
+        match self {
+            LowIR::Unit => Doc::start("()").style(Style::Literal),
+            LowIR::BoolConst(b) => Doc::start(b).style(Style::Literal),
+            LowIR::BoolOp { op, lhs, rhs } => lhs
+                .pretty(ctx)
+                .nest(Prec::Atom)
+                .space()
+                .chain(op.pretty(ctx))
+                .space()
+                .chain(rhs.pretty(ctx).nest(Prec::Atom))
+                .prec(Prec::App),
+            LowIR::IntConst(i) => Doc::start(i).style(Style::Literal),
+            LowIR::SizedIntConst(s, i) => Doc::start(i).add("u").add(s).style(Style::Literal),
+            LowIR::IntOp { op, lhs, rhs } => lhs
+                .pretty(ctx)
+                .nest(Prec::Atom)
+                .space()
+                .chain(op.pretty(ctx))
+                .space()
+                .chain(rhs.pretty(ctx).nest(Prec::Atom))
+                .prec(Prec::App),
+            LowIR::CompOp { op, lhs, rhs } => lhs
+                .pretty(ctx)
+                .nest(Prec::Atom)
+                .space()
+                .chain(op.pretty(ctx))
+                .space()
+                .chain(rhs.pretty(ctx).nest(Prec::Atom))
+                .prec(Prec::App),
+            LowIR::Let(k, v, body) => k
+                .pretty(ctx)
+                .style(Style::Binder)
+                .space()
+                .add(":=")
+                .space()
+                .chain(v.pretty(ctx).nest(Prec::App))
+                .hardline()
+                .chain(body.pretty(ctx))
+                .prec(Prec::Term),
+            LowIR::Local(s) => s.pretty(ctx),
+            LowIR::Global(s, _, _) => s.pretty(ctx).style(Style::Binder),
+            LowIR::TypedGlobal(_, s) => Doc::start(s).style(Style::Binder),
+            LowIR::Struct(v) => Doc::start("{")
+                .chain(Doc::intersperse(
+                    v.iter().map(|(s, x)| {
+                        Doc::none()
+                            .line()
+                            .chain(s.pretty(ctx))
+                            .space()
+                            .add(":=")
+                            .space()
+                            .chain(x.pretty(ctx))
+                    }),
+                    Doc::start(","),
+                ))
+                .indent()
+                .line()
+                .add("}")
+                .prec(Prec::App),
+            LowIR::Project(r, m) => r.pretty(ctx).nest(Prec::App).add(".").add(m),
+            LowIR::ClosureBorrow(c) => Doc::start("ref")
+                .style(Style::Keyword)
+                .space()
+                .chain(c.pretty(ctx))
+                .prec(Prec::Term),
+            LowIR::Closure {
+                fun_name,
+                attrs,
+                arg_name,
+                arg_ty,
+                upvalues,
+                ret_ty,
+                body,
+            } => Doc::start("fun")
+                .style(Style::Keyword)
+                .space()
+                .add(fun_name)
+                .debug(attrs)
+                .add("(")
+                .chain(arg_name.pretty(ctx).add(":").style(Style::Binder))
+                .space()
+                .chain(arg_ty.pretty(ctx))
+                .add(")")
+                .space()
+                .chain(if upvalues.is_empty() {
+                    Doc::none()
+                } else {
+                    Doc::start("with")
+                        .style(Style::Keyword)
+                        .space()
+                        .add("{")
+                        .chain(Doc::intersperse(
+                            upvalues.iter().map(|(k, t)| {
+                                Doc::none()
+                                    .line()
+                                    .chain(k.pretty(ctx))
+                                    .space()
+                                    .add(":")
+                                    .style(Style::Binder)
+                                    .space()
+                                    .chain(t.pretty(ctx))
+                            }),
+                            Doc::start(","),
+                        ))
+                        .indent()
+                        .line()
+                        .add("}")
+                        .space()
+                })
+                .add("->")
+                .space()
+                .chain(ret_ty.pretty(ctx))
+                .space()
+                .chain(
+                    Doc::start("{")
+                        .line()
+                        .chain(body.pretty(ctx))
+                        .indent()
+                        .line()
+                        .add("}"),
+                )
+                .prec(Prec::Term),
+            LowIR::Variant(id, t, v) => Doc::start("{")
+                .chain(t.pretty(ctx))
+                .add("}")
+                .add("::")
+                .add(id)
+                .add("(")
+                .chain(v.pretty(ctx))
+                .add(")"),
+            LowIR::Switch(val, cases) => Doc::start("switch")
+                .style(Style::Keyword)
+                .space()
+                .chain(val.pretty(ctx))
+                .space()
+                .add("{")
+                .chain(Doc::intersperse(
+                    cases
+                        .iter()
+                        .map(|x| Doc::none().line().chain(x.pretty(ctx).indent())),
+                    Doc::none(),
+                ))
+                .indent()
+                .line()
+                .add("}")
+                .prec(Prec::App),
+            LowIR::MultiSwitch {
+                switch_on,
+                cases,
+                blocks,
+            } => {
+                let switch = Doc::start("multiswitch")
+                    .style(Style::Keyword)
+                    .space()
+                    .chain(switch_on.pretty(ctx))
+                    .space()
+                    .add("{")
+                    .chain(Doc::intersperse(
+                        cases.iter().map(|(id, x)| {
+                            Doc::none().line().chain(
+                                Doc::start(id.0)
+                                    .add(":")
+                                    .style(Style::Binder)
+                                    .line()
+                                    .chain(x.pretty(ctx))
+                                    .indent(),
+                            )
+                        }),
+                        Doc::none(),
+                    ))
+                    .line()
+                    .add("}")
+                    .prec(Prec::App);
+                let blocks = Doc::start("where")
+                    .style(Style::Keyword)
+                    .space()
+                    .add("{")
+                    .line()
+                    .chain(Doc::intersperse(
+                        blocks.iter().map(|(phis, id, body)| {
+                            Doc::start(id.0)
+                                .add(":")
+                                .style(Style::Binder)
+                                .hardline()
+                                .chain(Doc::intersperse(
+                                    phis.iter().map(|x| x.pretty(ctx).hardline()),
+                                    Doc::none(),
+                                ))
+                                .chain(body.pretty(ctx))
+                                .indent()
+                        }),
+                        Doc::none().line(),
+                    ))
+                    .line()
+                    .add("}");
+                switch.space().chain(blocks)
+            }
+            LowIR::Unreachable => Doc::start("unreachable").style(Style::Keyword),
+            LowIR::Branch(id) => Doc::start("branch")
+                .style(Style::Keyword)
+                .space()
+                .add(id.0)
+                .prec(Prec::App),
+            LowIR::If { cond, yes, no } => Doc::start("if")
+                .style(Style::Keyword)
+                .space()
+                .chain(cond.pretty(ctx))
+                .space()
+                .add("{")
+                .line()
+                .chain(yes.pretty(ctx))
+                .indent()
+                .line()
+                .add("}")
+                .space()
+                .chain(
+                    Doc::start("else")
+                        .style(Style::Keyword)
+                        .space()
+                        .add("{")
+                        .line()
+                        .chain(no.pretty(ctx))
+                        .indent()
+                        .line()
+                        .add("}"),
+                ),
+            LowIR::Call(f, x) => f
+                .pretty(ctx)
+                .nest(Prec::Atom)
+                .add("(")
+                .chain(x.pretty(ctx))
+                .add(")")
+                .prec(Prec::App),
         }
     }
 }

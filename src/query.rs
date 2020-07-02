@@ -1,6 +1,6 @@
 use crate::bicheck::*;
 use crate::binding::*;
-use crate::common::{FileId, HasBindings, HasDatabase};
+use crate::common::{Doc, FileId, HasBindings, HasDatabase, Pretty, Style};
 use crate::elab::*;
 use crate::error::*;
 use crate::grammar::*;
@@ -60,6 +60,9 @@ pub trait MainExt: HasBindings {
 pub trait MainGroup: MainExt + salsa::Database {
     #[salsa::input]
     fn source(&self, file: FileId) -> Arc<String>;
+
+    #[salsa::input]
+    fn options(&self) -> crate::options::Options;
 
     /// Lists all the definitions in this immediate scope (doesn't include parent scopes)
     fn defs(&self, scope: ScopeId) -> Arc<Vec<Def>>;
@@ -191,6 +194,29 @@ fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowErr
     let scoped = (scope, db);
     let mut lctx = LCtx::new(&scoped);
     let body = elab.as_low(&mut lctx).ok_or(LowError::Polymorphic)?;
+
+    if db.options().show_low_ir {
+        eprintln!(
+            "{}",
+            Doc::start("fun")
+                .style(Style::Keyword)
+                .space()
+                .chain(s.pretty(db))
+                .add("()")
+                .space()
+                .add("->")
+                .space()
+                .chain(ret_ty.pretty(db))
+                .space()
+                .add("{")
+                .line()
+                .chain(body.pretty(db))
+                .indent()
+                .line()
+                .add("}")
+                .ansi_string()
+        );
+    }
 
     Ok(LowFun { name, ret_ty, body })
 }

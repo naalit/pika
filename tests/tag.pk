@@ -3,8 +3,7 @@ type Option: fun Type => Type of
   None : fun (a:Type) => Option a
   Some : fun (a:Type) a => Option a
 
-# This currently doesn't compile because GADTs don't work very well
-# Fixing it is waiting on unification
+# This now works!
 unwrap_or : fun (t:Type) (Option t) t => t = fun
   (_:) (Option.Some Type (a:)) (_:)  => a
   (_:) (Option.None Type) (default:) => default
@@ -36,4 +35,4 @@ k := g 3
 a := fun ((Int, Int) | Int | ()) => ()
 b := fun x: Int | () => a x
 
-# main : Int = unwrap_or Int (Option.Some Int 3) 12
+main : Int = unwrap_or Int (Option.Some Int 3) 12

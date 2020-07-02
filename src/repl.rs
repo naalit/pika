@@ -149,6 +149,7 @@ pub fn run_repl(options: &Options) {
     rl.set_helper(Some(ReplHelper::default()));
 
     let mut db = MainDatabase::default();
+    db.set_options(options.clone());
     let mut buf = String::new();
     let file = FILES
         .write()

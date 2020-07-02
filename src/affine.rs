@@ -59,7 +59,7 @@ impl Elab {
         // We know here that it's not erased
         match self {
             // Functions are never erased, at least for now
-            Elab::Fun(cl, _) => {
+            Elab::Fun(cl, _, _, _) => {
                 if cl.is_move {
                     One
                 } else {
@@ -90,8 +90,8 @@ impl Elab {
             Elab::I32(_) => Many,
             Elab::Builtin(Builtin::Int) => Many,
             Elab::App(f, x) => {
-                // debug_assert!(f.tag_head(), "Not in WHNF!");
-                f.multiplicity(env).min(x.multiplicity(env))
+                // Again, they're always at least 1
+                f.multiplicity(env).min(x.multiplicity(env)).max(One)
             }
             Elab::Pair(x, y) => x.multiplicity(env).min(y.multiplicity(env)),
             Elab::Union(v) => v.iter().map(|x| x.multiplicity(env)).min().unwrap(),
@@ -145,7 +145,7 @@ impl Elab {
             }
             Elab::Binder(_, t) => t.check_affine(actx)?,
             Elab::Cons(_, t) => t.check_affine(actx)?,
-            Elab::Fun(cl, v) => {
+            Elab::Fun(cl, _, v, _) => {
                 if !cl.is_move {
                     for (k, v) in cl.tys.iter() {
                         if v.multiplicity(actx) == One {
@@ -163,12 +163,12 @@ impl Elab {
                         }
                     }
                 }
-                for (args, body, ret) in v {
+                for (args, body) in v {
                     actx.with_rmult(Zero, |actx| {
                         for a in args {
                             a.check_affine(actx)?;
                         }
-                        ret.check_affine(actx)
+                        Ok(())
                     })?;
                     body.check_affine(actx)?;
                 }

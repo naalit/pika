@@ -39,6 +39,7 @@ fn main() {
                 let printer = Printer::new(options.color.0, 80);
 
                 let mut db = MainDatabase::default();
+                db.set_options(options.clone());
                 for i in &options.input_files {
                     let mut file = File::open(i).unwrap_or_else(|e| match e.kind() {
                         std::io::ErrorKind::NotFound => {

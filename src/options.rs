@@ -63,7 +63,7 @@ impl Default for ColorChoice {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 ///Pika compiler
 ///
 ///Commands:
@@ -81,6 +81,10 @@ pub struct Options {
     #[arg(long = "show-llvm")]
     ///Should the REPL generate LLVM code and print it to stderr?
     pub show_llvm: bool,
+
+    #[arg(long = "show-low-ir")]
+    ///Show Pika's LowIR for each definition
+    pub show_low_ir: bool,
 
     ///The files to compile
     pub input_files: Vec<String>,
