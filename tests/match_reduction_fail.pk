@@ -1,6 +1,6 @@
-f := fun
+f : fun Int => Int = fun a: => case a of
   2 => 0
-  i:Int => 1
+  i => 1
 
 # Up until recently, Pika would type g `fun i:Int => 0`
 # and b was `b : 0 = 1`

@@ -59,7 +59,7 @@ impl Elab {
         // We know here that it's not erased
         match self {
             // Functions are never erased, at least for now
-            Elab::Fun(cl, _, _, _) => {
+            Elab::Fun(cl, _, _) => {
                 if cl.is_move {
                     One
                 } else {
@@ -100,7 +100,7 @@ impl Elab {
             Elab::Project(_, _) => One,
             // Can't exist, so you can copy it I guess
             Elab::Bottom => Many,
-            Elab::Block(_) => panic!("not in WHNF!"),
+            Elab::Block(_) | Elab::CaseOf(_, _, _) => panic!("not in WHNF!"),
             Elab::StructIntern(_) => {
                 unreachable!("Right now, we always make a new struct for types")
             }
@@ -145,7 +145,7 @@ impl Elab {
             }
             Elab::Binder(_, t) => t.check_affine(actx)?,
             Elab::Cons(_, t) => t.check_affine(actx)?,
-            Elab::Fun(cl, _, v, _) => {
+            Elab::Fun(cl, from, to) => {
                 if !cl.is_move {
                     for (k, v) in cl.tys.iter() {
                         if v.multiplicity(actx) == One {
@@ -163,13 +163,13 @@ impl Elab {
                         }
                     }
                 }
-                for (args, body) in v {
-                    actx.with_rmult(Zero, |actx| {
-                        for a in args {
-                            a.check_affine(actx)?;
-                        }
-                        Ok(())
-                    })?;
+                actx.with_rmult(Zero, |actx| from.check_affine(actx))?;
+                to.check_affine(actx)?;
+            }
+            Elab::CaseOf(val, cases, _) => {
+                val.check_affine(actx)?;
+                for (pat, body) in cases {
+                    // TODO `Pat::check_affine`?
                     body.check_affine(actx)?;
                 }
             }

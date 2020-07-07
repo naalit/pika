@@ -2,9 +2,9 @@ type Bool of
   True
   False
 
-f : fun Int Bool => Int = fun
-  (i:) Bool.True => i
-  (_:) Bool.False => 4
+f : fun Int Bool => Int = fun i b: => case b of
+  Bool.True => i
+  Bool.False => 4
 
 b := fun x:Bool => f 23 x
 

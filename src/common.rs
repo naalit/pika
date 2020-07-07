@@ -2,6 +2,7 @@ pub use crate::binding::*;
 pub use crate::elab::*;
 pub use crate::error::{Error, Span};
 pub use crate::options::*;
+pub use crate::pattern::{Pat, TBool::*};
 pub use crate::printing::*;
 pub use crate::query::*;
 pub use std::collections::HashMap;

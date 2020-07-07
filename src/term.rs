@@ -23,12 +23,12 @@ impl Builtin {
             Builtin::Int => Elab::Type(0),
             Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => Elab::Fun(
                 Clos::default(),
-                vec![Elab::Builtin(Builtin::Int), Elab::Builtin(Builtin::Int)],
-                vec![(
-                    vec![Elab::Builtin(Builtin::Int), Elab::Builtin(Builtin::Int)],
-                    Elab::Builtin(Builtin::Int),
-                )],
-                Box::new(Elab::Type(0)),
+                Box::new(Elab::Builtin(Builtin::Int)),
+                Box::new(Elab::Fun(
+                    Clos::default(),
+                    Box::new(Elab::Builtin(Builtin::Int)),
+                    Box::new(Elab::Builtin(Builtin::Int)),
+                )),
             ),
         }
     }
@@ -69,7 +69,8 @@ pub enum Term {
     I32(i32),                                     // 3
     Type(u32),                                    // Type0
     Builtin(Builtin),                             // Int
-    Fun(bool, Vec<(Vec<STerm>, STerm)>),          // move? fun { a b => x; c d => y }
+    CaseOf(STerm, Vec<(STerm, STerm)>),           // case x of { y => z }
+    Fun(bool, Vec<STerm>, STerm),                 // move? fun a b => c
     App(STerm, STerm),                            // f x
     Pair(STerm, STerm),                           // x, y
     Struct(StructId, Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
@@ -85,10 +86,14 @@ impl Term {
     pub fn uses(&self, s: Sym) -> bool {
         match self {
             Term::Var(x) if *x == s => true,
-            Term::Fun(_, v) => v
+            Term::Fun(_, v, b) => !v
                 .iter()
-                .filter(|(args, b)| !args.iter().any(|x| x.binds(s)) && !b.binds(s))
-                .any(|(args, v)| args.iter().any(|x| x.uses(s)) || v.uses(s)),
+                .any(|a| a.binds(s))
+                && !b.binds(s)
+                && (
+                v.iter().any(|a| a.uses(s))
+                || b.uses(s)
+            ),
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.uses(s) || u.uses(s),
             Term::Binder(_, Some(t)) | Term::Project(t, _) | Term::Cons(_, t) => t.uses(s),
             Term::Struct(_, v) => v.iter().any(|(_, t)| t.uses(s)),
@@ -97,6 +102,7 @@ impl Term {
                 Statement::Expr(e) => e.uses(s),
                 Statement::Def(Def(_, e)) => e.uses(s),
             }),
+            Term::CaseOf(t, v) => t.uses(s) || v.iter().any(|(a, b)| a.uses(s) || b.uses(s)),
             Term::Unit
             | Term::I32(_)
             | Term::Type(_)
@@ -111,9 +117,10 @@ impl Term {
     pub fn binds(&self, s: Sym) -> bool {
         match self {
             Term::Binder(x, _) if *x == s => true,
-            Term::Fun(_, v) => v
-                .iter()
-                .any(|(args, v)| args.iter().any(|x| x.binds(s)) || v.binds(s)),
+            Term::Fun(_, v, b) =>
+                v.iter().any(|a| a.uses(s))
+                || b.uses(s)
+            ,
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.binds(s) || u.binds(s),
             Term::Binder(_, Some(t)) | Term::Project(t, _) => t.binds(s),
             Term::Struct(_, v) => v.iter().any(|(x, t)| **x == s || t.binds(s)),
@@ -122,6 +129,8 @@ impl Term {
                 Statement::Expr(e) => e.binds(s),
                 Statement::Def(Def(x, e)) => **x == s || e.binds(s),
             }),
+            // We use `uses` for the pattern side; it's not perfect, though, since we could have a use in a binder or projection
+            Term::CaseOf(t, v) => t.binds(s) || v.iter().any(|(a, b)| a.uses(s) || b.binds(s)),
             Term::Unit
             | Term::I32(_)
             | Term::Type(_)
@@ -137,10 +146,12 @@ impl Term {
     pub fn traverse(&self, f: impl Fn(&Term) + Copy) {
         f(self);
         match self {
-            Term::Fun(_, v) => v.iter().for_each(|(args, v)| {
-                args.iter().for_each(|x| x.traverse(f));
-                v.traverse(f)
-            }),
+            Term::Fun(_, v, to) => {
+                for i in v {
+                    i.traverse(f);
+                }
+                to.traverse(f);
+            }
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => {
                 t.traverse(f);
                 u.traverse(f);
@@ -175,8 +186,24 @@ impl Pretty for Term {
             Term::Type(0) => Doc::start("Type"),
             Term::Type(i) => Doc::start("Type").add(i),
             Term::Builtin(b) => Doc::start(b),
-            Term::Fun(m, v) if v.len() == 1 => {
-                let (args, body) = v.first().unwrap();
+            Term::CaseOf(val, cases) => Doc::start("case")
+                .style(Style::Keyword)
+                .space()
+                .chain(val.pretty(ctx))
+                .space()
+                .chain(pretty_block(
+                    "of",
+                    cases.iter().map(|(pat, body)| {
+                        pat.pretty(ctx)
+                            .line()
+                            .add("=>")
+                            .line()
+                            .chain(body.pretty(ctx))
+                            .indent()
+                            .group()
+                    }),
+                )),
+            Term::Fun(m, args, body) => {
                 let until_body = if *m {
                     Doc::start("move").space().add("fun")
                 } else {
@@ -202,34 +229,6 @@ impl Pretty for Term {
                 )
                 .prec(Prec::Term)
             }
-            Term::Fun(m, v) => pretty_block(
-                "fun",
-                v.iter().map(|(args, body)| {
-                    let until_body = if *m {
-                        Doc::start("move").space().add("fun")
-                    } else {
-                        Doc::start("fun")
-                    }
-                    .style(Style::Keyword)
-                    .line()
-                    .chain(Doc::intersperse(
-                        args.iter().map(|x| x.pretty(ctx)),
-                        Doc::none().line(),
-                    ))
-                    .indent()
-                    .line()
-                    .add("=>");
-                    Doc::either(
-                        until_body
-                            .clone()
-                            .line()
-                            .add("  ")
-                            .chain(body.pretty(ctx).indent())
-                            .group(),
-                        until_body.space().chain(body.pretty(ctx).indent()).group(),
-                    )
-                }),
-            ),
             Term::App(x, y) => x
                 .pretty(ctx)
                 .nest(Prec::App)

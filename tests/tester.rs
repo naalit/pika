@@ -116,7 +116,7 @@ fn test_fib_intepret() {
         .unwrap()
         .args(&["repl"])
         .write_stdin(
-            r#"fib := fun { 0 => 1; 1 => 1; i:Int => (fib (i - 1)) + (fib (i - 2)) }
+            r#"fib : fun Int => Int = fun x: => case x of { 0 => 1; 1 => 1; i => (fib (i - 1)) + (fib (i - 2)) }
 main := fib 14
 "#,
         )
@@ -178,5 +178,14 @@ fn test_nominal() {
         .args(&["run", "tests/nominal.pk"])
         .assert()
         .stdout("(7, 0)\n")
+        .success();
+}
+
+#[test]
+fn test_gadt() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/gadt.pk"])
+        .assert()
         .success();
 }

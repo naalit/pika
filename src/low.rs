@@ -2,7 +2,7 @@
 //! The process of lowering to LowIR uses Salsa
 //! In `codegen`, we use Inkwell to convert LowIR into LLVM outside of the Salsa framework
 
-use crate::{affine::Mult, common::*, term::Builtin};
+use crate::{affine::Mult, bicheck::TCtx, common::*, term::Builtin};
 use lazy_static::lazy_static;
 use std::ops::{Deref, DerefMut};
 use std::sync::RwLock;
@@ -47,14 +47,14 @@ impl<'a> LCtx<'a> {
 
     /// Gets the monomorphization for the given named function with the given parameter type, if one exists
     pub fn mono(&self, f: Sym, x: &Elab) -> Option<(String, LowTy)> {
-        let mut cloned = self.clone();
+        let mut tctx = TCtx::new(self);
         self.database()
             .monos()
             .get(&f)?
             .iter()
             .find(|v| {
                 let (k, _, _) = &***v;
-                x.subtype_of(k, &mut cloned)
+                x.unify(k, &mut tctx, &mut Vec::new())
             })
             .map(|x| (x.1.clone(), x.2.clone()))
     }
@@ -73,7 +73,7 @@ impl<'a> LCtx<'a> {
             .tys
             .iter()
             .filter_map(|(k, v)| {
-                if **v != Elab::Bottom {
+                if **v != Elab::Bottom && v.is_concrete(self) {
                     Some((*k, v.as_low_ty(self)))
                 } else {
                     None
@@ -270,6 +270,73 @@ pub enum LowIR {
     Call(Box<LowIR>, Box<LowIR>),
 }
 
+fn lower_cons(cons: TagId, ty: &Elab, lctx: &LCtx) -> LowIR {
+    let sid = if let Elab::Data(_, sid, _) = ty.result().head() {
+        *sid
+    } else {
+        panic!("wrong type")
+    };
+    let scope = ScopeId::Struct(sid, Box::new(lctx.scope()));
+    let raw = lctx.bindings().tag_name(cons);
+    let idx = lctx
+        .database()
+        .symbols(scope)
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.raw() == raw)
+        .unwrap()
+        .0 as u64;
+    let result_ty = ty.result().as_low_ty(lctx);
+
+    fn accumulate(t: &Elab, v: &mut Vec<LowTy>, lctx: &LCtx) {
+        match t {
+            Elab::Fun(_, from, to) => {
+                v.push(from.as_low_ty(lctx));
+                accumulate(to, v, lctx);
+            }
+            _ => (),
+        }
+    }
+
+    let mut arg_tys = Vec::new();
+    accumulate(ty, &mut arg_tys, lctx);
+
+    let low_args: Vec<_> = arg_tys
+        .into_iter()
+        .enumerate()
+        .map(|(i, x)| (lctx.bindings_mut().create(format!("_carg{}", i)), x))
+        .collect();
+    let body = LowIR::Variant(
+        idx,
+        result_ty,
+        Box::new(LowIR::Struct(
+            low_args
+                .iter()
+                .map(|(s, _)| (*s, LowIR::Local(*s)))
+                .collect(),
+        )),
+    );
+    let mut i = low_args.len();
+    low_args.iter().rfold(body, |body, (arg_name, arg_ty)| {
+        // Thread parameters through closures as well
+        i -= 1;
+        let up = low_args
+            .iter()
+            .take(i)
+            .map(|(x, y)| (*x, y.clone()))
+            .collect();
+        LowIR::Closure {
+            fun_name: format!("$_cons_closure{}", next_closure()),
+            attrs: Vec::new(),
+            arg_name: *arg_name,
+            arg_ty: arg_ty.clone(),
+            ret_ty: body.get_type(lctx),
+            body: Box::new(body),
+            upvalues: up,
+        }
+    })
+}
+
 impl Elab {
     pub fn low_ty_of(&self, lctx: &mut LCtx) -> Option<LowTy> {
         Some(match self {
@@ -340,64 +407,64 @@ impl Elab {
                     ElabStmt::Def(_, _) => LowTy::Unit,
                 }
             }
-            Elab::Fun(cl, arg_tys, v, ret) => {
+            Elab::Fun(cl, from, body) => {
                 let mut lctx = lctx.clone();
                 lctx.add_clos(&cl);
 
-                let mut cln = Cloner::new(&lctx);
-                if !ret.is_concrete(&lctx) || arg_tys.iter().any(|x| !x.is_concrete(&lctx)) {
+                if !self.get_type(&lctx).is_concrete(&lctx) {
                     // Don't lower this function yet, wait until it's called
                     return None;
                 }
 
-                if v.is_empty() {
-                    panic!("Empty");
-                }
-
-                for (args, _) in v {
-                    for (pat, ty) in args.iter().zip(arg_tys) {
-                        let pat = pat.cloned(&mut cln).whnf(&mut lctx);
-                        pat.compile_match(&mut lctx, &mut Vec::new(), &ty, LowIR::Unit);
-                    }
-                }
-
-                let ret_tys: Vec<_> = v
-                    .iter()
-                    .map(|(_, body)| body.cloned(&mut cln).low_ty_of(&mut lctx).unwrap())
-                    .collect();
-                let ret_ty = ret_tys.first().unwrap().clone();
-                for i in ret_tys {
-                    assert_eq!(i, ret_ty);
-                }
+                let mut cln = Cloner::new(&lctx);
 
                 // Use the closure we already created for upvalues
                 let upvalues: Vec<_> = cl
                     .tys
                     .iter()
-                    .filter(|(_, t)| **t != Elab::Bottom)
-                    .map(|(_, t)| t.cloned(&mut cln).whnf(&mut lctx).as_low_ty(&lctx))
-                    .collect();
-
-                // Now curry the argumentss
-                let arg_tys: Vec<_> = arg_tys.iter().map(|x| x.as_low_ty(&lctx)).collect();
-                let mut i = arg_tys.len();
-                arg_tys
-                    .iter()
-                    // .zip(&params)
-                    .rfold(ret_ty, |ret_ty, arg_ty| {
-                        // Thread parameters through closures as well
-                        i -= 1;
-                        let mut up = upvalues.clone();
-                        up.extend(arg_tys.iter().take(i).cloned());
-                        LowTy::ClosOwn {
-                            from: Box::new(arg_ty.clone()),
-                            to: Box::new(ret_ty),
-                            upvalues: up,
+                    .filter_map(|(k, t)| {
+                        if !lctx.vals.contains_key(k) && **t != Elab::Bottom && t.is_concrete(&lctx)
+                        {
+                            Some(t.cloned(&mut cln).whnf(&mut lctx).as_low_ty(&lctx))
+                        } else {
+                            None
                         }
                     })
+                    .collect();
+
+                let fresh = lctx.bindings_mut().create("_arg".to_string());
+                let param = LowIR::Local(fresh);
+                let _ = from.compile_match(&mut lctx, &from, param);
+                let ret_ty = body.low_ty_of(&mut lctx).unwrap();
+
+                LowTy::ClosOwn {
+                    // fun_name: format!("$_closure{}", next_closure()),
+                    // arg_name: fresh,
+                    from: Box::new(from.as_low_ty(&lctx)),
+                    to: Box::new(ret_ty),
+                    // body: Box::new(body),
+                    upvalues,
+                }
+            }
+            Elab::CaseOf(_, cases, _) => {
+                let mut ty = None;
+                for (pat, body) in cases {
+                    // We need to type the variables from the pattern before we can type the body
+                    pat.lower(LowIR::Unit, lctx);
+
+                    let this_ty = body.low_ty_of(lctx);
+                    if ty.is_none() {
+                        assert!(this_ty.is_some());
+                        ty = this_ty;
+                    } else {
+                        // Make sure all cases have the same type
+                        assert_eq!(ty, this_ty);
+                    }
+                }
+                ty.unwrap()
             }
             Elab::App(f, x) => match f.get_type_rec(lctx) {
-                Elab::Fun(_, _, _, _) => {
+                Elab::Fun(_, _, _) => {
                     if let Some(f) = f.low_ty_of(lctx) {
                         match f {
                             LowTy::ClosOwn { to, .. } => *to,
@@ -408,9 +475,67 @@ impl Elab {
                         // Inline it
                         let s = self.cloned(&mut Cloner::new(&lctx)).whnf(lctx);
                         // Only recurse if it actually did something (it's not an App anymore)
-                        match s {
-                            Elab::App(_, _) => return None,
-                            s => s.low_ty_of(lctx)?,
+                        match &s {
+                            Elab::App(f, _) => {
+                                // If it is still an App, it might be a partial application of a data constructor that makes it monomorphic
+                                if let Elab::Cons(cons, cty) = f.head() {
+                                    let ty = self.get_type(lctx);
+                                    if ty.is_concrete(lctx) {
+                                        // App(App(_, _), _) <-> Fun(_, Fun(_, Fun(_, Fun(_, _))))
+                                        //     App(_, _)     <->        Fun(_, Fun(_, Fun(_, _)))
+                                        //         _         <->               Fun(_, Fun(_, _))
+                                        fn match_len<'e>(a: &Elab, b: &'e Elab) -> &'e Elab {
+                                            match (a, b) {
+                                                (Elab::App(f, _), Elab::Fun(_, _, to)) => {
+                                                    match_len(f, to)
+                                                }
+                                                _ => b,
+                                            }
+                                        }
+                                        let tail = match_len(&s, cty);
+
+                                        let mut tctx = crate::bicheck::TCtx::new(lctx);
+                                        tctx.metas.extend(tail.fvs(lctx));
+                                        let mut tcons = Vec::new();
+                                        if !tail.unify(&ty, &tctx, &mut tcons) {
+                                            panic!(
+                                                "Couldn't unify {} and {}",
+                                                tail.pretty(lctx).ansi_string(),
+                                                ty.pretty(lctx).ansi_string()
+                                            );
+                                        }
+                                        for (k, v) in tcons {
+                                            eprintln!(
+                                                "MetaL {} := {}",
+                                                k.pretty(lctx).ansi_string(),
+                                                v.pretty(lctx).ansi_string()
+                                            );
+                                            lctx.set_val(k, v);
+                                        }
+
+                                        let cons = lower_cons(*cons, cty, lctx);
+                                        fn accumulate(
+                                            cons: LowIR,
+                                            t: &Elab,
+                                            lctx: &mut LCtx,
+                                        ) -> LowIR {
+                                            match t {
+                                                Elab::App(f, x) => {
+                                                    let f = accumulate(cons, f, lctx);
+                                                    LowIR::Call(
+                                                        Box::new(f.borrow(lctx)),
+                                                        Box::new(x.as_low(lctx).unwrap()),
+                                                    )
+                                                }
+                                                _ => cons,
+                                            }
+                                        }
+                                        return Some(accumulate(cons, &s, lctx).get_type(lctx));
+                                    }
+                                }
+                                return None;
+                            }
+                            _ => s.low_ty_of(lctx)?,
                         }
                     }
                 }
@@ -451,9 +576,9 @@ impl Elab {
             // Type erasure
             Elab::Builtin(Builtin::Int) | Elab::Type(_) | Elab::Union(_) => LowTy::Unit,
             Elab::Data(_, _, _) => LowTy::Unit,
-            Elab::Cons(_, t) => {
+            Elab::Cons(cons, t) => {
                 if t.is_concrete(lctx) {
-                    t.as_low_ty(lctx)
+                    lower_cons(*cons, t, lctx).get_type(lctx)
                 } else {
                     return None;
                 }
@@ -555,204 +680,74 @@ impl Elab {
                     LowIR::Let(name, Box::new(val), Box::new(acc))
                 })
             }
-            Elab::Fun(cl, arg_tys, branches, ret) => {
-                if !ret.is_concrete(lctx) || arg_tys.iter().any(|x| !x.is_concrete(lctx)) {
+            Elab::Fun(cl, from, body) => {
+                lctx.add_clos(&cl);
+
+                if !self.get_type(lctx).is_concrete(lctx) {
                     // Don't lower this function yet, wait until it's called
                     return None;
                 }
 
-                lctx.add_clos(cl);
-
-                // A snapshot of the lctxironment, so we know what was defined before the arguments matched
-                let lctx2 = lctx.clone();
-
                 let mut cln = Cloner::new(lctx);
-
-                // Compile the final body - do pattern matching etc.
-                let block_ids: Vec<_> = (0..branches.len()).map(|_| next_block()).collect();
-                let params: Vec<_> = (0..arg_tys.len())
-                    .map(|i| lctx.bindings_mut().create(format!("_arg{}", i)))
-                    .collect();
-                let body = if let Elab::Union(variants) = arg_tys.first().unwrap() {
-                    let tag = LowIR::Project(Box::new(LowIR::Local(params[0])), 0);
-                    let payload = LowIR::Project(Box::new(LowIR::Local(params[0])), 1);
-                    let payload_var = lctx.bindings_mut().create("_payload".to_string());
-
-                    let mut cases: Vec<(BlockId, LowIR)> = Vec::new();
-                    let mut phis: Vec<Vec<Phi>> = vec![Vec::new(); block_ids.len()];
-
-                    // Switch on the incoming variant
-                    for ty in variants.iter() {
-                        // TODO cast payload_var to the right type
-
-                        let block_id = next_block();
-
-                        let which_matched: Vec<(usize, LowIR)> = branches
-                            .iter()
-                            .enumerate()
-                            // Only check the variants that could potentially match
-                            .filter(|(_, (x, _))| x[0].overlap(&ty, &lctx2))
-                            .map(|(i, (args, _))| {
-                                let (arg, rest) = args.split_at(1);
-                                let arg = &arg[0];
-
-                                // If this branch matches a union, upcast to that union type
-                                let param = match arg {
-                                    Elab::Union(to) => if let Some((idx, _)) = to.iter().enumerate().find(|(_, x)| x.subtype_of(ty, lctx)) {
-                                        LowIR::Variant(
-                                            idx as u64,
-                                            arg.as_low_ty(lctx),
-                                            Box::new(LowIR::Local(payload_var))
-                                        )
-                                    } else {
-                                        panic!("no union variant matched but it said it had overlap")
-                                    }
-                                    _ => LowIR::Local(payload_var),
-                                };
-                                // The rest of the arguments are currently matched just with ifs, not a switch
-                                let mut need_phi = Vec::new();
-                                let did_match = arg.compile_match(lctx, &mut need_phi, &arg_tys[0], param);
-                                let did_match = rest.iter().enumerate().fold(did_match, |acc, (i, x)| {
-                                    let x = x.compile_match(lctx, &mut need_phi, &arg_tys[i], LowIR::Local(params[i]));
-                                    LowIR::BoolOp {
-                                        op: BoolOp::And,
-                                        lhs: Box::new(acc),
-                                        rhs: Box::new(x),
-                                    }
-                                });
-                                for (fresh, original) in need_phi {
-                                    if let Some(phi) = phis[i].iter_mut().find(|x| x.result == original) {
-                                        phi.incoming.push((block_id, fresh));
-                                    } else {
-                                        phis[i].push(Phi {
-                                            incoming: vec![(block_id, fresh)],
-                                            result: original
-                                        });
-                                    }
-                                }
-                                (i, did_match)
-                            })
-                            .collect();
-                        // Right fold, since we go with the first matched pattern (left on top)
-                        let case_block =
-                            which_matched
-                                .into_iter()
-                                .rfold(LowIR::Unreachable, |acc, (i, x)| LowIR::If {
-                                    cond: Box::new(x),
-                                    yes: Box::new(LowIR::Branch(block_ids[i])),
-                                    no: Box::new(acc),
-                                });
-                        cases.push((block_id, case_block));
-                    }
-
-                    assert_eq!(block_ids.len(), phis.len());
-
-                    let blocks: Vec<_> = block_ids
-                        .iter()
-                        .copied()
-                        .zip(phis)
-                        .enumerate()
-                        .map(|(i, (id, phis))| {
-                            let body = &branches[i].1;
-                            let body = body.as_low(lctx).unwrap();
-                            (phis, id, body)
-                        })
-                        .collect();
-
-                    let body = LowIR::MultiSwitch {
-                        switch_on: Box::new(tag),
-                        cases,
-                        blocks,
-                    };
-                    LowIR::Let(payload_var, Box::new(payload), Box::new(body))
-                } else {
-                    let mut cln = Cloner::new(lctx);
-                    // Not a union, so no switch, just pattern matching with ifs
-                    branches
-                        .iter()
-                        .map(|(args, body)| {
-                            // Skip upcasting to union, because if the argument was a union type we wouldn't be here
-
-                            let mut need_phi = Vec::new();
-                            let did_match = args.iter().enumerate().fold(
-                                LowIR::BoolConst(true),
-                                |acc, (i, x)| {
-                                    let x = x.cloned(&mut cln).whnf(lctx);
-                                    let x = x.compile_match(
-                                        lctx,
-                                        &mut need_phi,
-                                        &arg_tys[i],
-                                        LowIR::Local(params[i]),
-                                    );
-                                    LowIR::BoolOp {
-                                        op: BoolOp::And,
-                                        lhs: Box::new(acc),
-                                        rhs: Box::new(x),
-                                    }
-                                },
-                            );
-                            // We're not going to use actual phis, so just rename the variables back
-                            let body = need_phi.into_iter().fold(
-                                body.cloned(&mut cln).as_low(lctx).unwrap(),
-                                |body, (fresh, original)| {
-                                    LowIR::Let(
-                                        original,
-                                        Box::new(LowIR::Local(fresh)),
-                                        Box::new(body),
-                                    )
-                                },
-                            );
-                            (did_match, body)
-                        })
-                        // Right fold, since we go with the first matched pattern (left on top)
-                        .rfold(LowIR::Unreachable, |acc, (did_match, body)| LowIR::If {
-                            cond: Box::new(did_match),
-                            // Inline branches (in LowIR) instead of putting them in blocks because they're not duplicated
-                            yes: Box::new(body),
-                            no: Box::new(acc),
-                        })
-                };
 
                 // Use the closure we already created for upvalues
                 let upvalues: Vec<_> = cl
                     .tys
                     .iter()
-                    .filter(|(_, t)| **t != Elab::Bottom)
-                    .map(|(k, t)| (*k, t.cloned(&mut cln).whnf(lctx).as_low_ty(lctx)))
-                    .collect();
-
-                // Now curry the arguments
-                let arg_tys: Vec<_> = arg_tys.into_iter().map(|x| x.as_low_ty(lctx)).collect();
-                let mut i = arg_tys.len();
-                arg_tys
-                    .iter()
-                    .zip(&params)
-                    .rfold(body, |body, (arg_ty, &arg_name)| {
-                        // Thread parameters through closures as well
-                        i -= 1;
-                        let mut up = upvalues.clone();
-                        up.extend(
-                            params
-                                .iter()
-                                .zip(arg_tys.iter())
-                                .take(i)
-                                .map(|(x, y)| (*x, y.clone())),
-                        );
-                        LowIR::Closure {
-                            fun_name: format!("$_closure{}", next_closure()),
-                            attrs: Vec::new(),
-                            arg_name,
-                            arg_ty: arg_ty.clone(),
-                            ret_ty: body.get_type(lctx),
-                            body: Box::new(body),
-                            upvalues: up,
+                    .filter_map(|(k, t)| {
+                        if !lctx.vals.contains_key(k) && **t != Elab::Bottom && t.is_concrete(lctx)
+                        {
+                            Some((*k, t.cloned(&mut cln).whnf(lctx).as_low_ty(lctx)))
+                        } else {
+                            None
                         }
                     })
+                    .collect();
+
+                let fresh = lctx.bindings_mut().create("_arg".to_string());
+                let param = LowIR::Local(fresh);
+                let nothing = from.compile_match(lctx, &from, param);
+
+                let body = body.as_low(lctx).unwrap();
+                // We ignore `nothing`, but we need to chain them
+                let body = LowIR::Let(
+                    lctx.bindings_mut().create("_".to_string()),
+                    Box::new(nothing),
+                    Box::new(body),
+                );
+
+                let ret_ty = body.get_type(&lctx);
+                LowIR::Closure {
+                    fun_name: format!("$_closure{}", next_closure()),
+                    attrs: Vec::new(),
+                    arg_name: fresh,
+                    arg_ty: from.as_low_ty(lctx),
+                    ret_ty,
+                    body: Box::new(body),
+                    upvalues,
+                }
+            }
+            Elab::CaseOf(val, cases, _) => {
+                let val = val.as_low(lctx)?;
+                let ty = val.get_type(lctx);
+                let fresh = lctx.bindings_mut().create("$_scrutinee".to_string());
+                lctx.set_low_ty(fresh, ty);
+                let param = LowIR::Local(fresh);
+
+                let body = cases.iter().rfold(LowIR::Unreachable, |rest, (pat, body)| {
+                    let did_match = pat.lower(param.clone(), lctx);
+                    let body = body.as_low(lctx).unwrap();
+                    LowIR::If {
+                        cond: Box::new(did_match),
+                        yes: Box::new(body),
+                        no: Box::new(rest),
+                    }
+                });
+                LowIR::Let(fresh, Box::new(val), Box::new(body))
             }
             Elab::App(f, x) => match f.get_type_rec(lctx) {
-                Elab::Fun(cl, mut args, _, _) => {
+                Elab::Fun(cl, from, _) => {
                     lctx.add_clos(&cl);
-                    let from = args.remove(0);
                     // In case it has variables that already have values etc.
                     let from = from.normal(lctx);
 
@@ -770,7 +765,7 @@ impl Elab {
                                 if let Some((mono, ty)) = lctx.mono(*name, x) {
                                     return Some(LowIR::TypedGlobal(ty, mono));
                                 } else {
-                                    let s = self.cloned(&mut Cloner::new(&lctx)).whnf(lctx);
+                                    let s = self.cloned(&mut Cloner::new(lctx)).whnf(lctx);
                                     // Only recurse if it actually did something (it's not an App anymore)
                                     match s {
                                         Elab::App(_, _) => return None,
@@ -802,11 +797,74 @@ impl Elab {
                             }
                             _ => {
                                 // Inline it
-                                let s = self.cloned(&mut Cloner::new(&lctx)).whnf(lctx);
+                                let s = self.cloned(&mut Cloner::new(lctx)).whnf(lctx);
                                 // Only recurse if it actually did something (it's not an App anymore)
-                                match s {
-                                    Elab::App(_, _) => return None,
-                                    s => s.as_low(lctx)?,
+                                match &s {
+                                    Elab::App(f, _) => {
+                                        // If it is still an App, it might be a partial application of a data constructor that makes it monomorphic
+                                        if let Elab::Cons(cons, cty) = f.head() {
+                                            let ty = self.get_type(lctx);
+                                            if ty.is_concrete(lctx) {
+                                                // App(App(_, _), _) <-> Fun(_, Fun(_, Fun(_, Fun(_, _))))
+                                                //     App(_, _)     <->        Fun(_, Fun(_, Fun(_, _)))
+                                                //         _         <->               Fun(_, Fun(_, _))
+                                                fn match_len<'e>(
+                                                    a: &Elab,
+                                                    b: &'e Elab,
+                                                ) -> &'e Elab
+                                                {
+                                                    match (a, b) {
+                                                        (Elab::App(f, _), Elab::Fun(_, _, to)) => {
+                                                            match_len(f, to)
+                                                        }
+                                                        _ => b,
+                                                    }
+                                                }
+                                                let tail = match_len(&s, cty);
+
+                                                let mut tctx = crate::bicheck::TCtx::new(lctx);
+                                                tctx.metas.extend(tail.fvs(lctx));
+                                                let mut tcons = Vec::new();
+                                                if !tail.unify(&ty, &tctx, &mut tcons) {
+                                                    panic!(
+                                                        "Couldn't unify {} and {}",
+                                                        tail.pretty(lctx).ansi_string(),
+                                                        ty.pretty(lctx).ansi_string()
+                                                    );
+                                                }
+                                                for (k, v) in tcons {
+                                                    eprintln!(
+                                                        "MetaL {} := {}",
+                                                        k.pretty(lctx).ansi_string(),
+                                                        v.pretty(lctx).ansi_string()
+                                                    );
+                                                    lctx.set_val(k, v);
+                                                }
+
+                                                let cons = lower_cons(*cons, cty, lctx);
+                                                fn accumulate(
+                                                    cons: LowIR,
+                                                    t: &Elab,
+                                                    lctx: &mut LCtx,
+                                                ) -> LowIR
+                                                {
+                                                    match t {
+                                                        Elab::App(f, x) => {
+                                                            let f = accumulate(cons, f, lctx);
+                                                            LowIR::Call(
+                                                                Box::new(f.borrow(lctx)),
+                                                                Box::new(x.as_low(lctx).unwrap()),
+                                                            )
+                                                        }
+                                                        _ => cons,
+                                                    }
+                                                }
+                                                return Some(accumulate(cons, &s, lctx));
+                                            }
+                                        }
+                                        return None;
+                                    }
+                                    _ => s.as_low(lctx)?,
                                 }
                             }
                         }
@@ -876,77 +934,7 @@ impl Elab {
                 if !t.is_concrete(lctx) {
                     return None;
                 }
-                let mut t = t.cloned(&mut Cloner::new(lctx)).whnf(lctx);
-                match &mut t {
-                    Elab::Data(_, sid, _) => LowIR::Variant(
-                        lctx.database()
-                            .symbols(ScopeId::Struct(*sid, Box::new(lctx.scope())))
-                            .iter()
-                            .enumerate()
-                            .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
-                            .unwrap()
-                            .0 as u64,
-                        t.as_low_ty(lctx),
-                        Box::new(LowIR::Unit),
-                    ),
-                    Elab::Fun(_, _, v, _) => {
-                        assert_eq!(v.len(), 1);
-                        let (args, result) = v.pop().unwrap();
-                        let result = result.whnf(lctx);
-                        let idx = if let Elab::Data(_, sid, _) = &result {
-                            lctx.database()
-                                .symbols(ScopeId::Struct(*sid, Box::new(lctx.scope())))
-                                .iter()
-                                .enumerate()
-                                .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
-                                .unwrap()
-                                .0 as u64
-                        } else {
-                            panic!("wrong type {}", result.pretty(lctx).ansi_string());
-                        };
-                        let low_args: Vec<_> = args
-                            .iter()
-                            .enumerate()
-                            .map(|(i, x)| {
-                                (
-                                    lctx.bindings_mut().create(format!("_carg{}", i)),
-                                    x.as_low_ty(lctx),
-                                )
-                            })
-                            .collect();
-                        let body = LowIR::Variant(
-                            idx,
-                            result.as_low_ty(lctx),
-                            Box::new(LowIR::Struct(
-                                low_args
-                                    .iter()
-                                    .map(|(s, _)| (*s, LowIR::Local(*s)))
-                                    .collect(),
-                            )),
-                        );
-                        let mut i = low_args.len();
-                        low_args.iter().rfold(body, |body, (arg_name, arg_ty)| {
-                            // Thread parameters through closures as well
-                            i -= 1;
-                            let up = low_args
-                                .iter()
-                                .take(i)
-                                .map(|(x, y)| (*x, y.clone()))
-                                .collect();
-                            LowIR::Closure {
-                                fun_name: format!("$_cons_closure{}", next_closure()),
-                                attrs: Vec::new(),
-                                arg_name: *arg_name,
-                                arg_ty: arg_ty.clone(),
-                                ret_ty: body.get_type(lctx),
-                                body: Box::new(body),
-                                upvalues: up,
-                            }
-                        })
-                    }
-                    // TODO `Pair a`
-                    _ => panic!("wrong type"),
-                }
+                lower_cons(*id, t, lctx)
             }
             _ => panic!("{:?} not supported (ir)", self),
         })
@@ -975,13 +963,11 @@ impl Elab {
             | Elab::Data(_, _, _)
             | Elab::Cons(_, _) => true,
             Elab::Binder(_, t) => t.is_concrete(lctx),
-            Elab::Fun(_, _, v, _) => v
-                .iter()
-                .all(|(a, b)| a.iter().all(|a| a.is_concrete(lctx)) && b.is_concrete(lctx)),
+            Elab::Fun(_, from, to) => from.is_concrete(lctx) && to.is_concrete(lctx),
             Elab::Union(v) => v.iter().all(|x| x.is_concrete(lctx)),
             Elab::App(f, x) => f.is_concrete(lctx) && x.is_concrete(lctx),
             // This shouldn't happen unless the first param is neutral and thus not concrete
-            Elab::Project(_, _) | Elab::Block(_) | Elab::Top => false,
+            Elab::Project(_, _) | Elab::Block(_) | Elab::Top | Elab::CaseOf(_, _, _) => false,
         }
     }
 
@@ -1005,23 +991,25 @@ impl Elab {
             Elab::Builtin(Builtin::Int) | Elab::I32(_) => LowTy::Int(32),
             Elab::Unit => LowTy::Unit,
             Elab::Binder(_, t) => t.as_low_ty(lctx),
-            Elab::Fun(cl, from, _, to) => {
+            Elab::Fun(cl, from, to) => {
+                eprintln!("Low-Ty-ing {}", self.pretty(lctx).ansi_string());
+
                 let mut lctx = lctx.clone();
                 lctx.add_clos(&cl);
 
                 // TODO do we need whnf here?
-                let to = to
-                    .cloned(&mut Cloner::new(&lctx))
-                    .whnf(&mut lctx)
+                let from = from
+                    // .cloned(&mut Cloner::new(&lctx))
+                    // .whnf(&mut lctx)
                     .as_low_ty(&lctx);
-
-                from.iter().rfold(to, |ret, arg| {
-                    let arg = arg.as_low_ty(&lctx);
-                    LowTy::ClosRef {
-                        from: Box::new(arg),
-                        to: Box::new(ret),
-                    }
-                })
+                let to = to
+                    // .cloned(&mut Cloner::new(&lctx))
+                    // .whnf(&mut lctx)
+                    .as_low_ty(&lctx);
+                LowTy::ClosRef {
+                    from: Box::new(from),
+                    to: Box::new(to),
+                }
             }
             Elab::Pair(a, b) => LowTy::Struct(vec![a.as_low_ty(lctx), b.as_low_ty(lctx)]),
             Elab::StructInline(v) => {
@@ -1052,31 +1040,34 @@ impl Elab {
                                     //   B : fun (a:Type) a => T a
                                     // ```
                                     // if you have a `T Bool`, we represent that as just `{{}, Bool}` since we know it's B and that a is Bool
-                                    let result = match &t {
-                                        Elab::Data(_, _, _) => &t,
-                                        Elab::Fun(_, _, v, _) => &v[0].1,
-                                        _ => panic!("wrong type"),
-                                    };
+                                    let result = t.result();
                                     let mut tctx = crate::bicheck::TCtx::new(&lctx);
                                     tctx.metas.extend(result.fvs(&tctx));
                                     let mut tcons = Vec::new();
                                     if !result.unify(self, &tctx, &mut tcons) {
-                                        return None;
+                                        // TODO: this narrowing of GADTs based on type works here, but not in pattern matching yet. So when it does, turn it on here.
+                                        // return None;
                                     }
                                     for (k, v) in tcons {
                                         lctx.set_val(k, v);
                                     }
 
-                                    match &t {
-                                        Elab::Data(_, _, _) => Some(LowTy::Unit),
-                                        Elab::Fun(_, _, v, _) => {
-                                            assert_eq!(v.len(), 1);
-                                            Some(LowTy::Struct(
-                                                v[0].0.iter().map(|x| x.as_low_ty(&lctx)).collect(),
-                                            ))
+                                    fn accumulate(t: &Elab, v: &mut Vec<LowTy>, lctx: &LCtx) {
+                                        match t {
+                                            Elab::Fun(_, from, to) => {
+                                                v.push(from.as_low_ty(lctx));
+                                                accumulate(to, v, lctx);
+                                            }
+                                            _ => (),
                                         }
-                                        _ => panic!("wrong type"),
                                     }
+                                    let mut v = Vec::new();
+                                    accumulate(&t, &mut v, &lctx);
+                                    Some(if v.is_empty() {
+                                        LowTy::Unit
+                                    } else {
+                                        LowTy::Struct(v)
+                                    })
                                 })
                                 .collect(),
                         )
@@ -1094,37 +1085,39 @@ impl Elab {
                         .symbols(scope.clone())
                         .iter()
                         .map(|x| lctx.database().elab(scope.clone(), **x).unwrap())
-                        .map(|x| match x.get_type(lctx).whnf(&mut lctx.ectx.clone()) {
-                            Elab::Data(_, _, _) => LowTy::Unit,
-                            Elab::Fun(_, _, v, _) => {
-                                assert_eq!(v.len(), 1);
-                                LowTy::Struct(v[0].0.iter().map(|x| x.as_low_ty(lctx)).collect())
+                        .filter_map(|x| {
+                            let t = x.get_type(lctx);
+
+                            fn accumulate(t: &Elab, v: &mut Vec<LowTy>, lctx: &LCtx) {
+                                match t {
+                                    Elab::Fun(_, from, to) => {
+                                        v.push(from.as_low_ty(lctx));
+                                        accumulate(to, v, lctx);
+                                    }
+                                    _ => (),
+                                }
                             }
-                            _ => panic!("wrong type"),
+                            let mut v = Vec::new();
+                            accumulate(&t, &mut v, lctx);
+                            Some(if v.is_empty() {
+                                LowTy::Unit
+                            } else {
+                                LowTy::Struct(v)
+                            })
                         })
                         .collect(),
                 )
             }
-            Elab::Cons(_, t) => match &**t {
-                t @ Elab::Data(_, _, _) => t.as_low_ty(lctx),
-                Elab::Fun(_, _, v, _) => {
-                    assert_eq!(v.len(), 1);
-                    v[0].1.as_low_ty(lctx)
-                }
-                _ => panic!("wrong type"),
-            },
             _ => panic!("{} is not supported", self.pretty(lctx).ansi_string()),
         }
     }
 
-    /// Compile this pattern to code that binds all binders and returns whether it matched
+    /// Compile this pattern to code that binds all binders and returns ()
     ///
     /// This function clones `param`, so it should be a `LowIR::Local`
     fn compile_match(
         &self,
         lctx: &mut LCtx,
-        // `(fresh var, original var)` so we can do `original = phi [fresh0 case0] [fresh1 case1]`
-        need_phi: &mut Vec<(Sym, Sym)>,
         // The parameter type, which might need to be casted etc.
         ty: &Elab,
         param: LowIR,
@@ -1134,97 +1127,19 @@ impl Elab {
             t => t,
         };
         match (self, ty) {
-            (Elab::Cons(id, t), _) => {
-                let sid = match &**t {
-                    Elab::Data(_, sid, _) => *sid,
-                    Elab::Fun(_, _, v, _) if v.len() == 1 => match &v[0].1.head() {
-                        Elab::Data(_, sid, _) => *sid,
-                        _ => panic!("wrong type"),
-                    },
-                    _ => panic!("wrong type"),
-                };
-                let tag_size = tag_width(
-                    &lctx
-                        .database()
-                        .symbols(ScopeId::Struct(sid, Box::new(lctx.scope()))),
-                );
-                if tag_size == 0 {
-                    LowIR::BoolConst(true)
-                } else {
-                    let idx = lctx
-                        .database()
-                        .symbols(ScopeId::Struct(sid, Box::new(lctx.scope())))
-                        .iter()
-                        .enumerate()
-                        .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
-                        .unwrap()
-                        .0 as u64;
-                    let tag = LowIR::Project(Box::new(param), 0);
-
-                    LowIR::CompOp {
-                        op: CompOp::Eq,
-                        lhs: Box::new(LowIR::SizedIntConst(tag_size, idx)),
-                        rhs: Box::new(tag.clone()),
-                    }
-                }
-            }
             // TODO var case that checks both `lctx` and `need_phi`
             (Elab::Binder(x, t), _) => {
-                let fresh = lctx.bindings_mut().fresh(*x);
                 let lty = t.as_low_ty(&lctx);
                 lctx.set_low_ty(*x, lty.clone());
-                lctx.set_low_ty(fresh, lty);
-                need_phi.push((fresh, *x));
                 LowIR::Let(
-                    fresh,
+                    *x,
                     Box::new(param.clone()),
-                    Box::new(t.compile_match(lctx, need_phi, ty, param)),
+                    Box::new(t.compile_match(lctx, ty, param)),
                 )
-            }
-            (Elab::Union(_), Elab::Union(_)) => {
-                if self == ty {
-                    LowIR::BoolConst(true)
-                } else {
-                    let param = param.cast(ty, self, lctx);
-                    self.compile_match(lctx, need_phi, self, param)
-                }
-            }
-            (Elab::Union(v), _) => {
-                let (idx, t) = v
-                    .iter()
-                    .enumerate()
-                    .find(|(_, x)| ty.subtype_of(x, lctx))
-                    .unwrap();
-                let param = LowIR::Variant(idx as u64, self.as_low_ty(lctx), Box::new(param));
-                t.compile_match(lctx, need_phi, t, param)
-            }
-            (_, Elab::Union(v)) => {
-                let tag = LowIR::Project(Box::new(param.clone()), 0);
-                let tag_size = tag_width(v);
-                let good_variant = v
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, x)| x.overlap(&self, lctx))
-                    .fold(LowIR::BoolConst(false), |acc, (i, _)| LowIR::BoolOp {
-                        op: BoolOp::Or,
-                        lhs: Box::new(LowIR::CompOp {
-                            op: CompOp::Eq,
-                            lhs: Box::new(LowIR::SizedIntConst(tag_size, i as u64)),
-                            rhs: Box::new(tag.clone()),
-                        }),
-                        rhs: Box::new(acc),
-                    });
-                let casted = param.cast(ty, self, lctx);
-                let b = self.compile_match(lctx, need_phi, self, casted);
-                LowIR::BoolOp {
-                    op: BoolOp::And,
-                    lhs: Box::new(good_variant),
-                    rhs: Box::new(b),
-                }
             }
             (Elab::StructIntern(i), _) => ScopeId::Struct(*i, Box::new(lctx.scope()))
                 .inline(lctx)
-                .compile_match(lctx, need_phi, ty, param),
+                .compile_match(lctx, ty, param),
             (Elab::StructInline(v), Elab::StructInline(tv)) => {
                 let mut v: Vec<_> = v.iter().map(|(name, val)| (*name, val)).collect();
                 v.sort_by_key(|(s, _)| s.raw());
@@ -1234,104 +1149,28 @@ impl Elab {
                 let mut body = LowIR::BoolConst(true);
                 for (i, ((_name, val), (_, ty))) in v.into_iter().zip(tv).enumerate() {
                     let param = LowIR::Project(Box::new(param.clone()), i);
-                    body = LowIR::BoolOp {
-                        op: BoolOp::And,
-                        lhs: Box::new(body),
-                        rhs: Box::new(val.compile_match(lctx, need_phi, ty, param)),
-                    };
+                    let rest = val.compile_match(lctx, ty, param);
+                    body = LowIR::Let(
+                        lctx.bindings_mut().create("_".into()),
+                        Box::new(body),
+                        Box::new(rest),
+                    );
                 }
                 body
             }
             (Elab::Pair(x, y), Elab::Pair(tx, ty)) => {
                 let x_param = LowIR::Project(Box::new(param.clone()), 0);
                 let y_param = LowIR::Project(Box::new(param), 1);
-                let x = x.compile_match(lctx, need_phi, tx, x_param);
-                let y = y.compile_match(lctx, need_phi, ty, y_param);
-                LowIR::BoolOp {
-                    op: BoolOp::And,
-                    lhs: Box::new(x),
-                    rhs: Box::new(y),
-                }
+                let x = x.compile_match(lctx, tx, x_param);
+                let y = y.compile_match(lctx, ty, y_param);
+                LowIR::Let(
+                    lctx.bindings_mut().create("_".into()),
+                    Box::new(x),
+                    Box::new(y),
+                )
             }
-            (Elab::App(f, x), Elab::App(tf, tx)) if tf.cons().is_some() => match &**f {
-                // We know it matces, since the type is App and not Data
-                // TODO is it a struct at this point, though?
-                Elab::Cons(_, _) => x.compile_match(lctx, need_phi, tx, param),
-                Elab::App(_, _) => {
-                    let f_param = LowIR::Project(Box::new(param.clone()), 0);
-                    let x_param = LowIR::Project(Box::new(param), 1);
-                    let f = f.compile_match(lctx, need_phi, tf, f_param);
-                    let x = x.compile_match(lctx, need_phi, tx, x_param);
-                    LowIR::BoolOp {
-                        op: BoolOp::And,
-                        lhs: Box::new(f),
-                        rhs: Box::new(x),
-                    }
-                }
-                _ => panic!("not a function"),
-            },
-            (Elab::App(f, x), _) => {
-                let sid = match ty.head() {
-                    Elab::Data(_, sid, _) => sid,
-                    _ => panic!("wrong type"),
-                };
-                let tid = f.cons().unwrap();
-                let scope = ScopeId::Struct(*sid, Box::new(lctx.scope()));
-                let sym = **lctx
-                    .database()
-                    .symbols(scope.clone())
-                    .iter()
-                    .find(|x| x.raw() == lctx.bindings().tag_name(tid))
-                    .unwrap();
-                let cty = lctx.database().elab(scope, sym).unwrap().get_type(lctx);
-                let (x_param, tx) = match cty {
-                    Elab::Fun(_, _, mut v, _) if v.len() == 1 => {
-                        let (mut args, _) = v.pop().unwrap();
-                        // We leave the type as `Data(...)` for the head, so we need to know where we are
-                        // If there aren't any `App`s ahead of us, we're at the first parameter
-                        let idx = f.spine_len();
-                        // param.payload[i]
-                        let x_param = LowIR::Project(
-                            Box::new(LowIR::Project(Box::new(param.clone()), 1)),
-                            idx,
-                        );
-                        let tx = args.remove(idx);
-                        (x_param, tx)
-                    }
-                    _ => panic!("wrong type"),
-                };
-
-                // TODO bitcast
-
-                // Leave the type as `Data(...)` for the head, so it can make sure the tag matches
-                // We also pass the parameter unchanged for the head, so it can extract the tag etc.
-                let f = f.compile_match(lctx, need_phi, ty, param);
-                let x = x.compile_match(lctx, need_phi, &tx, x_param);
-
-                LowIR::BoolOp {
-                    op: BoolOp::And,
-                    lhs: Box::new(f),
-                    rhs: Box::new(x),
-                }
-            }
-            (Elab::I32(_), _) => LowIR::CompOp {
-                op: CompOp::Eq,
-                // This does the necessary bit-fiddling to make it a u64
-                lhs: Box::new(self.as_low(lctx).unwrap()),
-                rhs: Box::new(param),
-            },
             // Don't bind anything
-            // These don't need to check if they match, because something whose type matches it will always match
-            // and we checked that the type matches already, using a Union if it doesn't
-            (Elab::Type(_), _)
-            | (Elab::Builtin(_), _)
-            | (Elab::Unit, _)
-            | (Elab::Fun(_, _, _, _), _)
-            | (Elab::Data(_, _, _), _) => LowIR::BoolConst(true),
-            _ => panic!(
-                "pattern {} can't be compiled yet",
-                self.pretty(lctx).ansi_string()
-            ),
+            _ => LowIR::BoolConst(true),
         }
     }
 }
@@ -1373,12 +1212,15 @@ impl LowIR {
             (cur, ty) if cur == ty => self,
             (_, Elab::Binder(_, t)) => self.cast(from, t, lctx),
             (Elab::Union(from), Elab::Union(vto)) => {
+                let mut tctx = TCtx::new(lctx);
                 let fresh = lctx.bindings_mut().create("union".to_string());
                 let tag = LowIR::Project(Box::new(LowIR::Local(fresh)), 0);
                 let mut cases: Vec<LowIR> = Vec::new();
                 for ty in from.iter() {
-                    if let Some((idx, _)) =
-                        vto.iter().enumerate().find(|(_, x)| x.subtype_of(ty, lctx))
+                    if let Some((idx, _)) = vto
+                        .iter()
+                        .enumerate()
+                        .find(|(_, x)| x.unify(ty, &mut tctx, &mut Vec::new()))
                     {
                         cases.push(LowIR::Variant(
                             idx as u64,
@@ -1396,8 +1238,9 @@ impl LowIR {
                 )
             }
             (_, Elab::Union(vto)) => {
+                let mut tctx = TCtx::new(lctx);
                 for (i, t) in vto.iter().enumerate() {
-                    if from.subtype_of(t, lctx) {
+                    if from.unify(t, &mut tctx, &mut Vec::new()) {
                         let r = self.cast(from, t, lctx);
                         return LowIR::Variant(i as u64, to.as_low_ty(lctx), Box::new(r));
                     }

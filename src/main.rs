@@ -8,6 +8,7 @@ mod error;
 mod lexer;
 mod low;
 mod options;
+mod pattern;
 mod printing;
 mod query;
 mod repl;
@@ -22,7 +23,7 @@ use crate::printing::*;
 use crate::query::*;
 use crate::repl::*;
 use arg::Args;
-use elab::ECtx;
+use bicheck::TCtx;
 use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
@@ -137,28 +138,34 @@ fn main() {
                                     .expect("Failed to create LLVM execution engine");
 
                                 let scoped = (ScopeId::File(file), &db);
-                                let mut ectx = ECtx::new(&scoped);
+                                let mut tctx = TCtx::new(&scoped);
 
                                 use crate::elab::Elab;
                                 use crate::term::Builtin;
                                 match db
                                     .elab(ScopeId::File(file), **main)
                                     .unwrap()
-                                    .get_type(&ectx)
+                                    .get_type(&scoped)
                                 {
-                                    x if x.subtype_of(&Elab::Builtin(Builtin::Int), &mut ectx) => unsafe {
+                                    x if x.unify(
+                                        &Elab::Builtin(Builtin::Int),
+                                        &mut tctx,
+                                        &mut Vec::new(),
+                                    ) =>
+                                    unsafe {
                                         let main_fun: inkwell::execution_engine::JitFunction<
                                             unsafe extern "C" fn() -> i32,
                                         > = engine.get_function(&main_mangled).unwrap();
                                         let result = main_fun.call();
                                         println!("{}", result);
-                                    },
-                                    x if x.subtype_of(
+                                    }
+                                    x if x.unify(
                                         &Elab::Pair(
                                             Box::new(Elab::Builtin(Builtin::Int)),
                                             Box::new(Elab::Builtin(Builtin::Int)),
                                         ),
-                                        &mut ectx,
+                                        &mut tctx,
+                                        &mut Vec::new(),
                                     ) =>
                                     unsafe {
                                         // Rust aligns (i32, i32) differently than LLVM does, so values .1 and .3 in the result are padding

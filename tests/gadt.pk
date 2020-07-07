@@ -1,0 +1,18 @@
+# This is a very simple GADT, but is actually a GADT and not just an ADT
+type GADT : fun Type => Type of
+  One : fun () => GADT ()
+  Two : fun Int => GADT Int
+
+# Here Pika needs to figure out that GADT.One is impossible for GADT Int, so this is exhaustive
+f := fun x: GADT Int => case x of
+  GADT.Two i => i
+
+# Here it needs to figure out that in one branch a is (), and in the other it's Int
+g : fun (a:Type) (GADT a) => a = fun _ x: => case x of
+  GADT.One () => ()
+  GADT.Two i => i
+
+# And finally, here it needs to figure out that the other argument has type Int in one branch
+h := fun (a: Type) (x: GADT a) (y: a) => case x of
+  GADT.Two i => i + y
+  GADT.One () => 12

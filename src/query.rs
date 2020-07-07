@@ -94,7 +94,7 @@ pub trait MainGroup: MainExt + salsa::Database {
 fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
     fn add_term(t: &Term, db: &impl MainGroup, v: &mut Vec<ScopeId>, scope: ScopeId) {
         match t {
-            // This is only used for lowering, and data constructors aren't lowered
+            // This is only used for lowering, and data types aren't lowered
             Term::Data(_, _, _, _) => (),
             Term::Struct(s, _) => add_scope(db, v, ScopeId::Struct(*s, Box::new(scope))),
             Term::App(a, b) | Term::Pair(a, b) | Term::The(a, b) => {
@@ -106,10 +106,14 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
                 Statement::Expr(x) | Statement::Def(Def(_, x)) => add_term(x, db, v, scope.clone()),
             }),
             Term::Union(t) => t.iter().for_each(|x| add_term(x, db, v, scope.clone())),
-            Term::Fun(_, t) => t.iter().for_each(|(args, body)| {
-                args.iter().for_each(|x| add_term(x, db, v, scope.clone()));
-                add_term(body, db, v, scope.clone());
-            }),
+            // There shouldn't be any scopes needing lowering in function arguments
+            Term::Fun(_, _, t) => add_term(t, db, v, scope),
+            Term::CaseOf(val, cases) => {
+                add_term(val, db, v, scope.clone());
+                cases
+                    .iter()
+                    .for_each(|(_, body)| add_term(body, db, v, scope.clone()));
+            }
             Term::Unit
             | Term::Var(_)
             | Term::I32(_)

@@ -4,9 +4,11 @@ type Option: fun Type => Type of
   Some : fun (a:Type) a => Option a
 
 # This now works!
-unwrap_or : fun (t:Type) (Option t) t => t = fun
-  (_:) (Option.Some Type (a:)) (_:)  => a
-  (_:) (Option.None Type) (default:) => default
+unwrap_or : fun (t:Type) (Option t) t => t = fun _ x default: => case x of
+  Option.Some _ a => a
+  Option.None _ => default
+  # (_:) (Option.Some Type (a:)) (_:)  => a
+  # (_:) (Option.None Type) (default:) => default
 
 # Unions
 f := fun (Int | ()) => ()
@@ -35,4 +37,6 @@ k := g 3
 a := fun ((Int, Int) | Int | ()) => ()
 b := fun x: Int | () => a x
 
+ui := unwrap_or Int
+si := Option.Some Int 3
 main : Int = unwrap_or Int (Option.Some Int 3) 12

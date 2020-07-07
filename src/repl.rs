@@ -235,16 +235,17 @@ pub fn run_repl(options: &Options) {
                     }
                 }
 
-                if options.show_llvm {
-                    // Generate LLVM and print out the module, for now
+                if options.show_llvm || options.show_low_ir {
                     let module = db.low_mod(file);
-                    let context = inkwell::context::Context::create();
-                    let llvm = module.codegen(&mut crate::codegen::CodegenCtx::new(&context));
-                    llvm.print_to_stderr();
+                    if options.show_llvm {
+                        // Generate LLVM and print out the module
+                        let context = inkwell::context::Context::create();
+                        let llvm = module.codegen(&mut crate::codegen::CodegenCtx::new(&context));
+                        llvm.print_to_stderr();
 
-                    // For now we verify it but don't run it
-                    if let Err(e) = llvm.verify() {
-                        println!("Verification error: {}", e);
+                        if let Err(e) = llvm.verify() {
+                            println!("Verification error: {}", e);
+                        }
                     }
                 }
 

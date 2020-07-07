@@ -3,15 +3,7 @@ type ABC of
   B
   C
 
-# A subset of ABC
-AB := ABC.A | ABC.B
-
-# This one's good (tested in `match.pk` with `Bool`s)
-f : fun AB => () = fun
-  ABC.A => ()
-  ABC.B => ()
-
-# This one is an error
-g : fun ABC => () = fun
+# Error: non-exhaustive
+g : fun ABC => () = fun x: => case x of
   ABC.A => ()
   ABC.B => ()

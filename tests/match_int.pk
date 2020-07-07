@@ -1,8 +1,8 @@
 # Can we match on int literals?
 f : fun Int => Int
-  = fun
+  = fun i: => case i of
     3 => 12
-    i:Int => i
+    a => a
 
 # (12, 4)
 main := (f 3, f 4)

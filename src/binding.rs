@@ -107,17 +107,29 @@ impl Pretty for Sym {
     }
 }
 
-/// They used a variable that wasn't in scope
 #[derive(Clone, Debug)]
-pub struct NameError(Spanned<String>);
+pub enum NameError {
+    /// They used a variable that wasn't in scope
+    NotFound(Spanned<String>),
+    NotPattern(Span),
+}
+
 impl NameError {
     pub fn to_error(&self, file: FileId) -> Error {
-        Error::new(
-            file,
-            format!("Error: variable not found: {}", *self.0),
-            self.0.span(),
-            "not found",
-        )
+        match self {
+            NameError::NotFound(s) => Error::new(
+                file,
+                format!("variable not found: {}", **s),
+                s.span(),
+                "not found",
+            ),
+            NameError::NotPattern(s) => Error::new(
+                file,
+                String::from("invalid pattern"),
+                *s,
+                "expected pattern here",
+            ),
+        }
     }
 }
 
@@ -187,9 +199,7 @@ impl Bindings {
             .collect::<Vec<_>>()
             .into_iter()
             .map(|(lhs, rhs)| {
-                let rhs = rhs
-                    .resolve_names(&mut env)
-                    .map_err(|x| NameError(x.copy_span(x.to_string())))?;
+                let rhs = rhs.resolve_names(&mut env)?;
                 Ok(Def(lhs, rhs))
             })
             .collect()
@@ -232,20 +242,21 @@ pub struct ParseDef<'p>(pub Spanned<&'p str>, pub Spanned<ParseTree<'p>>);
 /// This is what the parser generates. All names are stored as string slices
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseTree<'p> {
-    Unit,                                        // ()
-    The(STree<'p>, STree<'p>),                   // the T x
-    Binder(&'p str, Option<STree<'p>>),          // x: T
-    Var(&'p str),                                // a
-    I32(i32),                                    // 3
-    Type(u32),                                   // Type0
-    Builtin(Builtin),                            // Int
-    Fun(bool, Vec<(Vec<STree<'p>>, STree<'p>)>), // move? fn { a b => x; c d => y }
-    App(STree<'p>, STree<'p>),                   // f x
-    Pair(STree<'p>, STree<'p>),                  // x, y
-    Struct(Vec<(Spanned<&'p str>, STree<'p>)>),  // struct { x := 3 }
-    Project(STree<'p>, Spanned<&'p str>),        // r.m
-    Block(Vec<ParseStmt<'p>>),                   // do { x; y }
-    Union(Vec<STree<'p>>),                       // x | y
+    Unit,                                           // ()
+    The(STree<'p>, STree<'p>),                      // the T x
+    Binder(&'p str, Option<STree<'p>>),             // x: T
+    Var(&'p str),                                   // a
+    I32(i32),                                       // 3
+    Type(u32),                                      // Type0
+    Builtin(Builtin),                               // Int
+    CaseOf(STree<'p>, Vec<(STree<'p>, STree<'p>)>), // case x of { y => z }
+    Fun(bool, Vec<STree<'p>>, STree<'p>),           // move? fun a b => c
+    App(STree<'p>, STree<'p>),                      // f x
+    Pair(STree<'p>, STree<'p>),                     // x, y
+    Struct(Vec<(Spanned<&'p str>, STree<'p>)>),     // struct { x := 3 }
+    Project(STree<'p>, Spanned<&'p str>),           // r.m
+    Block(Vec<ParseStmt<'p>>),                      // do { x; y }
+    Union(Vec<STree<'p>>),                          // x | y
     Data {
         // type T of C a b
         name: Spanned<&'p str>,                   // Pair
@@ -316,7 +327,37 @@ impl<'p, 'b> NEnv<'p, 'b> {
 }
 
 impl<'p> STree<'p> {
-    fn resolve_names<'b>(self, env: &mut NEnv<'p, 'b>) -> Result<STerm, Spanned<&'p str>> {
+    /// Names are handled differently in patterns and outside of them
+    fn resolve_pat<'b>(self, env: &mut NEnv<'p, 'b>) -> Result<STerm, NameError> {
+        use ParseTree::*;
+        let span = self.span();
+        Ok(Spanned::new(
+            match self.force_unwrap() {
+                // We assume any lone Var binds a new variable
+                // This means that if you define `MyNone = Option.None` and try to match on `MyNone`, it won't work
+                // We'll want to change this when we can import data constructors into a scope (like `use ParseTree::*` above!)
+                Var(s) => Term::Var(env.create(s)),
+                // We handle the left hand side of a `Project` as a term, not a pattern
+                Project(r, m) => Term::Project(
+                    r.resolve_names(env)?,
+                    m.copy_span(env.bindings.raw(m.to_string())),
+                ),
+                // Same with the right-hand-side of Binder
+                Binder(x, t) => {
+                    let t = t.map(|t| t.resolve_names(env)).transpose()?;
+                    Term::Binder(env.create(x), t)
+                }
+                App(f, x) => Term::App(f.resolve_pat(env)?, x.resolve_pat(env)?),
+                Pair(a, b) => Term::Pair(a.resolve_pat(env)?, b.resolve_pat(env)?),
+                I32(i) => Term::I32(i),
+                Unit => Term::Unit,
+                _ => return Err(NameError::NotPattern(span)),
+            },
+            span,
+        ))
+    }
+
+    fn resolve_names<'b>(self, env: &mut NEnv<'p, 'b>) -> Result<STerm, NameError> {
         use ParseTree::*;
         let span = self.span();
         Ok(Spanned::new(
@@ -340,26 +381,35 @@ impl<'p> STree<'p> {
                 Type(i) => Term::Type(i),
                 Builtin(b) => Term::Builtin(b),
                 I32(i) => Term::I32(i),
-                Var(x) => Term::Var(env.get(x).ok_or(Spanned::new(x, span))?),
+                Var(x) => Term::Var(
+                    env.get(x)
+                        .ok_or_else(|| NameError::NotFound(Spanned::new(x.to_string(), span)))?,
+                ),
                 The(t, u) => Term::The(t.resolve_names(env)?, u.resolve_names(env)?),
                 Binder(x, t) => {
                     // Binders aren't recursive in their types
                     let t = t.map(|t| t.resolve_names(env)).transpose()?;
                     Term::Binder(env.create(x), t)
                 }
-                Fun(m, iv) => {
+                CaseOf(x, iv) => {
+                    let x = x.resolve_names(env)?;
                     let mut rv = Vec::new();
-                    for (args, body) in iv {
+                    for (pat, body) in iv {
                         env.push();
-                        let mut ra = Vec::new();
-                        for a in args {
-                            ra.push(a.resolve_names(env)?);
-                        }
-                        let body = body.resolve_names(env)?;
-                        rv.push((ra, body));
+                        rv.push((pat.resolve_pat(env)?, body.resolve_names(env)?));
                         env.pop();
                     }
-                    Term::Fun(m, rv)
+                    Term::CaseOf(x, rv)
+                }
+                Fun(m, iargs, body) => {
+                    env.push();
+                    let mut rargs = Vec::new();
+                    for a in iargs {
+                        rargs.push(a.resolve_names(env)?);
+                    }
+                    let body = body.resolve_names(env)?;
+                    env.pop();
+                    Term::Fun(m, rargs, body)
                 }
                 App(f, x) => Term::App(f.resolve_names(env)?, x.resolve_names(env)?),
                 Pair(x, y) => {

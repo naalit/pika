@@ -22,6 +22,7 @@ pub enum Style {
     Special,
     Bold,
     BoldRed,
+    Error,
     Note,
     Comment,
     None,
@@ -31,7 +32,7 @@ impl Style {
         match self {
             Style::Keyword => spec(Color::Magenta, false),
             Style::Binder => spec(Color::Cyan, false),
-            Style::Literal => spec(Color::Red, false),
+            Style::Literal | Style::Error => spec(Color::Red, false),
             Style::Symbol => spec(Color::Green, false),
             Style::Special => spec(Color::Blue, true),
             Style::Bold => ColorSpec::new().set_bold(true).clone(),
@@ -54,7 +55,7 @@ pub struct Doc<'a> {
 }
 
 impl<'a> Into<String> for Doc<'a> {
-    /// Calls `Doc::ansi_string()`
+    /// Calls `Doc::ansi_string()`. This is primarily for interop with codespan_reporting
     fn into(self) -> String {
         self.ansi_string()
     }
@@ -110,9 +111,10 @@ impl<'a> Doc<'a> {
     }
 
     /// Sets the highlighting style for what we have so far
+    /// Implies `group()`
     pub fn style(self, ann: Style) -> Self {
         Doc {
-            doc: self.doc.annotate(ann.spec()),
+            doc: self.doc.annotate(ann.spec()).group(),
             ..self
         }
     }

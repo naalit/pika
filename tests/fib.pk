@@ -1,7 +1,7 @@
-fib := fun
+fib : fun Int => Int = fun x: => case x of
   0 => 1
   1 => 1
-  i:Int => (fib (i - 1)) + (fib (i - 2))
+  i => (fib (i - 1)) + (fib (i - 2))
 
 # 610
 main := fib 14

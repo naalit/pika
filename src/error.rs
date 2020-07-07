@@ -213,7 +213,7 @@ impl Error {
     ) -> Self {
         let d = Diagnostic::error()
             .with_message(primary)
-            .with_labels(vec![Label::secondary(file, span).with_message(secondary)]);
+            .with_labels(vec![Label::primary(file, span).with_message(secondary)]);
         Error(d)
     }
 

@@ -13,7 +13,6 @@ extern {
     type Error = Spanned<crate::lexer::LexError>;
 
     enum Tok<'input> {
-        "fun" => Tok::Fun,
         TYPE => Tok::Type(<u32>),
         "Int" => Tok::Int,
         "struct" => Tok::Struct,
@@ -22,6 +21,8 @@ extern {
         "move" => Tok::Move,
         "of" => Tok::Of,
         "type" => Tok::Data,
+        "fun" => Tok::Fun,
+        "case" => Tok::Case,
         ":" => Tok::Colon,
         ";" => Tok::Semi,
         "=>" => Tok::Arrow,
@@ -117,6 +118,7 @@ Term: ParseTree<'input> = {
     Struct,
     Block,
     Fun,
+    CaseOf,
     "the" <t:Spanned<Atom>> <u:Spanned<Atom>> => ParseTree::The(t, u),
     <f:Spanned<App>> <v:("|" <Spanned<App>>)+> => {
       let mut v = v;
@@ -164,11 +166,19 @@ Binder: ParseTree<'input> = {
 Cons: (Spanned<&'input str>, Either<Spanned<ParseTree<'input>>, Vec<Spanned<ParseTree<'input>>>>) = {
   // Some : fun [a:] a => Option a
   <a:Spanned<Var>> ":" <b:STerm> => (a, Either::Left(b)),
-  // Lam Sym (Box Term)
+  // Fun Sym (Box Term)
   <a:Spanned<Var>> <b:Spanned<Atom>*> => (a, Either::Right(b)),
   // New struct { a := 3; b := 4 }
   // This is only really needed with structs, other things you just parenthesize
   <a:Spanned<Var>> <b:Spanned<Struct>> => (a, Either::Right(vec![b])),
+}
+
+Case: (Spanned<ParseTree<'input>>, Spanned<ParseTree<'input>>) = {
+  <STerm> "=>" <STerm>,
+}
+
+CaseOf: ParseTree<'input> = {
+  "case" <x:STerm> <v:IBlock<"of", Case>> => ParseTree::CaseOf(x, v),
 }
 
 TypeDef: ParseTree<'input> = {
@@ -184,7 +194,7 @@ TypeDef: ParseTree<'input> = {
         args.first().map_or(a.span(), |x| x.span()).0,
         args.last().map_or(a.span(), |x| x.span()).1,
       );
-      Spanned::new(ParseTree::Fun(false, vec![(args, name.copy_span(ParseTree::Var(*name)))]), span)
+      Spanned::new(ParseTree::Fun(false, args, name.copy_span(ParseTree::Var(*name))), span)
     }).into_inner();
     ParseTree::Data {
       name,
@@ -205,7 +215,7 @@ TypeDef: ParseTree<'input> = {
           args.first().map_or(a.span(), |x| x.span()).0,
           args.last().map_or(a.span(), |x| x.span()).1,
         );
-        Spanned::new(ParseTree::Fun(false, vec![(args, name.copy_span(ParseTree::Var(*name)))]), span)
+        Spanned::new(ParseTree::Fun(false, args, name.copy_span(ParseTree::Var(*name))), span)
       }).into_inner();
       (a, b)
     }).collect();
@@ -237,6 +247,12 @@ MultiBinder: Vec<Spanned<ParseTree<'input>>> = {
     },
 }
 
+Fun: ParseTree<'input> = {
+  <m:"move"?> "fun" <a:MultiBinder> "=>" <b:Spanned<Term>> => {
+    ParseTree::Fun(m.is_some(), a, b)
+  },
+}
+
 Intersperse<T, Sep>: Vec<T> = {
   T => vec![<>],
   <v:(<T> Sep)+> <l:T?> => if let Some(l) = l {
@@ -246,33 +262,6 @@ Intersperse<T, Sep>: Vec<T> = {
   } else {
     v
   },
-}
-
-Branch: (Vec<Spanned<ParseTree<'input>>>, Spanned<ParseTree<'input>>) = {
-  // Standard single-line case
-  <MultiBinder> "=>" <Spanned<Term>>,
-  // Lots-of-parameters multi-line case used in pretty printing
-  // This one can't use the `a b c : T` shortcut, and it looks like:
-  // ```
-  // a := fun
-  //   (x:Int)
-  //   (y:Int)
-  //   (z:Int)
-  //     => x
-  //   (a:Int)
-  //   (b:Int)
-  //   (c:Int)
-  //     => b
-  //   z: => z
-  // ```
-  <Intersperse<<Spanned<Atom>>, "\n"+>> INDENT "=>" <Spanned<Term>> "\n"+ DEDENT,
-}
-
-Fun: ParseTree<'input> = {
-  // Single-line single-branch case
-  <m:"move"?> "fun" <b:Branch> => ParseTree::Fun(m.is_some(), vec![b]),
-
-  <m:"move"?> <b:IBlock<"fun", Branch>> => ParseTree::Fun(m.is_some(), b),
 }
 
 Atom: ParseTree<'input> = {
