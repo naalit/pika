@@ -3,10 +3,7 @@ use crate::common::*;
 use crate::elab::*;
 use crate::error::*;
 use crate::{affine::Mult, term::*};
-use std::{
-    collections::HashSet,
-    ops::{Deref, DerefMut},
-};
+use std::ops::{Deref, DerefMut};
 
 /// An error produced in type checking
 #[derive(Debug, PartialEq, Eq)]
@@ -15,7 +12,8 @@ pub enum TypeError {
     Synth(STerm),
     CantMatch(STerm, Elab),
     ConsType(Spanned<Elab>, TypeId),
-    // TODO use
+    UnsolvedMeta(Spanned<Sym>),
+    ImplicitLast(Span),
     WrongArity(usize, usize, Elab, Span),
     /// We wanted a `fun` but got a `move fun`
     MoveOnlyFun(STerm, Elab),
@@ -87,6 +85,31 @@ impl TypeError {
                     )
                     .style(Style::Error),
             ),
+            TypeError::UnsolvedMeta(meta) => {
+                if meta.span() == Span::empty() {
+                    Error::no_label(
+                        Doc::start("Type error: could not find solution for implicit variable '")
+                            .chain(meta.pretty(b))
+                            .add("', try adding a type annotation"),
+                    )
+                } else {
+                    Error::new(
+                        file,
+                        Doc::start("Type error: could not find solution for implicit variable '")
+                            .chain(meta.pretty(b))
+                            .add("', try adding a type annotation"),
+                        meta.span(),
+                        Doc::start("implicit search triggered here"),
+                    )
+                }
+            }
+            TypeError::ImplicitLast(span) => Error::new(
+                file,
+                "Type error: implicit parameters can only occur before at least one explicit parameter",
+                span,
+                "try moving this implicit earlier in the argument list, or adding an explicit parameter, maybe (), after this one",
+            )
+                .with_note("help: this rule exists so Pika always knows when to try to find an implicit: when you pass the next explicit argument"),
             TypeError::MoveOnlyFun(f, ty) => Error::new(
                 file,
                 Doc::start("Type error: expected copiable function '")
@@ -248,52 +271,34 @@ impl TypeError {
     }
 }
 
-pub enum Constraint {
-    Subtype(Elab, Elab),
-}
-impl Constraint {
-    pub fn cloned(&self, cln: &mut Cloner) -> Constraint {
-        match self {
-            Constraint::Subtype(a, b) => Constraint::Subtype(a.cloned(cln), b.cloned(cln)),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct TCtx<'a> {
     pub tys: HashMap<Sym, Arc<Elab>>,
-    cons: Vec<(Span, Arc<Constraint>)>,
-    pub metas: HashSet<Sym>,
+    pub metas: HashMap<Sym, Span>,
     pub ectx: ECtx<'a>,
 }
 impl<'a> From<ECtx<'a>> for TCtx<'a> {
     fn from(ectx: ECtx<'a>) -> Self {
         TCtx {
             tys: HashMap::new(),
-            cons: Vec::new(),
-            metas: HashSet::new(),
+            metas: HashMap::new(),
             ectx,
         }
     }
 }
 impl<'a> TCtx<'a> {
-    pub fn solve_constraints(&mut self) -> Result<(), TypeError> {
-        for (span, c) in self.cons.split_off(0) {
-            match &*c {
-                Constraint::Subtype(a, b) => {
-                    let mut cons = Vec::new();
-                    if a.unify(b, self, &mut cons) {
-                        self.apply_metas(cons);
-                    } else {
-                        return Err(TypeError::NotSubtype(
-                            Spanned::new(a.cloned(&mut Cloner::new(self)), span),
-                            b.cloned(&mut Cloner::new(self)),
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(())
+    pub fn solve_metas(&self) -> Vec<TypeError> {
+        self.metas
+            .iter()
+            .map(|(s, span)| Spanned::new(*s, *span))
+            .map(|x| TypeError::UnsolvedMeta(x))
+            .collect()
+    }
+
+    /// This gives the metas Span::empty(), so should only be used on temporary `TCtx`s that you don't intend to call solve_metas() on
+    pub fn extend_metas(&mut self, metas: impl IntoIterator<Item = Sym>) {
+        self.metas
+            .extend(metas.into_iter().map(|x| (x, Span::empty())))
     }
 
     pub fn apply_metas(&mut self, metas: impl IntoIterator<Item = (Sym, Elab)>) {
@@ -317,8 +322,7 @@ impl<'a> TCtx<'a> {
     pub fn new(db: &'a (impl Scoped + HasDatabase)) -> Self {
         TCtx {
             tys: HashMap::new(),
-            cons: Vec::new(),
-            metas: HashSet::new(),
+            metas: HashMap::new(),
             ectx: ECtx::new(db),
         }
     }
@@ -389,8 +393,10 @@ fn check_case(
 
         let mut matched_any = false;
         let mut i = 0;
+        // We don't want to apply substitutions introduced by patterns matching with uncovered!
+        let mut ectx = ECtx::new(tctx);
         while i < uncovered.len() {
-            match pat.matches(&uncovered[i], tctx) {
+            match pat.matches(&uncovered[i], &mut ectx) {
                 Yes => {
                     matched_any = true;
                     uncovered.remove(i);
@@ -542,28 +548,54 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
         }
         Term::App(fi, x) => {
             let f = synth(fi, tctx)?;
-            let x = match f.get_type(tctx) {
-                Elab::Fun(cl, from, _) => {
-                    for (k, v) in &cl.vals {
-                        eprintln!(
-                            "CL: {} := {}",
-                            k.pretty(tctx).ansi_string(),
-                            v.pretty(tctx).ansi_string()
-                        );
+
+            fn check_app(
+                ft: Elab,
+                fs: Span,
+                f: Elab,
+                x: &STerm,
+                tctx: &mut TCtx,
+            ) -> Result<Elab, TypeError> {
+                let x = match ft {
+                    Elab::Fun(cl, from, to) => {
+                        tctx.add_clos(&cl);
+                        if cl.implicit {
+                            let meta = match &*from {
+                                // If it's named, which is common, use that, it makes errors nicer
+                                Elab::Binder(s, _) => tctx.bindings_mut().fresh(*s),
+                                _ => tctx.bindings_mut().create("_meta".into()),
+                            };
+                            // TODO keep track of the given type for instance argument style resolution
+
+                            // It's more helpful to see the whole application where we decided to solve the implicit
+                            let app_span = Span(fs.0, x.span().1);
+                            tctx.metas.insert(meta, app_span);
+
+                            let v = Elab::Var(fs, meta, from);
+                            let from = match &v {
+                                Elab::Var(_, _, from) => from,
+                                _ => unreachable!(),
+                            };
+                            from.do_match(&v, tctx);
+                            // Apply the function to the new meta
+                            let f = Elab::App(Box::new(f), Box::new(v));
+                            // We have to WHNF here it to make sure meta solutions and the `do_match` from earlier are propagated correctly
+                            return check_app(*to, fs, f, x, tctx).map(|x| x.whnf(tctx));
+                        } else {
+                            let from = from.whnf(tctx);
+                            check(x, &from, tctx)
+                        }
                     }
-                    tctx.add_clos(&cl);
-                    let from = from.whnf(tctx);
-                    check(x, &from, tctx)?
-                }
-                Elab::Bottom => synth(x, tctx)?,
-                a => {
-                    return Err(TypeError::NotFunction(
-                        fi.copy_span(a.cloned(&mut Cloner::new(&tctx))),
+                    Elab::Bottom => synth(x, tctx),
+                    a => Err(TypeError::NotFunction(
+                        Spanned::new(a.cloned(&mut Cloner::new(&tctx)), fs),
                         x.clone(),
-                    ))
-                }
-            };
-            Ok(Elab::App(Box::new(f), Box::new(x)))
+                    )),
+                }?;
+                Ok(Elab::App(Box::new(f), Box::new(x)))
+            }
+
+            check_app(f.get_type(tctx), fi.span(), f, x, tctx)
         }
         Term::Project(r, m) => {
             let r = synth(r, tctx)?;
@@ -617,16 +649,19 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
         Term::Fun(m, args, body) => {
             let mut rargs = Vec::new();
             let mut rmult = Vec::new();
-            for a in args {
+            for (implicit, a) in args {
                 let a = synth(a, tctx)?.whnf(tctx);
                 // Match it with itself to apply the types
                 a.match_types(&a, tctx);
                 rmult.push(a.multiplicity(tctx));
-                rargs.push(a);
+                rargs.push((*implicit, a));
+            }
+            if args.last().unwrap().0 {
+                return Err(TypeError::ImplicitLast(args.last().unwrap().1.span()));
             }
             let body = synth(body, tctx)?;
 
-            let tys = tctx.clos(t, *m).tys;
+            let tys = tctx.clos(t, *m, false).tys;
             // TODO optimize
             let mut tys: Vec<_> = (0..rargs.len())
                 .map(|i| {
@@ -635,30 +670,34 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                         .chain(
                             tctx.tys
                                 .iter()
-                                .filter(|(k, _)| rargs.iter().take(i).any(|x| x.binds(**k)))
+                                .filter(|(k, _)| rargs.iter().take(i).any(|(_, x)| x.binds(**k)))
                                 .map(|(k, v)| (*k, v.clone())),
                         )
                         .collect()
                 })
                 .collect();
-            let t = rargs.into_iter().enumerate().rfold(body, |body, (i, arg)| {
-                Elab::Fun(
-                    if i == 0 {
-                        tctx.clos(t, *m)
-                    } else {
-                        Clos {
-                            // If we passed a move-only argument, we'll need to capture it and make the curried function move-only
-                            is_move: *m || rmult.iter().take(i).any(|x| *x == Mult::One),
-                            tys: tys.pop().unwrap(),
-                            // We only need to capture values in the top-level closure, they'll be propagated by `whnf()` when we apply it
-                            vals: Vec::new(),
-                            span: t.span(),
-                        }
-                    },
-                    Box::new(arg),
-                    Box::new(body),
-                )
-            });
+            let t = rargs
+                .into_iter()
+                .enumerate()
+                .rfold(body, |body, (i, (implicit, arg))| {
+                    Elab::Fun(
+                        if i == 0 {
+                            tctx.clos(t, *m, implicit)
+                        } else {
+                            Clos {
+                                // If we passed a move-only argument, we'll need to capture it and make the curried function move-only
+                                is_move: *m || rmult.iter().take(i).any(|x| *x == Mult::One),
+                                implicit,
+                                tys: tys.pop().unwrap(),
+                                // We only need to capture values in the top-level closure, they'll be propagated by `whnf()` when we apply it
+                                vals: Vec::new(),
+                                span: t.span(),
+                            }
+                        },
+                        Box::new(arg),
+                        Box::new(body),
+                    )
+                });
 
             Ok(t)
         }
@@ -699,7 +738,15 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
             tctx.set_ty(*x, ty.cloned(&mut Cloner::new(tctx)));
             Ok(Elab::Binder(*x, Box::new(ty)))
         }
-        Term::Binder(x, None) => Ok(Elab::Binder(*x, Box::new(Elab::Top))),
+        Term::Binder(x, None) => {
+            let name = format!("<type of {}>", x.pretty(tctx).raw_string());
+            let meta = tctx.bindings_mut().create(name);
+            tctx.metas.insert(meta, t.span());
+            Ok(Elab::Binder(
+                *x,
+                Box::new(Elab::Var(t.span(), meta, Box::new(Elab::Top))),
+            ))
+        }
         Term::Union(iv) => {
             let mut rv = Vec::new();
             for val in iv {
@@ -726,29 +773,30 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
     match (&**term, typ) {
         (Term::Pair(x, y), Elab::Pair(tx, ty)) => {
             let mut cln = Cloner::new(tctx);
-            let (tx, ty) = (tx.cloned(&mut cln).whnf(tctx), ty.cloned(&mut cln).whnf(tctx));
+            let (tx, ty) = (
+                tx.cloned(&mut cln).whnf(tctx),
+                ty.cloned(&mut cln).whnf(tctx),
+            );
             // TODO dependent pairs don't really work
             check(x, &tx, tctx)?;
             check(y, &ty, tctx)
         }
 
-        // As far as we know, it could be any type
-        (Term::Binder(s, None), _) /*if typ.subtype_of(&Elab::Type, &mut tctx.clone())*/ => {
-            // As far as we know, it could be anything, so it's `Top`
-            // We'll narrow it down with `update_binders()` later, if we can
-            Ok(Elab::Binder(*s, Box::new(Elab::Top)))
-        }
-
         (Term::Fun(m, args, body), Elab::Fun(cl, from, to)) => {
             if *m && !cl.is_move {
-                return Err(TypeError::MoveOnlyFun(term.clone(), typ.cloned(&mut Cloner::new(tctx))));
+                return Err(TypeError::MoveOnlyFun(
+                    term.clone(),
+                    typ.cloned(&mut Cloner::new(tctx)),
+                ));
             }
             tctx.add_clos(cl);
 
-            let arg = args.first().unwrap();
+            let (implicit, arg) = args.first().unwrap();
             let aspan = arg.span();
-            let mut arg = synth(arg, tctx)?.whnf(tctx);
+            let arg = synth(arg, tctx)?.whnf(tctx);
 
+            let mut cln = Cloner::new(tctx);
+            let from = from.cloned(&mut cln).whnf(tctx);
             let mut tcons = Vec::new();
             // Function parameters are contravariant
             if !from.unify(&arg, tctx, &mut tcons) {
@@ -757,20 +805,27 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                     Spanned::new(arg, aspan),
                 ));
             }
+            tctx.apply_metas(tcons);
 
-            arg.update_binders(from, &mut Cloner::new(tctx));
-            arg.match_types(from, tctx);
-            let mult = arg.multiplicity(tctx);
+            arg.match_types(&from, tctx);
+            // This multiplicity check is turned off for now, because it doesn't really cooperate with metavariables and it's going to be redone soon
+            // let mult = arg.multiplicity(tctx);
 
             let body = if args.len() > 1 {
-                let span = Span(args[1].span().0, body.span().1);
-                Spanned::new(Term::Fun(*m || mult == Mult::One, args.iter().skip(1).cloned().collect(), body.clone()), span)
+                let span = Span(args[1].1.span().0, body.span().1);
+                Spanned::new(
+                    Term::Fun(
+                        *m, /*|| mult == Mult::One*/
+                        args.iter().skip(1).cloned().collect(),
+                        body.clone(),
+                    ),
+                    span,
+                )
             } else {
                 body.clone()
             };
 
-            // let mut cln = Cloner::new(tctx);
-            let to = to.cloned(&mut Cloner::new(tctx)).whnf(tctx);
+            let to = to.cloned(&mut cln).whnf(tctx);
             let body = match check(&body, &to, tctx) {
                 Ok(body) => body,
                 Err(TypeError::NotSubtype(a, b)) if a.arity() != b.arity() => {
@@ -793,14 +848,14 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                 Err(e) => return Err(e),
             };
 
-            let clos = tctx.clos(term, *m);
-            // clos.tys.extend(cl.tys.iter().map(|(k, v)| (*k, v.clone())));
-            // clos.vals.extend(cl.vals.iter().map(|(k, v)| (*k, v.clone())));
+            let clos = tctx.clos(term, *m, *implicit);
             // WHNF to capture any needed variables from the type closure
             Ok(Elab::Fun(clos, Box::new(arg), Box::new(body)).whnf(tctx))
         }
 
-        (Term::CaseOf(val, cases), _) => check_case(val, cases, Some(typ.cloned(&mut Cloner::new(tctx))), tctx),
+        (Term::CaseOf(val, cases), _) => {
+            check_case(val, cases, Some(typ.cloned(&mut Cloner::new(tctx))), tctx)
+        }
 
         (_, _) => {
             let t = synth(term, tctx)?;
@@ -819,8 +874,9 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                         *i,
                     )),
                     _ => Err(TypeError::NotSubtype(
-                        term.copy_span(ty.cloned(&mut Cloner::new(&tctx))),
-                        typ.cloned(&mut Cloner::new(&tctx)),
+                        // Full normal form is helpful for errors
+                        term.copy_span(ty.cloned(&mut Cloner::new(&tctx)).normal(tctx)),
+                        typ.cloned(&mut Cloner::new(&tctx)).normal(tctx),
                     )),
                 }
             }
@@ -829,28 +885,6 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
 }
 
 impl Elab {
-    fn update_binders(&mut self, other: &Elab, cln: &mut Cloner) {
-        use Elab::*;
-        match (&mut *self, other) {
-            // We don't want `x:y:T`, and we already called match_types()
-            (_, Binder(_, t)) => {
-                self.update_binders(t, cln);
-            }
-            (Binder(_, t), _) => {
-                **t = other.cloned(cln);
-            }
-            (Pair(ax, ay), Pair(bx, by)) => {
-                ax.update_binders(bx, cln);
-                ay.update_binders(by, cln);
-            }
-            (App(af, ax), App(bf, bx)) => {
-                af.update_binders(bf, cln);
-                ax.update_binders(bx, cln);
-            }
-            _ => (),
-        }
-    }
-
     /// Like do_match(), but fills in the types instead of Elabs
     pub fn match_types(&self, other: &Elab, tctx: &mut TCtx) {
         use Elab::*;
@@ -894,7 +928,7 @@ impl Elab {
             }
             (Var(_, x, _), _) => {
                 if let Some(x) = tctx.val(*x) {
-                    x.match_types(other, tctx);
+                    x.cloned(&mut Cloner::new(&tctx)).match_types(other, tctx);
                 }
             }
             (Pair(ax, ay), Pair(bx, by)) => {
@@ -1013,7 +1047,7 @@ impl Elab {
                 b
             }
             // Solve metavariables
-            (Elab::Var(_, s, _), x) | (x, Elab::Var(_, s, _)) if tctx.metas.contains(s) => {
+            (Elab::Var(_, s, _), x) | (x, Elab::Var(_, s, _)) if tctx.metas.contains_key(s) => {
                 cons.push((*s, x.cloned(&mut Cloner::new(tctx))));
                 true
             }
@@ -1033,6 +1067,10 @@ impl Elab {
                 Elab::Fun(cl_a, from_sub, to_sub),
                 Elab::Fun(cl_b @ Clos { is_move: true, .. }, from_sup, to_sup),
             ) => {
+                if cl_a.implicit != cl_b.implicit {
+                    return false;
+                }
+
                 let mut tctx = tctx.clone();
                 tctx.add_clos(cl_a);
                 tctx.add_clos(cl_b);

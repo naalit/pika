@@ -7,8 +7,6 @@ type Option: fun Type => Type of
 unwrap_or : fun (t:Type) (Option t) t => t = fun _ x default: => case x of
   Option.Some _ a => a
   Option.None _ => default
-  # (_:) (Option.Some Type (a:)) (_:)  => a
-  # (_:) (Option.None Type) (default:) => default
 
 # Unions
 f := fun (Int | ()) => ()

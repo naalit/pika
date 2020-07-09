@@ -1,6 +1,6 @@
 s := struct
   a := fact 3 # 6
-  fact : fun Int => Int = fun x: => case x of
+  fact : fun Int => Int = fun x:Int => case x of
     1 => 1
     i => i * (fact (i - 1))
   b := fact a # 720

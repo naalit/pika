@@ -193,7 +193,7 @@ pub fn run_repl(options: &Options) {
 
                             let scoped = (ScopeId::File(file), &db);
                             let mut ectx = ECtx::new(&scoped);
-                            let ty = elab.get_type(&ectx);
+                            let ty = elab.get_type(&ectx).normal(&mut ectx);
                             ectx.set_val(
                                 **s,
                                 Elab::Var(

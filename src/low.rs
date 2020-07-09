@@ -123,6 +123,7 @@ fn next_closure() -> u32 {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd)]
 pub enum FunAttr {
     AlwaysInline,
+    Private,
 }
 
 /// A binary integer math operation
@@ -341,7 +342,8 @@ impl Elab {
     pub fn low_ty_of(&self, lctx: &mut LCtx) -> Option<LowTy> {
         Some(match self {
             // Guaranteed erasure for multiplicity-0 types
-            _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => LowTy::Unit,
+            // Disabled right now because of bad interaction with metavariables, and QTT stuff is going to get rewritten soon anyway
+            // _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => LowTy::Unit,
             Elab::Unit => LowTy::Unit,
             Elab::I32(_) => LowTy::Int(32),
             Elab::Var(_, x, ty) => {
@@ -438,11 +440,8 @@ impl Elab {
                 let ret_ty = body.low_ty_of(&mut lctx).unwrap();
 
                 LowTy::ClosOwn {
-                    // fun_name: format!("$_closure{}", next_closure()),
-                    // arg_name: fresh,
                     from: Box::new(from.as_low_ty(&lctx)),
                     to: Box::new(ret_ty),
-                    // body: Box::new(body),
                     upvalues,
                 }
             }
@@ -495,7 +494,7 @@ impl Elab {
                                         let tail = match_len(&s, cty);
 
                                         let mut tctx = crate::bicheck::TCtx::new(lctx);
-                                        tctx.metas.extend(tail.fvs(lctx));
+                                        tctx.extend_metas(tail.fvs(lctx));
                                         let mut tcons = Vec::new();
                                         if !tail.unify(&ty, &tctx, &mut tcons) {
                                             panic!(
@@ -593,7 +592,7 @@ impl Elab {
     pub fn as_low(&self, lctx: &mut LCtx) -> Option<LowIR> {
         Some(match self {
             // Guaranteed erasure for multiplicity-0 types
-            _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => LowIR::Unit,
+            // _ if self.get_type(lctx).multiplicity(lctx) == Mult::Zero => LowIR::Unit,
             Elab::Unit => LowIR::Unit,
             Elab::I32(i) => LowIR::IntConst(unsafe { std::mem::transmute::<i32, u32>(*i) } as u64),
             Elab::Var(_, x, ty) => {
@@ -823,7 +822,7 @@ impl Elab {
                                                 let tail = match_len(&s, cty);
 
                                                 let mut tctx = crate::bicheck::TCtx::new(lctx);
-                                                tctx.metas.extend(tail.fvs(lctx));
+                                                tctx.extend_metas(tail.fvs(lctx));
                                                 let mut tcons = Vec::new();
                                                 if !tail.unify(&ty, &tctx, &mut tcons) {
                                                     panic!(
@@ -963,7 +962,11 @@ impl Elab {
             | Elab::Data(_, _, _)
             | Elab::Cons(_, _) => true,
             Elab::Binder(_, t) => t.is_concrete(lctx),
-            Elab::Fun(_, from, to) => from.is_concrete(lctx) && to.is_concrete(lctx),
+            Elab::Fun(cl, from, to) => {
+                let mut lctx = lctx.clone();
+                lctx.add_clos(cl);
+                from.is_concrete(&lctx) && to.is_concrete(&lctx)
+            }
             Elab::Union(v) => v.iter().all(|x| x.is_concrete(lctx)),
             Elab::App(f, x) => f.is_concrete(lctx) && x.is_concrete(lctx),
             // This shouldn't happen unless the first param is neutral and thus not concrete
@@ -1042,7 +1045,7 @@ impl Elab {
                                     // if you have a `T Bool`, we represent that as just `{{}, Bool}` since we know it's B and that a is Bool
                                     let result = t.result();
                                     let mut tctx = crate::bicheck::TCtx::new(&lctx);
-                                    tctx.metas.extend(result.fvs(&tctx));
+                                    tctx.extend_metas(result.fvs(&tctx));
                                     let mut tcons = Vec::new();
                                     if !result.unify(self, &tctx, &mut tcons) {
                                         // TODO: this narrowing of GADTs based on type works here, but not in pattern matching yet. So when it does, turn it on here.

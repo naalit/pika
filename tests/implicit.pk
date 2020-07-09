@@ -1,0 +1,28 @@
+# This stuff is all from smalltt demos
+
+# Polymorphic identity
+id := fun [a:Type] (x:a) => x
+
+id2 := id id
+
+constTy := fun [a:Type] [b:Type] a b => a
+const : constTy = fun [_] [_] x y: => x
+
+
+# Dependent function composition (higher-order unification example)
+comp
+  : fun [A:Type] [B : fun A => Type] [C : fun [a:Type] (B a) => Type] (f : fun [a:Type] (b : B a) => C b) (g : fun (a : A) => B a) (x : A) => C (g x)
+  = fun [_][_][_] f g a: => f (g a)
+
+Nat := fun (t:Type) (fun t => t) t => t
+suc : (fun Nat => Nat) = fun n t f x: => f (n t f x)
+
+compTest1 : fun Nat => Nat
+  = comp suc suc
+
+
+# Pika   : instant
+# smalltt: instant
+# Agda   : instant
+# Coq    : doesn't finish
+idStress := id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id

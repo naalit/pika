@@ -43,6 +43,8 @@ pub enum Tok<'i> {
     PClose,        // ")"
     BraceOpen,     // "{"
     BraceClose,    // "}"
+    BraketOpen,    // "["
+    BraketClose,   // "]"
     Comma,         // ","
     Dot,           // "."
     Bar,           // "|"
@@ -255,6 +257,14 @@ impl<'i> Lexer<'i> {
                 self.next();
                 Tok::BraceClose
             }
+            '[' => {
+                self.next();
+                Tok::BraketOpen
+            }
+            ']' => {
+                self.next();
+                Tok::BraketClose
+            }
             ';' => {
                 self.next();
                 Tok::Semi
@@ -408,6 +418,8 @@ impl<'i> fmt::Display for Tok<'i> {
             PClose => write!(f, "')'"),
             BraceOpen => write!(f, "'{{'"),
             BraceClose => write!(f, "'}}'"),
+            BraketOpen => write!(f, "'['"),
+            BraketClose => write!(f, "']'"),
             Colon => write!(f, "':'"),
             Bar => write!(f, "'|'"),
             Plus => write!(f, "'+'"),

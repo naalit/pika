@@ -12,6 +12,11 @@ use inkwell::{basic_block::BasicBlock, builder::Builder, module::Module, types::
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 
+// Some calling conventions
+const TAILCC: u32 = 18;
+const CCC: u32 = 0;
+const FASTCC: u32 = 8;
+
 /// We need one of these to generate any LLVM code, but not to generate LowIR
 pub struct CodegenCtx<'ctx> {
     context: &'ctx Context,
@@ -35,11 +40,22 @@ impl<'ctx> CodegenCtx<'ctx> {
 }
 
 impl FunAttr {
-    fn llvm_enum(self) -> u32 {
+    fn apply(self, f: FunctionValue, ctx: &Context) {
+        match self {
+            FunAttr::Private => f.set_linkage(inkwell::module::Linkage::Private),
+            _ => f.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                ctx.create_enum_attribute(self.attr_enum().expect("Unknown attribute"), 0),
+            ),
+        }
+    }
+
+    fn attr_enum(self) -> Option<u32> {
         let name = match self {
             FunAttr::AlwaysInline => "alwaysinline",
+            FunAttr::Private => return None,
         };
-        inkwell::attributes::Attribute::get_named_enum_kind_id(name)
+        Some(inkwell::attributes::Attribute::get_named_enum_kind_id(name))
     }
 }
 
@@ -320,10 +336,9 @@ impl LowIR {
 
                 let fun_ty = ret_ty.llvm_fn_type(&ctx.context, &[LowTy::VoidPtr, arg_ty.clone()]);
                 let fun = module.add_function(&fun_name, fun_ty, None);
+                fun.set_call_conventions(TAILCC);
                 for attr in attrs {
-                    let attr = attr.llvm_enum();
-                    let attr = ctx.context.create_enum_attribute(attr, 0);
-                    fun.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+                    attr.apply(fun, ctx.context);
                 }
                 let entry = ctx.context.append_basic_block(fun, "entry");
                 ctx.builder.position_at_end(entry);
@@ -431,9 +446,12 @@ impl LowIR {
                     .into_pointer_value();
                 let f_rest = ctx.builder.build_extract_value(f_struct, 1, "env").unwrap();
 
-                ctx.builder
-                    .build_call(f_ptr, &[f_rest, x], "call")
-                    .as_any_value_enum()
+                let v = ctx.builder.build_call(f_ptr, &[f_rest, x], "call");
+                v.set_call_convention(TAILCC);
+                // We mark everything as a tail call just in case LLVM can optimize it
+                // Eventually we'll do a CPS transform and everything will *be* a tail call
+                v.set_tail_call(true);
+                v.as_any_value_enum()
             }
             LowIR::Variant(tag, ty, val) => {
                 let v = if let LowTy::Union(v) = ty {

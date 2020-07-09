@@ -250,7 +250,7 @@ pub enum ParseTree<'p> {
     Type(u32),                                      // Type0
     Builtin(Builtin),                               // Int
     CaseOf(STree<'p>, Vec<(STree<'p>, STree<'p>)>), // case x of { y => z }
-    Fun(bool, Vec<STree<'p>>, STree<'p>),           // move? fun a b => c
+    Fun(bool, Vec<(bool, STree<'p>)>, STree<'p>),   // move? fun [a] b => c
     App(STree<'p>, STree<'p>),                      // f x
     Pair(STree<'p>, STree<'p>),                     // x, y
     Struct(Vec<(Spanned<&'p str>, STree<'p>)>),     // struct { x := 3 }
@@ -404,8 +404,8 @@ impl<'p> STree<'p> {
                 Fun(m, iargs, body) => {
                     env.push();
                     let mut rargs = Vec::new();
-                    for a in iargs {
-                        rargs.push(a.resolve_names(env)?);
+                    for (implicit, a) in iargs {
+                        rargs.push((implicit, a.resolve_names(env)?));
                     }
                     let body = body.resolve_names(env)?;
                     env.pop();

@@ -82,9 +82,9 @@ pub fn to_pattern(
                 // Add constraints
                 let mut tcons = Vec::new();
                 let mut tctx = tctx.clone();
-                tctx.metas.extend(ty.fvs(&tctx));
+                tctx.extend_metas(ty.fvs(&tctx));
                 let result = t.result();
-                tctx.metas.extend(result.fvs(&tctx));
+                tctx.extend_metas(result.fvs(&tctx));
                 if result.unify(&ty, &tctx, &mut tcons) {
                     constraints.append(&mut tcons);
                     Some(Pat::Cons(tid, t))
@@ -147,8 +147,8 @@ impl Elab {
                         .filter_map(|x| {
                             let ty = x.get_type(env);
                             let mut tctx = TCtx::new(env);
-                            tctx.metas.extend(self.fvs(&tctx));
-                            tctx.metas.extend(ty.result().fvs(&tctx));
+                            tctx.extend_metas(self.fvs(&tctx));
+                            tctx.extend_metas(ty.result().fvs(&tctx));
                             // TODO do something with the meta solutions found eree
                             if !ty.result().unify(self, &mut tctx, &mut Vec::new()) {
                                 return None;

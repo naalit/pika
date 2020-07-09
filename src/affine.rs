@@ -96,7 +96,13 @@ impl Elab {
             Elab::Pair(x, y) => x.multiplicity(env).min(y.multiplicity(env)),
             Elab::Union(v) => v.iter().map(|x| x.multiplicity(env)).min().unwrap(),
             // In these two we know it's not concrete, but it's not erased, so it must be at least 1
-            Elab::Var(_, _, _) => One,
+            Elab::Var(_, _, t) => {
+                if t.universe(env) == 0 {
+                    One
+                } else {
+                    Zero
+                }
+            }
             Elab::Project(_, _) => One,
             // Can't exist, so you can copy it I guess
             Elab::Bottom => Many,
@@ -146,23 +152,24 @@ impl Elab {
             Elab::Binder(_, t) => t.check_affine(actx)?,
             Elab::Cons(_, t) => t.check_affine(actx)?,
             Elab::Fun(cl, from, to) => {
-                if !cl.is_move {
-                    for (k, v) in cl.tys.iter() {
-                        if v.multiplicity(actx) == One {
-                            return Err(Error::new(
-                                actx.scope.file(),
-                                Doc::start("non-")
-                                    .chain(Doc::start("move").style(Style::Keyword))
-                                    .add(" closure captures move-only value ")
-                                    .chain(k.pretty(actx))
-                                    .add(", of type '")
-                                    .chain(v.pretty(actx).add("'").group().style(Style::Bold)),
-                                cl.span,
-                                "captures move-only value",
-                            ));
-                        }
-                    }
-                }
+                // This multiplicity check is turned off for now, because it doesn't really cooperate with metavariables and it's going to be redone soon
+                // if !cl.is_move {
+                //     for (k, v) in cl.tys.iter() {
+                //         if v.multiplicity(actx) == One {
+                //             return Err(Error::new(
+                //                 actx.scope.file(),
+                //                 Doc::start("non-")
+                //                     .chain(Doc::start("move").style(Style::Keyword))
+                //                     .add(" closure captures move-only value ")
+                //                     .chain(k.pretty(actx))
+                //                     .add(", of type '")
+                //                     .chain(v.pretty(actx).add("'").group().style(Style::Bold)),
+                //                 cl.span,
+                //                 "captures move-only value",
+                //             ));
+                //         }
+                //     }
+                // }
                 actx.with_rmult(Zero, |actx| from.check_affine(actx))?;
                 to.check_affine(actx)?;
             }

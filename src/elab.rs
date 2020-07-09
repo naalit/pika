@@ -130,17 +130,20 @@ impl ElabStmt {
     }
 }
 
+/// The closure object stores not just captured function environments, but also header-like information for functions.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Default)]
 pub struct Clos {
     pub tys: Vec<(Sym, Arc<Elab>)>,
     pub vals: Vec<(Sym, Arc<Elab>)>,
     pub is_move: bool,
+    pub implicit: bool,
     pub span: Span,
 }
 impl Clos {
     pub fn empty(is_move: bool) -> Self {
         Clos {
             is_move,
+            implicit: false,
             tys: Vec::new(),
             vals: Vec::new(),
             span: Span::empty(),
@@ -161,12 +164,13 @@ impl Clos {
                 .map(|(k, v)| (cln.get(*k), Arc::new(v.cloned(cln))))
                 .collect(),
             is_move: self.is_move,
+            implicit: self.implicit,
             span: self.span,
         }
     }
 }
 impl<'a> TCtx<'a> {
-    pub fn clos(&self, t: &STerm, is_move: bool) -> Clos {
+    pub fn clos(&self, t: &STerm, is_move: bool, implicit: bool) -> Clos {
         let tys: Vec<_> = self
             .tys
             .iter()
@@ -181,6 +185,7 @@ impl<'a> TCtx<'a> {
             tys,
             vals,
             is_move,
+            implicit,
             span: t.span(),
         }
     }
@@ -450,17 +455,20 @@ impl Elab {
                 *ty = ty.normal(ectx);
                 Var(sp, s, ty)
             }
-            Fun(cl, mut from, mut to) => Fun(
-                cl,
-                {
-                    *from = from.normal(ectx);
-                    from
-                },
-                {
-                    *to = to.normal(ectx);
-                    to
-                },
-            ),
+            Fun(cl, mut from, mut to) => {
+                ectx.add_clos(&cl);
+                Fun(
+                    cl,
+                    {
+                        *from = from.normal(ectx);
+                        from
+                    },
+                    {
+                        *to = to.normal(ectx);
+                        to
+                    },
+                )
+            }
             CaseOf(mut val, cases, mut ty) => CaseOf(
                 {
                     *val = val.normal(ectx);
@@ -525,7 +533,8 @@ impl Elab {
     ///
     /// This is like actual normal form, but we only perform one level of beta- or projection-reduction
     /// So we're guaranteed not to have `(\x.t)u` at the top level, but we could have e.g. `(\x.(\y.t)u)`
-    /// This is the form we store types in, so if you need to compare types you'll need to call `whnf` recursively
+    /// This is the form we store types in, so if you need to compare types you'll need to call `whnf` recursively.
+    /// `whnf()` implies `save_ctx()`
     pub fn whnf(self, ectx: &mut ECtx) -> Self {
         match self {
             // Binders don't count as forms
@@ -537,6 +546,11 @@ impl Elab {
             Elab::Cons(id, mut t) => {
                 *t = t.whnf(ectx);
                 Elab::Cons(id, t)
+            }
+            Elab::Pair(mut x, mut y) => {
+                *x = x.whnf(ectx);
+                *y = y.whnf(ectx);
+                Elab::Pair(x, y)
             }
             // Unions don't either (no head)
             // (TODO somehow reuse the Vec)
@@ -627,13 +641,105 @@ impl Elab {
                 *val = val.whnf(ectx);
                 *ty = ty.whnf(ectx);
                 for i in 0..cases.len() {
-                    if cases[i].0.matches(&val, ectx) == Yes {
-                        return cases.swap_remove(i).1.whnf(ectx);
+                    match cases[i].0.matches(&val, ectx) {
+                        Yes => return cases.swap_remove(i).1.whnf(ectx),
+                        No => (),
+                        // If it might match, we don't want another case to return Yes
+                        Maybe => break,
                     }
                 }
                 // None of them is guaranteed to match, so don't reduce it yet
                 Elab::CaseOf(val, cases, ty)
             }
+            Elab::StructInline(v) => {
+                Elab::StructInline(v.into_iter().map(|(k, v)| (k, v.whnf(ectx))).collect())
+            }
+            x => x,
+        }
+    }
+
+    /// Inlines any *local* variables, but not global ones, and doesn't reduce applications, case-of, or projections.
+    pub fn save_ctx(self, ectx: &ECtx) -> Self {
+        match self {
+            // Binders don't count as forms
+            Elab::Binder(s, mut t) => {
+                // Reuse the Box
+                *t = t.save_ctx(ectx);
+                Elab::Binder(s, t)
+            }
+            Elab::Cons(id, mut t) => {
+                *t = t.save_ctx(ectx);
+                Elab::Cons(id, t)
+            }
+            // Unions don't either (no head)
+            // (TODO somehow reuse the Vec)
+            Elab::Union(v) => Elab::Union(v.into_iter().map(|x| x.save_ctx(ectx)).collect()),
+            Elab::Var(sp, x, mut ty) => {
+                if let Some(t) = ectx.vals.get(&x) {
+                    match &**t {
+                        // Update to the new type, but don't re-look-up the var
+                        Elab::Var(sp, y, new_ty) if x == *y => Elab::Var(
+                            *sp,
+                            x,
+                            Box::new(new_ty.cloned(&mut Cloner::new(&ectx)).save_ctx(ectx)),
+                        ),
+                        _ => t.cloned(&mut Cloner::new(&ectx)).save_ctx(ectx),
+                    }
+                } else {
+                    *ty = ty.save_ctx(ectx);
+                    Elab::Var(sp, x, ty)
+                }
+            }
+            Elab::App(mut f, mut x) => {
+                // We recursively WHNF the head
+                *f = f.save_ctx(ectx);
+                // We actually reduce the argument too, just not the body of functions etc.
+                // We need to make sure to apply all substitutions that aren't behind a closure
+                *x = x.save_ctx(ectx);
+                Elab::App(f, x)
+            }
+            Elab::Project(mut r, m) => {
+                *r = r.save_ctx(ectx);
+                Elab::Project(r, m)
+            }
+            Elab::Fun(mut cl, from, to) => {
+                // Update the closure
+                for (k, val) in ectx.vals.iter() {
+                    if !cl.vals.iter().any(|(s, _)| s == k)
+                        && !from.binds(*k)
+                        && !to.binds(*k)
+                        && (from.uses(*k) || to.uses(*k))
+                    {
+                        cl.vals.push((*k, val.clone()));
+                    }
+                }
+                Elab::Fun(cl, from, to)
+            }
+            Elab::CaseOf(mut val, cases, mut ty) => {
+                *val = val.save_ctx(ectx);
+                *ty = ty.save_ctx(ectx);
+                // TODO Pat::save_ctx()
+                let cases = cases
+                    .into_iter()
+                    .map(|(p, x)| (p, x.save_ctx(ectx)))
+                    .collect();
+                Elab::CaseOf(val, cases, ty)
+            }
+            Elab::Pair(mut x, mut y) => {
+                *x = x.save_ctx(ectx);
+                *y = y.save_ctx(ectx);
+                Elab::Pair(x, y)
+            }
+            Elab::StructInline(v) => {
+                Elab::StructInline(v.into_iter().map(|(k, v)| (k, v.save_ctx(ectx))).collect())
+            }
+            // Elab::Block(_) => {}
+            // Elab::Data(_, _, _) => {}
+            // Elab::Builtin(_) => {}
+            // Elab::Type(_) => {}
+            // Elab::StructIntern(_) => {}
+            // Elab::Bottom => {}
+            // Elab::Top => {}
             x => x,
         }
     }
@@ -656,7 +762,7 @@ impl Elab {
             Bottom => Type(0),
             Type(i) => Type(i + 1),
             Unit => Unit,
-            I32(i) => I32(*i),
+            I32(_) => Builtin(crate::term::Builtin::Int),
             Builtin(b) => b.get_type(),
             Var(_, _, t) => t.cloned(&mut Cloner::new(&env)),
             Data(_, _, t) | Cons(_, t) => t.cloned(&mut Cloner::new(&env)),
@@ -664,11 +770,9 @@ impl Elab {
                 let mut cln = Cloner::new(&env);
                 // We can determine types from Elabs without context, so no need to match types or apply the closure
                 // However, if we have e.g. `fun (a0:) (x:a0) => x`, we type it as `fun (a1:) a1 => a1`, so we need to clone the body before or after typing it, and after is usually less work
-                Fun(
-                    cl.cloned(&mut cln),
-                    Box::new(from.cloned(&mut cln)),
-                    Box::new(to.get_type(env).cloned(&mut cln)),
-                )
+                let from = from.cloned(&mut cln);
+                let to = to.get_type(env).cloned(&mut cln);
+                Fun(cl.cloned(&mut cln), Box::new(from), Box::new(to))
             }
             CaseOf(_, _, t) => t.cloned(&mut Cloner::new(&env)),
             App(f, x) => match f.get_type(env) {
@@ -828,11 +932,11 @@ impl Elab {
                 Binder(fresh, Box::new(t.cloned(cln)))
             }
             // All these allow bound variables, so we have to make sure they're done in order
-            Fun(cl, from, to) => Fun(
-                cl.cloned(cln),
-                Box::new(from.cloned(cln)),
-                Box::new(to.cloned(cln)),
-            ),
+            Fun(cl, from, to) => {
+                let from = from.cloned(cln);
+                let to = to.cloned(cln);
+                Fun(cl.cloned(cln), Box::new(from), Box::new(to))
+            }
             CaseOf(val, cases, ty) => CaseOf(
                 Box::new(val.cloned(cln)),
                 cases
@@ -908,19 +1012,23 @@ impl Pretty for Elab {
                     Doc::start("fun")
                 }
                 .style(Style::Keyword)
+                // .line()
+                // .add("{")
+                // .line()
+                // .chain(Doc::intersperse(
+                //     cl.vals
+                //         .iter()
+                //         .map(|(k, v)| k.pretty(ctx).space().add(":=").space().chain(v.pretty(ctx))),
+                //     Doc::start(",").space(),
+                // ))
+                // .line()
+                // .add("}")
                 .line()
-                .add("{{")
-                .line()
-                .chain(Doc::intersperse(
-                    cl.vals
-                        .iter()
-                        .map(|(k, v)| k.pretty(ctx).space().add(":=").space().chain(v.pretty(ctx))),
-                    Doc::start(",").space(),
-                ))
-                .line()
-                .add("}}")
-                .line()
-                .chain(from.pretty(ctx).nest(Prec::Atom))
+                .chain(if cl.implicit {
+                    Doc::start("[").chain(from.pretty(ctx)).add("]")
+                } else {
+                    from.pretty(ctx).nest(Prec::Atom)
+                })
                 .line()
                 .add("=>");
                 Doc::either(

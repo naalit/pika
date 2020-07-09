@@ -32,6 +32,8 @@ extern {
         ")" => Tok::PClose,
         "{" => Tok::BraceOpen,
         "}" => Tok::BraceClose,
+        "[" => Tok::BraketOpen,
+        "]" => Tok::BraketClose,
         "|" => Tok::Bar,
         "," => Tok::Comma,
         "." => Tok::Dot,
@@ -163,14 +165,14 @@ Binder: ParseTree<'input> = {
     <x:Var> ":" <t:STerm?> => ParseTree::Binder(x, t),
 }
 
-Cons: (Spanned<&'input str>, Either<Spanned<ParseTree<'input>>, Vec<Spanned<ParseTree<'input>>>>) = {
+Cons: (Spanned<&'input str>, Either<Spanned<ParseTree<'input>>, Vec<(bool, Spanned<ParseTree<'input>>)>>) = {
   // Some : fun [a:] a => Option a
   <a:Spanned<Var>> ":" <b:STerm> => (a, Either::Left(b)),
   // Fun Sym (Box Term)
-  <a:Spanned<Var>> <b:Spanned<Atom>*> => (a, Either::Right(b)),
+  <a:Spanned<Var>> <b:Icit*> => (a, Either::Right(b)),
   // New struct { a := 3; b := 4 }
   // This is only really needed with structs, other things you just parenthesize
-  <a:Spanned<Var>> <b:Spanned<Struct>> => (a, Either::Right(vec![b])),
+  <a:Spanned<Var>> <b:Spanned<Struct>> => (a, Either::Right(vec![(false, b)])),
 }
 
 Case: (Spanned<ParseTree<'input>>, Spanned<ParseTree<'input>>) = {
@@ -191,8 +193,8 @@ TypeDef: ParseTree<'input> = {
         return name.copy_span(ParseTree::Var(*name));
       }
       let span = Span(
-        args.first().map_or(a.span(), |x| x.span()).0,
-        args.last().map_or(a.span(), |x| x.span()).1,
+        args.first().map_or(a.span(), |(_,x)| x.span()).0,
+        args.last().map_or(a.span(), |(_,x)| x.span()).1,
       );
       Spanned::new(ParseTree::Fun(false, args, name.copy_span(ParseTree::Var(*name))), span)
     }).into_inner();
@@ -212,8 +214,8 @@ TypeDef: ParseTree<'input> = {
           return name.copy_span(ParseTree::Var(*name));
         }
         let span = Span(
-          args.first().map_or(a.span(), |x| x.span()).0,
-          args.last().map_or(a.span(), |x| x.span()).1,
+          args.first().map_or(a.span(), |(_,x)| x.span()).0,
+          args.last().map_or(a.span(), |(_,x)| x.span()).1,
         );
         Spanned::new(ParseTree::Fun(false, args, name.copy_span(ParseTree::Var(*name))), span)
       }).into_inner();
@@ -227,14 +229,19 @@ TypeDef: ParseTree<'input> = {
   },
 }
 
+Icit: (bool, Spanned<ParseTree<'input>>) = {
+  "[" <STerm> "]" => (true, <>),
+  Spanned<Atom> => (false, <>),
+}
+
 /// a b c : T --> (a:T) (b:T) (c:T)
-MultiBinder: Vec<Spanned<ParseTree<'input>>> = {
-    <v:Spanned<Atom>+> <t:(":" <STerm?>)?> =>? if let Some(t) = t {
+MultiBinder: Vec<(bool, Spanned<ParseTree<'input>>)> = {
+    <v:Icit+> <t:(":" <STerm?>)?> =>? if let Some(t) = t {
         let mut r = Vec::new();
-        for i in v {
+        for (b, i) in v {
             let span = i.span();
             if let ParseTree::Var(i) = i.force_unwrap() {
-                r.push(Spanned::new(ParseTree::Binder(i, t.clone()), span));
+                r.push((b, Spanned::new(ParseTree::Binder(i, t.clone()), span)));
             } else {
                 return Err(ParseError::User {
                     error: Spanned::new(crate::lexer::LexError::Other("':' can only be used with binders".to_string()), span),

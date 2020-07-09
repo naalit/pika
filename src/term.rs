@@ -70,7 +70,7 @@ pub enum Term {
     Type(u32),                                    // Type0
     Builtin(Builtin),                             // Int
     CaseOf(STerm, Vec<(STerm, STerm)>),           // case x of { y => z }
-    Fun(bool, Vec<STerm>, STerm),                 // move? fun a b => c
+    Fun(bool, Vec<(bool, STerm)>, STerm),         // move? fun [a] b => c
     App(STerm, STerm),                            // f x
     Pair(STerm, STerm),                           // x, y
     Struct(StructId, Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
@@ -88,10 +88,10 @@ impl Term {
             Term::Var(x) if *x == s => true,
             Term::Fun(_, v, b) => !v
                 .iter()
-                .any(|a| a.binds(s))
+                .any(|(_,a)| a.binds(s))
                 && !b.binds(s)
                 && (
-                v.iter().any(|a| a.uses(s))
+                v.iter().any(|(_,a)| a.uses(s))
                 || b.uses(s)
             ),
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.uses(s) || u.uses(s),
@@ -118,7 +118,7 @@ impl Term {
         match self {
             Term::Binder(x, _) if *x == s => true,
             Term::Fun(_, v, b) =>
-                v.iter().any(|a| a.uses(s))
+                v.iter().any(|(_,a)| a.uses(s))
                 || b.uses(s)
             ,
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.binds(s) || u.binds(s),
@@ -147,7 +147,7 @@ impl Term {
         f(self);
         match self {
             Term::Fun(_, v, to) => {
-                for i in v {
+                for (_, i) in v {
                     i.traverse(f);
                 }
                 to.traverse(f);
@@ -212,7 +212,13 @@ impl Pretty for Term {
                 .style(Style::Keyword)
                 .line()
                 .chain(Doc::intersperse(
-                    args.iter().map(|x| x.pretty(ctx)),
+                    args.iter().map(|(implicit, x)| {
+                        if *implicit {
+                            Doc::start("[").chain(x.pretty(ctx)).add("]").group()
+                        } else {
+                            x.pretty(ctx)
+                        }
+                    }),
                     Doc::none().line(),
                 ))
                 .indent()

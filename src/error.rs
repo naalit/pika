@@ -217,11 +217,17 @@ impl Error {
         Error(d)
     }
 
+    /// Add a note to the `Error`, which appears at the bottom unattached to any span
+    pub fn with_note(mut self, msg: impl Into<String>) -> Self {
+        self.0.notes.push(msg.into());
+        self
+    }
+
     /// Add a label to the `Error`
-    pub fn with_label(mut self, file: FileId, span: Span, msg: String) -> Self {
+    pub fn with_label(mut self, file: FileId, span: Span, msg: impl Into<String>) -> Self {
         self.0
             .labels
-            .push(Label::secondary(file, span).with_message(msg));
+            .push(Label::secondary(file, span).with_message(msg.into()));
         self
     }
 
