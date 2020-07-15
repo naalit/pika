@@ -778,8 +778,9 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
                 ty.cloned(&mut cln).whnf(tctx),
             );
             // TODO dependent pairs don't really work
-            check(x, &tx, tctx)?;
-            check(y, &ty, tctx)
+            let x = check(x, &tx, tctx)?;
+            let y = check(y, &ty, tctx)?;
+            Ok(Elab::Pair(Box::new(x), Box::new(y)))
         }
 
         (Term::Fun(m, args, body), Elab::Fun(cl, from, to)) => {

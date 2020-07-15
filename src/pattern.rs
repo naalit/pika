@@ -2,7 +2,6 @@
 use crate::{
     bicheck::TCtx,
     common::*,
-    low::{tag_width, BoolOp, CompOp, LCtx, LowIR},
     term::{Builtin, STerm, Term},
 };
 
@@ -330,86 +329,86 @@ impl Pat {
         }
     }
 
-    /// Compile this pattern to code that binds all variables and returns whether it matched
-    ///
-    /// This function clones `param`, so it should be a `LowIR::Local`
-    pub fn lower(&self, param: LowIR, lctx: &mut LCtx) -> LowIR {
-        match self {
-            Pat::Cons(id, ty) => {
-                let sid = match ty.result().head() {
-                    Elab::Data(_, sid, _) => *sid,
-                    _ => panic!("wrong type"),
-                };
-                // TODO narrowing of GADT variants based on type, in LowIR
-                let tag_size = tag_width(
-                    &lctx
-                        .database()
-                        .symbols(ScopeId::Struct(sid, Box::new(lctx.scope()))),
-                );
-                if tag_size == 0 {
-                    LowIR::BoolConst(true)
-                } else {
-                    let idx = lctx
-                        .database()
-                        .symbols(ScopeId::Struct(sid, Box::new(lctx.scope())))
-                        .iter()
-                        .enumerate()
-                        .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
-                        .unwrap()
-                        .0 as u64;
-                    let tag = LowIR::Project(Box::new(param), 0);
-
-                    LowIR::CompOp {
-                        op: CompOp::Eq,
-                        lhs: Box::new(LowIR::SizedIntConst(tag_size, idx)),
-                        rhs: Box::new(tag.clone()),
-                    }
-                }
-            }
-            Pat::App(f, x) => {
-                // We need to know where we are
-                // If there aren't any `App`s ahead of us, we're at the first parameter
-                let idx = f.spine_len();
-                let x_param =
-                    LowIR::Project(Box::new(LowIR::Project(Box::new(param.clone()), 1)), idx);
-
-                // Pass the parameter unchanged for the head, so it can extract the tag and make sure it matches
-                let f = f.lower(param, lctx);
-                let x = x.lower(x_param, lctx);
-
-                LowIR::BoolOp {
-                    op: BoolOp::And,
-                    lhs: Box::new(f),
-                    rhs: Box::new(x),
-                }
-            }
-            Pat::I32(i) => LowIR::CompOp {
-                op: CompOp::Eq,
-                // This does the necessary bit-fiddling to make it a u64 for use as a literal
-                lhs: Box::new(Elab::I32(*i).as_low(lctx).unwrap()),
-                rhs: Box::new(param),
-            },
-            Pat::Pair(x, y) => {
-                let x_param = LowIR::Project(Box::new(param.clone()), 0);
-                let y_param = LowIR::Project(Box::new(param), 1);
-                let x = x.lower(x_param, lctx);
-                let y = y.lower(y_param, lctx);
-                LowIR::BoolOp {
-                    op: BoolOp::And,
-                    lhs: Box::new(x),
-                    rhs: Box::new(y),
-                }
-            }
-            // TODO the type should be able to match, e.g. in unions
-            Pat::Var(s, t) => {
-                let lty = t.as_low_ty(lctx);
-                lctx.set_low_ty(*s, lty);
-                LowIR::Let(*s, Box::new(param), Box::new(LowIR::BoolConst(true)))
-            }
-            // Unit always matches
-            Pat::Unit => LowIR::BoolConst(true),
-        }
-    }
+    // /// Compile this pattern to code that binds all variables and returns whether it matched
+    // ///
+    // /// This function clones `param`, so it should be a `LowIR::Local`
+    // pub fn lower(&self, param: LowIR, lctx: &mut LCtx) -> LowIR {
+    //     match self {
+    //         Pat::Cons(id, ty) => {
+    //             let sid = match ty.result().head() {
+    //                 Elab::Data(_, sid, _) => *sid,
+    //                 _ => panic!("wrong type"),
+    //             };
+    //             // TODO narrowing of GADT variants based on type, in LowIR
+    //             let tag_size = tag_width(
+    //                 &lctx
+    //                     .database()
+    //                     .symbols(ScopeId::Struct(sid, Box::new(lctx.scope()))),
+    //             );
+    //             if tag_size == 0 {
+    //                 LowIR::BoolConst(true)
+    //             } else {
+    //                 let idx = lctx
+    //                     .database()
+    //                     .symbols(ScopeId::Struct(sid, Box::new(lctx.scope())))
+    //                     .iter()
+    //                     .enumerate()
+    //                     .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
+    //                     .unwrap()
+    //                     .0 as u64;
+    //                 let tag = LowIR::Project(Box::new(param), 0);
+    //
+    //                 LowIR::CompOp {
+    //                     op: CompOp::Eq,
+    //                     lhs: Box::new(LowIR::SizedIntConst(tag_size, idx)),
+    //                     rhs: Box::new(tag.clone()),
+    //                 }
+    //             }
+    //         }
+    //         Pat::App(f, x) => {
+    //             // We need to know where we are
+    //             // If there aren't any `App`s ahead of us, we're at the first parameter
+    //             let idx = f.spine_len();
+    //             let x_param =
+    //                 LowIR::Project(Box::new(LowIR::Project(Box::new(param.clone()), 1)), idx);
+    //
+    //             // Pass the parameter unchanged for the head, so it can extract the tag and make sure it matches
+    //             let f = f.lower(param, lctx);
+    //             let x = x.lower(x_param, lctx);
+    //
+    //             LowIR::BoolOp {
+    //                 op: BoolOp::And,
+    //                 lhs: Box::new(f),
+    //                 rhs: Box::new(x),
+    //             }
+    //         }
+    //         Pat::I32(i) => LowIR::CompOp {
+    //             op: CompOp::Eq,
+    //             // This does the necessary bit-fiddling to make it a u64 for use as a literal
+    //             lhs: Box::new(Elab::I32(*i).as_low(lctx).unwrap()),
+    //             rhs: Box::new(param),
+    //         },
+    //         Pat::Pair(x, y) => {
+    //             let x_param = LowIR::Project(Box::new(param.clone()), 0);
+    //             let y_param = LowIR::Project(Box::new(param), 1);
+    //             let x = x.lower(x_param, lctx);
+    //             let y = y.lower(y_param, lctx);
+    //             LowIR::BoolOp {
+    //                 op: BoolOp::And,
+    //                 lhs: Box::new(x),
+    //                 rhs: Box::new(y),
+    //             }
+    //         }
+    //         // TODO the type should be able to match, e.g. in unions
+    //         Pat::Var(s, t) => {
+    //             let lty = t.as_low_ty(lctx);
+    //             lctx.set_low_ty(*s, lty);
+    //             LowIR::Let(*s, Box::new(param), Box::new(LowIR::BoolConst(true)))
+    //         }
+    //         // Unit always matches
+    //         Pat::Unit => LowIR::BoolConst(true),
+    //     }
+    // }
 }
 
 impl Pretty for Pat {

@@ -240,6 +240,43 @@ impl Elab {
         free
     }
 
+    /// Returns a list of all variables bound by this term, with types.
+    /// This assumes it's, for example, a parameter - it only returns things that are still bound outside its body.
+    pub fn bound(&self) -> Vec<(Sym, &Elab)> {
+        let mut bound = Vec::new();
+        self.bound_(&mut bound);
+        bound
+    }
+
+    /// Helper for `bound()`
+    fn bound_<'a>(&'a self, bound: &mut Vec<(Sym, &'a Elab)>) {
+        use Elab::*;
+        match self {
+            Type(_) | Unit | I32(_) | Builtin(_) | Top | Bottom => (),
+            Var(_, _, ty) => {
+                ty.bound_(bound);
+            }
+            // These can't bind anything outside of their bodies
+            CaseOf(_, _, _)
+            | Fun(_, _, _)
+            | Data(_, _, _)
+            | Cons(_, _)
+            | StructIntern(_)
+            | StructInline(_)
+            | Project(_, _)
+            | Block(_)
+            | Union(_) => (),
+            App(x, y) | Pair(x, y) => {
+                x.bound_(bound);
+                y.bound_(bound);
+            }
+            Binder(s, t) => {
+                t.bound_(bound);
+                bound.push((*s, t));
+            }
+        }
+    }
+
     /// Helper for `fvs`
     pub fn fvs_(&self, bound: &mut HashSet<Sym>, free: &mut Vec<Sym>) {
         use Elab::*;

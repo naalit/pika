@@ -178,6 +178,17 @@ impl LowTy {
     }
 }
 
+fn fn_type<'a>(params: &[BasicTypeEnum<'a>], x: BasicTypeEnum<'a>) -> FunctionType<'a> {
+    match x {
+        BasicTypeEnum::ArrayType(t) => t.fn_type(params, false),
+        BasicTypeEnum::FloatType(t) => t.fn_type(params, false),
+        BasicTypeEnum::IntType(t) => t.fn_type(params, false),
+        BasicTypeEnum::PointerType(t) => t.fn_type(params, false),
+        BasicTypeEnum::StructType(t) => t.fn_type(params, false),
+        BasicTypeEnum::VectorType(t) => t.fn_type(params, false),
+    }
+}
+
 /// Gets the `undef` value of a given type
 fn undef_of(x: BasicTypeEnum) -> BasicValueEnum {
     match x {
@@ -403,6 +414,111 @@ impl LowIR {
                     .unwrap();
                 closure.as_any_value_enum()
             }
+            LowIR::ClosureM {
+                fun_name,
+                attrs,
+                args,
+                body,
+                ret_ty,
+                upvalues,
+            } => {
+                let env_values: Vec<_> = upvalues
+                    .iter()
+                    .map(|(n, _)| {
+                        BasicValueEnum::try_from(*ctx.locals.get(n).expect("Upvalue doesn't exist"))
+                            .unwrap()
+                    })
+                    .collect();
+                let env_types: Vec<_> = upvalues.iter().map(|(_, t)| t.clone()).collect();
+                let env_struct_type = LowTy::Struct(env_types);
+                let mut env_struct = env_struct_type
+                    .llvm(&ctx.context)
+                    .into_struct_type()
+                    .get_undef()
+                    .as_aggregate_value_enum();
+                for (i, v) in env_values.into_iter().enumerate() {
+                    env_struct = ctx
+                        .builder
+                        .build_insert_value(env_struct, v, i as u32, "struct")
+                        .unwrap();
+                }
+
+                let bb = ctx.builder.get_insert_block().unwrap();
+
+                let arg_tys: Vec<_> = std::iter::once(LowTy::VoidPtr).chain(args.iter().map(|(_, ty)| ty.clone())).collect();
+
+                let fun_ty = ret_ty.llvm_fn_type(&ctx.context, &arg_tys);
+                let fun = module.add_function(&fun_name, fun_ty, None);
+                fun.set_call_conventions(TAILCC);
+                for attr in attrs {
+                    attr.apply(fun, ctx.context);
+                }
+                let entry = ctx.context.append_basic_block(fun, "entry");
+                ctx.builder.position_at_end(entry);
+
+                let mut old_locals = HashMap::new();
+                std::mem::swap(&mut old_locals, &mut ctx.locals);
+                let params = fun.get_params();
+                for (i, (s, _)) in params.into_iter().zip(args) {
+                    ctx.locals
+                        .insert(*s, i.as_any_value_enum());
+                }
+                // Add upvalues to local environment
+                let local_env = fun.get_first_param().unwrap().into_pointer_value();
+                let local_env = ctx
+                    .builder
+                    .build_bitcast(
+                        local_env,
+                        env_struct_type
+                            .llvm(&ctx.context)
+                            .into_struct_type()
+                            .ptr_type(inkwell::AddressSpace::Generic),
+                        "env",
+                    )
+                    .into_pointer_value();
+                let local_env = ctx
+                    .builder
+                    .build_load(local_env, "local_env")
+                    .into_struct_value();
+                for (i, (name, _)) in upvalues.iter().enumerate() {
+                    let val = ctx
+                        .builder
+                        .build_extract_value(local_env, i as u32, "$_upvalue")
+                        .unwrap();
+                    ctx.locals.insert(*name, val.as_any_value_enum());
+                }
+
+                let body: BasicValueEnum = body
+                    .codegen(ctx, module)
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("{:?}", body));
+                ctx.builder.build_return(Some(&body as &_));
+
+                // Go back to the original function
+                std::mem::swap(&mut old_locals, &mut ctx.locals);
+                ctx.builder.position_at_end(bb);
+
+                let fun_ptr_ty = fun_ty.ptr_type(inkwell::AddressSpace::Generic);
+                let clos_ty = ctx.context.struct_type(
+                    &[
+                        fun_ptr_ty.as_basic_type_enum(),
+                        env_struct_type.llvm(&ctx.context),
+                    ],
+                    false,
+                );
+                // Magic, might break eventually
+                let fun_ptr = fun.as_any_value_enum().into_pointer_value();
+                let closure = clos_ty.get_undef();
+                let closure = ctx
+                    .builder
+                    .build_insert_value(closure, fun_ptr, 0, "clos.partial")
+                    .unwrap();
+                let closure = ctx
+                    .builder
+                    .build_insert_value(closure, env_struct, 1, "clos")
+                    .unwrap();
+                closure.as_any_value_enum()
+            }
             LowIR::ClosureBorrow(f) => {
                 // Extract the function pointer and environment from the closure
                 let f_struct = f.codegen(ctx, module).into_struct_value();
@@ -450,6 +566,26 @@ impl LowIR {
                 v.set_call_convention(TAILCC);
                 // We mark everything as a tail call just in case LLVM can optimize it
                 // Eventually we'll do a CPS transform and everything will *be* a tail call
+                v.set_tail_call(true);
+                v.as_any_value_enum()
+            }
+            LowIR::CallM(f, args) => {
+                let args: Vec<_> = args.iter().map(|x|x.codegen(ctx, module).try_into().unwrap()).collect();
+
+                // Extract the function pointer and environment from the closure
+                // We're calling a borrowed closure, so it has a pointer to the environment already
+                let f_struct = f.codegen(ctx, module).into_struct_value();
+                let f_ptr = ctx
+                    .builder
+                    .build_extract_value(f_struct, 0, "fun")
+                    .unwrap()
+                    .into_pointer_value();
+                let f_rest = ctx.builder.build_extract_value(f_struct, 1, "env").unwrap();
+                let args: Vec<_> = std::iter::once(f_rest).chain(args).collect();
+
+                let v = ctx.builder.build_call(f_ptr, &args, "call_m");
+                v.set_call_convention(TAILCC);
+                // We mark everything as a tail call just in case LLVM can optimize it
                 v.set_tail_call(true);
                 v.as_any_value_enum()
             }

@@ -34,7 +34,6 @@ impl<T: HasBindings> HasBindings for &mut T {
 }
 
 pub use crate::error::Spanned;
-use crate::low::{LowFun, LowMod, LowTy};
 use crate::term::{Def, STerm};
 
 pub trait MainGroupP: MainExt {
@@ -54,14 +53,6 @@ pub trait MainGroupP: MainExt {
 
     /// If the given definition exists, get the name it would be given in code generation
     fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String>;
-
-    /// Lower a definition to a LowIR function with no arguments
-    fn low_fun(&self, scope: ScopeId, s: Sym) -> Result<LowFun, LowError>;
-
-    fn low_ty(&self, scope: ScopeId, s: Sym) -> Result<LowTy, LowError>;
-
-    /// Lower a file to a LowIR module
-    fn low_mod(&self, file: FileId) -> LowMod;
 
     /// Returns all scopes in this entire file, including the file scope, in order of definition with the file last
     fn child_scopes(&self, file: FileId) -> Arc<Vec<ScopeId>>;
@@ -84,15 +75,6 @@ impl<T: MainGroup> MainGroupP for T {
     }
     fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String> {
         MainGroup::mangle(self, scope, s)
-    }
-    fn low_fun(&self, scope: ScopeId, s: Sym) -> Result<LowFun, LowError> {
-        MainGroup::low_fun(self, scope, s)
-    }
-    fn low_ty(&self, scope: ScopeId, s: Sym) -> Result<LowTy, LowError> {
-        MainGroup::low_ty(self, scope, s)
-    }
-    fn low_mod(&self, file: FileId) -> LowMod {
-        MainGroup::low_mod(self, file)
     }
     fn child_scopes(&self, file: FileId) -> Arc<Vec<ScopeId>> {
         MainGroup::child_scopes(self, file)

@@ -204,6 +204,43 @@ pub fn run_repl(options: &Options) {
                             );
                             let val = elab.cloned(&mut Cloner::new(&ectx)).normal(&mut ectx);
 
+                            // let _val = crate::cps::next_val();
+                            // let g = elab.cps(_val, &mut crate::cps::LCtx::from(ectx.clone()), crate::cps::Low::Halt(_val));
+                            // eprintln!("{}", g.pretty(&ectx).ansi_string());
+                            // let context = inkwell::context::Context::create();
+                            // let mut ctx = crate::cps::CodegenCtx::new(&context);
+                            // let fun = ctx.module.add_function("_start", context.void_type().fn_type(&[], false), None);
+                            // let entry = ctx.context.append_basic_block(fun, "entry");
+                            // ctx.builder.position_at_end(entry);
+                            // g.llvm(&mut ctx);
+                            // ctx.module.print_to_stderr();
+                            // if let Err(e) = ctx.module.verify() {
+                            //     printer
+                            //         .print(
+                            //             Doc::start("error")
+                            //                 .style(Style::BoldRed)
+                            //                 .add(": LLVM verification error: ")
+                            //                 .style(Style::Bold)
+                            //                 .line()
+                            //                 .add(e.to_string())
+                            //                 .hardline(),
+                            //         )
+                            //         .unwrap();
+                            // } else {
+                            //     let engine = ctx.module
+                            //         .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                            //         .expect("Failed to create LLVM execution engine");
+                            //     engine.add_global_mapping(&ctx.halt, crate::cps::_pika_print_int as usize);
+                            //     eprintln!("Calling:");
+                            //     unsafe {
+                            //         let main_fun: inkwell::execution_engine::JitFunction<
+                            //             unsafe extern "C" fn(),
+                            //         > = engine.get_function(&"_start").unwrap();
+                            //         main_fun.call();
+                            //     }
+                            // }
+                            // continue;
+
                             let doc = Doc::either(
                                 s.pretty(&db)
                                     .style(Style::Binder)
@@ -238,13 +275,25 @@ pub fn run_repl(options: &Options) {
                 if options.show_llvm || options.show_low_ir {
                     let module = db.low_mod(file);
                     if options.show_llvm {
-                        // Generate LLVM and print out the module
+                        // Generate LLVM and print it out
                         let context = inkwell::context::Context::create();
-                        let llvm = module.codegen(&mut crate::codegen::CodegenCtx::new(&context));
+                        let llvm = module.llvm(&context);
+
                         llvm.print_to_stderr();
 
                         if let Err(e) = llvm.verify() {
-                            println!("Verification error: {}", e);
+                            printer
+                                .print(
+                                    Doc::start("error")
+                                        .style(Style::BoldRed)
+                                        .add(": LLVM verification error: ")
+                                        .style(Style::Bold)
+                                        .line()
+                                        .add(e.to_string())
+                                        .hardline(),
+                                )
+                                .unwrap();
+                            std::process::exit(1);
                         }
                     }
                 }

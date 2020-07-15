@@ -1,3 +1,7 @@
+use crate::backend::{
+    low::{LCtx, Ty},
+    LowDef, LowMod,
+};
 use crate::bicheck::*;
 use crate::binding::*;
 use crate::common::{Doc, FileId, HasBindings, HasDatabase, Pretty, Style};
@@ -5,11 +9,10 @@ use crate::elab::*;
 use crate::error::*;
 use crate::grammar::*;
 use crate::lexer::Lexer;
-use crate::low::*;
 use crate::term::*;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::RwLock;
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub enum ScopeId {
@@ -41,10 +44,6 @@ impl ScopeId {
 
 /// Since queries can't access the database directly, this defines the interface they can use for accessing it
 pub trait MainExt: HasBindings {
-    fn monos(&self) -> RwLockReadGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
-
-    fn monos_mut(&self) -> RwLockWriteGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>;
-
     /// Report an error to the user
     /// After calling this, queries should attempt to recover as much as possible and continue on
     fn error(&self, e: Error);
@@ -79,12 +78,8 @@ pub trait MainGroup: MainExt + salsa::Database {
     /// If the given definition exists, get the name it would be given in code generation
     fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String>;
 
-    /// Lower a definition to a LowIR function with no arguments
-    fn low_fun(&self, scope: ScopeId, s: Sym) -> Result<LowFun, LowError>;
+    fn low_def(&self, scope: ScopeId, s: Sym) -> Option<LowDef>;
 
-    fn low_ty(&self, scope: ScopeId, s: Sym) -> Result<LowTy, LowError>;
-
-    /// Lower a file to a LowIR module
     fn low_mod(&self, file: FileId) -> LowMod;
 
     /// Returns all scopes in this entire file, including the file scope, in order of definition with the file last
@@ -152,52 +147,23 @@ fn mangle(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<String> {
     Some(format!("{}${}_{}", b.resolve(s), s.num(), scope.file()))
 }
 
-fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
-    for s in db.symbols(ScopeId::File(file)).iter() {
-        db.elab(ScopeId::File(file), **s);
-    }
-    let funs = db
-        .child_scopes(file)
-        .iter()
-        .flat_map(|s| {
-            db.symbols(s.clone())
-                .iter()
-                .map(|n| (s.clone(), **n))
-                .collect::<Vec<(ScopeId, Sym)>>()
-        })
-        .filter_map(|(scope, n)| db.low_fun(scope, n).ok())
-        .collect();
-    LowMod {
-        name: String::from("test_mod"),
-        funs,
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub enum LowError {
-    NoElab,
-    Polymorphic,
-}
-
-fn low_ty(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowTy, LowError> {
-    let elab = db.elab(scope.clone(), s).ok_or(LowError::NoElab)?;
+fn low_def(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowDef> {
+    let elab = db.elab(scope.clone(), s)?;
+    let name = db.mangle(scope.clone(), s)?;
 
     let scoped = (scope, db);
-    let mut lctx = LCtx::new(&scoped);
-    let ty = elab.low_ty_of(&mut lctx).ok_or(LowError::Polymorphic)?;
-    Ok(ty)
-}
 
-fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowError> {
-    let elab = db.elab(scope.clone(), s).ok_or(LowError::NoElab)?;
+    let mut lctx = LCtx::from(ECtx::new(&scoped));
 
-    let ret_ty = db.low_ty(scope.clone(), s)?;
+    let ty = elab.get_type(&scoped).cps_ty(&lctx);
+    let cont = lctx.next_val(Ty::Cont);
 
-    let name = db.mangle(scope.clone(), s).ok_or(LowError::NoElab)?;
-
-    let scoped = (scope, db);
-    let mut lctx = LCtx::new(&scoped);
-    let body = elab.as_low(&mut lctx).ok_or(LowError::Polymorphic)?;
+    let ret = lctx.next_val(ty.clone());
+    let body = elab.cps(
+        ret,
+        &mut lctx,
+        crate::backend::low::Low::ContCall(cont, ty, ret),
+    );
 
     if db.options().show_low_ir {
         eprintln!(
@@ -206,11 +172,11 @@ fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowErr
                 .style(Style::Keyword)
                 .space()
                 .chain(s.pretty(db))
-                .add("()")
+                .add("(")
+                .chain(Ty::Cont.pretty(db))
                 .space()
-                .add("->")
-                .space()
-                .chain(ret_ty.pretty(db))
+                .add(cont)
+                .add(")")
                 .space()
                 .add("{")
                 .line()
@@ -222,7 +188,44 @@ fn low_fun(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Result<LowFun, LowErr
         );
     }
 
-    Ok(LowFun { name, ret_ty, body })
+    Some(LowDef {
+        name,
+        cont_ty: Ty::Cont,
+        cont,
+        body,
+    })
+}
+
+fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
+    for s in db.symbols(ScopeId::File(file)).iter() {
+        db.elab(ScopeId::File(file), **s);
+    }
+    let defs = db
+        .child_scopes(file)
+        .iter()
+        .flat_map(|s| {
+            db.symbols(s.clone())
+                .iter()
+                .map(|n| (s.clone(), **n))
+                .collect::<Vec<(ScopeId, Sym)>>()
+        })
+        .filter_map(|(scope, n)| db.low_def(scope, n))
+        .collect();
+    let main_raw = db.bindings_mut().raw("main".to_string());
+    let main = if let Some(main) = db
+        .symbols(ScopeId::File(file))
+        .iter()
+        .find(|x| x.raw() == main_raw)
+    {
+        db.mangle(ScopeId::File(file), **main)
+    } else {
+        None
+    };
+    LowMod {
+        name: String::from("test_mod"),
+        defs,
+        main,
+    }
 }
 
 fn symbols(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>> {
@@ -322,7 +325,6 @@ pub struct MainDatabase {
     bindings: Arc<RwLock<Bindings>>,
     errors: RwLock<Vec<Error>>,
     scopes: RwLock<HashMap<(FileId, StructId), Arc<Vec<Def>>>>,
-    monos: RwLock<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>>,
 }
 
 impl MainDatabase {
@@ -356,13 +358,6 @@ impl HasBindings for MainDatabase {
 }
 
 impl MainExt for MainDatabase {
-    fn monos(&self) -> RwLockReadGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>> {
-        self.monos.read().unwrap()
-    }
-    fn monos_mut(&self) -> RwLockWriteGuard<HashMap<Sym, Vec<Arc<(Elab, String, LowTy)>>>> {
-        self.monos.write().unwrap()
-    }
-
     fn error(&self, error: Error) {
         self.errors.write().unwrap().push(error);
     }

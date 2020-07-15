@@ -1,29 +1,29 @@
 mod affine;
 mod bicheck;
 mod binding;
-mod codegen;
+// mod codegen;
 mod common;
 mod elab;
 mod error;
 mod lexer;
-mod low;
+// mod low;
 mod options;
 mod pattern;
 mod printing;
 mod query;
 mod repl;
 mod term;
+// mod cps;
+mod backend;
 use lalrpop_util::lalrpop_mod;
 lalrpop_mod!(pub grammar);
 
-use crate::common::HasBindings;
 use crate::error::FILES;
 use crate::options::*;
 use crate::printing::*;
 use crate::query::*;
 use crate::repl::*;
 use arg::Args;
-use bicheck::TCtx;
 use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
@@ -95,7 +95,15 @@ fn main() {
                     if options.command == Command::Run || options.show_llvm {
                         // Generate LLVM
                         let context = inkwell::context::Context::create();
-                        let llvm = module.codegen(&mut crate::codegen::CodegenCtx::new(&context));
+                        let llvm = module.llvm(&context);
+
+                        // let fpm = inkwell::passes::PassManager::create(());
+                        // fpm.add_verifier_pass();
+                        // fpm.add_function_inlining_pass();
+                        // fpm.add_instruction_combining_pass();
+                        // fpm.add_gvn_pass();
+                        // fpm.add_cfg_simplification_pass();
+                        // fpm.run_on(&llvm);
 
                         if options.show_llvm {
                             llvm.print_to_stderr();
@@ -126,69 +134,27 @@ fn main() {
                         }
 
                         if options.command == Command::Run {
-                            let main_raw = db.bindings_mut().raw("main".to_string());
-                            if let Some(main) = db
-                                .symbols(ScopeId::File(file))
-                                .iter()
-                                .find(|x| x.raw() == main_raw)
+                            let engine = llvm
+                                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                                .expect("Failed to create LLVM execution engine");
+                            engine.add_global_mapping(
+                                &llvm.get_function("malloc").unwrap(),
+                                crate::backend::malloc as usize,
+                            );
+                            engine.add_global_mapping(
+                                &llvm.get_function("_pika_print_int").unwrap(),
+                                crate::backend::_pika_print_int as usize,
+                            );
+                            if let Ok(main_fun) =
+                                unsafe { engine.get_function::<unsafe extern "C" fn()>("_start") }
                             {
-                                let main_mangled = db.mangle(ScopeId::File(file), **main).unwrap();
-                                let engine = llvm
-                                    .create_jit_execution_engine(inkwell::OptimizationLevel::None)
-                                    .expect("Failed to create LLVM execution engine");
-
-                                let scoped = (ScopeId::File(file), &db);
-                                let mut tctx = TCtx::new(&scoped);
-
-                                use crate::elab::Elab;
-                                use crate::term::Builtin;
-                                match db
-                                    .elab(ScopeId::File(file), **main)
-                                    .unwrap()
-                                    .get_type(&scoped)
-                                {
-                                    x if x.unify(
-                                        &Elab::Builtin(Builtin::Int),
-                                        &mut tctx,
-                                        &mut Vec::new(),
-                                    ) =>
-                                    unsafe {
-                                        let main_fun: inkwell::execution_engine::JitFunction<
-                                            unsafe extern "C" fn() -> i32,
-                                        > = engine.get_function(&main_mangled).unwrap();
-                                        let result = main_fun.call();
-                                        println!("{}", result);
-                                    }
-                                    x if x.unify(
-                                        &Elab::Pair(
-                                            Box::new(Elab::Builtin(Builtin::Int)),
-                                            Box::new(Elab::Builtin(Builtin::Int)),
-                                        ),
-                                        &mut tctx,
-                                        &mut Vec::new(),
-                                    ) =>
-                                    unsafe {
-                                        // Rust aligns (i32, i32) differently than LLVM does, so values .1 and .3 in the result are padding
-                                        let main_fun: inkwell::execution_engine::JitFunction<
-                                            unsafe extern "C" fn() -> (i32, i32, i32, i32),
-                                        > = engine.get_function(&main_mangled).unwrap();
-                                        let result = main_fun.call();
-                                        println!("({}, {})", result.0, result.2);
-                                    }
-                                    x => {
-                                        printer.print(
-                                            Doc::start("error")
-                                                .style(Style::BoldRed)
-                                                .add(": `main` can't return '")
-                                                .chain(x.pretty(&db).group().style(Style::None))
-                                                .add("'")
-                                                .style(Style::Bold)
-                                                .line()
-                                                .chain(Doc::start("help: `main` can return either 'Int' or '(Int, Int)'").style(Style::Note))
-                                                .hardline()
-                                        ).unwrap();
-                                        std::process::exit(1)
-                                    }
+                                printer
+                                    .print(
+                                        Doc::start("Running `main`").style(Style::Bold).hardline(),
+                                    )
+                                    .unwrap();
+                                unsafe {
+                                    main_fun.call();
                                 }
                             } else {
                                 printer

@@ -269,6 +269,16 @@ pub enum LowIR {
         no: Box<LowIR>,
     },
     Call(Box<LowIR>, Box<LowIR>),
+    CallM(Box<LowIR>, Vec<LowIR>),
+    /// An owned closure
+    ClosureM {
+        fun_name: String,
+        attrs: Vec<FunAttr>,
+        args: Vec<(Sym, LowTy)>,
+        upvalues: Vec<(Sym, LowTy)>,
+        ret_ty: LowTy,
+        body: Box<LowIR>,
+    },
 }
 
 fn lower_cons(cons: TagId, ty: &Elab, lctx: &LCtx) -> LowIR {
@@ -918,7 +928,7 @@ impl Elab {
                         upvalues: vec![(a, LowTy::Int(32))],
                         ret_ty: LowTy::Int(32),
                         body: Box::new(LowIR::IntOp {
-                            op: bu.int_op().unwrap(),
+                            op: todo!("get rid of this module"),
                             lhs: Box::new(LowIR::Local(a)),
                             rhs: Box::new(LowIR::Local(b)),
                         }),
@@ -1197,17 +1207,17 @@ pub fn tag_width<T>(v: &[T]) -> u32 {
     }
 }
 
-impl Builtin {
-    fn int_op(self) -> Option<IntOp> {
-        match self {
-            Builtin::Add => Some(IntOp::Add),
-            Builtin::Sub => Some(IntOp::Sub),
-            Builtin::Mul => Some(IntOp::Mul),
-            Builtin::Div => Some(IntOp::Div),
-            _ => None,
-        }
-    }
-}
+// impl Builtin {
+//     pub fn int_op(self) -> Option<IntOp> {
+//         match self {
+//             Builtin::Add => Some(IntOp::Add),
+//             Builtin::Sub => Some(IntOp::Sub),
+//             Builtin::Mul => Some(IntOp::Mul),
+//             Builtin::Div => Some(IntOp::Div),
+//             _ => None,
+//         }
+//     }
+// }
 
 impl LowIR {
     fn cast(self, from: &Elab, to: &Elab, lctx: &mut LCtx) -> Self {
@@ -1285,7 +1295,7 @@ impl LowIR {
             LowIR::Local(s) => lctx.low_ty(*s).unwrap(),
             LowIR::TypedGlobal(t, _) => t.clone(),
             LowIR::Global(s, scope, _) => lctx.database().low_ty(scope.clone(), *s).unwrap(),
-            LowIR::Call(f, _) => match f.get_type(lctx) {
+            LowIR::Call(f, _) | LowIR::CallM(f, _) => match f.get_type(lctx) {
                 LowTy::ClosRef { to, .. } | LowTy::ClosOwn { to, .. } => *to,
                 _ => panic!("not a function LowTy"),
             },
@@ -1306,6 +1316,17 @@ impl LowIR {
                 to: Box::new(ret_ty.clone()),
                 upvalues: upvalues.iter().map(|(_, t)| t.clone()).collect(),
             },
+            LowIR::ClosureM {
+                args,
+                ret_ty,
+                upvalues,
+                ..
+            } => todo!("LowTy::ClosOwnM"),
+            //     LowTy::ClosOwn {
+            //     from: Box::new(arg_ty.clone()),
+            //     to: Box::new(ret_ty.clone()),
+            //     upvalues: upvalues.iter().map(|(_, t)| t.clone()).collect(),
+            // },
             LowIR::Variant(_, t, _) => t.clone(),
             LowIR::Switch(_, v) => v.first().unwrap().get_type(lctx),
             LowIR::BoolConst(_) => LowTy::Bool,
@@ -1543,6 +1564,64 @@ impl Pretty for LowIR {
                         .add("}"),
                 )
                 .prec(Prec::Term),
+                LowIR::ClosureM {
+                    fun_name,
+                    attrs,
+                    args,
+                    upvalues,
+                    ret_ty,
+                    body,
+                } => Doc::start("fun")
+                    .style(Style::Keyword)
+                    .space()
+                    .add(fun_name)
+                    .debug(attrs)
+                    .add("(")
+                    .chain(Doc::intersperse(args.iter().map(|(arg_name, arg_ty)|
+                    arg_name.pretty(ctx).add(":").style(Style::Binder)
+                    .space()
+                    .chain(arg_ty.pretty(ctx))
+                ), Doc::start(",").space()))
+                    .add(")")
+                    .space()
+                    .chain(if upvalues.is_empty() {
+                        Doc::none()
+                    } else {
+                        Doc::start("with")
+                            .style(Style::Keyword)
+                            .space()
+                            .add("{")
+                            .chain(Doc::intersperse(
+                                upvalues.iter().map(|(k, t)| {
+                                    Doc::none()
+                                        .line()
+                                        .chain(k.pretty(ctx))
+                                        .space()
+                                        .add(":")
+                                        .style(Style::Binder)
+                                        .space()
+                                        .chain(t.pretty(ctx))
+                                }),
+                                Doc::start(","),
+                            ))
+                            .indent()
+                            .line()
+                            .add("}")
+                            .space()
+                    })
+                    .add("->")
+                    .space()
+                    .chain(ret_ty.pretty(ctx))
+                    .space()
+                    .chain(
+                        Doc::start("{")
+                            .line()
+                            .chain(body.pretty(ctx))
+                            .indent()
+                            .line()
+                            .add("}"),
+                    )
+                    .prec(Prec::Term),
             LowIR::Variant(id, t, v) => Doc::start("{")
                 .chain(t.pretty(ctx))
                 .add("}")
@@ -1652,6 +1731,13 @@ impl Pretty for LowIR {
                 .nest(Prec::Atom)
                 .add("(")
                 .chain(x.pretty(ctx))
+                .add(")")
+                .prec(Prec::App),
+            LowIR::CallM(f, v) => f
+                .pretty(ctx)
+                .nest(Prec::Atom)
+                .add("(")
+                .chain(Doc::intersperse(v.iter().map(|x|x.pretty(ctx)), Doc::start(",").space()))
                 .add(")")
                 .prec(Prec::App),
         }
