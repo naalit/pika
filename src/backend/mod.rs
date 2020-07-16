@@ -28,6 +28,8 @@ extern "C" {
 
 impl LowDef {
     fn declare(&self, ctx: &codegen::CodegenCtx) {
+        // Typecheck everything before codegenning anything
+        self.body.type_check(self.cont);
         // It takes a continuation, and the stack pointer, but not an environmeent
         let fun_ty = ctx
             .context
@@ -38,11 +40,17 @@ impl LowDef {
     }
 
     fn define(&self, ctx: &mut codegen::CodegenCtx) {
+        use inkwell::values::BasicValue;
+
+        // { u64 %12, fun %16 }
+
         let fun = ctx.module.get_function(&self.name).unwrap();
         let entry = ctx.context.append_basic_block(fun, "entry");
         ctx.builder.position_at_end(entry);
         ctx.stack_ptr = fun.get_first_param().unwrap().into_pointer_value();
+        ctx.stack_ptr.set_name("stack_ptr");
         ctx.locals.insert(self.cont, fun.get_nth_param(1).unwrap());
+        fun.get_nth_param(1).unwrap().set_name("cont");
         self.body.llvm(ctx);
     }
 }

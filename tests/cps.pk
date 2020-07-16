@@ -1,0 +1,10 @@
+# # idInt := fun (x:Int) => x + 2
+# # applyInt := fun (f:fun Int => Int) (x:Int) => x
+# # main := applyInt idInt 3
+# fstInt := fun (x:Int, y:Int) => x
+# # flip := fun (f:fun (Int, Int) => Int) (x:Int, y:Int) => f (y, x)
+# # main := flip fstInt (5, 18)
+fst := fun (t:Type) (x:t, y:t) => x
+# apply := fun (a:Type) (f: fun (Int, Int) => a) (x:(Int, Int)) => f x
+flip := fun (f:fun (a:Type) (a, a) => a) (t:Type) (x:t, y:t) => f t (y, x)
+main : Int = flip fst Int (3, 18)

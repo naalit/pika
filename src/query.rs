@@ -302,6 +302,9 @@ fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
     // We'll run `simplify_unions` on it later, which should get rid of Bottom if there's a base case
     tctx.set_ty(s, Elab::Bottom);
     let e = synth(&term, &mut tctx);
+    for err in tctx.solve_metas() {
+        db.error(err.to_error(scope.file(), db));
+    }
     match e {
         Ok(e) => {
             if let Err(e) = e.check_affine(&mut crate::affine::ACtx::new(&scoped)) {
@@ -309,6 +312,9 @@ fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
             }
             // We let it go anyway so we don't get "type not found" errors when borrow checking fails
             // We'll check if db.has_errors() before going too far
+
+            // We have to make sure any meta solutions are applied to the term
+            let e = e.save_ctx(&mut tctx);
             Some(Arc::new(e))
         }
         Err(e) => {

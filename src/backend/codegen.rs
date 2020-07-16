@@ -437,7 +437,21 @@ impl Ty {
     ) -> BasicValueEnum<'a> {
         match self {
             Ty::Int(_) => val,
-            Ty::Fun | Ty::Cont | Ty::Dyn(_) | Ty::Struct(_) => {
+            Ty::Dyn(_) => {
+                // If it's smaller than a word, we don't have a pointer, we have a bitcasted something else, so don't copy it
+                let size = self.size_of(val, ctx);
+                let word_size = ctx.voidptr().size_of().unwrap();
+                ctx.if_else_mut({
+                    ctx.builder.build_int_compare(IntPredicate::ULE, size, word_size, "fits")
+                }, |ctx| {
+                    val
+                }, |ctx| {
+                    let ptr = ctx.alloca(size);
+                    self.copy_to(val, ptr, ctx);
+                    ptr.as_basic_value_enum()
+                })
+            },
+            Ty::Fun | Ty::Cont | Ty::Struct(_) => {
                 let size = self.size_of(val, ctx);
                 let ptr = ctx.alloca(size);
                 self.copy_to(val, ptr, ctx);
@@ -524,24 +538,6 @@ impl Ty {
         match self {
             Ty::Int(i) => ctx.context.custom_width_int_type(*i).as_basic_type_enum(),
             Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont => ctx.voidptr(),
-            // Ty::Fun => {
-            //     ctx.context.struct_type(
-            //     &[
-            //         ctx.voidptr(),
-            //         ctx.context.void_type().fn_type(&[ctx.voidptr(), ctx.voidptr(), ctx.voidptr(), Ty::Cont.llvm(ctx)], false).ptr_type(AddressSpace::Generic).as_basic_type_enum(),
-            //         ],
-            //     false,
-            //     ).as_basic_type_enum()
-            // }
-            // Ty::Cont => {
-            //     ctx.context.struct_type(
-            //     &[
-            //         ctx.voidptr(),
-            //         ctx.context.void_type().fn_type(&[ctx.voidptr(), ctx.voidptr()], false).ptr_type(AddressSpace::Generic).as_basic_type_enum(),
-            //         ],
-            //     false,
-            //     ).as_basic_type_enum()
-            // }
         }
     }
 }
@@ -634,6 +630,7 @@ fn llvm_closure<'a>(
 
         // Extract everything we stored in the environment
         let local_env = fun.get_first_param().unwrap().into_pointer_value();
+        local_env.set_name("env");
         // We don't need the size or function pointer ourselves, so we can skip it
         let mut slot_ptr = unsafe {
             ctx.builder
@@ -654,6 +651,7 @@ fn llvm_closure<'a>(
             slot_ptr = unsafe { ctx.builder.build_gep(slot_ptr, &[word_size], "next_slot") };
         } else {
             ctx.stack_ptr = fun.get_nth_param(1).unwrap().into_pointer_value();
+            ctx.stack_ptr.set_name("stack_ptr");
         }
 
         // Add upvalues to local environment
@@ -687,6 +685,11 @@ fn llvm_closure<'a>(
             let param = fun
                 .get_nth_param(i as u32 + if is_cont { 1 } else { 2 })
                 .unwrap();
+            if !is_cont && i == 1 {
+                param.set_name("cont");
+            } else {
+                param.set_name("arg");
+            }
             let param = ty.from_void_ptr(param.into_pointer_value(), ctx);
             let param = if is_cont {
                 // The value may have been allocated in the caller's stack frame, which we just popped.
@@ -695,13 +698,6 @@ fn llvm_closure<'a>(
                 // If this isn't a continuation, it doesn't matter since we're not popping the caller's stack frame
                 param
             };
-            // // If it isn't a continuation, the last argument is a continuation, NOT a void pointer
-            // // Otherwise its a void pointer, and we need to extract the right type
-            // let param = if !is_cont && i + 1 == args.len() {
-            //     param
-            // } else {
-            //     ty.from_void_ptr(param, ctx)
-            // };
             ctx.locals.insert(*arg, param);
         }
 
@@ -850,13 +846,12 @@ impl Expr {
                 arg,
                 arg_ty,
                 cont,
-                cont_ty,
                 body,
                 upvalues,
             } => {
                 // Functions take a continuation as the last argument, in addition to their normal argumnt
                 llvm_closure(
-                    &[(*arg, arg_ty), (*cont, cont_ty)],
+                    &[(*arg, arg_ty), (*cont, &Ty::Cont)],
                     upvalues,
                     body,
                     ctx,

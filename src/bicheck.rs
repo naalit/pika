@@ -671,6 +671,7 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                             tctx.tys
                                 .iter()
                                 .filter(|(k, _)| rargs.iter().take(i).any(|(_, x)| x.binds(**k)))
+                                .filter(|(k, _)| rargs.iter().skip(i).map(|(_, x)| x).chain(std::iter::once(&body)).any(|x| x.uses(**k)))
                                 .map(|(k, v)| (*k, v.clone())),
                         )
                         .collect()
