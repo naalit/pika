@@ -1,12 +1,12 @@
 //! Pika's backend; see README.md in this folder for details.
 mod codegen;
 pub mod low;
+mod util;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LowDef {
     pub name: String,
     pub cont: low::Val,
-    pub cont_ty: low::Ty,
     pub body: low::Low,
 }
 
@@ -34,7 +34,7 @@ impl LowDef {
         let fun_ty = ctx
             .context
             .void_type()
-            .fn_type(&[ctx.voidptr(), self.cont_ty.llvm(ctx)], false);
+            .fn_type(&[ctx.voidptr(), ctx.voidptr()], false);
         let fun = ctx.module.add_function(&self.name, fun_ty, None);
         fun.set_call_conventions(codegen::TAILCC);
     }

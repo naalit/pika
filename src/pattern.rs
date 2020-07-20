@@ -148,7 +148,7 @@ impl Elab {
                             let mut tctx = TCtx::new(env);
                             tctx.extend_metas(self.fvs(&tctx));
                             tctx.extend_metas(ty.result().fvs(&tctx));
-                            // TODO do something with the meta solutions found eree
+                            // TODO do something with the meta solutions found here
                             if !ty.result().unify(self, &mut tctx, &mut Vec::new()) {
                                 return None;
                             }
@@ -254,7 +254,37 @@ impl Elab {
     }
 }
 
+use crate::backend::low::{CompOp, Expr, LCtx, Low, Ty, Val};
+
+/// `f a b c` -> `[c, b, a]`.
+/// Note that this iterator reverses the order of arguments.
+pub struct SpineIter<'a>(&'a Pat);
+impl<'a> SpineIter<'a> {
+    pub fn reversed(self) -> std::iter::Rev<std::vec::IntoIter<&'a Pat>> {
+        self.collect::<Vec<_>>().into_iter().rev()
+    }
+}
+impl<'a> Iterator for SpineIter<'a> {
+    type Item = &'a Pat;
+
+    fn next(&mut self) -> Option<&'a Pat> {
+        match self.0 {
+            Pat::App(f, x) => {
+                self.0 = f;
+                Some(x)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl Pat {
+    /// `f a b c` -> `[c, b, a]`.
+    /// Note that this iterator reverses the order of arguments.
+    pub fn spine_iter(&self) -> SpineIter {
+        SpineIter(self)
+    }
+
     /// Adds the types of any variables bound by the pattern to the typing context
     pub fn apply_types(&self, tctx: &mut TCtx) {
         match self {
@@ -329,86 +359,239 @@ impl Pat {
         }
     }
 
-    // /// Compile this pattern to code that binds all variables and returns whether it matched
-    // ///
-    // /// This function clones `param`, so it should be a `LowIR::Local`
-    // pub fn lower(&self, param: LowIR, lctx: &mut LCtx) -> LowIR {
-    //     match self {
-    //         Pat::Cons(id, ty) => {
-    //             let sid = match ty.result().head() {
-    //                 Elab::Data(_, sid, _) => *sid,
-    //                 _ => panic!("wrong type"),
-    //             };
-    //             // TODO narrowing of GADT variants based on type, in LowIR
-    //             let tag_size = tag_width(
-    //                 &lctx
-    //                     .database()
-    //                     .symbols(ScopeId::Struct(sid, Box::new(lctx.scope()))),
-    //             );
-    //             if tag_size == 0 {
-    //                 LowIR::BoolConst(true)
-    //             } else {
-    //                 let idx = lctx
-    //                     .database()
-    //                     .symbols(ScopeId::Struct(sid, Box::new(lctx.scope())))
-    //                     .iter()
-    //                     .enumerate()
-    //                     .find(|(_, x)| x.raw() == lctx.bindings().tag_name(*id))
-    //                     .unwrap()
-    //                     .0 as u64;
-    //                 let tag = LowIR::Project(Box::new(param), 0);
-    //
-    //                 LowIR::CompOp {
-    //                     op: CompOp::Eq,
-    //                     lhs: Box::new(LowIR::SizedIntConst(tag_size, idx)),
-    //                     rhs: Box::new(tag.clone()),
-    //                 }
-    //             }
-    //         }
-    //         Pat::App(f, x) => {
-    //             // We need to know where we are
-    //             // If there aren't any `App`s ahead of us, we're at the first parameter
-    //             let idx = f.spine_len();
-    //             let x_param =
-    //                 LowIR::Project(Box::new(LowIR::Project(Box::new(param.clone()), 1)), idx);
-    //
-    //             // Pass the parameter unchanged for the head, so it can extract the tag and make sure it matches
-    //             let f = f.lower(param, lctx);
-    //             let x = x.lower(x_param, lctx);
-    //
-    //             LowIR::BoolOp {
-    //                 op: BoolOp::And,
-    //                 lhs: Box::new(f),
-    //                 rhs: Box::new(x),
-    //             }
-    //         }
-    //         Pat::I32(i) => LowIR::CompOp {
-    //             op: CompOp::Eq,
-    //             // This does the necessary bit-fiddling to make it a u64 for use as a literal
-    //             lhs: Box::new(Elab::I32(*i).as_low(lctx).unwrap()),
-    //             rhs: Box::new(param),
-    //         },
-    //         Pat::Pair(x, y) => {
-    //             let x_param = LowIR::Project(Box::new(param.clone()), 0);
-    //             let y_param = LowIR::Project(Box::new(param), 1);
-    //             let x = x.lower(x_param, lctx);
-    //             let y = y.lower(y_param, lctx);
-    //             LowIR::BoolOp {
-    //                 op: BoolOp::And,
-    //                 lhs: Box::new(x),
-    //                 rhs: Box::new(y),
-    //             }
-    //         }
-    //         // TODO the type should be able to match, e.g. in unions
-    //         Pat::Var(s, t) => {
-    //             let lty = t.as_low_ty(lctx);
-    //             lctx.set_low_ty(*s, lty);
-    //             LowIR::Let(*s, Box::new(param), Box::new(LowIR::BoolConst(true)))
-    //         }
-    //         // Unit always matches
-    //         Pat::Unit => LowIR::BoolConst(true),
-    //     }
-    // }
+    /// Returns a list of all variables bound by this pattern, with types.
+    pub fn bound(&self) -> Vec<(Sym, &Elab)> {
+        let mut bound = Vec::new();
+        self.bound_(&mut bound);
+        bound
+    }
+
+    /// Helper for `bound()`
+    fn bound_<'a>(&'a self, bound: &mut Vec<(Sym, &'a Elab)>) {
+        match self {
+            Pat::Var(s, t) => bound.push((*s, t)),
+            Pat::Pair(x, y) | Pat::App(x, y) => {
+                x.bound_(bound);
+                y.bound_(bound);
+            }
+            Pat::Cons(_, _) | Pat::Unit | Pat::I32(_) => (),
+        }
+    }
+
+    pub fn cons(&self) -> Option<(TagId, &Elab)> {
+        match self {
+            Pat::Cons(id, t) => Some((*id, t)),
+            Pat::App(f, _) => f.cons(),
+            _ => None,
+        }
+    }
+
+    pub fn uses(&self, s: Sym) -> bool {
+        match self {
+            Pat::Var(_, t) | Pat::Cons(_, t) => t.uses(s),
+            Pat::Pair(x, y) | Pat::App(x, y) => x.uses(s) || y.uses(s),
+            Pat::Unit | Pat::I32(_) => false,
+        }
+    }
+
+    pub fn binds(&self, s: Sym) -> bool {
+        match self {
+            Pat::Var(x, _) => *x == s,
+            Pat::Pair(x, y) | Pat::App(x, y) => x.binds(s) || y.binds(s),
+            Pat::Unit | Pat::I32(_) | Pat::Cons(_, _) => false,
+        }
+    }
+
+    /// Compile this pattern to code that binds all variables and runs `yes` if it matched, otherwise runs `no`.
+    /// It applies any constraints to `lctx`, so you might want to clone that first.
+    pub fn lower(&self, ty: &Elab, param: Val, lctx: &mut LCtx, yes: Low, no: Low) -> Low {
+        match (self, ty) {
+            (Pat::Cons(_, _), _) | (Pat::App(_, _), _) => {
+                let (id, _) = self.cons().unwrap();
+
+                // We do this before setting metas to make sure it includes all constructors
+                let cps_ty = ty.cps_ty(lctx);
+
+                let (idx, tag_width, cons_ty) = {
+                    let v = ty.valid_cons(lctx);
+
+                    if v.is_empty() {
+                        panic!(
+                            "Empty type '{}' is not allowed",
+                            ty.pretty(lctx).ansi_string()
+                        );
+                    }
+
+                    let tag_width = crate::backend::low::tag_width(&v);
+
+                    let (idx, (_, cons_ty, metas)) = v
+                        .into_iter()
+                        .enumerate()
+                        .find(|(_, (x, _, _))| *x == id)
+                        .unwrap();
+                    for (k, v) in metas {
+                        lctx.ectx.set_val(k, v);
+                    }
+
+                    (idx, tag_width, cons_ty)
+                };
+
+                let union_ty = if let Ty::Struct(v) = &cps_ty {
+                    v[1].clone()
+                } else {
+                    unreachable!()
+                };
+                let payload_ty = if let Ty::Union(v) = &union_ty {
+                    v[idx].clone()
+                } else {
+                    unreachable!()
+                };
+
+                let payload_union = lctx.next_val(union_ty.clone());
+                let payload = lctx.next_val(payload_ty.clone());
+
+                // We make roughly this:
+                // ```
+                // if cons matches {
+                //  if a matches {
+                //   if b matches {
+                //    yes
+                //   } else no
+                //  } else no
+                // } else no
+                // ```
+
+                // The arguments will share `no`, so make a continuation out of it and assign it to a variable
+                // `() -> no`
+                let vno = lctx.next_val(Ty::Cont);
+                let cno =
+                    crate::backend::low::make_cont(lctx.next_val(Ty::Unit), Ty::Unit, lctx, no);
+                let vunit = lctx.next_val(Ty::Unit);
+
+                let yes = self
+                    .spine_iter()
+                    .reversed()
+                    .zip(cons_ty.args_iter().reversed().rev())
+                    .enumerate()
+                    .rfold(yes, |yes, (i, (pat, ty))| {
+                        let member = lctx.next_val(ty.cps_ty(lctx));
+                        let rest =
+                            pat.lower(ty, member, lctx, yes, Low::ContCall(vno, Ty::Unit, vunit));
+                        Low::Let(
+                            member,
+                            Expr::Project(payload_ty.clone(), payload, i as u32),
+                            Box::new(rest),
+                        )
+                    });
+
+                let yes = Low::Let(
+                    payload_union,
+                    Expr::Project(cps_ty.clone(), param, 1),
+                    Box::new(Low::Let(
+                        payload,
+                        Expr::AsVariant(union_ty, payload_union, idx as u32),
+                        Box::new(yes),
+                    )),
+                );
+
+                let did_match = lctx.next_val(Ty::Int(1));
+                let rest = Low::IfElse(
+                    did_match,
+                    Box::new(yes),
+                    Box::new(Low::ContCall(vno, Ty::Unit, vunit)),
+                );
+                let rest = Low::Let(
+                    vunit,
+                    Expr::Unit,
+                    Box::new(Low::Let(vno, cno, Box::new(rest))),
+                );
+
+                let idx_val = lctx.next_val(Ty::Int(tag_width));
+                let tag_val = lctx.next_val(Ty::Int(tag_width));
+                Low::Let(
+                    idx_val,
+                    Expr::IntConst(tag_width, idx as u64),
+                    Box::new(Low::Let(
+                        tag_val,
+                        Expr::Project(cps_ty, param, 0),
+                        Box::new(Low::Let(
+                            did_match,
+                            Expr::CompOp(idx_val, CompOp::Eq, tag_val),
+                            Box::new(rest),
+                        )),
+                    )),
+                )
+            }
+            (Pat::Var(x, _), _) => {
+                let v = lctx.get(*x).unwrap();
+                Low::Let(v, Expr::Val(param), Box::new(yes))
+            }
+            (Pat::I32(i), _) => {
+                let did_match = lctx.next_val(Ty::Int(1));
+                let vconst = lctx.next_val(Ty::Int(32));
+                Low::Let(
+                    vconst,
+                    Expr::IntConst(32, *i as u64),
+                    Box::new(Low::Let(
+                        did_match,
+                        Expr::CompOp(vconst, CompOp::Eq, param),
+                        Box::new(Low::IfElse(did_match, Box::new(yes), Box::new(no))),
+                    )),
+                )
+            }
+            (Pat::Pair(pa, pb), Elab::Pair(ta, tb)) => {
+                let cty = ty.cps_ty(lctx);
+                let va = lctx.next_val(ta.cps_ty(lctx));
+                let vb = lctx.next_val(tb.cps_ty(lctx));
+                // The two lowered patterns are going to share `no`, so we `cont`-ify it
+                let vno = lctx.next_val(Ty::Cont);
+                let cno =
+                    crate::backend::low::make_cont(lctx.next_val(Ty::Unit), Ty::Unit, lctx, no);
+                let vunit = lctx.next_val(Ty::Unit);
+
+                let b = pb.lower(
+                    tb,
+                    vb,
+                    lctx,
+                    yes,
+                    Low::Let(
+                        vunit,
+                        Expr::Unit,
+                        Box::new(Low::ContCall(vno, Ty::Unit, vunit)),
+                    ),
+                );
+                let a = pa.lower(
+                    ta,
+                    va,
+                    lctx,
+                    b,
+                    Low::Let(
+                        vunit,
+                        Expr::Unit,
+                        Box::new(Low::ContCall(vno, Ty::Unit, vunit)),
+                    ),
+                );
+
+                Low::Let(
+                    vno,
+                    cno,
+                    Box::new(Low::Let(
+                        va,
+                        Expr::Project(cty.clone(), param, 0),
+                        Box::new(Low::Let(
+                            vb,
+                            Expr::Project(cty.clone(), param, 1),
+                            Box::new(a),
+                        )),
+                    )),
+                )
+            }
+            (Pat::Pair(_, _), _) => {
+                panic!("expected pair type, got {}", ty.pretty(lctx).ansi_string())
+            }
+            (Pat::Unit, _) => yes,
+        }
+    }
 }
 
 impl Pretty for Pat {

@@ -5,4 +5,4 @@ f : fun Int => Int
     a => a
 
 # (12, 4)
-main := (f 3, f 4)
+main := (f 3) + (f 4)

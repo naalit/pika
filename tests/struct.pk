@@ -9,4 +9,4 @@ s := do
   a
 
 # Should be (12, 4)
-main := (a, s)
+main := a + s # (a, s)

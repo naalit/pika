@@ -9,8 +9,8 @@ unwrap_or : fun (t:Type) (Option t) t => t = fun _ x default: => case x of
   Option.None _ => default
 
 # Unions
-f := fun (Int | ()) => ()
-g := fun (x: Int | ()) => f x
+# f := fun (Int | ()) => ()
+# g := fun (x: Int | ()) => f x
 
 # Booleans
 type Bool of
@@ -30,10 +30,10 @@ is_one_zero := is_zero one
 s : Option Int = Option.Some Int 3
 n : Option Int = Option.None Int
 
-k := g 3
+# k := g 3
 
-a := fun ((Int, Int) | Int | ()) => ()
-b := fun x: Int | () => a x
+# a := fun ((Int, Int) | Int | ()) => ()
+# b := fun x: Int | () => a x
 
 ui := unwrap_or Int
 si := Option.Some Int 3

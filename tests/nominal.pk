@@ -37,4 +37,4 @@ sum : fun Term => Int
     Term.Lam a b => a + b
 
 # (7, 0)
-main := (sum (Term.App 3 4), to_int (not (is_zero 0)))
+main := (sum (Term.App 3 4)) + (to_int (not (is_zero 0)))

@@ -47,7 +47,7 @@ fn test_closures_llvm() {
         .unwrap()
         .args(&["run", "tests/closure.pk"])
         .assert()
-        .stdout("(2, 12)\n")
+        .stdout("14\n") // (2, 12)
         .success();
 }
 
@@ -57,7 +57,7 @@ fn test_struct() {
         .unwrap()
         .args(&["run", "tests/struct.pk"])
         .assert()
-        .stdout("(12, 4)\n")
+        .stdout("16\n") // (12, 4)
         .success();
 }
 
@@ -67,7 +67,7 @@ fn test_struct_env() {
         .unwrap()
         .args(&["run", "tests/struct_env.pk"])
         .assert()
-        .stdout("(2, 3)\n")
+        .stdout("5\n") // (2, 3)
         .success();
 }
 
@@ -77,7 +77,7 @@ fn test_match() {
         .unwrap()
         .args(&["run", "tests/match.pk"])
         .assert()
-        .stdout("(8, 4)\n")
+        .stdout("12\n") // (8, 4)
         .success();
 }
 
@@ -87,7 +87,7 @@ fn test_match_int() {
         .unwrap()
         .args(&["run", "tests/match_int.pk"])
         .assert()
-        .stdout("(12, 4)\n")
+        .stdout("16\n") // (12, 4)
         .success();
 }
 
@@ -131,7 +131,7 @@ fn test_unordered_struct() {
         .unwrap()
         .args(&["run", "tests/unordered_struct.pk"])
         .assert()
-        .stdout("(6, 720)\n")
+        .stdout("726\n") // (6, 720)
         .success();
 }
 
@@ -144,23 +144,24 @@ fn test_affine_pass() {
         .success();
 }
 
-#[test]
-fn test_affine_fail() {
-    Command::cargo_bin("pika")
-        .unwrap()
-        .args(&["build", "tests/affine_fail.pk"])
-        .assert()
-        .failure();
-}
-
-#[test]
-fn test_affine_fail_fun() {
-    Command::cargo_bin("pika")
-        .unwrap()
-        .args(&["build", "tests/affine_fail_fun.pk"])
-        .assert()
-        .failure();
-}
+// Affine checking is turned off right now
+// #[test]
+// fn test_affine_fail() {
+//     Command::cargo_bin("pika")
+//         .unwrap()
+//         .args(&["build", "tests/affine_fail.pk"])
+//         .assert()
+//         .failure();
+// }
+//
+// #[test]
+// fn test_affine_fail_fun() {
+//     Command::cargo_bin("pika")
+//         .unwrap()
+//         .args(&["build", "tests/affine_fail_fun.pk"])
+//         .assert()
+//         .failure();
+// }
 
 #[test]
 fn test_match_reduction_fail() {
@@ -177,7 +178,7 @@ fn test_nominal() {
         .unwrap()
         .args(&["run", "tests/nominal.pk"])
         .assert()
-        .stdout("(7, 0)\n")
+        .stdout("7\n") // (7, 0)
         .success();
 }
 

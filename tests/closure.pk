@@ -8,4 +8,4 @@ twelve := zero Int (const 2) 12
 # And this 2
 two    := one  Int (const 2) 12
 # Let's test it
-main := (two, twelve)
+main := two + twelve

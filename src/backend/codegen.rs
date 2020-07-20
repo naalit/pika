@@ -1,8 +1,7 @@
 //! The LLVM interface lives here, since its thread-locality and `inkwell`'s lifetimes don't really work with Salsa.
 use super::low::*;
 use inkwell::{
-    attributes::{Attribute, AttributeLoc},
-    basic_block::BasicBlock,
+    attributes::AttributeLoc,
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
@@ -11,7 +10,7 @@ use inkwell::{
     AddressSpace, IntPredicate,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     convert::{TryFrom, TryInto},
     fmt::Debug,
 };
@@ -20,6 +19,27 @@ use std::{
 pub const TAILCC: u32 = 18;
 pub const CCC: u32 = 0;
 pub const FASTCC: u32 = 8;
+
+impl FunAttr {
+    fn apply<'a>(self, f: FunctionValue<'a>, ctx: &CodegenCtx<'a>) {
+        match self {
+            FunAttr::Private => f.set_linkage(Linkage::Private),
+            _ => f.add_attribute(
+                AttributeLoc::Function,
+                ctx.context
+                    .create_enum_attribute(self.attr_enum().expect("Unknown attribute"), 0),
+            ),
+        }
+    }
+
+    fn attr_enum(self) -> Option<u32> {
+        let name = match self {
+            FunAttr::AlwaysInline => "alwaysinline",
+            FunAttr::Private => return None,
+        };
+        Some(inkwell::attributes::Attribute::get_named_enum_kind_id(name))
+    }
+}
 
 /// We need one of these to generate any LLVM code, but not to generate LowIR
 pub struct CodegenCtx<'ctx> {
@@ -77,6 +97,21 @@ impl<'ctx> CodegenCtx<'ctx> {
             .as_basic_type_enum()
     }
 
+    /// Rounds to the next highest multiple of the word size on this platform
+    pub fn round_to_word(&self, size: IntValue<'ctx>) -> IntValue<'ctx> {
+        // For now we assume words are 8 bytes
+        // TODO use target information or something
+
+        // (size + 7) & ~7
+        let seven = self.context.i64_type().const_int(7, false);
+        let not_seven = seven.const_not();
+        let plus_seven = self.builder.build_int_add(size, seven, "plus_seven");
+        let rounded = self
+            .builder
+            .build_and(plus_seven, not_seven, "rounded_size");
+        rounded
+    }
+
     /// Allocate `size` bytes on the Pika stack
     pub fn alloca(&mut self, size: IntValue<'ctx>) -> PointerValue<'ctx> {
         // TODO bump down
@@ -106,7 +141,7 @@ impl<'ctx> CodegenCtx<'ctx> {
                 .fn_type(&[self.context.i64_type().as_basic_type_enum()], false),
             None,
         );
-        // Right now it's just 2KB, and not segmented
+        // Right now it's just 16KB, and not segmented
         let ptr = self
             .builder
             .build_call(
@@ -114,7 +149,7 @@ impl<'ctx> CodegenCtx<'ctx> {
                 &[self
                     .context
                     .i64_type()
-                    .const_int(2048, false)
+                    .const_int(1024 * 16, false)
                     .as_basic_value_enum()],
                 "_stack_ptr",
             )
@@ -123,28 +158,6 @@ impl<'ctx> CodegenCtx<'ctx> {
             .unwrap();
         self.builder.build_store(self.stack_base, ptr);
         self.stack_ptr = ptr.into_pointer_value();
-    }
-}
-
-fn fn_type<'a>(params: &[BasicTypeEnum<'a>], x: BasicTypeEnum<'a>) -> FunctionType<'a> {
-    match x {
-        BasicTypeEnum::ArrayType(t) => t.fn_type(params, false),
-        BasicTypeEnum::FloatType(t) => t.fn_type(params, false),
-        BasicTypeEnum::IntType(t) => t.fn_type(params, false),
-        BasicTypeEnum::PointerType(t) => t.fn_type(params, false),
-        BasicTypeEnum::StructType(t) => t.fn_type(params, false),
-        BasicTypeEnum::VectorType(t) => t.fn_type(params, false),
-    }
-}
-/// Gets the `undef` value of a given type
-fn undef_of(x: BasicTypeEnum) -> BasicValueEnum {
-    match x {
-        BasicTypeEnum::ArrayType(x) => x.get_undef().into(),
-        BasicTypeEnum::FloatType(x) => x.get_undef().into(),
-        BasicTypeEnum::IntType(x) => x.get_undef().into(),
-        BasicTypeEnum::PointerType(x) => x.get_undef().into(),
-        BasicTypeEnum::StructType(x) => x.get_undef().into(),
-        BasicTypeEnum::VectorType(x) => x.get_undef().into(),
     }
 }
 
@@ -286,7 +299,14 @@ impl Ty {
                     },
                 )
             }
-            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont => ptr.as_basic_value_enum(),
+            Ty::Unit => ctx
+                .context
+                .struct_type(&[], false)
+                .const_zero()
+                .as_basic_value_enum(),
+            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) => {
+                ptr.as_basic_value_enum()
+            }
         }
     }
 
@@ -344,7 +364,11 @@ impl Ty {
                     },
                 )
             }
-            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont => val.into_pointer_value(),
+            // We don't care what the voidptr representation of a zero-sized type is, so just use undef
+            Ty::Unit => ctx.voidptr().into_pointer_type().get_undef(),
+            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) => {
+                val.into_pointer_value()
+            }
         }
     }
 
@@ -357,32 +381,41 @@ impl Ty {
     /// which conveniently compares as bigger than word size.
     fn normal_size<'a>(&self, ctx: &CodegenCtx<'a>) -> IntValue<'a> {
         match self {
+            Ty::Unit => ctx.context.i64_type().const_zero(),
             Ty::Int(_) => self.llvm(ctx).size_of().unwrap(),
             Ty::Struct(v) => {
+                // 1-element structs are transparent, but always stored as a void ptr
+                if v.len() == 1 {
+                    return v[0].normal_size(ctx);
+                }
+
                 let mut total_size = ctx.context.i64_type().const_zero();
-                let word_size = ctx.voidptr().size_of().unwrap();
+                let mut any_dyn = ctx.context.bool_type().const_zero();
+                let minus_one = ctx.context.i64_type().const_int(-1i64 as u64, false);
                 for i in v {
-                    // We align each value to a word, so if it's less than a word we round up
                     let size = i.normal_size(ctx);
-                    let smaller_than_word = ctx.builder.build_int_compare(
-                        IntPredicate::ULT,
+                    // If any members are dynamically sized, so is the struct
+                    let is_dyn_size = ctx.builder.build_int_compare(
+                        IntPredicate::EQ,
                         size,
-                        word_size,
-                        "smaller_than_word",
+                        minus_one,
+                        "member_is_dyn_size",
                     );
-                    let size = ctx
+                    any_dyn = ctx
                         .builder
-                        .build_select(smaller_than_word, word_size, size, "rounded_size")
-                        .into_int_value();
+                        .build_or(is_dyn_size, any_dyn, "any_member_dyn_size");
+                    // We align each value to a word, so if it's less than a word we round up
+                    let size = ctx.round_to_word(size);
                     total_size = ctx.builder.build_int_add(total_size, size, "struct_size");
                 }
-                total_size
+                ctx.if_else(any_dyn, |_| minus_one, |_| total_size)
             }
             Ty::Dyn(v) => ctx.locals.get(v).unwrap().into_int_value(),
-            Ty::Fun | Ty::Cont => ctx
-                .context
-                .i64_type()
-                .const_int(unsafe { std::mem::transmute::<i64, u64>(-1) }, false),
+            // We leave continuations in place, don't move them around, because they can't escape their stack region like closures can
+            // We just pass around the same pointer
+            Ty::Cont => ctx.voidptr().size_of().unwrap(),
+            // Closures and unions are always dynamically sized
+            Ty::Fun | Ty::Union(_) => ctx.context.i64_type().const_int(-1i64 as u64, false),
         }
     }
 
@@ -390,11 +423,8 @@ impl Ty {
     /// This doesn't guarantee it's dyn size, that's determined by whether `normal_size()` is `-1` (at runtime).
     fn might_be_dyn_size(&self) -> bool {
         match self {
-            Ty::Int(_) => false,
-            Ty::Fun => true,
-            Ty::Cont => true,
-            Ty::Struct(_) => true,
-            Ty::Dyn(_) => true,
+            Ty::Int(_) | Ty::Unit | Ty::Cont => false,
+            Ty::Fun | Ty::Struct(_) | Ty::Dyn(_) | Ty::Union(_) => true,
         }
     }
 
@@ -403,10 +433,7 @@ impl Ty {
         if !self.might_be_dyn_size() {
             return normal_size;
         }
-        let minus_one = ctx
-            .context
-            .i64_type()
-            .const_int(unsafe { std::mem::transmute::<i64, u64>(-1) }, false);
+        let minus_one = ctx.context.i64_type().const_int(-1i64 as u64, false);
         let is_dyn_size =
             ctx.builder
                 .build_int_compare(IntPredicate::EQ, normal_size, minus_one, "is_dyn_size");
@@ -436,22 +463,34 @@ impl Ty {
         ctx: &mut CodegenCtx<'a>,
     ) -> BasicValueEnum<'a> {
         match self {
-            Ty::Int(_) => val,
+            Ty::Int(_) | Ty::Unit => val,
+            // Again, we never need to reallocate continuations, because they're always called before the stack unwinds past them
+            Ty::Cont => val,
+            Ty::Struct(v) if v.len() == 1 => v[0].reallocate(val, ctx),
             Ty::Dyn(_) => {
                 // If it's smaller than a word, we don't have a pointer, we have a bitcasted something else, so don't copy it
+                // That's only true of the normal size, though, not the dynamic syze
+                let norm_size = self.normal_size(ctx);
                 let size = self.size_of(val, ctx);
                 let word_size = ctx.voidptr().size_of().unwrap();
-                ctx.if_else_mut({
-                    ctx.builder.build_int_compare(IntPredicate::ULE, size, word_size, "fits")
-                }, |ctx| {
-                    val
-                }, |ctx| {
-                    let ptr = ctx.alloca(size);
-                    self.copy_to(val, ptr, ctx);
-                    ptr.as_basic_value_enum()
-                })
-            },
-            Ty::Fun | Ty::Cont | Ty::Struct(_) => {
+                ctx.if_else_mut(
+                    {
+                        ctx.builder.build_int_compare(
+                            IntPredicate::ULE,
+                            norm_size,
+                            word_size,
+                            "fits",
+                        )
+                    },
+                    |_| val,
+                    |ctx| {
+                        let ptr = ctx.alloca(size);
+                        self.copy_to(val, ptr, ctx);
+                        ptr.as_basic_value_enum()
+                    },
+                )
+            }
+            Ty::Fun | Ty::Struct(_) | Ty::Union(_) => {
                 let size = self.size_of(val, ctx);
                 let ptr = ctx.alloca(size);
                 self.copy_to(val, ptr, ctx);
@@ -468,7 +507,9 @@ impl Ty {
     ) {
         // We do:
         // if size_of<self>() <= size_of<i8*>() {
-        //   store(this, ptr)
+        //   if size_of<self>() != 0 {
+        //      store(this, ptr)
+        //   }
         // } else {
         //   memcpy(this, ptr)
         // }
@@ -484,15 +525,30 @@ impl Ty {
                     .build_int_compare(IntPredicate::ULE, norm_size, ptr_size, "fits")
             },
             |ctx| {
-                let casted = ctx.builder.build_bitcast(
-                    ptr,
-                    ctx.voidptr().ptr_type(AddressSpace::Generic),
-                    "ptr_cast",
-                );
-                let s = ctx.builder.build_store(casted.into_pointer_value(), val);
-                s.set_alignment(8).unwrap();
-                // We need to return a BasicValueEnum for `if_else()`
-                ctx.context.bool_type().const_zero().as_basic_value_enum()
+                ctx.if_else(
+                    {
+                        ctx.builder.build_int_compare(
+                            IntPredicate::EQ,
+                            norm_size,
+                            ctx.context.i64_type().const_zero(),
+                            "is_zero_sized",
+                        )
+                    },
+                    |ctx| {
+                        // We need to return a BasicValueEnum for `if_else()`
+                        ctx.context.bool_type().const_zero().as_basic_value_enum()
+                    },
+                    |ctx| {
+                        let casted = ctx.builder.build_bitcast(
+                            ptr,
+                            ctx.voidptr().ptr_type(AddressSpace::Generic),
+                            "ptr_cast",
+                        );
+                        let s = ctx.builder.build_store(casted.into_pointer_value(), val);
+                        s.set_alignment(8).unwrap();
+                        ctx.context.bool_type().const_zero().as_basic_value_enum()
+                    },
+                )
             },
             |ctx| {
                 ctx.builder
@@ -505,7 +561,7 @@ impl Ty {
 
     fn load_from<'a>(&self, ptr: PointerValue<'a>, ctx: &CodegenCtx<'a>) -> BasicValueEnum<'a> {
         // We do:
-        // if size_of<self>() <= size_of<i8*>() {
+        // if size_of<self>() <= size_of<i8*>() && size_of<self>() > 0 {
         //   load(ptr)
         // } else {
         //   ptr
@@ -516,8 +572,16 @@ impl Ty {
 
         let voidptr = ctx.if_else(
             {
-                ctx.builder
-                    .build_int_compare(IntPredicate::ULE, this_size, ptr_size, "fits")
+                let fits =
+                    ctx.builder
+                        .build_int_compare(IntPredicate::ULE, this_size, ptr_size, "fits");
+                let non_zero = ctx.builder.build_int_compare(
+                    IntPredicate::UGT,
+                    this_size,
+                    ctx.context.i64_type().const_zero(),
+                    "non_zero_sized",
+                );
+                ctx.builder.build_and(fits, non_zero, "should_load")
             },
             |ctx| {
                 let casted = ctx.builder.build_bitcast(
@@ -534,25 +598,13 @@ impl Ty {
         self.from_void_ptr(voidptr, ctx)
     }
 
-    pub fn llvm<'a>(&self, ctx: &CodegenCtx<'a>) -> BasicTypeEnum<'a> {
+    fn llvm<'a>(&self, ctx: &CodegenCtx<'a>) -> BasicTypeEnum<'a> {
         match self {
+            Ty::Unit => ctx.context.struct_type(&[], false).as_basic_type_enum(),
             Ty::Int(i) => ctx.context.custom_width_int_type(*i).as_basic_type_enum(),
-            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont => ctx.voidptr(),
+            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) => ctx.voidptr(),
         }
     }
-}
-
-fn llvm_struct<'a>(values: &[BasicValueEnum<'a>], ctx: &CodegenCtx<'a>) -> StructValue<'a> {
-    let types: Vec<_> = values.iter().map(|x| x.get_type()).collect();
-    let mut struct_val = ctx.context.struct_type(&types, false).get_undef();
-    for (i, v) in values.iter().enumerate() {
-        struct_val = ctx
-            .builder
-            .build_insert_value(struct_val, *v, i as u32, "struct")
-            .unwrap()
-            .into_struct_value();
-    }
-    struct_val
 }
 
 /// Store, on the stack, something like: `{ i64 %size, void (i8* %env, i8* %sp, args...)* %ptr, upvalues... }`
@@ -582,16 +634,7 @@ fn llvm_closure<'a>(
             let val = *ctx.locals.get(name).unwrap();
             let size = ty.size_of(val, ctx);
             // We align each value to a word, so if it's less than a word we round up
-            let smaller_than_word = ctx.builder.build_int_compare(
-                IntPredicate::ULT,
-                size,
-                word_size,
-                "smaller_than_word",
-            );
-            let size = ctx
-                .builder
-                .build_select(smaller_than_word, word_size, size, "rounded_size")
-                .into_int_value();
+            let size = ctx.round_to_word(size);
             (*name, val, ty, size)
         })
         .collect();
@@ -609,22 +652,30 @@ fn llvm_closure<'a>(
         // All functions, continuation or not, return void, and take an environment as their first argument
         // Non-continuations also take the current stack pointer as their second argument
         let arg_tys: Vec<_> = std::iter::repeat(ctx.voidptr())
-            .take(if is_cont { 1 } else { 2 })
-            .chain(args.iter().enumerate().map(
-                |(i, (_, t))| ctx.voidptr(), // // If it isn't a continuation, the last argument is a continuation, NOT a void pointer
-                                             // // Otherwise it is a void pointer
-                                             // if !is_cont && i + 1 == args.len() {
-                                             //     t.llvm(ctx)
-                                             // } else {
-                                             //     ctx.voidptr()
-                                             // }
-            ))
+            .take(if is_cont { 1 } else { 2 } + args.len())
             .collect();
         let ty = ctx.context.void_type().fn_type(&arg_tys, false);
-        let fun =
-            ctx.module
-                .add_function(if is_cont { "_cont_closure" } else { "_closure" }, ty, None);
+        let mut name = block
+            .get_parent()
+            .unwrap()
+            .get_name()
+            .to_str()
+            .unwrap()
+            .to_string();
+        if is_cont {
+            if !name.ends_with("._continuation") {
+                name.push_str("._continuation");
+            }
+        } else {
+            name.push_str("._closure");
+        }
+        let fun = ctx.module.add_function(&name, ty, None);
         fun.set_call_conventions(TAILCC);
+        // We make all continuations `private`, that might help LLVM optimize CPS better
+        if is_cont {
+            FunAttr::Private.apply(fun, ctx);
+        }
+
         let entry = ctx.context.append_basic_block(fun, "entry");
         ctx.builder.position_at_end(entry);
 
@@ -658,7 +709,7 @@ fn llvm_closure<'a>(
         let mut replace = Vec::new();
         for (name, _, ty, _) in &upvalues {
             let val = ty.load_from(slot_ptr, ctx);
-            if let Some(old) = ctx.locals.insert(*name, val.as_basic_value_enum()) {
+            if let Some(old) = ctx.locals.insert(*name, val) {
                 replace.push((*name, old));
             }
 
@@ -666,16 +717,7 @@ fn llvm_closure<'a>(
             // We recalculate size here since we're in a different function
             let size = ty.size_of(val, ctx);
             // We align each value to a word, so if it's less than a word we round up
-            let smaller_than_word = ctx.builder.build_int_compare(
-                IntPredicate::ULT,
-                size,
-                word_size,
-                "smaller_than_word",
-            );
-            let size = ctx
-                .builder
-                .build_select(smaller_than_word, word_size, size, "rounded_size")
-                .into_int_value();
+            let size = ctx.round_to_word(size);
             slot_ptr = unsafe { ctx.builder.build_gep(slot_ptr, &[size], "next_slot") };
         }
 
@@ -775,11 +817,24 @@ fn llvm_closure<'a>(
 impl Expr {
     fn llvm<'a>(&self, ctx: &mut CodegenCtx<'a>) -> BasicValueEnum<'a> {
         match self {
+            Expr::Unit => ctx
+                .context
+                .struct_type(&[], false)
+                .const_zero()
+                .as_basic_value_enum(),
             Expr::IntConst(size, i) => ctx
                 .context
                 .custom_width_int_type(*size)
                 .const_int(*i, false)
                 .as_basic_value_enum(),
+            Expr::CompOp(x, op, y) => {
+                let x = ctx.locals.get(x).unwrap().into_int_value();
+                let y = ctx.locals.get(y).unwrap().into_int_value();
+                match op {
+                    CompOp::Eq => ctx.builder.build_int_compare(IntPredicate::EQ, x, y, "eq"),
+                }
+                .as_basic_value_enum()
+            }
             Expr::IntOp(x, op, y) => {
                 let x = ctx.locals.get(x).unwrap().into_int_value();
                 let y = ctx.locals.get(y).unwrap().into_int_value();
@@ -788,11 +843,73 @@ impl Expr {
                     IntOp::Sub => ctx.builder.build_int_sub(x, y, "sub"),
                     IntOp::Mul => ctx.builder.build_int_mul(x, y, "mul"),
                     IntOp::Div => ctx.builder.build_int_signed_div(x, y, "div"),
+                    IntOp::BitAnd => ctx.builder.build_and(x, y, "bitwise_and"),
+                    IntOp::BitOr => ctx.builder.build_or(x, y, "bitwise_or"),
                 }
                 .as_basic_value_enum()
             }
             Expr::Val(v) => *ctx.locals.get(v).unwrap(),
+            Expr::Variant(t, v, i) => {
+                let t = if let Ty::Union(v) = t {
+                    v[*i as usize].clone()
+                } else {
+                    unreachable!()
+                };
+                let v = *ctx.locals.get(v).unwrap();
+
+                // I don't think we need word alignment here since we don't store anything after the variant, but it's possible
+                let size = t.size_of(v, ctx);
+
+                let size = ctx.builder.build_int_add(
+                    size,
+                    ctx.context.i64_type().size_of(),
+                    "variant_size",
+                );
+                let ptr = ctx.alloca(size);
+
+                let casted = ctx
+                    .builder
+                    .build_bitcast(
+                        ptr,
+                        ctx.context.i64_type().ptr_type(AddressSpace::Generic),
+                        "variant_size_ptr",
+                    )
+                    .into_pointer_value();
+                ctx.builder.build_store(casted, size);
+                let payload_slot = unsafe {
+                    ctx.builder
+                        .build_gep(ptr, &[ctx.context.i64_type().size_of()], "payload_slot")
+                };
+                t.copy_to(v, payload_slot, ctx);
+
+                ptr.as_basic_value_enum()
+            }
+            Expr::AsVariant(t, u, i) => {
+                let t = if let Ty::Union(v) = t {
+                    v[*i as usize].clone()
+                } else {
+                    unreachable!()
+                };
+                let ptr = ctx.locals.get(u).unwrap().into_pointer_value();
+                let payload_slot = unsafe {
+                    ctx.builder
+                        .build_gep(ptr, &[ctx.context.i64_type().size_of()], "payload_slot")
+                };
+                t.load_from(payload_slot, ctx)
+            }
             Expr::Struct(v) => {
+                // Structs with 1 element are transparent, but stored as a void ptr
+                // So to create one, just call `to_void_ptr()` on the element.
+                if v.len() == 1 {
+                    return v[0]
+                        .1
+                        .to_void_ptr(*ctx.locals.get(&v[0].0).unwrap(), ctx)
+                        .as_basic_value_enum();
+                }
+
+                let minus_one = ctx.context.i64_type().const_int(-1i64 as u64, false);
+                let mut any_dyn = ctx.context.bool_type().const_zero();
+
                 // Because the sizes of the struct members might not be known at compile time,
                 // we build the struct on the Pika stack and return a pointer
                 let mut total_size = ctx.context.i64_type().const_zero();
@@ -800,17 +917,65 @@ impl Expr {
                     .iter()
                     .map(|(val, ty)| {
                         let val = *ctx.locals.get(val).unwrap();
-                        let size = ty.size_of(val, ctx);
+                        let norm_size = ty.normal_size(ctx);
+                        let size = if ty.might_be_dyn_size() {
+                            let is_dyn_size = ctx.builder.build_int_compare(
+                                IntPredicate::EQ,
+                                norm_size,
+                                minus_one,
+                                "member_is_dyn_size",
+                            );
+                            any_dyn =
+                                ctx.builder
+                                    .build_or(is_dyn_size, any_dyn, "any_member_dyn_size");
+                            ty.size_of(val, ctx)
+                        } else {
+                            norm_size
+                        };
+                        // We align each value to a word, so if it's less than a word we round up
+                        let size = ctx.round_to_word(size);
                         (val, ty, size)
                     })
                     .collect();
                 for (_, _, size) in &v {
                     total_size = ctx.builder.build_int_add(total_size, *size, "struct_size");
                 }
+                total_size = ctx.if_else(
+                    any_dyn,
+                    |ctx| {
+                        ctx.builder.build_int_add(
+                            total_size,
+                            ctx.context.i64_type().size_of(),
+                            "dyn_struct_size",
+                        )
+                    },
+                    |_| total_size,
+                );
 
                 // Allocate space for the whole struct, then insert each element
                 let struct_ptr = ctx.alloca(total_size);
-                let mut slot_ptr = struct_ptr;
+                let mut slot_ptr = ctx.if_else(
+                    any_dyn,
+                    |ctx| {
+                        let cast = ctx
+                            .builder
+                            .build_bitcast(
+                                struct_ptr,
+                                ctx.context.i64_type().ptr_type(AddressSpace::Generic),
+                                "dyn_struct_size_ptr",
+                            )
+                            .into_pointer_value();
+                        ctx.builder.build_store(cast, total_size);
+                        unsafe {
+                            ctx.builder.build_gep(
+                                struct_ptr,
+                                &[ctx.context.i64_type().size_of()],
+                                "first_slot",
+                            )
+                        }
+                    },
+                    |_| struct_ptr,
+                );
                 for (val, ty, size) in v {
                     ty.copy_to(val, slot_ptr, ctx);
                     // Advance by `size` to the next slot
@@ -820,11 +985,51 @@ impl Expr {
             }
             Expr::Project(ty, r, m) => {
                 if let Ty::Struct(v) = ty {
+                    // Structs with 1 element are transparent, but stored as a void ptr
+                    // So to grab that element, just call `from_void_ptr()`.
+                    if v.len() == 1 {
+                        assert_eq!(*m, 0);
+                        return v[0]
+                            .from_void_ptr(ctx.locals.get(r).unwrap().into_pointer_value(), ctx);
+                    }
+
+                    let mut any_dyn = ctx.context.bool_type().const_zero();
+                    let minus_one = ctx.context.i64_type().const_int(-1i64 as u64, false);
+
+                    for ty in v {
+                        if ty.might_be_dyn_size() {
+                            let norm_size = ty.normal_size(ctx);
+                            let is_dyn_size = ctx.builder.build_int_compare(
+                                IntPredicate::EQ,
+                                norm_size,
+                                minus_one,
+                                "member_is_dyn_size",
+                            );
+                            any_dyn =
+                                ctx.builder
+                                    .build_or(is_dyn_size, any_dyn, "any_member_dyn_size");
+                        }
+                    }
+
                     let struct_ptr = *ctx.locals.get(r).unwrap();
-                    let mut slot_ptr = struct_ptr.into_pointer_value();
+                    let slot_ptr = struct_ptr.into_pointer_value();
+                    // If the struct is dynamically sized, we need to skip the size slot
+                    let mut slot_ptr = ctx.if_else(
+                        any_dyn,
+                        |ctx| unsafe {
+                            ctx.builder.build_gep(
+                                slot_ptr,
+                                &[ctx.context.i64_type().size_of()],
+                                "first_slot",
+                            )
+                        },
+                        |_| slot_ptr,
+                    );
                     for ty in v.iter().take(*m as usize) {
                         let val = ty.from_void_ptr(slot_ptr, ctx);
                         let size = ty.size_of(val, ctx);
+                        // We align each value to a word, so if it's less than a word we round up
+                        let size = ctx.round_to_word(size);
                         // Advance by `size` to the next slot
                         slot_ptr = unsafe { ctx.builder.build_gep(slot_ptr, &[size], "next_slot") };
                     }
@@ -870,6 +1075,29 @@ impl Low {
                 let val = val.llvm(ctx);
                 ctx.locals.insert(*name, val);
                 rest.llvm(ctx)
+            }
+            Low::IfElse(cond, yes, no) => {
+                let cond = ctx.locals.get(cond).unwrap().into_int_value();
+
+                // `CodegenCtx::if_else()` is for expressions, it would be a hassle to use it here, so we just reimplement it
+                let old_block = ctx.builder.get_insert_block().unwrap();
+                let old_stack_ptr = ctx.stack_ptr;
+
+                let yes_block = ctx.context.insert_basic_block_after(old_block, "then");
+                ctx.builder.position_at_end(yes_block);
+                yes.llvm(ctx);
+
+                ctx.stack_ptr = old_stack_ptr;
+                let no_block = ctx.context.insert_basic_block_after(old_block, "else");
+                ctx.builder.position_at_end(no_block);
+                no.llvm(ctx);
+
+                ctx.builder.position_at_end(old_block);
+                ctx.builder.build_conditional_branch(
+                    cond.as_basic_value_enum().into_int_value(),
+                    yes_block,
+                    no_block,
+                );
             }
             Low::Global(name, k) => {
                 let k = *ctx.locals.get(k).unwrap();
@@ -968,6 +1196,9 @@ impl Low {
                 ctx.builder
                     .build_call(ctx.halt, &[*ctx.locals.get(v).unwrap()], "halt");
                 ctx.builder.build_return(None);
+            }
+            Low::Unreachable => {
+                ctx.builder.build_unreachable();
             }
         }
     }

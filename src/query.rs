@@ -4,7 +4,7 @@ use crate::backend::{
 };
 use crate::bicheck::*;
 use crate::binding::*;
-use crate::common::{Doc, FileId, HasBindings, HasDatabase, Pretty, Style};
+use crate::common::{Doc, FileId, HasBindings, HasDatabase, Pretty, SPretty, Style};
 use crate::elab::*;
 use crate::error::*;
 use crate::grammar::*;
@@ -173,14 +173,14 @@ fn low_def(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowDef> {
                 .space()
                 .chain(s.pretty(db))
                 .add("(")
-                .chain(Ty::Cont.pretty(db))
+                .chain(Ty::Cont.pretty())
                 .space()
                 .add(cont)
                 .add(")")
                 .space()
                 .add("{")
                 .line()
-                .chain(body.pretty(db))
+                .chain(body.pretty())
                 .indent()
                 .line()
                 .add("}")
@@ -188,12 +188,7 @@ fn low_def(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowDef> {
         );
     }
 
-    Some(LowDef {
-        name,
-        cont_ty: Ty::Cont,
-        cont,
-        body,
-    })
+    Some(LowDef { name, cont, body })
 }
 
 fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
@@ -298,10 +293,18 @@ fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
 
     let scoped = (scope.clone(), db);
     let mut tctx = TCtx::new(&scoped);
-    // If it calls itself recursively, assume it could be anything.
-    // We'll run `simplify_unions` on it later, which should get rid of Bottom if there's a base case
-    tctx.set_ty(s, Elab::Bottom);
-    let e = synth(&term, &mut tctx);
+
+    // If it calls itself recursively, assume it could be anything. We'll use a metavariable for that.
+    let name = format!("<type of {}>", s.pretty(&tctx).raw_string());
+    let meta = tctx.bindings_mut().create(name);
+    tctx.metas.insert(meta, term.span());
+    tctx.set_ty(s, Elab::Var(term.span(), meta, Box::new(Elab::Top)));
+
+    let e = check(
+        &term,
+        &Elab::Var(term.span(), meta, Box::new(Elab::Top)),
+        &mut tctx,
+    );
     for err in tctx.solve_metas() {
         db.error(err.to_error(scope.file(), db));
     }

@@ -9,4 +9,4 @@ f : fun Int Bool => Int = fun i b: => case b of
 b := fun x:Bool => f 23 x
 
 # (8, 4)
-main := (f 8 Bool.True, b Bool.False)
+main := (f 8 Bool.True) + (b Bool.False)

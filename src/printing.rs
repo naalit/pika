@@ -49,25 +49,24 @@ impl Style {
 
 /// A wrapper around a `pretty::RcDoc` with precedence tracking and a different interface
 #[derive(Clone)]
-pub struct Doc<'a> {
-    doc: RcDoc<'a, ColorSpec>,
+pub struct Doc {
+    doc: RcDoc<'static, ColorSpec>,
     prec: Prec,
 }
 
-impl<'a> Into<String> for Doc<'a> {
+impl Into<String> for Doc {
     /// Calls `Doc::ansi_string()`. This is primarily for interop with codespan_reporting
     fn into(self) -> String {
         self.ansi_string()
     }
 }
 
-pub fn pretty_block<'a>(keyword: &str, v: impl IntoIterator<Item = Doc<'a>> + Clone) -> Doc<'a> {
+pub fn pretty_block(keyword: &str, v: impl IntoIterator<Item = Doc> + Clone) -> Doc {
     Doc::either(
         Doc::start(keyword)
             .style(Style::Keyword)
             .line()
             .chain(Doc::intersperse(v.clone(), Doc::none().line()))
-            .group()
             .indent(),
         Doc::start(keyword)
             .style(Style::Keyword)
@@ -76,13 +75,11 @@ pub fn pretty_block<'a>(keyword: &str, v: impl IntoIterator<Item = Doc<'a>> + Cl
             .space()
             .chain(Doc::intersperse(v, Doc::start(";").space()))
             .space()
-            .add("}")
-            .group(),
+            .add("}"),
     )
-    .prec(Prec::Term)
 }
 
-impl<'a> Doc<'a> {
+impl Doc {
     /// Render into a string with no newlines and no colors
     pub fn raw_string(self) -> String {
         let mut buffer = Buffer::no_color();
@@ -196,7 +193,7 @@ impl<'a> Doc<'a> {
 
     /// Appends another `Doc`
     /// You're responsible for decreasing the precedence to match
-    pub fn chain(self, x: Doc<'a>) -> Self {
+    pub fn chain(self, x: Self) -> Self {
         Doc {
             doc: self.doc.append(x.doc),
             ..self
@@ -279,3 +276,14 @@ fn spec(col: Color, bold: bool) -> ColorSpec {
 pub trait Pretty {
     fn pretty(&self, ctx: &impl HasBindings) -> Doc;
 }
+
+/// Like Pretty, but "standalone": doesn't require a `Bindings`.
+pub trait SPretty {
+    fn pretty(&self) -> Doc;
+}
+
+// impl<T: SPretty> Pretty for T {
+//     fn pretty(&self, _ctx: &impl HasBindings) {
+//         self.pretty()
+//     }
+// }

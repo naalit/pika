@@ -6,4 +6,4 @@ s := struct
   b := fact a # 720
 
 # (6, 720)
-main := (s.a, s.b)
+main := s.a + s.b

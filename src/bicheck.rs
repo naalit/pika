@@ -303,7 +303,7 @@ impl<'a> TCtx<'a> {
 
     pub fn apply_metas(&mut self, metas: impl IntoIterator<Item = (Sym, Elab)>) {
         for (k, v) in metas {
-            // #[cfg(feature = "logging")]
+            #[cfg(feature = "logging")]
             eprintln!(
                 "Meta {} := {}",
                 k.pretty(self).ansi_string(),
@@ -552,7 +552,7 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
             fn check_app(
                 ft: Elab,
                 fs: Span,
-                f: Elab,
+                mut f: Elab,
                 x: &STerm,
                 tctx: &mut TCtx,
             ) -> Result<Elab, TypeError> {
@@ -585,6 +585,27 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                             let from = from.whnf(tctx);
                             check(x, &from, tctx)
                         }
+                    }
+                    Elab::Var(sp, v, t) if tctx.metas.contains_key(&v) => {
+                        let x = synth(x, tctx)?;
+                        let tx = x.get_type(tctx);
+
+                        // Make a new meta for the return type
+                        let nto = format!("<return type of {}>", v.pretty(tctx).raw_string());
+                        let mto = tctx.bindings_mut().create(nto);
+                        tctx.metas.insert(mto, sp);
+                        tctx.apply_metas(Some((
+                            v,
+                            Elab::Fun(
+                                Clos::default(),
+                                Box::new(tx),
+                                Box::new(Elab::Var(sp, mto, t)),
+                            ),
+                        )));
+
+                        f = f.save_ctx(tctx);
+
+                        Ok(x)
                     }
                     Elab::Bottom => synth(x, tctx),
                     a => Err(TypeError::NotFunction(
@@ -671,7 +692,14 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                             tctx.tys
                                 .iter()
                                 .filter(|(k, _)| rargs.iter().take(i).any(|(_, x)| x.binds(**k)))
-                                .filter(|(k, _)| rargs.iter().skip(i).map(|(_, x)| x).chain(std::iter::once(&body)).any(|x| x.uses(**k)))
+                                .filter(|(k, _)| {
+                                    rargs
+                                        .iter()
+                                        .skip(i)
+                                        .map(|(_, x)| x)
+                                        .chain(std::iter::once(&body))
+                                        .any(|x| x.uses(**k))
+                                })
                                 .map(|(k, v)| (*k, v.clone())),
                         )
                         .collect()
@@ -1001,6 +1029,16 @@ impl Elab {
             (Elab::Unit, Elab::Unit) => true,
             // Two variables that haven't been resolved yet, but refer to the same definition
             (Elab::Var(_, x, _), Elab::Var(_, y, _)) if y == x => true,
+            (Elab::Var(_, x, _), _) if tctx.vals.contains_key(x) => tctx
+                .val(*x)
+                .unwrap()
+                .cloned(&mut Cloner::new(tctx))
+                .unify(sup, tctx, cons),
+            (_, Elab::Var(_, x, _)) if tctx.vals.contains_key(x) => self.unify(
+                &tctx.val(*x).unwrap().cloned(&mut Cloner::new(tctx)),
+                tctx,
+                cons,
+            ),
             (Elab::Var(_, x, _), _) if tctx.database().elab(tctx.scope(), *x).is_some() => tctx
                 .database()
                 .elab(tctx.scope(), *x)
@@ -1017,16 +1055,7 @@ impl Elab {
                     tctx,
                     cons,
                 ),
-            (Elab::Var(_, x, _), _) if tctx.vals.contains_key(x) => tctx
-                .val(*x)
-                .unwrap()
-                .cloned(&mut Cloner::new(tctx))
-                .unify(sup, tctx, cons),
-            (_, Elab::Var(_, x, _)) if tctx.vals.contains_key(x) => self.unify(
-                &tctx.val(*x).unwrap().cloned(&mut Cloner::new(tctx)),
-                tctx,
-                cons,
-            ),
+            // Use already solved metavariables
             (Elab::Var(_, x, _), _) if cons.iter().any(|(k, _)| k == x) => {
                 let mut tcons = Vec::new();
                 let b = cons

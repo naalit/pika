@@ -228,7 +228,85 @@ pub enum Elab {
 }
 type BElab = Box<Elab>;
 
+/// `f a b c` -> `[c, b, a]`.
+/// Note that this iterator reverses the order of arguments.
+pub struct SpineIter<'a>(&'a Elab);
+impl<'a> SpineIter<'a> {
+    pub fn reversed(self) -> std::iter::Rev<std::vec::IntoIter<&'a Elab>> {
+        self.collect::<Vec<_>>().into_iter().rev()
+    }
+}
+impl<'a> Iterator for SpineIter<'a> {
+    type Item = &'a Elab;
+
+    fn next(&mut self) -> Option<&'a Elab> {
+        match self.0 {
+            Elab::App(f, x) => {
+                self.0 = f;
+                Some(x)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// `fun a b c => d` -> `[a, b, c]`
+pub struct ArgsIter<'a>(&'a Elab);
+impl<'a> ArgsIter<'a> {
+    pub fn reversed(self) -> std::iter::Rev<std::vec::IntoIter<&'a Elab>> {
+        self.collect::<Vec<_>>().into_iter().rev()
+    }
+}
+impl<'a> Iterator for ArgsIter<'a> {
+    type Item = &'a Elab;
+
+    fn next(&mut self) -> Option<&'a Elab> {
+        match self.0 {
+            Elab::Fun(_, x, r) => {
+                self.0 = r;
+                Some(x)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl Elab {
+    /// Returns a list of all the constructors that are valid for this type, ordered by RawSym.
+    /// Also returns, for each constructor, its type and any constraints that must hold if it matches.
+    pub fn valid_cons(
+        &self,
+        env: &(impl HasDatabase + Scoped),
+    ) -> Vec<(TagId, Elab, Vec<(Sym, Elab)>)> {
+        if let Elab::Data(_, sid, _) = self.head() {
+            let mut v = Vec::new();
+            let scope = ScopeId::Struct(*sid, Box::new(env.scope()));
+            // Sort the constructors by RawSym
+            let mut symbols: Vec<_> = (*env.database().symbols(scope.clone())).clone();
+            symbols.sort_by_key(|x| x.raw());
+            for sym in symbols {
+                let cons = env.database().elab(scope.clone(), *sym).unwrap();
+                let cons_ty = cons.get_type(env);
+                let mut tctx = crate::bicheck::TCtx::new(env);
+                let result = cons_ty.result();
+                tctx.extend_metas(result.fvs(&tctx));
+                tctx.extend_metas(self.fvs(&tctx));
+                let mut metas = Vec::new();
+                // Only consider ones that fit based on the actual type
+                // i.e. `Vec 0 T` shouldn't need a tag
+                if result.unify(&self, &mut tctx, &mut metas) {
+                    v.push((cons.cons().unwrap(), cons_ty, metas));
+                }
+            }
+            v
+        } else {
+            panic!(
+                "Called `Elab::valid_cons()` on {}, but must be a datatype!",
+                self.pretty(env).ansi_string()
+            )
+        }
+    }
+
     /// Returns a list of all free variables in this term
     pub fn fvs(&self, ectx: &ECtx) -> Vec<Sym> {
         // Add the symbols currently bound in the environment to the bound list
@@ -340,6 +418,17 @@ impl Elab {
         }
     }
 
+    /// `f a b c` -> `[c, b, a]`.
+    /// Note that this iterator reverses the order of arguments.
+    pub fn spine_iter(&self) -> SpineIter {
+        SpineIter(self)
+    }
+
+    /// `fun a b c => d` -> `[a, b, c]`
+    pub fn args_iter(&self) -> ArgsIter {
+        ArgsIter(&self)
+    }
+
     /// The analog of `head()` for function return values.
     /// `result(fun x => fun y => z) = z`
     pub fn result(&self) -> &Elab {
@@ -434,9 +523,10 @@ impl Elab {
         match self {
             Type(_) | Unit | I32(_) | Builtin(_) | Top | Bottom => false,
             Var(_, x, ty) => *x == s || ty.uses(s),
-            // TODO Pat::uses()
             CaseOf(val, cases, ty) => {
-                val.uses(s) || ty.uses(s) || cases.iter().any(|(pat, body)| body.uses(s))
+                val.uses(s)
+                    || ty.uses(s)
+                    || cases.iter().any(|(pat, body)| pat.uses(s) || body.uses(s))
             }
             App(x, y) | Pair(x, y) | Fun(_, x, y) => x.uses(s) || y.uses(s),
             Binder(_, x) => x.uses(s),
@@ -461,9 +551,12 @@ impl Elab {
         match self {
             Type(_) | Unit | I32(_) | Builtin(_) | Top | Bottom => false,
             Binder(x, ty) => *x == s || ty.binds(s),
-            // TODO Pat::binds()
             CaseOf(val, cases, ty) => {
-                val.binds(s) || ty.binds(s) || cases.iter().any(|(pat, body)| body.binds(s))
+                val.binds(s)
+                    || ty.binds(s)
+                    || cases
+                        .iter()
+                        .any(|(pat, body)| pat.binds(s) || body.binds(s))
             }
             App(x, y) | Pair(x, y) | Fun(_, x, y) => x.binds(s) || y.binds(s),
             Var(_, _, ty) => ty.binds(s),
@@ -1062,17 +1155,6 @@ impl Pretty for Elab {
                     Doc::start("fun")
                 }
                 .style(Style::Keyword)
-                .line()
-                .add("{")
-                .line()
-                .chain(Doc::intersperse(
-                    cl.tys
-                        .iter()
-                        .map(|(k, v)| k.pretty(ctx).space().add(":").space().chain(v.pretty(ctx))),
-                    Doc::start(",").space(),
-                ))
-                .line()
-                .add("}")
                 .line()
                 .chain(if cl.implicit {
                     Doc::start("[").chain(from.pretty(ctx)).add("]")

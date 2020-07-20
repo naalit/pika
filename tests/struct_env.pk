@@ -6,4 +6,4 @@ g := fun i:Int => struct
   b := a
   c := b
 
-main := ((f 2).x, (g 3).c)
+main := (f 2).x + (g 3).c

@@ -38,21 +38,32 @@ pub fn next_val() -> Val {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ty {
+    Unit,
     Int(u32),
     Fun,  //(/*Box<Ty>, */Box<Ty>),
     Cont, //(Box<Ty>),
     Struct(Vec<Ty>),
     /// Used for unknown types; represents a location on the stack, with a size
     Dyn(Val),
+    /// Low IR unions are *not* tagged automatically, they should be in a struct with a tag.
+    /// They're dynamically sized to whichever variant they actually are.
+    /// That does mean we store the size redundantly, so in the future that may change.
+    Union(Vec<Ty>),
 }
 
 /// A primitive expression, that actually returns a value
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Expr {
+    Unit,
     IntConst(u32, u64),
     IntOp(Val, IntOp, Val),
+    CompOp(Val, CompOp, Val),
     Struct(Vec<(Val, Ty)>),
     Project(Ty, Val, u32),
+    /// `Variant` creates a union type with given payload
+    Variant(Ty, Val, u32),
+    /// `AsVariant` extracts the payload from the given union type
+    AsVariant(Ty, Val, u32),
     Val(Val),
     Cont {
         arg: Val,
@@ -70,8 +81,7 @@ pub enum Expr {
 }
 impl From<i32> for Expr {
     fn from(i: i32) -> Expr {
-        // There really should be a better way of doing this
-        Expr::IntConst(32, unsafe { std::mem::transmute::<i32, u32>(i) } as u64)
+        Expr::IntConst(32, i as u32 as u64)
     }
 }
 impl<T: Into<Expr> + Copy> From<&T> for Expr {
@@ -90,13 +100,16 @@ pub enum Low {
     ContCall(Val, Ty, Val),
     /// Global(name, k)
     Global(String, Val),
+    IfElse(Val, Box<Low>, Box<Low>),
+    Unreachable,
     Halt(Val),
 }
 
+#[derive(Clone)]
 pub struct LCtx<'a> {
     to_val: HashMap<Sym, Val>,
     tys: HashMap<Val, Ty>,
-    ectx: ECtx<'a>,
+    pub ectx: ECtx<'a>,
 }
 impl<'a> LCtx<'a> {
     pub fn next_val(&mut self, t: Ty) -> Val {
@@ -105,21 +118,12 @@ impl<'a> LCtx<'a> {
         v
     }
 
-    fn get(&self, x: Sym) -> Option<Val> {
+    pub fn get(&self, x: Sym) -> Option<Val> {
         self.to_val.get(&x).copied()
     }
 
-    fn set(&mut self, x: Sym, v: Val) {
+    pub fn set(&mut self, x: Sym, v: Val) {
         self.to_val.insert(x, v);
-    }
-}
-impl<'a> Clone for LCtx<'a> {
-    fn clone(&self) -> Self {
-        LCtx {
-            to_val: self.to_val.clone(),
-            tys: HashMap::new(),
-            ectx: self.ectx.clone(),
-        }
     }
 }
 impl<'a> From<ECtx<'a>> for LCtx<'a> {
@@ -154,10 +158,12 @@ impl Ty {
             Ty::Dyn(v) => {
                 set.insert(*v);
             }
-            Ty::Int(_)
-            |Ty::Fun
-            |Ty::Cont
-            |Ty::Struct(_) => {}
+            Ty::Struct(v) | Ty::Union(v) => {
+                for i in v {
+                    i.fvs(set)
+                }
+            }
+            Ty::Int(_) | Ty::Fun | Ty::Cont | Ty::Unit => {}
         }
     }
 }
@@ -165,8 +171,8 @@ impl Ty {
 impl Expr {
     pub fn fvs(&self, set: &mut HashSet<Val>) {
         match self {
-            Expr::IntConst(_, _) => (),
-            Expr::IntOp(a, _, b) => {
+            Expr::IntConst(_, _) | Expr::Unit => (),
+            Expr::IntOp(a, _, b) | Expr::CompOp(a, _, b) => {
                 set.insert(*a);
                 set.insert(*b);
             }
@@ -174,6 +180,10 @@ impl Expr {
             Expr::Project(t, r, _) => {
                 t.fvs(set);
                 set.insert(*r);
+            }
+            Expr::Variant(t, v, _) | Expr::AsVariant(t, v, _) => {
+                t.fvs(set);
+                set.insert(*v);
             }
             Expr::Val(v) => {
                 set.insert(*v);
@@ -205,21 +215,21 @@ impl Low {
                 set.insert(*v);
                 set
             }
+            Low::IfElse(cond, yes, no) => {
+                let mut a = yes.fvs();
+                let b = no.fvs();
+                a.extend(b);
+                a.insert(*cond);
+                a
+            }
+            Low::Unreachable => HashSet::new(),
         }
     }
 }
 
-// Figures out the necessary upvalues, etc. to turn `rest` into a continuation you can pass around and call
-fn make_cont(arg: Val, arg_ty: Ty, lctx: &LCtx, rest: Low) -> Expr {
-    // We need to pass everything `rest` uses to the continuation
-    let mut upvalues = rest.fvs();
-    // The argument type might depend on something
-    arg_ty.fvs(&mut upvalues);
-    upvalues.remove(&arg);
-    let mut upvalues: Vec<_> = upvalues
-        .into_iter()
-        .map(|x| (x, lctx.tys.get(&x).unwrap().clone()))
-        .collect();
+fn order_upvalues(upvalues: &mut Vec<(Val, Ty)>, lctx: &LCtx) {
+    // Start with a deterministic order
+    upvalues.sort_by_key(|(x, _)| x.num());
 
     // Reorder upvalues and add extras so that upvalue types with dependencies on other upvalues are all resolved
     let mut i = 0;
@@ -232,12 +242,30 @@ fn make_cont(arg: Val, arg_ty: Ty, lctx: &LCtx, rest: Low) -> Expr {
         // We don't want duplicates, though
         upvalues.retain(|(x, _)| !extra.contains(x));
 
-        upvalues.extend(extra.into_iter()
-            .map(|x| (x, lctx.tys.get(&x).unwrap().clone())));
+        upvalues.extend(
+            extra
+                .into_iter()
+                .map(|x| (x, lctx.tys.get(&x).unwrap().clone())),
+        );
         i += 1;
     }
     // And here we reverse it so dependencies are in the right order
     upvalues.reverse();
+}
+
+// Figures out the necessary upvalues, etc. to turn `rest` into a continuation you can pass around and call
+pub fn make_cont(arg: Val, arg_ty: Ty, lctx: &LCtx, rest: Low) -> Expr {
+    // We need to pass everything `rest` uses to the continuation
+    let mut upvalues = rest.fvs();
+    // The argument type might depend on something
+    arg_ty.fvs(&mut upvalues);
+    upvalues.remove(&arg);
+    let mut upvalues: Vec<_> = upvalues
+        .into_iter()
+        .map(|x| (x, lctx.tys.get(&x).unwrap().clone()))
+        .collect();
+
+    order_upvalues(&mut upvalues, lctx);
 
     Expr::Cont {
         arg,
@@ -247,11 +275,38 @@ fn make_cont(arg: Val, arg_ty: Ty, lctx: &LCtx, rest: Low) -> Expr {
     }
 }
 
+/// Get the width of the smallest IntType that can differentiate between all the things in `v`.
+/// One of `i1, i8, i16, i32, i64`, or 0 if no tag is needed.
+pub fn tag_width<T>(v: &[T]) -> u32 {
+    let l = v.len();
+    if l <= 1 {
+        0
+    } else if l <= 2 {
+        1
+    } else if l <= 256 {
+        8
+    } else if l <= 1 << 16 {
+        16
+    } else if l <= 1 << 32 {
+        32
+    } else {
+        64
+    }
+}
+
 impl Elab {
     pub fn pass_args(&self, lctx: &mut LCtx, arg: Val, ty: &Ty, rest: Low) -> Low {
         match self {
             // These are types that don't bind anything
-            Elab::Builtin(Builtin::Int) | Elab::Type(_) | Elab::Var(_, _, _) | Elab::Fun(_, _, _) => rest,
+            Elab::Builtin(Builtin::Int)
+            | Elab::Type(_)
+            | Elab::Var(_, _, _)
+            | Elab::Fun(_, _, _)
+            | Elab::Data(_, _, _)
+            | Elab::StructInline(_)
+            | Elab::StructIntern(_)
+            | Elab::App(_, _)
+            | Elab::Unit => rest,
             Elab::Binder(s, t) => {
                 let v = lctx.get(*s).unwrap();
                 Low::Let(
@@ -283,7 +338,11 @@ impl Elab {
     }
 
     pub fn cps_ty(&self, lctx: &LCtx) -> Ty {
-        match self.cloned(&mut Cloner::new(lctx)).normal(&mut lctx.ectx.clone()) {
+        match self
+            .cloned(&mut Cloner::new(lctx))
+            .normal(&mut lctx.ectx.clone())
+        {
+            Elab::Unit => Ty::Unit,
             Elab::Builtin(Builtin::Int) => Ty::Int(32),
             Elab::Fun(_, _, _) => Ty::Fun,
             Elab::Binder(_, t) => t.cps_ty(lctx),
@@ -293,15 +352,222 @@ impl Elab {
                     .unwrap_or_else(|| panic!("Not found: {}", v.pretty(lctx).ansi_string())),
             ),
             Elab::Pair(a, b) => Ty::Struct(vec![a.cps_ty(lctx), b.cps_ty(lctx)]),
-            _ => todo!("{:?}", self),
+            Elab::StructInline(v) => {
+                let mut v: Vec<_> = v.iter().map(|(x, t)| (x, t.cps_ty(lctx))).collect();
+                // Structs are always sorted by field RawSym
+                // TODO This isn't stable across separately compiled files, so when we add that we'll need to change
+                v.sort_by_key(|(x, _)| x.raw());
+                Ty::Struct(v.into_iter().map(|(_, t)| t).collect())
+            }
+            Elab::StructIntern(s) => ScopeId::Struct(s, Box::new(lctx.scope()))
+                .inline(lctx)
+                .cps_ty(lctx),
+            ty @ Elab::App(_, _) | ty @ Elab::Data(_, _, _) => {
+                let v: Vec<_> = ty
+                    .valid_cons(lctx)
+                    .into_iter()
+                    .map(|(_cons, cons_ty, metas)| {
+                        let mut lctx = lctx.clone();
+                        for (k, v) in metas {
+                            lctx.ectx.set_val(k, v);
+                        }
+                        let args: Vec<_> = cons_ty.args_iter().map(|x| x.cps_ty(&lctx)).collect();
+                        Ty::Struct(args)
+                    })
+                    .collect();
+                if v.is_empty() {
+                    panic!("Empty type {} not allowed!", ty.pretty(lctx).ansi_string())
+                } else {
+                    let tag_bits = tag_width(&v);
+                    Ty::Struct(vec![Ty::Int(tag_bits), Ty::Union(v)])
+                }
+            }
+            _ => todo!("type for '{:?}'", self),
         }
     }
 
     /// Generates LowIR code that generates Low IR for evaluating this Elab, setting the result to `name`, then running `rest`.
     pub fn cps(&self, name: Val, lctx: &mut LCtx, rest: Low) -> Low {
         match self {
+            Elab::Unit => Low::Let(name, Expr::Unit, Box::new(rest)),
             Elab::I32(i) => Low::Let(name, i.into(), Box::new(rest)),
             Elab::Builtin(Builtin::Int) => Low::Let(name, Expr::IntConst(64, 4), Box::new(rest)),
+            Elab::Data(_, _, t) => {
+                Low::Let(
+                    name,
+                    // Data types are always dynamically sized, for now at least
+                    t.args_iter()
+                        .reversed()
+                        .fold(
+                            (Expr::IntConst(64, -1i64 as u64), Ty::Int(64)),
+                            |(ret_val, ret_ty), arg_ty| {
+                                let arg_ty = arg_ty.cps_ty(lctx);
+                                let arg = lctx.next_val(arg_ty.clone());
+                                let cont = lctx.next_val(Ty::Cont);
+                                let val = lctx.next_val(ret_ty.clone());
+                                (
+                                    Expr::Fun {
+                                        arg,
+                                        arg_ty,
+                                        cont,
+                                        upvalues: Vec::new(),
+                                        body: Box::new(Low::Let(
+                                            val,
+                                            ret_val,
+                                            Box::new(Low::ContCall(cont, ret_ty, val)),
+                                        )),
+                                    },
+                                    Ty::Fun,
+                                )
+                            },
+                        )
+                        .0,
+                    Box::new(rest),
+                )
+            }
+            Elab::Cons(id, t) => {
+                let mut arg_tys = Vec::new();
+                let mut arg_vals = Vec::new();
+                for ty in t.args_iter() {
+                    let cps_ty = ty.cps_ty(lctx);
+                    let val = lctx.next_val(cps_ty.clone());
+                    // Since any argument's type could depend on previous arguments, it's important to do this in order
+                    match ty {
+                        Elab::Binder(x, _) => {
+                            lctx.set(*x, val);
+                        }
+                        _ => (),
+                    }
+                    arg_tys.push(cps_ty);
+                    arg_vals.push(val);
+                }
+                let ret_ty = t.result().cps_ty(lctx);
+
+                if arg_tys.is_empty() {
+                    // We're returning the constructed value directly
+                    let valid_cons = t.result().valid_cons(lctx);
+                    let idx = valid_cons
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (tid, _, _))| tid == id)
+                        .unwrap()
+                        .0;
+                    let s_ty = Ty::Struct(arg_tys.clone());
+                    let s_val = lctx.next_val(s_ty);
+                    let u_ty = match &ret_ty {
+                        Ty::Struct(v) => v[1].clone(),
+                        _ => panic!("maybe there's only one variant?"),
+                    };
+                    let u_val = lctx.next_val(u_ty.clone());
+                    let tag_bits = tag_width(&valid_cons);
+                    let tag_val = lctx.next_val(Ty::Int(tag_bits));
+
+                    Low::Let(
+                        s_val,
+                        Expr::Struct(Vec::new()),
+                        Box::new(Low::Let(
+                            u_val,
+                            Expr::Variant(u_ty.clone(), s_val, idx as u32),
+                            Box::new(Low::Let(
+                                tag_val,
+                                Expr::IntConst(tag_bits, idx as u64),
+                                Box::new(Low::Let(
+                                    name,
+                                    Expr::Struct(vec![(tag_val, Ty::Int(tag_bits)), (u_val, u_ty)]),
+                                    Box::new(rest),
+                                )),
+                            )),
+                        )),
+                    )
+                } else {
+                    // We're returning a function that constructs the value
+                    let final_cont = lctx.next_val(Ty::Cont);
+                    let body = {
+                        let ret_val = lctx.next_val(ret_ty.clone());
+                        let valid_cons = t.result().valid_cons(lctx);
+                        let idx = valid_cons
+                            .iter()
+                            .enumerate()
+                            .find(|(_, (tid, _, _))| tid == id)
+                            .unwrap()
+                            .0;
+                        let s_ty = Ty::Struct(arg_tys.clone());
+                        let s_val = lctx.next_val(s_ty);
+                        let u_ty = match &ret_ty {
+                            Ty::Struct(v) => v[1].clone(),
+                            _ => panic!("maybe there's only one variant?"),
+                        };
+                        let u_val = lctx.next_val(u_ty.clone());
+                        let tag_bits = tag_width(&valid_cons);
+                        let tag_val = lctx.next_val(Ty::Int(tag_bits));
+
+                        Low::Let(
+                            s_val,
+                            Expr::Struct(
+                                arg_vals
+                                    .iter()
+                                    .copied()
+                                    .zip(arg_tys.iter().cloned())
+                                    .collect(),
+                            ),
+                            Box::new(Low::Let(
+                                u_val,
+                                Expr::Variant(u_ty.clone(), s_val, idx as u32),
+                                Box::new(Low::Let(
+                                    tag_val,
+                                    Expr::IntConst(tag_bits, idx as u64),
+                                    Box::new(Low::Let(
+                                        ret_val,
+                                        Expr::Struct(vec![
+                                            (tag_val, Ty::Int(tag_bits)),
+                                            (u_val, u_ty),
+                                        ]),
+                                        Box::new(Low::ContCall(
+                                            final_cont,
+                                            ret_ty.clone(),
+                                            ret_val,
+                                        )),
+                                    )),
+                                )),
+                            )),
+                        )
+                    };
+
+                    let (body, ret_cont) = arg_vals
+                        .iter()
+                        .copied()
+                        .zip(arg_tys.iter().cloned())
+                        .enumerate()
+                        .rfold((body, final_cont), |(body, cont), (i, (arg, arg_ty))| {
+                            // Here, `cont` is the cont that `body` passes its result to, but it hasn't been defined
+
+                            let next_cont = lctx.next_val(Ty::Cont);
+                            let fun_val = lctx.next_val(Ty::Fun);
+                            let body = Low::Let(
+                                fun_val,
+                                Expr::Fun {
+                                    arg,
+                                    arg_ty,
+                                    cont,
+                                    body: Box::new(body),
+                                    // All args from before this need to be passed through
+                                    upvalues: arg_vals
+                                        .iter()
+                                        .copied()
+                                        .zip(arg_tys.iter().cloned())
+                                        .take(i)
+                                        .collect(),
+                                },
+                                Box::new(Low::ContCall(next_cont, Ty::Fun, fun_val)),
+                            );
+                            (body, next_cont)
+                        });
+
+                    let rest_cont = make_cont(name, Ty::Fun, lctx, rest);
+
+                    Low::Let(ret_cont, rest_cont, Box::new(body))
+                }
+            }
             Elab::Pair(x, y) => {
                 let xt = x.get_type(lctx).cps_ty(lctx);
                 let yt = y.get_type(lctx).cps_ty(lctx);
@@ -310,6 +576,118 @@ impl Elab {
                 let rest = Low::Let(name, Expr::Struct(vec![(xv, xt), (yv, yt)]), Box::new(rest));
                 let rest = y.cps(yv, lctx, rest);
                 x.cps(xv, lctx, rest)
+            }
+            Elab::Project(r, m) => {
+                let tr = r.get_type(lctx);
+                match &tr {
+                    Elab::StructInline(v) => {
+                        let mut v: Vec<_> = v.iter().map(|(x, _)| x.raw()).collect();
+                        v.sort();
+                        if let Ok(idx) = v.binary_search(m) {
+                            let tr = tr.cps_ty(lctx);
+                            let vr = lctx.next_val(tr.clone());
+                            r.cps(
+                                vr,
+                                lctx,
+                                Low::Let(name, Expr::Project(tr, vr, idx as u32), Box::new(rest)),
+                            )
+                        } else {
+                            panic!(
+                                "{} doesn't contain {}",
+                                r.pretty(lctx).ansi_string(),
+                                m.pretty(lctx).ansi_string()
+                            );
+                        }
+                    }
+                    _ => panic!("not a struct: {}", r.pretty(lctx).ansi_string()),
+                }
+            }
+            Elab::StructInline(iv) => {
+                // Compile it in "struct mode": all members are local variables
+                let mut iv: Vec<_> = iv.iter().collect();
+                iv.sort_by_key(|(x, _)| x.raw());
+
+                let mut rv = Vec::new();
+                let mut vals = Vec::new();
+                for (sym, val) in iv {
+                    let ty = val.get_type(lctx).cps_ty(lctx);
+                    let name = lctx.next_val(ty.clone());
+                    lctx.set(*sym, name);
+                    rv.push((name, ty));
+                    vals.push((name, val));
+                }
+
+                let rest = Low::Let(name, Expr::Struct(rv), Box::new(rest));
+                vals.into_iter()
+                    .rfold(rest, |rest, (name, val)| val.cps(name, lctx, rest))
+            }
+            Elab::StructIntern(id) => {
+                let scope = ScopeId::Struct(*id, Box::new(lctx.scope()));
+
+                // Compile it in "module mode": all members are global functions, like top-level definitions
+                let mut rv: Vec<(RawSym, Val, String, Ty)> = Vec::new();
+                let s = lctx.database().symbols(scope.clone());
+                for sym in s.iter() {
+                    // declare void @name(i8* %sp, i8* %k)
+                    let global = lctx.database().mangle(scope.clone(), **sym).unwrap();
+                    let ty = lctx
+                        .database()
+                        .elab(scope.clone(), **sym)
+                        .unwrap()
+                        .get_type(lctx)
+                        .cps_ty(lctx);
+                    let name = lctx.next_val(ty.clone());
+                    lctx.set(**sym, name);
+                    rv.push((sym.raw(), name, global, ty));
+                }
+                rv.sort_by_key(|(x, _, _, _)| *x);
+
+                // Chain continuations through each member, then make the struct and pass it to `rest`
+                let mut rest = Low::Let(
+                    name,
+                    Expr::Struct(rv.iter().map(|(_, k, _, t)| (*k, t.clone())).collect()),
+                    Box::new(rest),
+                );
+                for (_, name, global, ty) in rv {
+                    let cont = lctx.next_val(Ty::Cont);
+                    let cont_expr = make_cont(name, ty, lctx, rest);
+                    rest = Low::Let(cont, cont_expr, Box::new(Low::Global(global, cont)));
+                }
+                rest
+            }
+            Elab::CaseOf(val, cases, ret_ty) => {
+                let val_ty = val.get_type(lctx).normal(&mut lctx.ectx.clone());
+
+                let val_ty_cps = val_ty.cps_ty(lctx);
+                let ret_ty_cps = ret_ty.cps_ty(lctx);
+                let val_val = lctx.next_val(val_ty_cps.clone());
+
+                // The branches are going to share rest, so make a cont for it
+                let vrest = lctx.next_val(Ty::Cont);
+                let crest = make_cont(name, ret_ty_cps.clone(), lctx, rest);
+
+                let rest = cases.iter().rfold(Low::Unreachable, |rest, (pat, body)| {
+                    let mut lctx = lctx.clone();
+
+                    for (i, t) in pat.bound() {
+                        let t = t.cps_ty(&lctx);
+                        let v = lctx.next_val(t);
+                        lctx.set(i, v);
+                    }
+
+                    let body_result_val = lctx.next_val(ret_ty_cps.clone());
+                    let body = body.cps(
+                        body_result_val,
+                        &mut lctx,
+                        Low::ContCall(vrest, ret_ty_cps.clone(), body_result_val),
+                    );
+
+                    pat.lower(&val_ty, val_val, &mut lctx, body, rest)
+                });
+
+                let rest = Low::Let(vrest, crest, Box::new(rest));
+
+                val.cps(val_val, lctx, rest)
             }
             Elab::Fun(cl, arg, body) => {
                 lctx.ectx.add_clos(cl);
@@ -330,6 +708,13 @@ impl Elab {
                     let body = body.cps(retv, lctx, Low::ContCall(cont, ret, retv));
                     Box::new(arg.pass_args(lctx, argv, &arg_ty, body))
                 };
+                let mut upvalues = cl
+                    .tys
+                    .iter()
+                    .filter(|(k, _)| !lctx.ectx.vals.contains_key(k))
+                    .filter_map(|(k, t)| Some((lctx.get(*k)?, t.cps_ty(lctx))))
+                    .collect();
+                order_upvalues(&mut upvalues, lctx);
                 Low::Let(
                     name,
                     Expr::Fun {
@@ -337,22 +722,17 @@ impl Elab {
                         arg_ty,
                         cont,
                         body,
-                        upvalues: cl
-                            .tys
-                            .iter()
-                            .filter(|(k, _)| !lctx.ectx.vals.contains_key(k))
-                            .map(|(k, t)| (lctx.get(*k).unwrap_or_else(|| panic!("Not found: upvalue {}", k.pretty(lctx).ansi_string())), t.cps_ty(lctx)))
-                            .collect(),
+                        upvalues,
                     },
                     Box::new(rest),
                 )
             }
             Elab::App(f, x) => {
                 let ty = self
-                    .get_type(lctx)
+                    .get_type_rec(lctx)
                     .normal(&mut lctx.ectx.clone())
                     .cps_ty(lctx);
-                let tx = x.get_type(lctx).cps_ty(lctx);
+                let tx = x.get_type_rec(lctx).cps_ty(lctx);
                 let nf = lctx.next_val(Ty::Fun);
                 let nx = lctx.next_val(tx.clone());
                 let cont = lctx.next_val(Ty::Cont);
@@ -361,13 +741,42 @@ impl Elab {
                 let x = x.cps(
                     nx,
                     lctx,
-                    Low::Let(
-                        cont,
-                        cont_expr,
-                        Box::new(Low::Call(nf, tx, nx, cont)),
-                    ),
+                    Low::Let(cont, cont_expr, Box::new(Low::Call(nf, tx, nx, cont))),
                 );
                 f.cps(nf, lctx, x)
+            }
+            Elab::Block(v) => {
+                // We need to define them all first, since we actually lower them in reverse order
+                let vals: Vec<_> = v
+                    .iter()
+                    .map(|s| match s {
+                        ElabStmt::Def(s, x) => {
+                            let t = x.get_type(lctx).cps_ty(lctx);
+                            let v = lctx.next_val(t);
+                            lctx.set(*s, v);
+                            Some(v)
+                        }
+                        ElabStmt::Expr(_) => None,
+                    })
+                    .collect();
+                v.iter()
+                    .zip(vals)
+                    .enumerate()
+                    .rfold(rest, |rest, (i, (s, val))| match s {
+                        ElabStmt::Def(_, x) => {
+                            let val = val.unwrap();
+                            x.cps(val, lctx, rest)
+                        }
+                        ElabStmt::Expr(e) => {
+                            if i + 1 == v.len() {
+                                e.cps(name, lctx, rest)
+                            } else {
+                                let t = e.get_type(lctx).cps_ty(lctx);
+                                let val = lctx.next_val(t);
+                                e.cps(val, lctx, rest)
+                            }
+                        }
+                    })
             }
             Elab::Builtin(x) if x.is_binop() => {
                 let op = x.int_op().unwrap();
@@ -407,180 +816,20 @@ impl Elab {
                 if let Some(v) = lctx.get(*s) {
                     Low::Let(name, Expr::Val(v), Box::new(rest))
                 } else {
-                    // declare void @name({ i8*, void (ret_ty)* } %k)
-                    let global = lctx.database().mangle(lctx.scope(), *s).unwrap();
+                    // declare void @name(i8* %sp, i8* %k)
+                    let global = lctx.database().mangle(lctx.scope(), *s).unwrap_or_else(|| {
+                        panic!(
+                            "Not found: {} in scope {:?}",
+                            s.pretty(lctx).ansi_string(),
+                            lctx.scope()
+                        )
+                    });
                     let cont = lctx.next_val(Ty::Cont);
                     let cont_expr = make_cont(name, t.cps_ty(lctx), lctx, rest);
-                    Low::Let(
-                        cont,
-                        cont_expr,
-                        Box::new(Low::Global(global, cont)),
-                    )
+                    Low::Let(cont, cont_expr, Box::new(Low::Global(global, cont)))
                 }
             }
-            _ => todo!("{}", self.pretty(lctx).ansi_string()),
-        }
-    }
-}
-
-#[derive(Default)]
-struct CheckCtx {
-    tys: HashMap<Val, Ty>,
-}
-impl CheckCtx {
-    fn ty(&self, v: Val) -> Result<&Ty, (&'static str, Val)> {
-        self.tys.get(&v).ok_or(("not found", v))
-    }
-}
-
-impl Ty {
-    fn typeck(&self, ctx: &CheckCtx) -> Result<(), (&'static str, Val)> {
-        match self {
-            Ty::Fun
-            | Ty::Cont
-            | Ty::Int(_) => Ok(()),
-            Ty::Struct(v) => {
-                for i in v {
-                    i.typeck(ctx)?;
-                }
-                Ok(())
-            }
-            Ty::Dyn(v) => match ctx.ty(*v)? {
-                Ty::Int(64) => Ok(()),
-                _ => Err(("required type u64 for type size", *v)),
-            }
-        }
-    }
-}
-
-impl Expr {
-    fn typeck(&self, ctx: &CheckCtx) -> Result<Ty, (&'static str, Val)> {
-        match self {
-            Expr::IntConst(size, _) => Ok(Ty::Int(*size)),
-            Expr::IntOp(a, _, b) => {
-                let ta = ctx.ty(*a)?;
-                let tb = ctx.ty(*b)?;
-                match &ta {
-                    Ty::Int(_) => if ta == tb {
-                        Ok(ta.clone())
-                    } else {
-                        Err(("non-matching argument types to int op", *b))
-                    },
-                    _ => Err(("only integer types are allowed for int op args", *a)),
-                }
-            }
-            Expr::Struct(iv) => {
-                let mut rv = Vec::new();
-                for (v, t) in iv {
-                    t.typeck(ctx)?;
-                    if ctx.ty(*v)? != t {
-                        return Err(("struct member's actual type didn't match given type", *v));
-                    }
-                    rv.push(t.clone());
-                }
-                Ok(Ty::Struct(rv))
-            }
-            Expr::Project(t, s, m) => {
-                t.typeck(ctx)?;
-                if ctx.ty(*s)? != t {
-                    return Err(("project lhs's type didn't match given type", *s));
-                }
-                if let Ty::Struct(v) = t {
-                    if let Some(t) = v.get(*m as usize) {
-                        Ok(t.clone())
-                    } else {
-                        Err(("project out of range for struct type", *s))
-                    }
-                } else {
-                    Err(("project's lhs must be struct type", *s))
-                }
-            }
-            Expr::Val(v) => ctx.ty(*v).map(Ty::clone),
-            Expr::Cont { arg, arg_ty, body, upvalues } => {
-                let mut nctx = CheckCtx::default();
-                for (v, t) in upvalues {
-                    t.typeck(&nctx)?;
-                    if ctx.ty(*v)? != t {
-                        return Err(("upvalue type didn't match actual type", *v));
-                    }
-                    nctx.tys.insert(*v, t.clone());
-                }
-                arg_ty.typeck(&nctx)?;
-                nctx.tys.insert(*arg, arg_ty.clone());
-                body.typeck(&mut nctx)?;
-                Ok(Ty::Cont)
-            }
-            Expr::Fun { arg, arg_ty, cont, body, upvalues } => {
-                let mut nctx = CheckCtx::default();
-                for (v, t) in upvalues {
-                    t.typeck(&nctx)?;
-                    if ctx.ty(*v)? != t {
-                        return Err(("upvalue type didn't match actual type", *v));
-                    }
-                    nctx.tys.insert(*v, t.clone());
-                }
-                arg_ty.typeck(&nctx)?;
-                nctx.tys.insert(*arg, arg_ty.clone());
-                nctx.tys.insert(*cont, Ty::Cont);
-                body.typeck(&mut nctx)?;
-                Ok(Ty::Fun)
-            }
-        }
-    }
-}
-
-impl Low {
-    fn typeck(&self, ctx: &mut CheckCtx) -> Result<(), (&'static str, Val)> {
-        match self {
-            Low::Let(k, v, rest) => {
-                let t = v.typeck(ctx)?;
-                ctx.tys.insert(*k, t);
-                rest.typeck(ctx)
-            },
-            Low::Call(f, tx, x, k) => {
-                tx.typeck(ctx)?;
-                if *ctx.ty(*f)? != Ty::Fun {
-                    return Err(("called function must have function type", *f));
-                }
-                if ctx.ty(*x)? != tx {
-                    return Err(("argument's actual type didn't match declared type", *x));
-                }
-                if *ctx.ty(*k)? != Ty::Cont {
-                    return Err(("continuation argument must have continuation type", *k));
-                }
-                Ok(())
-            },
-            Low::ContCall(k, tx, x) => {
-                tx.typeck(ctx)?;
-                if *ctx.ty(*k)? != Ty::Cont {
-                    return Err(("called continuation must have continuation type", *k));
-                }
-                if ctx.ty(*x)? != tx {
-                    return Err(("argument's actual type didn't match declared type", *x));
-                }
-                Ok(())
-            },
-            // We assume all globals are defined for now
-            Low::Global(_, k) => match ctx.ty(*k)? {
-                Ty::Cont => Ok(()),
-                _ => Err(("passed to global but not a continuation", *k)),
-            },
-            Low::Halt(v) => match ctx.ty(*v)? {
-                Ty::Int(32) => Ok(()),
-                _ => Err(("wrong type for halt", *v)),
-            },
-        }
-    }
-
-    /// Typecheck this Low IR, assuming the continuation `cont`
-    pub fn type_check(&self, cont: Val) {
-        let mut ctx = CheckCtx::default();
-        ctx.tys.insert(cont, Ty::Cont);
-        match self.typeck(&mut ctx) {
-            Ok(()) => if cfg!(feature = "logging") {
-                println!("Low IR typechecked!")
-            },
-            Err((msg, val)) => panic!("Low IR didn't typecheck: value {}: {}", val, msg),
+            _ => todo!("lowering for '{}'", self.pretty(lctx).ansi_string()),
         }
     }
 }
@@ -598,18 +847,13 @@ pub enum IntOp {
     Sub,
     Mul,
     Div,
+    BitAnd,
+    BitOr,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum CompOp {
     Eq,
-}
-
-/// A binary logic operation, used for pattern matching compilation
-#[derive(Clone, Debug, PartialEq, Eq, Copy)]
-pub enum BoolOp {
-    And,
-    Or,
 }
 
 impl Builtin {
@@ -620,180 +864,6 @@ impl Builtin {
             Builtin::Mul => Some(IntOp::Mul),
             Builtin::Div => Some(IntOp::Div),
             _ => None,
-        }
-    }
-}
-
-impl Pretty for IntOp {
-    fn pretty(&self, _ctx: &impl HasBindings) -> Doc {
-        match self {
-            IntOp::Add => Doc::start("+"),
-            IntOp::Sub => Doc::start("-"),
-            IntOp::Mul => Doc::start("*"),
-            IntOp::Div => Doc::start("/"),
-        }
-    }
-}
-impl Pretty for BoolOp {
-    fn pretty(&self, _ctx: &impl HasBindings) -> Doc {
-        match self {
-            BoolOp::And => Doc::start("&&"),
-            BoolOp::Or => Doc::start("||"),
-        }
-    }
-}
-impl Pretty for CompOp {
-    fn pretty(&self, _ctx: &impl HasBindings) -> Doc {
-        match self {
-            CompOp::Eq => Doc::start("=="),
-        }
-    }
-}
-
-impl std::fmt::Display for Val {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "%{}", self.num())
-    }
-}
-
-impl Pretty for Expr {
-    fn pretty(&self, ctx: &impl crate::common::HasBindings) -> Doc {
-        match self {
-            Expr::IntConst(size, i) => Doc::start(i).add("u").add(size),
-            Expr::IntOp(a, op, b) => Doc::start(a).space().chain(op.pretty(ctx)).space().add(b),
-            Expr::Val(v) => Doc::start(v),
-            Expr::Struct(v) => Doc::start("{")
-                .chain(Doc::intersperse(
-                    v.iter().map(|(x, _)| Doc::start(x)),
-                    Doc::start(",").space(),
-                ))
-                .add("}"),
-            Expr::Project(_, r, m) => Doc::start(r).add(".").add(m),
-            Expr::Cont {
-                arg,
-                arg_ty,
-                body,
-                upvalues,
-            } => Doc::start("cont")
-                .style(Style::Keyword)
-                .add("{")
-                .chain(Doc::intersperse(
-                    upvalues.iter().map(|(x, t)| t.pretty(ctx).space().add(x)),
-                    Doc::start(",").space(),
-                ))
-                .add("}")
-                .add("(")
-                .chain(arg_ty.pretty(ctx))
-                .space()
-                .add(arg)
-                .add(")")
-                .space()
-                .add("{")
-                .line()
-                .chain(body.pretty(ctx))
-                .indent()
-                .line()
-                .add("}"),
-            Expr::Fun {
-                arg,
-                arg_ty,
-                cont,
-                body,
-                upvalues,
-            } => Doc::start("fun")
-                .style(Style::Keyword)
-                .add("{")
-                .chain(Doc::intersperse(
-                    upvalues.iter().map(|(x, t)| t.pretty(ctx).space().add(x)),
-                    Doc::start(",").space(),
-                ))
-                .add("}")
-                .add("(")
-                .chain(arg_ty.pretty(ctx))
-                .space()
-                .add(arg)
-                .add(",")
-                .space()
-                .chain(Ty::Cont.pretty(ctx))
-                .space()
-                .add(cont)
-                .add(")")
-                .space()
-                .add("{")
-                .line()
-                .chain(body.pretty(ctx))
-                .indent()
-                .line()
-                .add("}"),
-        }
-    }
-}
-impl Pretty for Ty {
-    fn pretty(&self, ctx: &impl crate::common::HasBindings) -> Doc {
-        match self {
-            Ty::Int(size) => Doc::start("u").add(size).style(Style::Literal),
-            Ty::Fun => Doc::start("fun").style(Style::Keyword),
-            Ty::Cont => Doc::start("cont").style(Style::Keyword),
-            Ty::Struct(v) => Doc::start("{")
-                .chain(Doc::intersperse(
-                    v.iter().map(|x| x.pretty(ctx)),
-                    Doc::start(",").space(),
-                ))
-                .add("}"),
-            Ty::Dyn(v) => Doc::start("dyn")
-                .style(Style::Keyword)
-                .add("[")
-                .add(v)
-                .add("]"),
-        }
-    }
-}
-impl Pretty for Low {
-    fn pretty(&self, ctx: &impl crate::common::HasBindings) -> Doc {
-        match self {
-            Low::Let(name, val, rest) => Doc::start("let")
-                .style(Style::Keyword)
-                .space()
-                .add(name)
-                .space()
-                .add("=")
-                .space()
-                .chain(val.pretty(ctx))
-                .space()
-                .chain(Doc::start("in").style(Style::Keyword))
-                .line()
-                .chain(rest.pretty(ctx)),
-            Low::Call(f, t, x, k) => Doc::start("call")
-                .style(Style::Keyword)
-                .space()
-                .add(f)
-                .add("(")
-                .chain(t.pretty(ctx))
-                .space()
-                .add(x)
-                .add(",")
-                .space()
-                .chain(Ty::Cont.pretty(ctx))
-                .space()
-                .add(k)
-                .add(")"),
-            Low::ContCall(k, t, x) => Doc::start("continue")
-                .style(Style::Keyword)
-                .space()
-                .add(k)
-                .add("(")
-                .chain(t.pretty(ctx))
-                .space()
-                .add(x)
-                .add(")"),
-            Low::Halt(v) => Doc::start("halt").style(Style::Keyword).space().add(v),
-            Low::Global(name, k) => Doc::start("call global")
-                .style(Style::Keyword)
-                .space()
-                .add(name)
-                .add("(")
-                .add(k)
-                .add(")"),
         }
     }
 }
