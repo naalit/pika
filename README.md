@@ -24,10 +24,11 @@ To that end, some things Pika has/will have:
 - No runtime
 
 ### Status
-Currently, Pika supports typechecking, compiling to LLVM, and running simple expressions with functions and ints.
-It has some support for pairs and records, but don't expect that to work very well yet.
+Currently, Pika supports typechecking, compiling to LLVM, and running expressions.
+While the core language works pretty well, it doesn't yet have any side effects or FFI.
+The main core language feature left to implement is algebraic effects - the backend is ready, but they haven't been added yet.
 
-It does type erasure via monomorphization, so no types are passed around at runtime (but monomorphized functions are currently 100% inlined, so try to avoid large ones for now) and has full support for closures.
+Like Sixten, types are currently passed around as sizes. This might change in the future.
 It uses bidirectional type checking via something adjacent to Normalization-By-Evaluation.
 
 ### Example
@@ -50,11 +51,21 @@ two := suc one
 const : fun (t:Type) t t => t = fun _ a b: => a
 a := one Int (const Int 12) 2 # returns 12
 
-# Functions can pattern-match and recurse (no mutual recursion yet, though)
-fib := fun
+# We have normal (G)ADTs
+type Option: fun Type => Type of
+  None : fun (a:Type) => Option a
+  Some : fun (a:Type) a => Option a
+
+# With pattern matching, and implicit arguments (solved by unification)
+unwrap_or : fun [t:Type] (Option t) t => t = fun [_] x default: => case x of
+  Option.Some _ a => a
+  Option.None _ => default
+
+# Recursion works (no mutual recursion yet, though)
+fib : fun Int => Int = fun x: => case x of
   0 => 1
   1 => 1
-  i:Int => (fib (i - 1)) + (fib (i - 2))
+  i => (fib (i - 1)) + (fib (i - 2))
 
 # `pika run path-to-this-file.pk` will compile it with LLVM and print out the value of `main`
 # It should be 610

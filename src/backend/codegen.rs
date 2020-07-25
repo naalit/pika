@@ -15,7 +15,7 @@ use std::{
     fmt::Debug,
 };
 
-/// 4sKB stack segments
+/// 4KB stack segments
 pub const STACK_SEGMENT_SIZE: u64 = 4 * 1024;
 
 // Some calling conventions
@@ -55,7 +55,6 @@ impl FunAttr {
 /// #### Deallocating segments
 /// We, when restoring a saved ending address, check if it's the same as the current one (i.e. the same segment).
 /// If it isn't, we pop segments until it is - each segment stores, at its base, the high and low addresses of the last segment.
-/// TODO: Segment deallocation has not yet been implemented.
 pub struct Stack<'ctx> {
     pub stack_low: PointerValue<'ctx>,
     pub stack_high: PointerValue<'ctx>,
@@ -186,9 +185,95 @@ impl<'ctx> CodegenCtx<'ctx> {
         self.builder.build_store(stack_low_ptr, stack_low);
     }
 
-    fn restore_stack(&mut self, ptr: PointerValue<'ctx>) {
-        // TODO when switching segments, deallocate the top ones
+    /// Finishes restoring the stack, freeing unneeded stack segments.
+    fn finish_restore_stack(
+        &mut self,
+        (stack_low, old_stack_low): (PointerValue<'ctx>, PointerValue<'ctx>),
+    ) {
+        let var = self.builder.build_alloca(self.voidptr(), "var");
+        self.builder.build_store(var, old_stack_low);
 
+        //   ...load stack pointer and %stack_low...
+        //   %var = box %old_stack_low
+        //   br %header
+        // header:
+        //   %old_stack_low = load %var
+        //   br (%stack_low == %old_stack_low), %done, %free_segment
+        // free_segment:
+        //   ; each stack segment stores a pointer to the last one at its base (which is the high address since we bump down)
+        //   %previous_stack_low = load (%old_stack_low + STACK_SEGMENT_SIZE - 8)
+        //   store %var, %previous_stack_low
+        //   call @free(%old_stack_low)
+        //   br %header
+        // done:
+        //   ...continue...
+
+        let header = self.context.insert_basic_block_after(
+            self.builder.get_insert_block().unwrap(),
+            "header.free_segment",
+        );
+        let free_segment = self
+            .context
+            .insert_basic_block_after(header, "free_segment");
+        let done = self
+            .context
+            .insert_basic_block_after(free_segment, "done.free_segment");
+        self.builder.build_unconditional_branch(header);
+
+        self.builder.position_at_end(header);
+        let old_stack_low = self
+            .builder
+            .build_load(var, "old_stack_low")
+            .into_pointer_value();
+        let diff = self
+            .builder
+            .build_ptr_diff(stack_low, old_stack_low, "diff");
+        let same_segment = self.builder.build_int_compare(
+            IntPredicate::EQ,
+            diff,
+            self.context.i64_type().const_zero(),
+            "same_segment",
+        );
+        self.builder
+            .build_conditional_branch(same_segment, done, free_segment);
+
+        self.builder.position_at_end(free_segment);
+        // self.builder.build_call(self.halt, &[self.context.i32_type().const_int(-2i32 as u64, false).as_basic_value_enum()], "_log_free");
+
+        let prev_ptr = unsafe {
+            self.builder.build_gep(
+                old_stack_low,
+                &[self
+                    .context
+                    .i64_type()
+                    .const_int(STACK_SEGMENT_SIZE - 8, false)],
+                "previous_ptr_slot",
+            )
+        };
+        let prev_ptr = self
+            .builder
+            .build_bitcast(
+                prev_ptr,
+                self.voidptr().ptr_type(AddressSpace::Generic),
+                "previous_ptr",
+            )
+            .into_pointer_value();
+        let previous_stack_low = self.builder.build_load(prev_ptr, "previous_stack_low");
+        self.builder.build_store(var, previous_stack_low);
+        self.builder.build_free(old_stack_low);
+        self.builder.build_unconditional_branch(header);
+
+        self.builder.position_at_end(done);
+    }
+
+    /// Loads the saved stack pointer and end.
+    ///
+    /// It's safe to use the stack after this, but leaks may happen.
+    /// Make sure to call `finish_restore_stack()` with the return value to avoid that.
+    fn start_restore_stack(
+        &mut self,
+        ptr: PointerValue<'ctx>,
+    ) -> (PointerValue<'ctx>, PointerValue<'ctx>) {
         let stack_ptr_ptr = self
             .builder
             .build_bitcast(
@@ -218,45 +303,55 @@ impl<'ctx> CodegenCtx<'ctx> {
             .builder
             .build_load(stack_low_ptr, "stack_low")
             .into_pointer_value();
+
+        let old_stack_low = self
+            .builder
+            .build_load(self.stack.stack_low, "old_stack_low")
+            .into_pointer_value();
         self.builder.build_store(self.stack.stack_low, stack_low);
+
+        // We need to pass `stack_low` along because we could allocate another segment in the meantime and change the global
+        (stack_low, old_stack_low)
     }
 
     /// Allocates and switches to a new stack segment
     fn morestack(&mut self) {
         // self.builder.build_call(self.halt, &[self.context.i32_type().const_int(-1i32 as u64, false).as_basic_value_enum()], "_log_morestack");
 
-        let malloc = self.module.get_function("malloc").unwrap_or_else(|| {
-            self.module.add_function(
-                "malloc",
-                self.context
-                    .i8_type()
-                    .ptr_type(AddressSpace::Generic)
-                    .fn_type(&[self.context.i64_type().as_basic_type_enum()], false),
-                None,
-            )
-        });
         let low = self
             .builder
-            .build_call(
-                malloc,
-                &[self
-                    .context
-                    .i64_type()
-                    .const_int(STACK_SEGMENT_SIZE, false)
-                    .as_basic_value_enum()],
+            .build_array_malloc(
+                self.context.i8_type(),
+                self.context.i64_type().const_int(STACK_SEGMENT_SIZE, false),
                 "stack_low",
             )
-            .as_any_value_enum()
-            .into_pointer_value();
+            .unwrap();
+
+        // Each stack segment stores a pointer to the last one at its high address
         let high = unsafe {
             self.builder.build_gep(
                 low,
-                &[self.context.i64_type().const_int(STACK_SEGMENT_SIZE, false)],
+                // One word below the top
+                &[self
+                    .context
+                    .i64_type()
+                    .const_int(STACK_SEGMENT_SIZE - 8, false)],
                 "stack_high",
             )
         };
-
-        // TODO store previous stack segment information for deallocation
+        let previous_stack_low = self
+            .builder
+            .build_load(self.stack.stack_low, "previous_stack_low");
+        self.builder.build_store(
+            self.builder
+                .build_bitcast(
+                    high,
+                    self.voidptr().ptr_type(AddressSpace::Generic),
+                    "previous_ptr",
+                )
+                .into_pointer_value(),
+            previous_stack_low,
+        );
 
         self.builder.build_store(self.stack.stack_low, low);
         self.builder.build_store(self.stack.stack_high, high);
@@ -301,7 +396,7 @@ impl<'ctx> CodegenCtx<'ctx> {
             self.builder
                 .build_int_compare(IntPredicate::UGE, new_as_int, end_as_int, "has_space");
         self.if_else_mut(
-            { has_space },
+            has_space,
             |ctx| {
                 ctx.stack.stack_ptr = new_ptr;
                 new_ptr
@@ -317,6 +412,16 @@ impl<'ctx> CodegenCtx<'ctx> {
                 new_ptr
             },
         )
+    }
+
+    /// Frees any remaining segments of the Pika stack.
+    fn free_stack(&mut self) {
+        let low = self
+            .builder
+            .build_load(self.stack.stack_low, "stack_low")
+            .into_pointer_value();
+        // We tell it, "we were here, and we're restoring to `null`, so free everything until there"
+        self.finish_restore_stack((self.voidptr().into_pointer_type().const_null(), low));
     }
 
     /// Allocates the first segment of the Pika stack. Run at the beginning of execution.
@@ -885,13 +990,16 @@ fn llvm_closure<'a>(
         };
 
         // Load the stack pointer again, or grab that parameter if it's not a continuation
-        if is_cont {
-            ctx.restore_stack(slot_ptr);
+        let token = if is_cont {
+            // We *don't* call `finish_restore_stack()`, because the parameters might be stored
+            //  in another stack segment and we don't want to free it until we've reallocated them
+            let token = ctx.start_restore_stack(slot_ptr);
             slot_ptr = unsafe {
                 ctx.builder
                     .build_gep(slot_ptr, &[word_size], "_next_slot_partial")
             };
             slot_ptr = unsafe { ctx.builder.build_gep(slot_ptr, &[word_size], "next_slot") };
+            Some(token)
         } else {
             ctx.stack.stack_ptr = fun.get_nth_param(1).unwrap().into_pointer_value();
             ctx.stack.stack_ptr.set_name("stack_ptr");
@@ -899,7 +1007,8 @@ fn llvm_closure<'a>(
             // It might be a good idea eventually to maintain a minimum guaranteed size across calls,
             // so functions that don't allocate much called in a loop don't have to do any checks.
             ctx.stack.min_space = 0;
-        }
+            None
+        };
 
         // Add upvalues to local environment
         let mut replace = Vec::new();
@@ -937,6 +1046,11 @@ fn llvm_closure<'a>(
                 param
             };
             ctx.locals.insert(*arg, param);
+        }
+
+        // Now that we've reallocated the parameters, we can do this
+        if let Some(token) = token {
+            ctx.finish_restore_stack(token);
         }
 
         body.llvm(ctx);
@@ -1397,6 +1511,8 @@ impl Low {
             Low::Halt(v) => {
                 ctx.builder
                     .build_call(ctx.halt, &[*ctx.locals.get(v).unwrap()], "halt");
+                // We're done, so we can free the stack
+                ctx.free_stack();
                 ctx.builder.build_return(None);
             }
             Low::Unreachable => {
