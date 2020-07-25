@@ -47,8 +47,8 @@ impl LowDef {
         let fun = ctx.module.get_function(&self.name).unwrap();
         let entry = ctx.context.append_basic_block(fun, "entry");
         ctx.builder.position_at_end(entry);
-        ctx.stack_ptr = fun.get_first_param().unwrap().into_pointer_value();
-        ctx.stack_ptr.set_name("stack_ptr");
+        ctx.stack.stack_ptr = fun.get_first_param().unwrap().into_pointer_value();
+        ctx.stack.stack_ptr.set_name("stack_ptr");
         ctx.locals.insert(self.cont, fun.get_nth_param(1).unwrap());
         fun.get_nth_param(1).unwrap().set_name("cont");
         self.body.llvm(ctx);

@@ -15,6 +15,9 @@ use std::{
     fmt::Debug,
 };
 
+/// 4sKB stack segments
+pub const STACK_SEGMENT_SIZE: u64 = 4 * 1024;
+
 // Some calling conventions
 pub const TAILCC: u32 = 18;
 pub const CCC: u32 = 0;
@@ -41,6 +44,27 @@ impl FunAttr {
     }
 }
 
+/// Represents the state of the Pika stack.
+///
+/// We pass the stack pointer around, and pop the stack by restoring saved stack pointers.
+/// We also need an ending address for the current segment, so we know how much capacity we have.
+/// The ending address is a global variable, b/c it doesn't need to be a register.
+/// When we save and restore the stack pointer, we also save and restore the ending address.
+/// Since the stack is only popped by restoring saved stack pointers, we also restore that ending address.
+///
+/// #### Deallocating segments
+/// We, when restoring a saved ending address, check if it's the same as the current one (i.e. the same segment).
+/// If it isn't, we pop segments until it is - each segment stores, at its base, the high and low addresses of the last segment.
+/// TODO: Segment deallocation has not yet been implemented.
+pub struct Stack<'ctx> {
+    pub stack_low: PointerValue<'ctx>,
+    pub stack_high: PointerValue<'ctx>,
+    /// The current stack pointer. We thread this through function calls as needed.
+    pub stack_ptr: PointerValue<'ctx>,
+    /// We maintain the minimum space we're guaranteed to have available on this segment, so we can avoid checking on every alloca.
+    pub min_space: u64,
+}
+
 /// We need one of these to generate any LLVM code, but not to generate LowIR
 pub struct CodegenCtx<'ctx> {
     pub context: &'ctx Context,
@@ -48,9 +72,7 @@ pub struct CodegenCtx<'ctx> {
     pub locals: HashMap<Val, BasicValueEnum<'ctx>>,
     pub module: Module<'ctx>,
     pub halt: FunctionValue<'ctx>,
-    pub stack_base: PointerValue<'ctx>,
-    /// The current stack pointer. We thread this through function calls as needed.
-    pub stack_ptr: PointerValue<'ctx>,
+    pub stack: Stack<'ctx>,
 }
 impl<'ctx> CodegenCtx<'ctx> {
     pub fn new(context: &'ctx Context) -> Self {
@@ -65,18 +87,31 @@ impl<'ctx> CodegenCtx<'ctx> {
             None,
         );
 
-        let stack = module.add_global(
+        let stack_low = module.add_global(
             context.i8_type().ptr_type(AddressSpace::Generic),
             None,
-            "_pika_stack",
+            "_pika_stack_low",
         );
-        stack.set_initializer(
+        stack_low.set_initializer(
             &context
                 .i8_type()
                 .ptr_type(AddressSpace::Generic)
                 .const_null(),
         );
-        let stack = stack.as_pointer_value();
+        let stack_low = stack_low.as_pointer_value();
+
+        let stack_high = module.add_global(
+            context.i8_type().ptr_type(AddressSpace::Generic),
+            None,
+            "_pika_stack_high",
+        );
+        stack_high.set_initializer(
+            &context
+                .i8_type()
+                .ptr_type(AddressSpace::Generic)
+                .const_null(),
+        );
+        let stack_high = stack_high.as_pointer_value();
 
         CodegenCtx {
             context,
@@ -84,8 +119,15 @@ impl<'ctx> CodegenCtx<'ctx> {
             locals: HashMap::new(),
             module,
             halt,
-            stack_base: stack,
-            stack_ptr: stack,
+            stack: Stack {
+                stack_low,
+                stack_high,
+                stack_ptr: context
+                    .i8_type()
+                    .ptr_type(AddressSpace::Generic)
+                    .const_null(),
+                min_space: 0,
+            },
         }
     }
 
@@ -112,52 +154,174 @@ impl<'ctx> CodegenCtx<'ctx> {
         rounded
     }
 
-    /// Allocate `size` bytes on the Pika stack
-    pub fn alloca(&mut self, size: IntValue<'ctx>) -> PointerValue<'ctx> {
-        // TODO bump down
-        // TODO alignment
-        // TODO segmented stack
+    /// `ptr` must have two words of space available
+    fn save_stack(&self, ptr: PointerValue<'ctx>) {
+        let stack_ptr_ptr = self
+            .builder
+            .build_bitcast(
+                ptr,
+                self.voidptr().ptr_type(AddressSpace::Generic),
+                "stack_ptr_ptr",
+            )
+            .into_pointer_value();
+        self.builder
+            .build_store(stack_ptr_ptr, self.stack.stack_ptr);
 
-        // To check if bugs are caused by stack handling, uncomment the two lines below to disable stack popping
-
-        // self.stack_ptr = self.builder.build_load(self.stack_base, "_stack_ptr").into_pointer_value();
-        let new_ptr = unsafe {
+        let stack_low_slot = unsafe {
             self.builder
-                .build_gep(self.stack_ptr, &[size], "_stack_push")
+                .build_gep(ptr, &[self.voidptr().size_of().unwrap()], "stack_low_slot")
         };
-        // self.builder.build_store(self.stack_base, new_ptr);
-        let old = self.stack_ptr;
-        self.stack_ptr = new_ptr;
-        old
+        let stack_low_ptr = self
+            .builder
+            .build_bitcast(
+                stack_low_slot,
+                self.voidptr().ptr_type(AddressSpace::Generic),
+                "stack_low_ptr",
+            )
+            .into_pointer_value();
+        let stack_low = self
+            .builder
+            .build_load(self.stack.stack_low, "stack_low")
+            .into_pointer_value();
+        self.builder.build_store(stack_low_ptr, stack_low);
     }
 
-    /// Allocate the Pika stack
-    pub fn allocate_stack(&mut self) {
-        let malloc = self.module.add_function(
-            "malloc",
-            self.context
-                .i8_type()
-                .ptr_type(AddressSpace::Generic)
-                .fn_type(&[self.context.i64_type().as_basic_type_enum()], false),
-            None,
-        );
-        // Right now it's just 16KB, and not segmented
-        let ptr = self
+    fn restore_stack(&mut self, ptr: PointerValue<'ctx>) {
+        // TODO when switching segments, deallocate the top ones
+
+        let stack_ptr_ptr = self
+            .builder
+            .build_bitcast(
+                ptr,
+                self.voidptr().ptr_type(AddressSpace::Generic),
+                "stack_ptr_ptr",
+            )
+            .into_pointer_value();
+        self.stack.stack_ptr = self
+            .builder
+            .build_load(stack_ptr_ptr, "stack_ptr_saved")
+            .into_pointer_value();
+
+        let stack_low_slot = unsafe {
+            self.builder
+                .build_gep(ptr, &[self.voidptr().size_of().unwrap()], "stack_low_slot")
+        };
+        let stack_low_ptr = self
+            .builder
+            .build_bitcast(
+                stack_low_slot,
+                self.voidptr().ptr_type(AddressSpace::Generic),
+                "stack_low_ptr",
+            )
+            .into_pointer_value();
+        let stack_low = self
+            .builder
+            .build_load(stack_low_ptr, "stack_low")
+            .into_pointer_value();
+        self.builder.build_store(self.stack.stack_low, stack_low);
+    }
+
+    /// Allocates and switches to a new stack segment
+    fn morestack(&mut self) {
+        // self.builder.build_call(self.halt, &[self.context.i32_type().const_int(-1i32 as u64, false).as_basic_value_enum()], "_log_morestack");
+
+        let malloc = self.module.get_function("malloc").unwrap_or_else(|| {
+            self.module.add_function(
+                "malloc",
+                self.context
+                    .i8_type()
+                    .ptr_type(AddressSpace::Generic)
+                    .fn_type(&[self.context.i64_type().as_basic_type_enum()], false),
+                None,
+            )
+        });
+        let low = self
             .builder
             .build_call(
                 malloc,
                 &[self
                     .context
                     .i64_type()
-                    .const_int(1024 * 16, false)
+                    .const_int(STACK_SEGMENT_SIZE, false)
                     .as_basic_value_enum()],
-                "_stack_ptr",
+                "stack_low",
             )
-            .try_as_basic_value()
-            .left()
-            .unwrap();
-        self.builder.build_store(self.stack_base, ptr);
-        self.stack_ptr = ptr.into_pointer_value();
+            .as_any_value_enum()
+            .into_pointer_value();
+        let high = unsafe {
+            self.builder.build_gep(
+                low,
+                &[self.context.i64_type().const_int(STACK_SEGMENT_SIZE, false)],
+                "stack_high",
+            )
+        };
+
+        // TODO store previous stack segment information for deallocation
+
+        self.builder.build_store(self.stack.stack_low, low);
+        self.builder.build_store(self.stack.stack_high, high);
+        // We bump down, so start at the high value
+        self.stack.stack_ptr = high;
+        self.stack.min_space = STACK_SEGMENT_SIZE;
+    }
+
+    /// Allocate `size` bytes on the Pika stack
+    pub fn alloca(&mut self, size: IntValue<'ctx>, max_size: Option<u64>) -> PointerValue<'ctx> {
+        let neg_size = self.builder.build_int_neg(size, "minus_size");
+        let new_ptr = unsafe {
+            self.builder
+                .build_gep(self.stack.stack_ptr, &[neg_size], "stack_try_push")
+        };
+
+        if let Some(max_size) = max_size {
+            if max_size <= self.stack.min_space {
+                // If we know we have enough space, we can skip the branching
+                // LLVM probably can't figure this out on its own, so we do this ourselves
+                self.stack.min_space -= max_size;
+                self.stack.stack_ptr = new_ptr;
+                return new_ptr;
+            } else {
+                // We don't even know if this will fit, let alone how much will be left after
+                self.stack.min_space = 0;
+            }
+        }
+
+        let end_ptr = self
+            .builder
+            .build_load(self.stack.stack_low, "stack_low")
+            .into_pointer_value();
+        let end_as_int =
+            self.builder
+                .build_ptr_to_int(end_ptr, self.context.i64_type(), "end_as_int");
+        let new_as_int =
+            self.builder
+                .build_ptr_to_int(new_ptr, self.context.i64_type(), "try_push_as_int");
+
+        let has_space =
+            self.builder
+                .build_int_compare(IntPredicate::UGE, new_as_int, end_as_int, "has_space");
+        self.if_else_mut(
+            { has_space },
+            |ctx| {
+                ctx.stack.stack_ptr = new_ptr;
+                new_ptr
+            },
+            |ctx| {
+                ctx.morestack();
+                // TODO what if `size` is bigger than a segment?
+                let new_ptr = unsafe {
+                    ctx.builder
+                        .build_gep(ctx.stack.stack_ptr, &[neg_size], "stack_push")
+                };
+                ctx.stack.stack_ptr = new_ptr;
+                new_ptr
+            },
+        )
+    }
+
+    /// Allocates the first segment of the Pika stack. Run at the beginning of execution.
+    pub fn allocate_stack(&mut self) {
+        self.morestack();
     }
 }
 
@@ -211,7 +375,7 @@ impl<'a> CodegenCtx<'a> {
         no: impl FnOnce(&mut CodegenCtx<'a>) -> R,
     ) -> R {
         let old_block = self.builder.get_insert_block().unwrap();
-        let old_stack_ptr = self.stack_ptr;
+        let old_stack_ptr = self.stack.stack_ptr;
 
         let after_block = self.context.insert_basic_block_after(old_block, "merge");
 
@@ -220,17 +384,17 @@ impl<'a> CodegenCtx<'a> {
             .insert_basic_block_after(old_block, "yes_block");
         self.builder.position_at_end(yes_block);
         let yes_val = yes(self);
-        let yes_stack_ptr = self.stack_ptr;
+        let yes_stack_ptr = self.stack.stack_ptr;
         let phi_type = yes_val.as_basic_value_enum().get_type();
         // They could have branched around in `yes()`, so we need to phi from *this* block
         let yes_block_f = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(after_block);
 
-        self.stack_ptr = old_stack_ptr;
+        self.stack.stack_ptr = old_stack_ptr;
         let no_block = self.context.insert_basic_block_after(old_block, "no_block");
         self.builder.position_at_end(no_block);
         let no_val = no(self);
-        let no_stack_ptr = self.stack_ptr;
+        let no_stack_ptr = self.stack.stack_ptr;
         // Same with `no()`
         let no_block_f = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(after_block);
@@ -247,13 +411,38 @@ impl<'a> CodegenCtx<'a> {
         phi.add_incoming(&[(&yes_val, yes_block_f), (&no_val, no_block_f)]);
         let stack_ptr_phi = self.builder.build_phi(self.voidptr(), "stack_ptr_phi");
         stack_ptr_phi.add_incoming(&[(&yes_stack_ptr, yes_block_f), (&no_stack_ptr, no_block_f)]);
-        self.stack_ptr = stack_ptr_phi.as_basic_value().into_pointer_value();
+        self.stack.stack_ptr = stack_ptr_phi.as_basic_value().into_pointer_value();
 
         phi.as_basic_value().try_into().unwrap()
     }
 }
 
 impl Ty {
+    fn max_size(&self) -> Option<u64> {
+        match self {
+            Ty::Int(bits) => Some(*bits as u64 / 8),
+            // TODO not assume 64-bit
+            Ty::Cont => Some(8),
+            Ty::Unit => Some(0),
+            Ty::Union(v) => {
+                // We always store the size
+                let mut max = 8;
+                for i in v {
+                    max = max.max(i.max_size()?);
+                }
+                Some(max)
+            }
+            Ty::Struct(v) => {
+                let mut tot = if self.might_be_dyn_size() { 8 } else { 0 };
+                for i in v {
+                    tot += i.max_size()?;
+                }
+                Some(tot)
+            }
+            Ty::Dyn(_) | Ty::Fun => None,
+        }
+    }
+
     /// Either casts the `i8*` into the appropriate type, or loads it, depending on the size of the type.
     fn from_void_ptr<'a>(&self, ptr: PointerValue<'a>, ctx: &CodegenCtx<'a>) -> BasicValueEnum<'a> {
         match self {
@@ -352,7 +541,7 @@ impl Ty {
                             "Ty::Int may only be used with power-of-two bit widths, not {}",
                             size
                         );
-                        let ptr = ctx.alloca(int_size);
+                        let ptr = ctx.alloca(int_size, Some(*size as u64 / 8));
                         let ptr_cast = ctx.builder.build_bitcast(
                             ptr,
                             int_type.ptr_type(AddressSpace::Generic),
@@ -424,7 +613,8 @@ impl Ty {
     fn might_be_dyn_size(&self) -> bool {
         match self {
             Ty::Int(_) | Ty::Unit | Ty::Cont => false,
-            Ty::Fun | Ty::Struct(_) | Ty::Dyn(_) | Ty::Union(_) => true,
+            Ty::Struct(v) => v.iter().any(Ty::might_be_dyn_size),
+            Ty::Fun | Ty::Dyn(_) | Ty::Union(_) => true,
         }
     }
 
@@ -484,7 +674,7 @@ impl Ty {
                     },
                     |_| val,
                     |ctx| {
-                        let ptr = ctx.alloca(size);
+                        let ptr = ctx.alloca(size, None);
                         self.copy_to(val, ptr, ctx);
                         ptr.as_basic_value_enum()
                     },
@@ -492,7 +682,7 @@ impl Ty {
             }
             Ty::Fun | Ty::Struct(_) | Ty::Union(_) => {
                 let size = self.size_of(val, ctx);
-                let ptr = ctx.alloca(size);
+                let ptr = ctx.alloca(size, self.max_size());
                 self.copy_to(val, ptr, ctx);
                 ptr.as_basic_value_enum()
             }
@@ -622,10 +812,14 @@ fn llvm_closure<'a>(
     let i64_size = ctx.context.i64_type().size_of();
     let word_size = ctx.voidptr().size_of().unwrap();
     let header_size = ctx.builder.build_int_add(i64_size, word_size, "env_size");
+    // TODO not assume 64-bit
+    let mut max_size = Some(16);
     let mut total_size = header_size;
-    // If it's a continuation, the closure environment includes the stack pointer
+    // If it's a continuation, the closure environment includes the stack pointer and the stack end
     if is_cont {
         total_size = ctx.builder.build_int_add(total_size, word_size, "env_size");
+        total_size = ctx.builder.build_int_add(total_size, word_size, "env_size");
+        max_size = max_size.map(|x| x + 16);
     }
     // Add all the sizes of the upvalues
     let upvalues: Vec<_> = upvalues
@@ -638,8 +832,9 @@ fn llvm_closure<'a>(
             (*name, val, ty, size)
         })
         .collect();
-    for (_, _, _, size) in &upvalues {
+    for (_, _, t, size) in &upvalues {
         total_size = ctx.builder.build_int_add(total_size, *size, "env_size");
+        max_size = max_size.and_then(|x| t.max_size().map(|y| x + y));
     }
 
     // Now we generate the new function
@@ -647,7 +842,8 @@ fn llvm_closure<'a>(
     let fun = {
         // Store the old block and stack pointer
         let block = ctx.builder.get_insert_block().unwrap();
-        let old_stack_ptr = ctx.stack_ptr;
+        let old_stack_ptr = ctx.stack.stack_ptr;
+        let old_min_space = ctx.stack.min_space;
 
         // All functions, continuation or not, return void, and take an environment as their first argument
         // Non-continuations also take the current stack pointer as their second argument
@@ -690,19 +886,19 @@ fn llvm_closure<'a>(
 
         // Load the stack pointer again, or grab that parameter if it's not a continuation
         if is_cont {
-            let casted = ctx.builder.build_bitcast(
-                slot_ptr,
-                ctx.voidptr().ptr_type(AddressSpace::Generic),
-                "stack_ptr_slot",
-            );
-            ctx.stack_ptr = ctx
-                .builder
-                .build_load(casted.into_pointer_value(), "stack_ptr_saved")
-                .into_pointer_value();
+            ctx.restore_stack(slot_ptr);
+            slot_ptr = unsafe {
+                ctx.builder
+                    .build_gep(slot_ptr, &[word_size], "_next_slot_partial")
+            };
             slot_ptr = unsafe { ctx.builder.build_gep(slot_ptr, &[word_size], "next_slot") };
         } else {
-            ctx.stack_ptr = fun.get_nth_param(1).unwrap().into_pointer_value();
-            ctx.stack_ptr.set_name("stack_ptr");
+            ctx.stack.stack_ptr = fun.get_nth_param(1).unwrap().into_pointer_value();
+            ctx.stack.stack_ptr.set_name("stack_ptr");
+            // We got the stack pointer in from outside, who knows how much space is left?
+            // It might be a good idea eventually to maintain a minimum guaranteed size across calls,
+            // so functions that don't allocate much called in a loop don't have to do any checks.
+            ctx.stack.min_space = 0;
         }
 
         // Add upvalues to local environment
@@ -747,7 +943,8 @@ fn llvm_closure<'a>(
 
         // Go back back to where we were
         ctx.builder.position_at_end(block);
-        ctx.stack_ptr = old_stack_ptr;
+        ctx.stack.stack_ptr = old_stack_ptr;
+        ctx.stack.min_space = old_min_space;
         ctx.locals.extend(replace);
         fun
     };
@@ -755,7 +952,7 @@ fn llvm_closure<'a>(
     // Back to creating the closure
 
     // Allocate space for the whole struct, then insert each element
-    let base_ptr = ctx.alloca(total_size);
+    let base_ptr = ctx.alloca(total_size, max_size);
 
     // Start with the total size
     {
@@ -790,15 +987,11 @@ fn llvm_closure<'a>(
     // Then the stack pointer, if this is a continuation
     let mut slot_ptr = unsafe { ctx.builder.build_gep(slot_ptr, &[word_size], "env_slots") };
     if is_cont {
-        let casted = ctx.builder.build_bitcast(
-            slot_ptr,
-            ctx.voidptr().ptr_type(AddressSpace::Generic),
-            "stack_ptr_slot",
-        );
-        let s = ctx
-            .builder
-            .build_store(casted.into_pointer_value(), ctx.stack_ptr);
-        s.set_alignment(8).unwrap();
+        ctx.save_stack(slot_ptr);
+        slot_ptr = unsafe {
+            ctx.builder
+                .build_gep(slot_ptr, &[word_size], "_next_slot_partial")
+        };
         slot_ptr = unsafe { ctx.builder.build_gep(slot_ptr, &[word_size], "next_slot") };
     }
 
@@ -865,7 +1058,7 @@ impl Expr {
                     ctx.context.i64_type().size_of(),
                     "variant_size",
                 );
-                let ptr = ctx.alloca(size);
+                let ptr = ctx.alloca(size, t.max_size());
 
                 let casted = ctx
                     .builder
@@ -913,6 +1106,8 @@ impl Expr {
                 // Because the sizes of the struct members might not be known at compile time,
                 // we build the struct on the Pika stack and return a pointer
                 let mut total_size = ctx.context.i64_type().const_zero();
+                let mut max_size = Some(0);
+                let mut maybe_dyn = false;
                 let v: Vec<_> = v
                     .iter()
                     .map(|(val, ty)| {
@@ -937,8 +1132,13 @@ impl Expr {
                         (val, ty, size)
                     })
                     .collect();
-                for (_, _, size) in &v {
+                for (_, t, size) in &v {
                     total_size = ctx.builder.build_int_add(total_size, *size, "struct_size");
+                    maybe_dyn |= t.might_be_dyn_size();
+                    max_size = max_size.and_then(|x| t.max_size().map(|y| x + y));
+                }
+                if maybe_dyn {
+                    max_size.map(|x| x + 8);
                 }
                 total_size = ctx.if_else(
                     any_dyn,
@@ -953,7 +1153,7 @@ impl Expr {
                 );
 
                 // Allocate space for the whole struct, then insert each element
-                let struct_ptr = ctx.alloca(total_size);
+                let struct_ptr = ctx.alloca(total_size, max_size);
                 let mut slot_ptr = ctx.if_else(
                     any_dyn,
                     |ctx| {
@@ -1081,13 +1281,13 @@ impl Low {
 
                 // `CodegenCtx::if_else()` is for expressions, it would be a hassle to use it here, so we just reimplement it
                 let old_block = ctx.builder.get_insert_block().unwrap();
-                let old_stack_ptr = ctx.stack_ptr;
+                let old_stack_ptr = ctx.stack.stack_ptr;
 
                 let yes_block = ctx.context.insert_basic_block_after(old_block, "then");
                 ctx.builder.position_at_end(yes_block);
                 yes.llvm(ctx);
 
-                ctx.stack_ptr = old_stack_ptr;
+                ctx.stack.stack_ptr = old_stack_ptr;
                 let no_block = ctx.context.insert_basic_block_after(old_block, "else");
                 ctx.builder.position_at_end(no_block);
                 no.llvm(ctx);
@@ -1105,9 +1305,11 @@ impl Low {
                 // Note that this is NOT a closure
                 let fun = ctx.module.get_function(&name).unwrap();
 
-                let v =
-                    ctx.builder
-                        .build_call(fun, &[ctx.stack_ptr.as_basic_value_enum(), k], "_void");
+                let v = ctx.builder.build_call(
+                    fun,
+                    &[ctx.stack.stack_ptr.as_basic_value_enum(), k],
+                    "_void",
+                );
                 v.set_call_convention(TAILCC);
                 v.set_tail_call(true);
                 ctx.builder.build_return(None);
@@ -1146,7 +1348,7 @@ impl Low {
                     f_ptr,
                     &[
                         closure.as_basic_value_enum(),
-                        ctx.stack_ptr.as_basic_value_enum(),
+                        ctx.stack.stack_ptr.as_basic_value_enum(),
                         x.as_basic_value_enum(),
                         k,
                     ],
