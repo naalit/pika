@@ -23,7 +23,6 @@ pub enum LexError {
 pub enum Tok<'i> {
     Fun,       // "fun"
     Type(u32), // "Type0"
-    Int,       // "Int"
     Struct,    // "struct"
     Do,        // "do"
     The,       // "the"
@@ -31,6 +30,9 @@ pub enum Tok<'i> {
     Of,        // "of"
     Data,      // "type" - called Data because it's not "Type"
     Case,      // "case"
+    Raise,     // "raise"
+    Catch,     // "catch"
+    With,      // "with"
 
     Colon,         // ":"
     Semi,          // ";"
@@ -217,13 +219,15 @@ impl<'i> Lexer<'i> {
                 "fun" => Tok::Fun,
                 "struct" => Tok::Struct,
                 "Type" => Tok::Type(0),
-                "Int" => Tok::Int,
                 "the" => Tok::The,
                 "do" => Tok::Do,
                 "move" => Tok::Move,
                 "of" => Tok::Of,
                 "type" => Tok::Data,
                 "case" => Tok::Case,
+                "raise" => Tok::Raise,
+                "catch" => Tok::Catch,
+                "with" => Tok::With,
                 _ => Tok::Name(s),
             }
         }
@@ -400,7 +404,6 @@ impl<'i> fmt::Display for Tok<'i> {
         use Tok::*;
         match self {
             Fun => write!(f, "'fun'"),
-            Int => write!(f, "'Int'"),
             Type(0) => write!(f, "'Type'"),
             Type(i) => write!(f, "'Type{}'", i),
             Struct => write!(f, "'struct'"),
@@ -410,6 +413,9 @@ impl<'i> fmt::Display for Tok<'i> {
             Of => write!(f, "'of'"),
             Data => write!(f, "'type'"),
             Case => write!(f, "'case'"),
+            Raise => write!(f, "'raise'"),
+            Catch => write!(f, "'catch'"),
+            With => write!(f, "'with'"),
 
             Dot => write!(f, "'.'"),
             Comma => write!(f, "','"),
@@ -458,7 +464,7 @@ mod tests {
                 Name("a"),
                 Indent,
                 Colon,
-                Int,
+                Name("Int"),
                 Newline,
                 Equals,
                 LitInt(3),

@@ -1,4 +1,5 @@
 pub use crate::binding::*;
+pub use crate::builtins::*;
 pub use crate::elab::*;
 pub use crate::error::{Error, Span};
 pub use crate::options::*;
@@ -22,12 +23,12 @@ pub trait HasBindings {
         self.bindings_ref().read().unwrap()
     }
 }
-impl<T: HasBindings> HasBindings for &T {
+impl<T: HasBindings + ?Sized> HasBindings for &T {
     fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
         (*self).bindings_ref()
     }
 }
-impl<T: HasBindings> HasBindings for &mut T {
+impl<T: HasBindings + ?Sized> HasBindings for &mut T {
     fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
         (**self).bindings_ref()
     }
@@ -36,53 +37,8 @@ impl<T: HasBindings> HasBindings for &mut T {
 pub use crate::error::Spanned;
 use crate::term::{Def, STerm};
 
-pub trait MainGroupP: MainExt {
-    fn source(&self, file: FileId) -> Arc<String>;
-
-    /// Lists all the definitions in this immediate scope (doesn't include parent scopes)
-    fn defs(&self, scope: ScopeId) -> Arc<Vec<Def>>;
-
-    /// Lists all the symbols defined in this immediate scope (doesn't include parent scopes)
-    fn symbols(&self, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>>;
-
-    /// Gets the raw term for a definition in this or a parent scope
-    fn term(&self, scope: ScopeId, s: Sym) -> Option<Arc<STerm>>;
-
-    /// Gets a definition, type-checked and elaborated
-    fn elab(&self, scope: ScopeId, s: Sym) -> Option<Arc<Elab>>;
-
-    /// If the given definition exists, get the name it would be given in code generation
-    fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String>;
-
-    /// Returns all scopes in this entire file, including the file scope, in order of definition with the file last
-    fn child_scopes(&self, file: FileId) -> Arc<Vec<ScopeId>>;
-}
-impl<T: MainGroup> MainGroupP for T {
-    fn source(&self, file: FileId) -> Arc<String> {
-        MainGroup::source(self, file)
-    }
-    fn defs(&self, scope: ScopeId) -> Arc<Vec<Def>> {
-        MainGroup::defs(self, scope)
-    }
-    fn symbols(&self, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>> {
-        MainGroup::symbols(self, scope)
-    }
-    fn term(&self, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
-        MainGroup::term(self, scope, s)
-    }
-    fn elab(&self, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
-        MainGroup::elab(self, scope, s)
-    }
-    fn mangle(&self, scope: ScopeId, s: Sym) -> Option<String> {
-        MainGroup::mangle(self, scope, s)
-    }
-    fn child_scopes(&self, file: FileId) -> Arc<Vec<ScopeId>> {
-        MainGroup::child_scopes(self, file)
-    }
-}
-
 pub trait HasDatabase: HasBindings {
-    fn database(&self) -> &dyn MainGroupP;
+    fn database(&self) -> &dyn MainGroup;
 }
 
 pub trait Scoped {
@@ -90,13 +46,14 @@ pub trait Scoped {
 }
 
 // These three make it so `(scope, &database)` is `impl Scoped + HasDatabase`
-impl<T: MainGroup> HasBindings for (ScopeId, &T) {
+impl<T: MainGroup + ?Sized> HasBindings for (ScopeId, &T) {
     fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
         self.1.bindings_ref()
     }
 }
-impl<T: MainGroup> HasDatabase for (ScopeId, &T) {
-    fn database(&self) -> &dyn MainGroupP {
+// This has weird interactions with Sized, so &dyn works better than <T: MainGroup>
+impl HasDatabase for (ScopeId, &dyn MainGroup) {
+    fn database(&self) -> &dyn MainGroup {
         self.1
     }
 }

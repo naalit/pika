@@ -3,7 +3,7 @@ use crate::common::{termcolor, Span};
 use crate::elab::Cloner;
 use crate::options::Options;
 use crate::printing::*;
-use crate::query::{MainDatabase, MainGroup, ScopeId};
+use crate::query::{MainDatabase, MainExt, MainGroup, ScopeId};
 use crate::{
     elab::{ECtx, Elab},
     error::FILES,
@@ -191,7 +191,7 @@ pub fn run_repl(options: &Options) {
                                 first = false;
                             }
 
-                            let scoped = (ScopeId::File(file), &db);
+                            let scoped = (ScopeId::File(file), &db as &dyn MainGroup);
                             let mut ectx = ECtx::new(&scoped);
                             let ty = elab.get_type(&ectx).normal(&mut ectx);
                             ectx.set_val(

@@ -2,50 +2,6 @@ use crate::common::*;
 use crate::elab::Elab;
 use crate::error::Spanned;
 
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd)]
-pub enum Builtin {
-    Int,
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-impl Builtin {
-    pub fn is_binop(&self) -> bool {
-        match self {
-            Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => true,
-            _ => false,
-        }
-    }
-
-    pub fn get_type(&self) -> Elab {
-        match self {
-            Builtin::Int => Elab::Type(0),
-            Builtin::Sub | Builtin::Mul | Builtin::Div | Builtin::Add => Elab::Fun(
-                Clos::default(),
-                Box::new(Elab::Builtin(Builtin::Int)),
-                Box::new(Elab::Fun(
-                    Clos::default(),
-                    Box::new(Elab::Builtin(Builtin::Int)),
-                    Box::new(Elab::Builtin(Builtin::Int)),
-                )),
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for Builtin {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Builtin::Int => write!(f, "Int"),
-            Builtin::Add => write!(f, "(+)"),
-            Builtin::Sub => write!(f, "(-)"),
-            Builtin::Mul => write!(f, "(*)"),
-            Builtin::Div => write!(f, "(/)"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Def(pub Spanned<Sym>, pub STerm);
 
@@ -74,6 +30,8 @@ pub enum Term {
     App(STerm, STerm),                            // f x
     Pair(STerm, STerm),                           // x, y
     Struct(StructId, Vec<(Spanned<Sym>, STerm)>), // struct { x := 3 }
+    Catch(STerm),                                 // catch x
+    Raise(STerm),                                 // raise x
     /// Datatypes need a `StructId` too since they create a namespace
     Data(TypeId, StructId, STerm, Vec<(Spanned<Sym>, TagId, STerm)>), // type D: T of C: fun a => D
     Cons(TagId, STerm),                           // C : T
@@ -95,7 +53,7 @@ impl Term {
                 || b.uses(s)
             ),
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.uses(s) || u.uses(s),
-            Term::Binder(_, Some(t)) | Term::Project(t, _) | Term::Cons(_, t) => t.uses(s),
+            Term::Binder(_, Some(t)) | Term::Project(t, _) | Term::Cons(_, t) | Term::Catch(t) | Term::Raise(t) => t.uses(s),
             Term::Struct(_, v) => v.iter().any(|(_, t)| t.uses(s)),
             Term::Data(_, _, t, v) => t.uses(s) || v.iter().any(|(_, _, t)| t.uses(s)),
             Term::Block(v) => v.iter().any(|x| match x {
@@ -122,7 +80,7 @@ impl Term {
                 || b.uses(s)
             ,
             Term::The(t, u) | Term::App(t, u) | Term::Pair(t, u) => t.binds(s) || u.binds(s),
-            Term::Binder(_, Some(t)) | Term::Project(t, _) => t.binds(s),
+            Term::Binder(_, Some(t)) | Term::Project(t, _) | Term::Catch(t) | Term::Raise(t) => t.binds(s),
             Term::Struct(_, v) => v.iter().any(|(x, t)| **x == s || t.binds(s)),
             Term::Data(_, _, t, v) => t.uses(s) || v.iter().any(|(_, _, t)| t.uses(s)),
             Term::Block(v) => v.iter().any(|x| match x {
@@ -156,7 +114,7 @@ impl Term {
                 t.traverse(f);
                 u.traverse(f);
             }
-            Term::Binder(_, Some(t)) | Term::Project(t, _) => {
+            Term::Binder(_, Some(t)) | Term::Project(t, _) | Term::Catch(t) | Term::Raise(t) => {
                 t.traverse(f);
             }
             Term::Struct(_, v) => {
@@ -186,6 +144,16 @@ impl Pretty for Term {
             Term::Type(0) => Doc::start("Type"),
             Term::Type(i) => Doc::start("Type").add(i),
             Term::Builtin(b) => Doc::start(b),
+            Term::Catch(t) => Doc::start("catch")
+                .style(Style::Keyword)
+                .space()
+                .chain(t.pretty(ctx))
+                .prec(Prec::Term),
+            Term::Raise(t) => Doc::start("raise")
+                .style(Style::Keyword)
+                .space()
+                .chain(t.pretty(ctx))
+                .prec(Prec::Term),
             Term::CaseOf(val, cases) => Doc::start("case")
                 .style(Style::Keyword)
                 .space()
@@ -260,11 +228,7 @@ impl Pretty for Term {
                         .group()
                 }),
             ),
-            Term::Data(id, _, _, _) => Doc::start("type")
-                .style(Style::Keyword)
-                .space()
-                .chain(id.pretty(ctx).style(Style::Binder))
-                .group(),
+            Term::Data(id, _, _, _) => id.pretty(ctx).style(Style::Binder),
             Term::Cons(id, _) => id.pretty(ctx),
             Term::Block(v) => pretty_block(
                 "do",

@@ -1,15 +1,12 @@
 use crate::bicheck::TCtx;
 use crate::common::*;
-use crate::{
-    pattern::Pat,
-    term::{Builtin, STerm},
-};
+use crate::{pattern::Pat, term::STerm};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// The evaluation context
 pub struct ECtx<'a> {
-    database: &'a dyn MainGroupP,
+    database: &'a dyn MainGroup,
     scope: ScopeId,
     pub vals: HashMap<Sym, Arc<Elab>>,
 }
@@ -47,7 +44,7 @@ impl<'a> HasBindings for ECtx<'a> {
     }
 }
 impl<'a> HasDatabase for ECtx<'a> {
-    fn database(&self) -> &dyn MainGroupP {
+    fn database(&self) -> &dyn MainGroup {
         self.database
     }
 }
@@ -272,12 +269,13 @@ impl<'a> Iterator for ArgsIter<'a> {
 }
 
 impl Elab {
-    /// Returns a list of all the constructors that are valid for this type, ordered by RawSym.
+    /// Returns a list of all the constructors declared for this type, ordered by RawSym.
     /// Also returns, for each constructor, its type and any constraints that must hold if it matches.
+    /// If this isn't a known datatype, returns None.
     pub fn valid_cons(
         &self,
         env: &(impl HasDatabase + Scoped),
-    ) -> Vec<(TagId, Elab, Vec<(Sym, Elab)>)> {
+    ) -> Option<Vec<(TagId, Elab, Vec<(Sym, Elab)>)>> {
         if let Elab::Data(_, sid, _) = self.head() {
             let mut v = Vec::new();
             let scope = ScopeId::Struct(*sid, Box::new(env.scope()));
@@ -292,18 +290,20 @@ impl Elab {
                 tctx.extend_metas(result.fvs(&tctx));
                 tctx.extend_metas(self.fvs(&tctx));
                 let mut metas = Vec::new();
-                // Only consider ones that fit based on the actual type
-                // i.e. `Vec 0 T` shouldn't need a tag
+                // // Only consider ones that fit based on the actual type
+                // // i.e. `Vec 0 T` shouldn't need a tag
+                // Actually, that leads to problems when you pass a `Vec 0 T` to a `fun [n] Vec n T => ()` that you don't want monomorphized
+                // So we always leave the tag in, out of all the constructors
+                // However, unification is still needed so we can figure out constructor parameter types
                 if result.unify(&self, &mut tctx, &mut metas) {
                     v.push((cons.cons().unwrap(), cons_ty, metas));
+                } else {
+                    v.push((cons.cons().unwrap(), cons_ty, Vec::new()));
                 }
             }
-            v
+            Some(v)
         } else {
-            panic!(
-                "Called `Elab::valid_cons()` on {}, but must be a datatype!",
-                self.pretty(env).ansi_string()
-            )
+            None
         }
     }
 
@@ -606,7 +606,7 @@ impl Elab {
                 },
                 cases
                     .into_iter()
-                    .map(|(pat, body)| (pat, body.normal(ectx)))
+                    .map(|(pat, body)| (pat, body.whnf(ectx)))
                     .collect(),
                 {
                     *ty = ty.normal(ectx);
@@ -771,8 +771,10 @@ impl Elab {
                 *val = val.whnf(ectx);
                 *ty = ty.whnf(ectx);
                 for i in 0..cases.len() {
-                    match cases[i].0.matches(&val, ectx) {
-                        Yes => return cases.swap_remove(i).1.whnf(ectx),
+                    // We don't want match substitutions getting applied at the wrong time
+                    let mut ectx = ectx.clone();
+                    match cases[i].0.matches(&val, &mut ectx) {
+                        Yes => return cases.swap_remove(i).1.whnf(&mut ectx),
                         No => (),
                         // If it might match, we don't want another case to return Yes
                         Maybe => break,
@@ -789,7 +791,7 @@ impl Elab {
     }
 
     /// Inlines any *local* variables, but not global ones, and doesn't reduce applications, case-of, or projections.
-    pub fn save_ctx(self, tctx: &mut TCtx) -> Self {
+    pub fn save_ctx(self, tctx: &TCtx) -> Self {
         match self {
             // Binders don't count as forms
             Elab::Binder(s, mut t) => {
@@ -854,8 +856,9 @@ impl Elab {
                     }
                 }
                 // We make sure inner closures are updated too
-                from.match_types(&from, tctx);
-                *to = to.save_ctx(tctx);
+                let mut tctx = tctx.clone();
+                from.match_types(&from, &mut tctx);
+                *to = to.save_ctx(&tctx);
                 Elab::Fun(cl, from, to)
             }
             Elab::CaseOf(mut val, cases, mut ty) => {
@@ -905,7 +908,7 @@ impl Elab {
             Bottom => Type(0),
             Type(i) => Type(i + 1),
             Unit => Unit,
-            I32(_) => Builtin(crate::term::Builtin::Int),
+            I32(_) => Builtin(crate::builtins::Builtin::Int),
             Builtin(b) => b.get_type(),
             Var(_, _, t) => t.cloned(&mut Cloner::new(&env)),
             Data(_, _, t) | Cons(_, t) => t.cloned(&mut Cloner::new(&env)),
@@ -1217,12 +1220,8 @@ impl Pretty for Elab {
                         .group()
                 }),
             ),
-            Elab::Data(id, _, _) => Doc::start("type")
-                .style(Style::Keyword)
-                .space()
-                .chain(id.pretty(ctx).style(Style::Binder))
-                .group(),
-            Elab::Cons(id, _) => id.pretty(ctx),
+            Elab::Data(id, _, _) => id.pretty(ctx).style(Style::Binder),
+            Elab::Cons(id, _) => id.pretty(ctx).style(Style::Binder),
             Elab::Block(v) => pretty_block(
                 "do",
                 v.iter().map(|s| match s {

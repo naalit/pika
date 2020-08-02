@@ -1,4 +1,4 @@
-use crate::{common::*, term::Builtin};
+use crate::common::*;
 
 pub struct ACtx<'a> {
     /// Multiplicity is specified as how many copies of the input are required per copy of the output.
@@ -7,7 +7,7 @@ pub struct ACtx<'a> {
     // TODO track spans on the elab
     moved: Vec<(Span, Sym)>,
     scope: ScopeId,
-    database: &'a dyn MainGroupP,
+    database: &'a dyn MainGroup,
 }
 impl<'a> ACtx<'a> {
     pub fn new(db: &'a (impl Scoped + HasDatabase)) -> Self {
@@ -35,7 +35,7 @@ impl<'a> HasBindings for ACtx<'a> {
     }
 }
 impl<'a> HasDatabase for ACtx<'a> {
-    fn database(&self) -> &dyn MainGroupP {
+    fn database(&self) -> &dyn MainGroup {
         self.database
     }
 }

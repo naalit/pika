@@ -15,7 +15,7 @@ impl CheckCtx {
 impl Ty {
     fn typeck(&self, ctx: &CheckCtx) -> Result<(), String> {
         match self {
-            Ty::Fun | Ty::Cont | Ty::Int(_) | Ty::Unit => Ok(()),
+            Ty::Fun | Ty::Cont | Ty::Int(_) | Ty::Unit | Ty::Unknown => Ok(()),
             Ty::Struct(v) | Ty::Union(v) => {
                 for i in v {
                     i.typeck(ctx)?;
@@ -292,6 +292,9 @@ impl Low {
                         ctx.ty(*k)?.pretty().ansi_string()
                     ));
                 }
+                if *tx == Ty::Cont {
+                    return Err(format!("continuations can't take continuation arguments, it would break stack semantics: {}", x));
+                }
                 if ctx.ty(*x)? != tx {
                     return Err(format!(
                         "argument's actual type {}: {} didn't match declared type {}",
@@ -458,6 +461,7 @@ impl SPretty for Ty {
             Ty::Int(size) => Doc::start("u").add(size).style(Style::Literal),
             Ty::Fun => Doc::start("fun").style(Style::Keyword),
             Ty::Cont => Doc::start("cont").style(Style::Keyword),
+            Ty::Unknown => Doc::start("unknown").style(Style::Keyword),
             Ty::Struct(v) => Doc::start("struct")
                 .style(Style::Keyword)
                 .space()

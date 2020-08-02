@@ -14,7 +14,6 @@ extern {
 
     enum Tok<'input> {
         TYPE => Tok::Type(<u32>),
-        "Int" => Tok::Int,
         "struct" => Tok::Struct,
         "the" => Tok::The,
         "do" => Tok::Do,
@@ -23,6 +22,9 @@ extern {
         "type" => Tok::Data,
         "fun" => Tok::Fun,
         "case" => Tok::Case,
+        "raise" => Tok::Raise,
+        "catch" => Tok::Catch,
+        "with" => Tok::With,
         ":" => Tok::Colon,
         ";" => Tok::Semi,
         "=>" => Tok::Arrow,
@@ -129,8 +131,10 @@ Term: ParseTree<'input> = {
       ParseTree::Union(v)
     },
     Binder,
-    // To allow e.g. (Some x:)
-    <f:Spanned<App>> <x:Spanned<Binder>> => ParseTree::App(f, x),
+    // `raise` is an expression, not a statement - `raise : Eff R E -> R`
+    // It's like Rust `?`
+    "raise" <STerm> => ParseTree::Raise(<>),
+    "catch" <STerm> => ParseTree::Catch(<>),
 
     BinOp<OpAdd>,
     BinOp<OpSub>,
@@ -275,15 +279,10 @@ Atom: ParseTree<'input> = {
     <r:Spanned<Atom>> "." <v:Spanned<Var>> => ParseTree::Project(r, v),
     "(" ")" => ParseTree::Unit,
     "(" <a:STerm> "," <b:STerm> ")" => ParseTree::Pair(a, b),
-    Builtin => ParseTree::Builtin(<>),
     TYPE => ParseTree::Type(<>),
     Int => ParseTree::I32(<>),
     Var => ParseTree::Var(<>),
     "(" <Term> ")",
-}
-
-Builtin: Builtin = {
-    "Int" => Builtin::Int,
 }
 
 Var: &'input str = {

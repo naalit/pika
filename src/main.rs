@@ -1,20 +1,18 @@
 mod affine;
+mod backend;
 mod bicheck;
 mod binding;
-// mod codegen;
+mod builtins;
 mod common;
 mod elab;
 mod error;
 mod lexer;
-// mod low;
 mod options;
 mod pattern;
 mod printing;
 mod query;
 mod repl;
 mod term;
-// mod cps;
-mod backend;
 use lalrpop_util::lalrpop_mod;
 lalrpop_mod!(pub grammar);
 

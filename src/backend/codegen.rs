@@ -523,6 +523,7 @@ impl<'a> CodegenCtx<'a> {
 }
 
 impl Ty {
+    /// Does this type have a compile-time-known maximum size? If so, what is it, in bytes?
     fn max_size(&self) -> Option<u64> {
         match self {
             Ty::Int(bits) => Some(*bits as u64 / 8),
@@ -544,7 +545,7 @@ impl Ty {
                 }
                 Some(tot)
             }
-            Ty::Dyn(_) | Ty::Fun => None,
+            Ty::Dyn(_) | Ty::Fun | Ty::Unknown => None,
         }
     }
 
@@ -598,7 +599,7 @@ impl Ty {
                 .struct_type(&[], false)
                 .const_zero()
                 .as_basic_value_enum(),
-            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) => {
+            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) | Ty::Unknown => {
                 ptr.as_basic_value_enum()
             }
         }
@@ -660,7 +661,7 @@ impl Ty {
             }
             // We don't care what the voidptr representation of a zero-sized type is, so just use undef
             Ty::Unit => ctx.voidptr().into_pointer_type().get_undef(),
-            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) => {
+            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) | Ty::Unknown => {
                 val.into_pointer_value()
             }
         }
@@ -709,7 +710,9 @@ impl Ty {
             // We just pass around the same pointer
             Ty::Cont => ctx.voidptr().size_of().unwrap(),
             // Closures and unions are always dynamically sized
-            Ty::Fun | Ty::Union(_) => ctx.context.i64_type().const_int(-1i64 as u64, false),
+            Ty::Fun | Ty::Union(_) | Ty::Unknown => {
+                ctx.context.i64_type().const_int(-1i64 as u64, false)
+            }
         }
     }
 
@@ -719,7 +722,7 @@ impl Ty {
         match self {
             Ty::Int(_) | Ty::Unit | Ty::Cont => false,
             Ty::Struct(v) => v.iter().any(Ty::might_be_dyn_size),
-            Ty::Fun | Ty::Dyn(_) | Ty::Union(_) => true,
+            Ty::Fun | Ty::Dyn(_) | Ty::Union(_) | Ty::Unknown => true,
         }
     }
 
@@ -785,7 +788,7 @@ impl Ty {
                     },
                 )
             }
-            Ty::Fun | Ty::Struct(_) | Ty::Union(_) => {
+            Ty::Fun | Ty::Struct(_) | Ty::Union(_) | Ty::Unknown => {
                 let size = self.size_of(val, ctx);
                 let ptr = ctx.alloca(size, self.max_size());
                 self.copy_to(val, ptr, ctx);
@@ -897,7 +900,9 @@ impl Ty {
         match self {
             Ty::Unit => ctx.context.struct_type(&[], false).as_basic_type_enum(),
             Ty::Int(i) => ctx.context.custom_width_int_type(*i).as_basic_type_enum(),
-            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) => ctx.voidptr(),
+            Ty::Dyn(_) | Ty::Struct(_) | Ty::Fun | Ty::Cont | Ty::Union(_) | Ty::Unknown => {
+                ctx.voidptr()
+            }
         }
     }
 }

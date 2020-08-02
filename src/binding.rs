@@ -144,6 +144,7 @@ pub struct Bindings {
     /// Both `TagId`s and `TypeId`s use the same lookup table
     tags: Vec<RawSym>,
     tag_to_type: Vec<Option<TypeId>>,
+    num_structs: u32,
 }
 impl Bindings {
     /// Don't do this if you're holding symbols somewhere!
@@ -168,9 +169,36 @@ impl Bindings {
         self.tag_to_type[(t.0.get() - 1) as usize]
     }
 
+    pub fn next_struct(&mut self) -> StructId {
+        self.num_structs += 1;
+        StructId(NonZeroU32::new(self.num_structs).unwrap())
+    }
+
+    pub fn add_type<'a>(
+        &mut self,
+        name: &str,
+        tags: impl IntoIterator<Item = &'a str>,
+    ) -> (TypeId, Vec<TagId>) {
+        let raw = self.raw(name);
+        self.tags.push(raw);
+        self.tag_to_type.push(None);
+        let ty = TypeId(NonZeroU32::new(self.tags.len() as u32).unwrap());
+        let cons = tags
+            .into_iter()
+            .map(|k| {
+                let raw = self.raw(k);
+                self.tags.push(raw);
+                self.tag_to_type.push(Some(ty));
+                TagId(NonZeroU32::new(self.tags.len() as u32).unwrap())
+            })
+            .collect();
+        (ty, cons)
+    }
+
     /// Interns a string (or gets it if it's already interned), returning the RawSym to it
-    pub fn raw(&mut self, s: String) -> RawSym {
-        self.strings.get(&s).cloned().unwrap_or_else(|| {
+    pub fn raw(&mut self, s: impl Into<String>) -> RawSym {
+        let s = s.into();
+        self.strings.get(&s).copied().unwrap_or_else(|| {
             let i = RawSym::new(self.string_pool.len());
             self.strings.insert(s.clone(), i);
             self.string_pool.push(s);
@@ -180,10 +208,7 @@ impl Bindings {
 
     /// Creates a new symbol with the same name as `s`, but a fresh value
     pub fn fresh(&mut self, s: Sym) -> Sym {
-        let u = self
-            .nums
-            .get_mut(&s.raw())
-            .expect("Symbol not in Bindings!");
+        let u = self.nums.entry(s.raw()).or_insert(0);
         *u += 1;
         s.with_num(*u - 1)
     }
@@ -206,7 +231,7 @@ impl Bindings {
     }
 
     /// Create a new symbol. It's guaranteed to be unique to all other symbols created with create()
-    pub fn create(&mut self, s: String) -> Sym {
+    pub fn create(&mut self, s: impl Into<String>) -> Sym {
         let raw = self.raw(s);
         let u = self.nums.entry(raw).or_insert(0);
         *u += 1;
@@ -257,6 +282,8 @@ pub enum ParseTree<'p> {
     Project(STree<'p>, Spanned<&'p str>),           // r.m
     Block(Vec<ParseStmt<'p>>),                      // do { x; y }
     Union(Vec<STree<'p>>),                          // x | y
+    Raise(STree<'p>),                               // raise x
+    Catch(STree<'p>),                               // catch x
     Data {
         // type T of C a b
         name: Spanned<&'p str>,                   // Pair
@@ -273,35 +300,18 @@ struct NEnv<'p, 'b> {
     /// That way, we don't have to do anything extra when we add to `symbols`, and we can just `resize()` it when we `pop()` the scope
     scopes: Vec<usize>,
     bindings: &'b mut Bindings,
-    struct_id: u32,
 }
 impl<'p, 'b> NEnv<'p, 'b> {
     fn new(bindings: &'b mut Bindings) -> Self {
-        NEnv {
+        let mut env = NEnv {
             symbols: Vec::new(),
             scopes: Vec::new(),
             bindings,
-            struct_id: 0,
+        };
+        for name in Builtins::all_names() {
+            env.create(name);
         }
-    }
-
-    // The `TagId` and `TypeId` intern-spaces are the same
-    fn next_tag(&mut self, k: &'p str, ty: Option<TypeId>) -> TagId {
-        let raw = self.bindings.raw(k.to_string());
-        self.bindings.tags.push(raw);
-        self.bindings.tag_to_type.push(ty);
-        TagId(NonZeroU32::new(self.bindings.tags.len() as u32).unwrap())
-    }
-    fn next_type(&mut self, k: &'p str) -> TypeId {
-        let raw = self.bindings.raw(k.to_string());
-        self.bindings.tags.push(raw);
-        self.bindings.tag_to_type.push(None);
-        TypeId(NonZeroU32::new(self.bindings.tags.len() as u32).unwrap())
-    }
-
-    fn next_struct(&mut self) -> StructId {
-        self.struct_id += 1;
-        StructId(NonZeroU32::new(self.struct_id).unwrap())
+        env
     }
 
     fn get(&self, s: &str) -> Option<Sym> {
@@ -323,6 +333,17 @@ impl<'p, 'b> NEnv<'p, 'b> {
         let s = self.bindings.create(k.to_string());
         self.symbols.push((k, s));
         s
+    }
+}
+impl<'p, 'b> std::ops::Deref for NEnv<'p, 'b> {
+    type Target = Bindings;
+    fn deref(&self) -> &Bindings {
+        self.bindings
+    }
+}
+impl<'p, 'b> std::ops::DerefMut for NEnv<'p, 'b> {
+    fn deref_mut(&mut self) -> &mut Bindings {
+        self.bindings
     }
 }
 
@@ -363,13 +384,12 @@ impl<'p> STree<'p> {
         Ok(Spanned::new(
             match self.force_unwrap() {
                 Data { name, ty, cons } => {
-                    let id = env.next_type(*name);
+                    let (id, cids) = env.add_type(&name, cons.iter().map(|(x, _)| **x));
                     let st = env.next_struct();
                     let ty = ty.resolve_names(env)?;
 
                     let mut rv = Vec::new();
-                    for (name, ty) in cons {
-                        let tag = env.next_tag(*name, Some(id));
+                    for ((name, ty), tag) in cons.into_iter().zip(cids) {
                         let name = name.copy_span(env.create(*name));
                         let ty = ty.resolve_names(env)?;
                         rv.push((name, tag, ty));
@@ -377,6 +397,8 @@ impl<'p> STree<'p> {
 
                     Term::Data(id, st, ty, rv)
                 }
+                Raise(t) => Term::Raise(t.resolve_names(env)?),
+                Catch(t) => Term::Catch(t.resolve_names(env)?),
                 Unit => Term::Unit,
                 Type(i) => Term::Type(i),
                 Builtin(b) => Term::Builtin(b),

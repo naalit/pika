@@ -190,3 +190,13 @@ fn test_gadt() {
         .assert()
         .success();
 }
+
+#[test]
+fn test_freer() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/freer.pk"])
+        .assert()
+        .stdout("12\n")
+        .success();
+}

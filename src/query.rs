@@ -4,12 +4,13 @@ use crate::backend::{
 };
 use crate::bicheck::*;
 use crate::binding::*;
-use crate::common::{Doc, FileId, HasBindings, HasDatabase, Pretty, SPretty, Style};
+use crate::common::{Builtins, Doc, FileId, HasBindings, HasDatabase, Pretty, SPretty, Style};
 use crate::elab::*;
 use crate::error::*;
 use crate::grammar::*;
 use crate::lexer::Lexer;
 use crate::term::*;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -44,12 +45,17 @@ impl ScopeId {
 
 /// Since queries can't access the database directly, this defines the interface they can use for accessing it
 pub trait MainExt: HasBindings {
+    fn builtins(&self) -> Builtins;
+    fn reset(&self);
+
+    fn has_errors(&self) -> bool;
+
     /// Report an error to the user
     /// After calling this, queries should attempt to recover as much as possible and continue on
     fn error(&self, e: Error);
 
     /// Add a module to the struct table
-    fn add_mod(&self, id: StructId, file: FileId, defs: &Vec<(Spanned<Sym>, STerm)>);
+    fn add_mod(&self, id: StructId, file: FileId, defs: &[(Spanned<Sym>, STerm)]);
 
     /// Get a handle to the struct table
     fn struct_defs(&self, file: FileId, id: StructId) -> Option<Arc<Vec<Def>>>;
@@ -86,8 +92,8 @@ pub trait MainGroup: MainExt + salsa::Database {
     fn child_scopes(&self, file: FileId) -> Arc<Vec<ScopeId>>;
 }
 
-fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
-    fn add_term(t: &Term, db: &impl MainGroup, v: &mut Vec<ScopeId>, scope: ScopeId) {
+fn child_scopes(db: &dyn MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
+    fn add_term(t: &Term, db: &dyn MainGroup, v: &mut Vec<ScopeId>, scope: ScopeId) {
         match t {
             // This is only used for lowering, and data types aren't lowered
             Term::Data(_, _, _, _) => (),
@@ -96,7 +102,9 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
                 add_term(a, db, v, scope.clone());
                 add_term(b, db, v, scope);
             }
-            Term::Binder(_, Some(x)) | Term::Project(x, _) => add_term(x, db, v, scope),
+            Term::Binder(_, Some(x)) | Term::Project(x, _) | Term::Raise(x) | Term::Catch(x) => {
+                add_term(x, db, v, scope)
+            }
             Term::Block(t) => t.iter().for_each(|x| match x {
                 Statement::Expr(x) | Statement::Def(Def(_, x)) => add_term(x, db, v, scope.clone()),
             }),
@@ -119,7 +127,7 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
         }
     }
 
-    fn add_scope(db: &impl MainGroup, v: &mut Vec<ScopeId>, scope: ScopeId) {
+    fn add_scope(db: &dyn MainGroup, v: &mut Vec<ScopeId>, scope: ScopeId) {
         v.push(scope.clone());
         for Def(_, val) in db.defs(scope.clone()).iter() {
             add_term(val, db, v, scope.clone());
@@ -137,7 +145,7 @@ fn child_scopes(db: &impl MainGroup, file: FileId) -> Arc<Vec<ScopeId>> {
     )
 }
 
-fn mangle(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<String> {
+fn mangle(db: &dyn MainGroup, scope: ScopeId, s: Sym) -> Option<String> {
     // Return None if it doesn't exist
     let _term = db.term(scope.clone(), s)?;
 
@@ -147,7 +155,7 @@ fn mangle(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<String> {
     Some(format!("{}${}_{}", b.resolve(s), s.num(), scope.file()))
 }
 
-fn low_def(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowDef> {
+fn low_def(db: &dyn MainGroup, scope: ScopeId, s: Sym) -> Option<LowDef> {
     let elab = db.elab(scope.clone(), s)?;
     let name = db.mangle(scope.clone(), s)?;
 
@@ -171,7 +179,7 @@ fn low_def(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowDef> {
             Doc::start("fun")
                 .style(Style::Keyword)
                 .space()
-                .chain(s.pretty(db))
+                .chain(s.pretty(&db))
                 .add("(")
                 .chain(Ty::Cont.pretty())
                 .space()
@@ -191,9 +199,16 @@ fn low_def(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<LowDef> {
     Some(LowDef { name, cont, body })
 }
 
-fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
+fn low_mod(db: &dyn MainGroup, file: FileId) -> LowMod {
     for s in db.symbols(ScopeId::File(file)).iter() {
         db.elab(ScopeId::File(file), **s);
+    }
+    if db.has_errors() {
+        return LowMod {
+            name: String::from("error"),
+            defs: Vec::new(),
+            main: None,
+        };
     }
     let defs = db
         .child_scopes(file)
@@ -223,15 +238,15 @@ fn low_mod(db: &impl MainGroup, file: FileId) -> LowMod {
     }
 }
 
-fn symbols(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>> {
+fn symbols(db: &dyn MainGroup, scope: ScopeId) -> Arc<Vec<Spanned<Sym>>> {
     Arc::new(db.defs(scope).iter().map(|Def(x, _)| x.clone()).collect())
 }
 
-fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
+fn defs(db: &dyn MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
     let r = match scope {
         ScopeId::File(file) => {
             // We reset the bindings when we get all the definitions so they're more reproducible and thus memoizable
-            db.bindings_mut().reset();
+            db.reset();
 
             let parser = DefsParser::new();
             let s = db.source(file);
@@ -264,7 +279,7 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
         if let Some(s) = seen.iter().find(|x| ***x == sym.raw()) {
             db.error(
                 TypeError::DuplicateField(s.clone(), sym.copy_span(sym.raw()))
-                    .to_error(scope.file(), db),
+                    .to_error(scope.file(), &db),
             );
         } else {
             seen.push(sym.copy_span(sym.raw()));
@@ -274,7 +289,7 @@ fn defs(db: &impl MainGroup, scope: ScopeId) -> Arc<Vec<Def>> {
     r
 }
 
-fn term(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
+fn term(db: &dyn MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
     let r = db
         .defs(scope.clone())
         .iter()
@@ -288,7 +303,7 @@ fn term(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<STerm>> {
     r
 }
 
-fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
+fn elab(db: &dyn MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
     let term = db.term(scope.clone(), s)?;
 
     let scoped = (scope.clone(), db);
@@ -305,11 +320,12 @@ fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
         &Elab::Var(term.span(), meta, Box::new(Elab::Top)),
         &mut tctx,
     );
-    for err in tctx.solve_metas() {
-        db.error(err.to_error(scope.file(), db));
-    }
     match e {
         Ok(e) => {
+            for err in tctx.solve_metas() {
+                db.error(err.to_error(scope.file(), &db));
+            }
+
             if let Err(e) = e.check_affine(&mut crate::affine::ACtx::new(&scoped)) {
                 db.error(e);
             }
@@ -321,26 +337,23 @@ fn elab(db: &impl MainGroup, scope: ScopeId, s: Sym) -> Option<Arc<Elab>> {
             Some(Arc::new(e))
         }
         Err(e) => {
-            db.error(e.to_error(scope.file(), db));
+            db.error(e.to_error(scope.file(), &db));
             None
         }
     }
 }
 
 #[salsa::database(MainStorage)]
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MainDatabase {
-    runtime: salsa::Runtime<MainDatabase>,
+    storage: salsa::Storage<Self>,
     bindings: Arc<RwLock<Bindings>>,
     errors: RwLock<Vec<Error>>,
     scopes: RwLock<HashMap<(FileId, StructId), Arc<Vec<Def>>>>,
+    builtins: Cell<Option<Builtins>>,
 }
 
 impl MainDatabase {
-    pub fn has_errors(&self) -> bool {
-        !self.errors.read().unwrap().is_empty()
-    }
-
     pub fn emit_errors(&self) {
         self.errors
             .write()
@@ -350,15 +363,7 @@ impl MainDatabase {
     }
 }
 
-impl salsa::Database for MainDatabase {
-    fn salsa_runtime(&self) -> &salsa::Runtime<Self> {
-        &self.runtime
-    }
-
-    fn salsa_runtime_mut(&mut self) -> &mut salsa::Runtime<Self> {
-        &mut self.runtime
-    }
-}
+impl salsa::Database for MainDatabase {}
 
 impl HasBindings for MainDatabase {
     fn bindings_ref(&self) -> &Arc<RwLock<Bindings>> {
@@ -367,11 +372,30 @@ impl HasBindings for MainDatabase {
 }
 
 impl MainExt for MainDatabase {
+    fn builtins(&self) -> Builtins {
+        if let Some(b) = self.builtins.get() {
+            b
+        } else {
+            let b = Builtins::create(self, 0);
+            self.builtins.set(Some(b));
+            b
+        }
+    }
+
+    fn reset(&self) {
+        self.bindings_mut().reset();
+        self.builtins.set(None);
+    }
+
+    fn has_errors(&self) -> bool {
+        !self.errors.read().unwrap().is_empty()
+    }
+
     fn error(&self, error: Error) {
         self.errors.write().unwrap().push(error);
     }
 
-    fn add_mod(&self, id: StructId, file: FileId, defs: &Vec<(Spanned<Sym>, STerm)>) {
+    fn add_mod(&self, id: StructId, file: FileId, defs: &[(Spanned<Sym>, STerm)]) {
         let defs = defs
             .iter()
             .map(|(name, val)| Def(name.clone(), val.clone()))

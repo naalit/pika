@@ -1,4 +1,4 @@
-use crate::{common::*, term::Builtin};
+use crate::common::*;
 use lazy_static::lazy_static;
 use std::{collections::HashSet, num::NonZeroU32, sync::RwLock};
 
@@ -49,6 +49,9 @@ pub enum Ty {
     /// They're dynamically sized to whichever variant they actually are.
     /// That does mean we store the size redundantly, so in the future that may change.
     Union(Vec<Ty>),
+    /// Represents a type with zero information known at compile time.
+    /// It *must* be dynamically sized, i.e. be a pointer to a size
+    Unknown,
 }
 
 /// A primitive expression, that actually returns a value
@@ -146,7 +149,7 @@ impl<'a> HasBindings for LCtx<'a> {
     }
 }
 impl<'a> HasDatabase for LCtx<'a> {
-    fn database(&self) -> &dyn MainGroupP {
+    fn database(&self) -> &dyn MainGroup {
         self.ectx.database()
     }
 }
@@ -163,7 +166,7 @@ impl Ty {
                     i.fvs(set)
                 }
             }
-            Ty::Int(_) | Ty::Fun | Ty::Cont | Ty::Unit => {}
+            Ty::Int(_) | Ty::Fun | Ty::Cont | Ty::Unit | Ty::Unknown => {}
         }
     }
 }
@@ -280,7 +283,8 @@ pub fn make_cont(arg: Val, arg_ty: Ty, lctx: &LCtx, rest: Low) -> Expr {
 pub fn tag_width<T>(v: &[T]) -> u32 {
     let l = v.len();
     if l <= 1 {
-        0
+        eprintln!("Warning: tag_width() when a tag isn't needed");
+        1
     } else if l <= 2 {
         1
     } else if l <= 256 {
@@ -363,23 +367,27 @@ impl Elab {
                 .inline(lctx)
                 .cps_ty(lctx),
             ty @ Elab::App(_, _) | ty @ Elab::Data(_, _, _) => {
-                let v: Vec<_> = ty
-                    .valid_cons(lctx)
-                    .into_iter()
-                    .map(|(_cons, cons_ty, metas)| {
-                        let mut lctx = lctx.clone();
-                        for (k, v) in metas {
-                            lctx.ectx.set_val(k, v);
-                        }
-                        let args: Vec<_> = cons_ty.args_iter().map(|x| x.cps_ty(&lctx)).collect();
-                        Ty::Struct(args)
-                    })
-                    .collect();
-                if v.is_empty() {
-                    panic!("Empty type {} not allowed!", ty.pretty(lctx).ansi_string())
+                if let Some(v) = ty.valid_cons(lctx) {
+                    let v: Vec<_> = v
+                        .into_iter()
+                        .map(|(_cons, cons_ty, metas)| {
+                            let mut lctx = lctx.clone();
+                            for (k, v) in metas {
+                                lctx.ectx.set_val(k, v);
+                            }
+                            let args: Vec<_> =
+                                cons_ty.args_iter().map(|x| x.cps_ty(&lctx)).collect();
+                            Ty::Struct(args)
+                        })
+                        .collect();
+                    if v.is_empty() {
+                        panic!("Empty type {} not allowed!", ty.pretty(lctx).ansi_string())
+                    } else {
+                        let tag_bits = tag_width(&v);
+                        Ty::Struct(vec![Ty::Int(tag_bits), Ty::Union(v)])
+                    }
                 } else {
-                    let tag_bits = tag_width(&v);
-                    Ty::Struct(vec![Ty::Int(tag_bits), Ty::Union(v)])
+                    Ty::Unknown
                 }
             }
             _ => todo!("type for '{:?}'", self),
@@ -445,7 +453,7 @@ impl Elab {
 
                 if arg_tys.is_empty() {
                     // We're returning the constructed value directly
-                    let valid_cons = t.result().valid_cons(lctx);
+                    let valid_cons = t.result().valid_cons(lctx).unwrap();
                     let idx = valid_cons
                         .iter()
                         .enumerate()
@@ -484,7 +492,7 @@ impl Elab {
                     let final_cont = lctx.next_val(Ty::Cont);
                     let body = {
                         let ret_val = lctx.next_val(ret_ty.clone());
-                        let valid_cons = t.result().valid_cons(lctx);
+                        let valid_cons = t.result().valid_cons(lctx).unwrap();
                         let idx = valid_cons
                             .iter()
                             .enumerate()

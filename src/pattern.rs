@@ -2,7 +2,7 @@
 use crate::{
     bicheck::TCtx,
     common::*,
-    term::{Builtin, STerm, Term},
+    term::{STerm, Term},
 };
 
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
@@ -15,6 +15,8 @@ pub enum Pat {
     Cons(TagId, Elab),
     Unit,
     I32(i32),
+    /// Matches anything and ignores it
+    Wild,
     // May add in the future:
     // - Struct patterns
     // - Union patterns
@@ -61,17 +63,45 @@ pub fn to_pattern(
             //     App(_, _)     <-> Fun(_, X, Fun(_, Y, _)) -> or = X
             // ->      _         <->           Fun(_, Y, _)  ==> or@X
             //
-            fn match_len<'e>(a: &Term, b: &'e Elab, or: &'e Elab) -> Option<&'e Elab> {
+
+            // App(App(_, _), _) <-> Fun(true, A, Fun(false, B, Fun(true, C, Fun(false, D, _)))) -> i = 1
+            // App(App(_, _), _) <->              Fun(false, B, Fun(true, C, Fun(false, D, _)))  -> or = B, i = 0, li = 1
+            //     App(_, _)     <->                            Fun(true, C, Fun(false, D, _))   -> or = B, i = 1, li = 1
+            //     App(_, _)     <->                                         Fun(false, D, _)    -> or = D, i = 0, li = 1
+            //         _         <->                                                       _     ==> or@Y, li@1
+
+            // `implicits` tracks the number of implicit arguments since the last explicit one
+            // `last_implicits` tracks the number of implicit arguments before the last explicit one
+            fn match_len<'e>(
+                a: &Term,
+                b: &'e Elab,
+                or: &'e Elab,
+                implicits: u32,
+                last_implicits: u32,
+            ) -> Option<(&'e Elab, u32)> {
                 match (a, b) {
-                    (Term::App(f, _), Elab::Fun(_, from, to)) => match_len(f, to, from),
+                    (_, Elab::Fun(cl, _, to)) if cl.implicit => {
+                        match_len(a, to, or, implicits + 1, last_implicits)
+                    }
+                    // Reset the implicits when we hit an explicit arg
+                    // WAIT THAT'S THE WRONG THING! WHAT DO WE DO?
+                    (Term::App(f, _), Elab::Fun(_, from, to)) => {
+                        match_len(f, to, from, 0, implicits)
+                    }
                     // They put an App but one wasn't needed
                     (Term::App(_, _), _) => None,
-                    _ => Some(or),
+                    _ => Some((or, last_implicits)),
                 }
             }
 
-            let tx = match_len(t, cty, cty)?;
+            let (tx, implicits) = match_len(t, &cty, &cty, 0, 0)?;
             let px = to_pattern(x, tx, constraints, tctx)?;
+
+            let mut pf = pf;
+            for _ in 0..implicits {
+                // Add a wild pattern for each implicit; eventually it may be possible to match on them
+                pf = Pat::App(Box::new(pf), Box::new(Pat::Wild));
+            }
 
             Some(Pat::App(Box::new(pf), Box::new(px)))
         }
@@ -148,41 +178,45 @@ impl Elab {
                             let mut tctx = TCtx::new(env);
                             tctx.extend_metas(self.fvs(&tctx));
                             tctx.extend_metas(ty.result().fvs(&tctx));
-                            // TODO do something with the meta solutions found here
-                            if !ty.result().unify(self, &mut tctx, &mut Vec::new()) {
+                            let mut cons = Vec::new();
+                            if !ty.result().unify(self, &mut tctx, &mut cons) {
                                 return None;
                             }
-                            Some(match ty {
-                                Elab::Data(_, _, _) => x.cloned(&mut cln),
-                                t @ Elab::Fun(_, _, _) => {
-                                    fn expand_fun(
-                                        s: Elab,
-                                        f: Elab,
-                                        cln: &mut Cloner,
-                                        env: &impl HasBindings,
-                                    ) -> Elab {
-                                        match s {
-                                            Elab::Fun(_, from, to) => {
-                                                let v = Elab::Var(
-                                                    Span::empty(),
-                                                    env.bindings_mut().create("_".to_string()),
-                                                    from,
-                                                );
-                                                expand_fun(
-                                                    *to,
-                                                    Elab::App(Box::new(f), Box::new(v)),
-                                                    cln,
-                                                    env,
-                                                )
+                            tctx.apply_metas(cons);
+                            Some(
+                                match ty {
+                                    Elab::App(_, _) | Elab::Data(_, _, _) => x.cloned(&mut cln),
+                                    t @ Elab::Fun(_, _, _) => {
+                                        fn expand_fun(
+                                            s: Elab,
+                                            f: Elab,
+                                            cln: &mut Cloner,
+                                            env: &impl HasBindings,
+                                        ) -> Elab {
+                                            match s {
+                                                Elab::Fun(_, from, to) => {
+                                                    let v = Elab::Var(
+                                                        Span::empty(),
+                                                        env.bindings_mut().create("_".to_string()),
+                                                        from,
+                                                    );
+                                                    expand_fun(
+                                                        *to,
+                                                        Elab::App(Box::new(f), Box::new(v)),
+                                                        cln,
+                                                        env,
+                                                    )
+                                                }
+                                                _ => f,
                                             }
-                                            _ => f,
                                         }
-                                    }
 
-                                    expand_fun(t, x.cloned(&mut cln), &mut cln, env)
+                                        expand_fun(t, x.cloned(&mut cln), &mut cln, env)
+                                    }
+                                    _ => panic!("wrong type {}", ty.pretty(env).ansi_string()),
                                 }
-                                _ => panic!("wrong type"),
-                            })
+                                .whnf(&mut tctx),
+                            )
                         })
                         .collect(),
                 )
@@ -293,7 +327,7 @@ impl Pat {
                 x.apply_types(tctx);
                 y.apply_types(tctx);
             }
-            Pat::Cons(_, _) | Pat::Unit | Pat::I32(_) => (),
+            Pat::Cons(_, _) | Pat::Unit | Pat::I32(_) | Pat::Wild => (),
         }
     }
 
@@ -309,6 +343,7 @@ impl Pat {
             Pat::Cons(id, ty) => Pat::Cons(*id, ty.cloned(cln)),
             Pat::Unit => Pat::Unit,
             Pat::I32(i) => Pat::I32(*i),
+            Pat::Wild => Pat::Wild,
         }
     }
 
@@ -324,7 +359,7 @@ impl Pat {
                 y.fvs_(bound, free);
             }
             Pat::Cons(_, t) => t.fvs_(bound, free),
-            Pat::Unit | Pat::I32(_) => (),
+            Pat::Unit | Pat::I32(_) | Pat::Wild => (),
         }
     }
 
@@ -343,9 +378,10 @@ impl Pat {
         }
     }
 
+    /// Matches this pattern against `x`, binding all variables and returning whether it matches.
     pub fn matches(&self, x: &Elab, ectx: &mut ECtx) -> TBool {
         match (self, x) {
-            (Pat::Unit, _) => Yes,
+            (Pat::Unit, _) | (Pat::Wild, _) => Yes,
             (Pat::I32(n), Elab::I32(m)) => (n == m).into(),
             (Pat::Pair(a1, b1), Elab::Pair(a2, b2)) => a1.matches(a2, ectx) & b1.matches(b2, ectx),
             (Pat::App(f1, x1), Elab::App(f2, x2)) => f1.matches(f2, ectx) & x1.matches(x2, ectx),
@@ -353,7 +389,9 @@ impl Pat {
                 ectx.set_val(*s, x.cloned(&mut Cloner::new(ectx)));
                 Yes
             }
-            (Pat::Cons(a, _), Elab::Cons(b, _)) => (a == b).into(),
+            (Pat::Cons(a, _), _) if x.cons().is_some() => (*a == x.cons().unwrap()).into(),
+            // This is needed for matching constructors of different arity
+            (Pat::App(_, _), _) if x.cons().is_some() => No,
             // This means we have a variable instead of a pair or constructor or something
             _ => Maybe,
         }
@@ -374,7 +412,7 @@ impl Pat {
                 x.bound_(bound);
                 y.bound_(bound);
             }
-            Pat::Cons(_, _) | Pat::Unit | Pat::I32(_) => (),
+            Pat::Cons(_, _) | Pat::Unit | Pat::I32(_) | Pat::Wild => (),
         }
     }
 
@@ -390,7 +428,7 @@ impl Pat {
         match self {
             Pat::Var(_, t) | Pat::Cons(_, t) => t.uses(s),
             Pat::Pair(x, y) | Pat::App(x, y) => x.uses(s) || y.uses(s),
-            Pat::Unit | Pat::I32(_) => false,
+            Pat::Unit | Pat::I32(_) | Pat::Wild => false,
         }
     }
 
@@ -398,7 +436,7 @@ impl Pat {
         match self {
             Pat::Var(x, _) => *x == s,
             Pat::Pair(x, y) | Pat::App(x, y) => x.binds(s) || y.binds(s),
-            Pat::Unit | Pat::I32(_) | Pat::Cons(_, _) => false,
+            Pat::Unit | Pat::I32(_) | Pat::Cons(_, _) | Pat::Wild => false,
         }
     }
 
@@ -413,7 +451,9 @@ impl Pat {
                 let cps_ty = ty.cps_ty(lctx);
 
                 let (idx, tag_width, cons_ty) = {
-                    let v = ty.valid_cons(lctx);
+                    let v = ty
+                        .valid_cons(lctx)
+                        .unwrap_or_else(|| panic!("{}", ty.pretty(lctx).ansi_string()));
 
                     if v.is_empty() {
                         panic!(
@@ -474,9 +514,12 @@ impl Pat {
                     .zip(cons_ty.args_iter().reversed().rev())
                     .enumerate()
                     .rfold(yes, |yes, (i, (pat, ty))| {
+                        let ty = ty
+                            .cloned(&mut Cloner::new(lctx))
+                            .whnf(&mut lctx.ectx.clone());
                         let member = lctx.next_val(ty.cps_ty(lctx));
                         let rest =
-                            pat.lower(ty, member, lctx, yes, Low::ContCall(vno, Ty::Unit, vunit));
+                            pat.lower(&ty, member, lctx, yes, Low::ContCall(vno, Ty::Unit, vunit));
                         Low::Let(
                             member,
                             Expr::Project(payload_ty.clone(), payload, i as u32),
@@ -589,7 +632,7 @@ impl Pat {
             (Pat::Pair(_, _), _) => {
                 panic!("expected pair type, got {}", ty.pretty(lctx).ansi_string())
             }
-            (Pat::Unit, _) => yes,
+            (Pat::Unit, _) | (Pat::Wild, _) => yes,
         }
     }
 }
@@ -616,8 +659,10 @@ impl Pretty for Pat {
                 .pretty(ctx)
                 .nest(Prec::App)
                 .space()
-                .chain(x.pretty(ctx).nest(Prec::Atom)),
-            Pat::Cons(tid, _) => tid.pretty(ctx),
+                .chain(x.pretty(ctx).nest(Prec::Atom))
+                .prec(Prec::App),
+            Pat::Cons(tid, _) => tid.pretty(ctx).style(Style::Binder),
+            Pat::Wild => Doc::start("_"),
         }
     }
 }

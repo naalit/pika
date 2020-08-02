@@ -71,35 +71,50 @@ impl TypeError {
                 t.span(),
                 Doc::start("allowed types are '")
                     .chain(id.pretty(b).style(Style::None))
-                    .add("' and '")
+                    .add(" [...]' and '")
                     .chain(
                         Doc::start("fun")
                             .style(Style::Keyword)
                             .space()
-                            .add("...")
+                            .add("[...]")
                             .space()
                             .add("=>")
                             .space()
                             .chain(id.pretty(b))
+                            .space()
+                            .add("[...]")
                             .style(Style::None),
                     )
                     .style(Style::Error),
             ),
             TypeError::UnsolvedMeta(meta) => {
+                let name = b.bindings().resolve(*meta).to_string();
+                let message = if name.starts_with("<type of ") {
+                    Doc::start("Type error: could not infer type of '")
+                        // "<type of " + NAME + ">"
+                        .add(&name[9..name.len() - 1])
+                        .add("', try adding a type annotation")
+                        .style(Style::Bold)
+                } else {
+                    Doc::start("Type error: could not find solution for implicit variable '")
+                        .add(&name)
+                        .add("', try adding a type annotation")
+                        .style(Style::Bold)
+                };
                 if meta.span() == Span::empty() {
                     Error::no_label(
-                        Doc::start("Type error: could not find solution for implicit variable '")
-                            .chain(meta.pretty(b))
-                            .add("', try adding a type annotation"),
+                        message,
                     )
                 } else {
                     Error::new(
                         file,
-                        Doc::start("Type error: could not find solution for implicit variable '")
-                            .chain(meta.pretty(b))
-                            .add("', try adding a type annotation"),
+                        message,
                         meta.span(),
-                        Doc::start("implicit search triggered here"),
+                        if name.starts_with("<type of ") {
+                            Doc::start("try adding an annotation here")
+                        } else {
+                            Doc::start("implicit search triggered here")
+                        },
                     )
                 }
             }
@@ -310,8 +325,11 @@ impl<'a> TCtx<'a> {
                 v.pretty(self).ansi_string()
             );
 
-            if self.vals.contains_key(&k) {
-                panic!("Meta {} already defined", k.pretty(self).ansi_string());
+            if let Some(val) = self.vals.get(&k) {
+                // Only error if there's an actual conflict
+                if !val.unify(&v, self, &mut Vec::new()) {
+                    panic!("Meta {} already defined", k.pretty(self).ansi_string());
+                }
             }
 
             self.metas.remove(&k);
@@ -349,7 +367,7 @@ impl<'a> HasBindings for TCtx<'a> {
     }
 }
 impl<'a> HasDatabase for TCtx<'a> {
-    fn database(&self) -> &dyn MainGroupP {
+    fn database(&self) -> &dyn MainGroup {
         self.ectx.database()
     }
 }
@@ -379,9 +397,12 @@ fn check_case(
     let val = synth(val, tctx)?;
     let tval = val.get_type(tctx);
 
+    // Using a block here so the bindings isn't locked for the whole function
+    let s = { tctx.bindings_mut().create("_".to_string()) };
+
     let mut uncovered = vec![Elab::Var(
         Span::empty(),
-        tctx.bindings_mut().create("_".to_string()),
+        s,
         Box::new(tval.cloned(&mut Cloner::new(tctx))),
     )];
     let mut rcases = Vec::new();
@@ -436,16 +457,28 @@ fn check_case(
                 x
             }
         } else {
-            let mut tctx = tctx.clone();
-            tctx.apply_metas(cons);
+            let mut tctx2 = tctx.clone();
+            tctx2.apply_metas(cons);
 
-            if let Some(t) = &tret {
-                check(body, t, &mut tctx)?
+            let before_metas: Vec<_> = tctx2.metas.keys().copied().collect();
+
+            let x = if let Some(t) = &tret {
+                // What if this solves metas?
+                check(body, t, &mut tctx2)?
             } else {
-                let x = synth(body, &mut tctx)?;
-                tret = Some(x.get_type(&tctx));
+                let x = synth(body, &mut tctx2)?;
+                tret = Some(x.get_type(&tctx2));
                 x
-            }
+            };
+
+            let mut cln = Cloner::new(&tctx2);
+            let to_apply = before_metas
+                .into_iter()
+                .filter(|k| !tctx2.metas.contains_key(k))
+                .map(|k| (k, tctx2.val(k).unwrap().cloned(&mut cln).save_ctx(&tctx2)));
+            tctx.apply_metas(to_apply);
+
+            x
         };
         rcases.push((pat, body));
     }
@@ -470,12 +503,14 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
         Term::Type(i) => Ok(Elab::Type(*i)),
         Term::Builtin(b) => Ok(Elab::Builtin(*b)),
         Term::Var(x) => {
-            let ty = tctx
-                .ty(*x)
-                .map(|x| x.cloned(&mut Cloner::new(&tctx)))
-                .ok_or_else(|| TypeError::NotFound(t.copy_span(*x)))?
-                .whnf(tctx);
-            Ok(Elab::Var(t.span(), *x, Box::new(ty)))
+            if let Some(ty) = tctx.ty(*x).map(|x| x.cloned(&mut Cloner::new(&tctx))) {
+                let ty = ty.whnf(tctx);
+                Ok(Elab::Var(t.span(), *x, Box::new(ty)))
+            } else if let Some(b) = tctx.database().builtins().resolve(x.raw(), tctx) {
+                Ok(b)
+            } else {
+                Err(TypeError::NotFound(t.copy_span(*x)))
+            }
         }
         Term::I32(i) => Ok(Elab::I32(*i)),
         Term::Unit => Ok(Elab::Unit),
@@ -519,7 +554,7 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                 &cons
                     .iter()
                     .map(|(k, id, t)| (k.clone(), k.copy_span(Term::Cons(*id, t.clone()))))
-                    .collect(),
+                    .collect::<Vec<_>>(),
             );
 
             // Record any type errors in data constructors
@@ -535,13 +570,8 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
             let ty_span = ty.span();
             let mut ty = synth(ty, tctx)?.normal(tctx);
             let did = tctx.bindings().tag_to_type(*id).unwrap();
-            match &mut ty {
-                // TODO `Pair a`
+            match ty.result().head() {
                 Elab::Data(did2, _, _) if *did2 == did => (),
-                Elab::Fun(_, _, to) => match to.result().head() {
-                    Elab::Data(did2, _, _) if *did2 == did => (),
-                    _ => return Err(TypeError::ConsType(Spanned::new(ty, ty_span), did)),
-                },
                 _ => return Err(TypeError::ConsType(Spanned::new(ty, ty_span), did)),
             };
             Ok(Elab::Cons(*id, Box::new(ty)))
@@ -563,7 +593,7 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                             let meta = match &*from {
                                 // If it's named, which is common, use that, it makes errors nicer
                                 Elab::Binder(s, _) => tctx.bindings_mut().fresh(*s),
-                                _ => tctx.bindings_mut().create("_meta".into()),
+                                _ => tctx.bindings_mut().create("_meta"),
                             };
                             // TODO keep track of the given type for instance argument style resolution
 
@@ -879,12 +909,31 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
             };
 
             let clos = tctx.clos(term, *m, *implicit);
-            // WHNF to capture any needed variables from the type closure
-            Ok(Elab::Fun(clos, Box::new(arg), Box::new(body)).whnf(tctx))
+            // `save_ctx` to capture any needed variables from the type closure
+            Ok(Elab::Fun(clos, Box::new(arg), Box::new(body)).save_ctx(tctx))
         }
 
         (Term::CaseOf(val, cases), _) => {
             check_case(val, cases, Some(typ.cloned(&mut Cloner::new(tctx))), tctx)
+        }
+
+        // This helps with recursion - unify first, then check the underlying type
+        (Term::The(ty, term), _) => {
+            let ty = synth(ty, tctx)?;
+            let mut tcons = Vec::new();
+            // Is it guaranteed to be a `typ`?
+            if ty.unify(&typ, &mut tctx.clone(), &mut tcons) {
+                // If any metas were solved by this, add the solutions to the context
+                tctx.apply_metas(tcons);
+                let ty = ty.whnf(tctx);
+                check(term, &ty, tctx)
+            } else {
+                Err(TypeError::NotSubtype(
+                    // Full normal form is helpful for errors
+                    term.copy_span(ty.cloned(&mut Cloner::new(&tctx)).normal(tctx)),
+                    typ.cloned(&mut Cloner::new(&tctx)).normal(tctx),
+                ))
+            }
         }
 
         (_, _) => {
