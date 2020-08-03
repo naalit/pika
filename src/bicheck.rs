@@ -586,7 +586,7 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                 x: &STerm,
                 tctx: &mut TCtx,
             ) -> Result<Elab, TypeError> {
-                let x = match ft {
+                let x = match ft.unbind_mv() {
                     Elab::Fun(cl, from, to) => {
                         tctx.add_clos(&cl);
                         if cl.implicit {
@@ -609,8 +609,8 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
                             from.do_match(&v, tctx);
                             // Apply the function to the new meta
                             let f = Elab::App(Box::new(f), Box::new(v));
-                            // We have to WHNF here it to make sure meta solutions and the `do_match` from earlier are propagated correctly
-                            return check_app(*to, fs, f, x, tctx).map(|x| x.whnf(tctx));
+                            // We have to save_ctx here it to make sure meta solutions and the `do_match` from earlier are propagated correctly
+                            return check_app(*to, fs, f, x, tctx).map(|x| x.save_ctx(tctx));
                         } else {
                             let from = from.whnf(tctx);
                             check(x, &from, tctx)
@@ -637,7 +637,6 @@ pub fn synth(t: &STerm, tctx: &mut TCtx) -> Result<Elab, TypeError> {
 
                         Ok(x)
                     }
-                    Elab::Bottom => synth(x, tctx),
                     a => Err(TypeError::NotFunction(
                         Spanned::new(a.cloned(&mut Cloner::new(&tctx)), fs),
                         x.clone(),
@@ -843,6 +842,18 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
         }
 
         (Term::Fun(m, args, body), Elab::Fun(cl, from, to)) => {
+            // Add implicits that are in the type but not the function
+            if cl.implicit && !args[0].0 {
+                let mut cln = Cloner::new(tctx);
+                let from = from.cloned(&mut cln);
+                let to = to.cloned(&mut cln);
+                let body = check(term, &to, tctx)?;
+
+                let clos = tctx.clos(term, cl.is_move, true);
+                // `save_ctx` to capture any needed variables from the type closure
+                return Ok(Elab::Fun(clos, Box::new(from), Box::new(body)).save_ctx(tctx));
+            }
+
             if *m && !cl.is_move {
                 return Err(TypeError::MoveOnlyFun(
                     term.clone(),
@@ -922,7 +933,7 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
             let ty = synth(ty, tctx)?;
             let mut tcons = Vec::new();
             // Is it guaranteed to be a `typ`?
-            if ty.unify(&typ, &mut tctx.clone(), &mut tcons) {
+            if ty.unify(&typ, tctx, &mut tcons) {
                 // If any metas were solved by this, add the solutions to the context
                 tctx.apply_metas(tcons);
                 let ty = ty.whnf(tctx);
@@ -941,21 +952,21 @@ pub fn check(term: &STerm, typ: &Elab, tctx: &mut TCtx) -> Result<Elab, TypeErro
             let ty = t.get_type(tctx);
             let mut tcons = Vec::new();
             // Is it guaranteed to be a `typ`?
-            if ty.unify(&typ, &mut tctx.clone(), &mut tcons) {
+            if ty.unify(&typ, tctx, &mut tcons) {
                 // If any metas were solved by this, add the solutions to the context
                 tctx.apply_metas(tcons);
                 Ok(t)
             } else {
-                match typ.unbind() {
+                match typ.cloned(&mut Cloner::new(tctx)).unbind_mv() {
                     Elab::Type(i) => Err(TypeError::WrongUniverse(
                         term.copy_span(ty.cloned(&mut Cloner::new(&tctx))),
                         ty.universe(tctx) - 1,
-                        *i,
+                        i,
                     )),
-                    _ => Err(TypeError::NotSubtype(
+                    typ => Err(TypeError::NotSubtype(
                         // Full normal form is helpful for errors
                         term.copy_span(ty.cloned(&mut Cloner::new(&tctx)).normal(tctx)),
-                        typ.cloned(&mut Cloner::new(&tctx)).normal(tctx),
+                        typ.normal(tctx),
                     )),
                 }
             }

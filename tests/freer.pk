@@ -1,5 +1,5 @@
 # This is a test of Eff (the freer monad) without actually `raise`ing at all
-# It mostly tests the robustness of the GADT implementation
+# It mostly tests the robustness of the GADT implementation, and implicits
 
 # An example effect, printing and reading ints
 type IO : fun Type => Type of
@@ -11,11 +11,11 @@ prompt : fun Int => Eff Int IO
   = fun x: => Eff.Effect (IO.Print x) (fun () => Eff.Effect (IO.Read) (fun r: => Eff.Pure r))
 
 # Ignores prints, always inputs 12, and returns the result
-io_handler : fun (R:) (Eff R IO) => R = fun R x: => case x of
+io_handler : fun [R:] (Eff R IO) => R = fun x: => case x of
   Eff.Pure x => x
   # This is just a function, so we make it a deep handler manually by recursing
-  Eff.Effect (IO.Print _) k => io_handler R (k ())
-  Eff.Effect IO.Read k => io_handler R (k 12)
+  Eff.Effect (IO.Print _) k => io_handler (k ())
+  Eff.Effect IO.Read k => io_handler (k 12)
 
 # -> 12
-main : Int = io_handler Int (prompt 246)
+main : Int = io_handler (prompt 246)

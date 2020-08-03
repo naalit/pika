@@ -269,23 +269,64 @@ impl<'a> Iterator for ArgsIter<'a> {
 }
 
 impl Elab {
+    /// Does the type of this value have an implicit argument first?
+    /// This is just for pretty printing, where we want to know whether applications are implicit but don't have a database or scope so `get_type()` doesn't work
+    fn has_implicit_arg(&self, ctx: &impl HasBindings) -> bool {
+        match self.unbind() {
+            // Note that this works because functions have function types
+            Elab::Var(_, _, t) => t.has_implicit_arg(ctx),
+            Elab::Cons(_, t) => t.has_implicit_arg(ctx),
+            Elab::Data(_, _, t) => t.has_implicit_arg(ctx),
+            Elab::CaseOf(_, _, tret) => tret.has_implicit_arg(ctx),
+            Elab::Fun(cl, _, _) => cl.implicit,
+            Elab::App(f, _) => match &**f {
+                Elab::Fun(_, _, to) => to.has_implicit_arg(ctx),
+                Elab::Var(_, _, t) => match &**t {
+                    Elab::Fun(_, _, to) => to.has_implicit_arg(ctx),
+                    // These might have an implicit arg, but right now we just give up since it doesn't matter too much
+                    _ => false,
+                },
+                // Same here
+                _ => false,
+            },
+            Elab::Block(v) => match v.last().unwrap() {
+                ElabStmt::Expr(e) => e.has_implicit_arg(ctx),
+                _ => panic!("not a function: {}", self.pretty(ctx).ansi_string()),
+            },
+            Elab::Bottom
+            | Elab::Top
+            | Elab::Pair(_, _)
+            | Elab::StructIntern(_)
+            | Elab::StructInline(_)
+            | Elab::I32(_)
+            | Elab::Type(_)
+            | Elab::Binder(_, _)
+            | Elab::Union(_)
+            | Elab::Unit => panic!("not a function: {}", self.pretty(ctx).ansi_string()),
+            // These might have an implicit arg, but right now we just give up since it doesn't matter too much
+            Elab::Project(_, _) => false,
+            // Right now no builtin takes an implicit arg first
+            Elab::Builtin(_) => false,
+        }
+    }
+
     /// Returns a list of all the constructors declared for this type, ordered by RawSym.
     /// Also returns, for each constructor, its type and any constraints that must hold if it matches.
     /// If this isn't a known datatype, returns None.
     pub fn valid_cons(
         &self,
-        env: &(impl HasDatabase + Scoped),
+        ctx: &(impl HasDatabase + Scoped),
     ) -> Option<Vec<(TagId, Elab, Vec<(Sym, Elab)>)>> {
         if let Elab::Data(_, sid, _) = self.head() {
             let mut v = Vec::new();
-            let scope = ScopeId::Struct(*sid, Box::new(env.scope()));
+            let scope = ScopeId::Struct(*sid, Box::new(ctx.scope()));
             // Sort the constructors by RawSym
-            let mut symbols: Vec<_> = (*env.database().symbols(scope.clone())).clone();
+            let mut symbols: Vec<_> = (*ctx.database().symbols(scope.clone())).clone();
             symbols.sort_by_key(|x| x.raw());
             for sym in symbols {
-                let cons = env.database().elab(scope.clone(), *sym).unwrap();
-                let cons_ty = cons.get_type(env);
-                let mut tctx = crate::bicheck::TCtx::new(env);
+                let cons = ctx.database().elab(scope.clone(), *sym).unwrap();
+                let cons_ty = cons.get_type(ctx);
+                let mut tctx = crate::bicheck::TCtx::new(ctx);
                 let result = cons_ty.result();
                 tctx.extend_metas(result.fvs(&tctx));
                 tctx.extend_metas(self.fvs(&tctx));
@@ -410,10 +451,18 @@ impl Elab {
         }
     }
 
-    /// Binders are usually confusing in type errors, so you can get rid of them
+    /// Top-level binders are usually confusing in type errors, so you can get rid of them
     pub fn unbind(&self) -> &Self {
         match self {
             Elab::Binder(_, x) => x,
+            x => x,
+        }
+    }
+
+    /// Like `unbind()`, but moving
+    pub fn unbind_mv(self) -> Self {
+        match self {
+            Elab::Binder(_, x) => *x,
             x => x,
         }
     }
@@ -891,17 +940,17 @@ impl Elab {
     }
 
     /// Like `get_type()`, but looks up actual types for recursive calls. Should only be used after type checking.
-    pub fn get_type_rec(&self, env: &(impl Scoped + HasDatabase)) -> Elab {
-        match (self.get_type(env), self) {
+    pub fn get_type_rec(&self, ctx: &(impl Scoped + HasDatabase)) -> Elab {
+        match (self.get_type(ctx), self) {
             (Elab::Bottom, Elab::Var(_, s, _)) => {
-                env.database().elab(env.scope(), *s).unwrap().get_type(env)
+                ctx.database().elab(ctx.scope(), *s).unwrap().get_type(ctx)
             }
             (x, _) => x,
         }
     }
 
     /// Gets the "best" type of `self`.
-    pub fn get_type(&self, env: &(impl Scoped + HasDatabase)) -> Elab {
+    pub fn get_type(&self, ctx: &(impl Scoped + HasDatabase)) -> Elab {
         use Elab::*;
         match self {
             Top => Top,
@@ -910,21 +959,21 @@ impl Elab {
             Unit => Unit,
             I32(_) => Builtin(crate::builtins::Builtin::Int),
             Builtin(b) => b.get_type(),
-            Var(_, _, t) => t.cloned(&mut Cloner::new(&env)),
-            Data(_, _, t) | Cons(_, t) => t.cloned(&mut Cloner::new(&env)),
+            Var(_, _, t) => t.cloned(&mut Cloner::new(&ctx)),
+            Data(_, _, t) | Cons(_, t) => t.cloned(&mut Cloner::new(&ctx)),
             Fun(cl, from, to) => {
-                let mut cln = Cloner::new(&env);
+                let mut cln = Cloner::new(&ctx);
                 // We can determine types from Elabs without context, so no need to match types or apply the closure
                 // However, if we have e.g. `fun (a0:) (x:a0) => x`, we type it as `fun (a1:) a1 => a1`, so we need to clone the body before or after typing it, and after is usually less work
                 let from = from.cloned(&mut cln);
-                let to = to.get_type(env).cloned(&mut cln);
+                let to = to.get_type(ctx).cloned(&mut cln);
                 Fun(cl.cloned(&mut cln), Box::new(from), Box::new(to))
             }
-            CaseOf(_, _, t) => t.cloned(&mut Cloner::new(&env)),
-            App(f, x) => match f.get_type(env) {
+            CaseOf(_, _, t) => t.cloned(&mut Cloner::new(&ctx)),
+            App(f, x) => match f.get_type(ctx).unbind_mv() {
                 Fun(cl, from, to) => {
                     // We need to WHNF the body, with the appropriate definitions in scope
-                    let mut ectx = ECtx::new(env);
+                    let mut ectx = ECtx::new(ctx);
                     ectx.add_clos(&cl);
                     // And of course, the return type can depend on the argument value, so pass it that
                     from.do_match(&x, &mut ectx);
@@ -933,87 +982,91 @@ impl Elab {
                 // This triggers with recursive functions
                 Bottom => Bottom,
                 Top => Top,
-                _ => panic!("not a function type"),
+                t => panic!(
+                    "not a function type: {} :: {}",
+                    f.pretty(ctx).ansi_string(),
+                    t.pretty(ctx).ansi_string()
+                ),
             },
-            Pair(x, y) => Pair(Box::new(x.get_type(env)), Box::new(y.get_type(env))),
-            Binder(_, x) => x.get_type(env),
+            Pair(x, y) => Pair(Box::new(x.get_type(ctx)), Box::new(y.get_type(ctx))),
+            Binder(_, x) => x.get_type(ctx),
             StructIntern(id) => {
-                let scope = ScopeId::Struct(*id, Box::new(env.scope()));
+                let scope = ScopeId::Struct(*id, Box::new(ctx.scope()));
                 // TODO rename
                 StructInline(
-                    env.database()
+                    ctx.database()
                         .symbols(scope.clone())
                         .iter()
                         .filter_map(|x| {
-                            Some((**x, env.database().elab(scope.clone(), **x)?.get_type(env)))
+                            Some((**x, ctx.database().elab(scope.clone(), **x)?.get_type(ctx)))
                         })
                         .collect(),
                 )
             }
-            StructInline(v) => StructInline(v.iter().map(|(n, x)| (*n, x.get_type(env))).collect()),
+            StructInline(v) => StructInline(v.iter().map(|(n, x)| (*n, x.get_type(ctx))).collect()),
             Project(r, m) => {
-                if let StructInline(t) = r.get_type(env) {
+                if let StructInline(t) = r.get_type(ctx) {
                     t.iter()
                         .find(|(n, _)| n.raw() == *m)
                         .unwrap()
                         .1
-                        .cloned(&mut Cloner::new(env))
+                        .cloned(&mut Cloner::new(ctx))
                 } else {
                     panic!("not a struct type")
                 }
             }
             Block(v) => match v.last().unwrap() {
                 ElabStmt::Def(_, _) => Unit,
-                ElabStmt::Expr(e) => e.get_type(env),
+                ElabStmt::Expr(e) => e.get_type(ctx),
             },
             // Unions can only be types, and the type of a union doesn't mean that much
-            Union(_) => Type(self.universe(env)),
+            Union(_) => Type(self.universe(ctx)),
         }
     }
 
     /// What's the lowest universe this is definitely in - `self : TypeN`?
-    pub fn universe(&self, env: &(impl Scoped + HasDatabase)) -> u32 {
+    pub fn universe(&self, ctx: &(impl Scoped + HasDatabase)) -> u32 {
         match self {
             Elab::Unit | Elab::I32(_) | Elab::Builtin(_) => 0,
             Elab::Bottom => 0,
             // TODO get rid of top
             Elab::Top => u32::MAX,
             Elab::Type(i) => i + 1,
-            Elab::Binder(_, t) => t.universe(env),
-            Elab::Var(_, _, t) | Elab::CaseOf(_, _, t) => t.universe(env).saturating_sub(1),
-            Elab::Pair(x, y) => x.universe(env).max(y.universe(env)),
-            Elab::App(_, _) => match self.get_type(env) {
-                Elab::App(f, x) => f.universe(env).max(x.universe(env)).saturating_sub(1),
-                x => x.universe(env).saturating_sub(1),
+            Elab::Binder(_, t) => t.universe(ctx),
+            Elab::Var(_, _, t) | Elab::CaseOf(_, _, t) => t.universe(ctx).saturating_sub(1),
+            Elab::Pair(x, y) => x.universe(ctx).max(y.universe(ctx)),
+            Elab::App(_, _) => match self.get_type(ctx) {
+                Elab::App(f, x) => f.universe(ctx).max(x.universe(ctx)).saturating_sub(1),
+                x => x.universe(ctx).saturating_sub(1),
             },
-            Elab::Union(v) => v.iter().map(|x| x.universe(env)).max().unwrap_or(0),
-            Elab::StructInline(v) => v.iter().map(|(_, x)| x.universe(env)).max().unwrap_or(0),
-            Elab::StructIntern(id) => env
+            Elab::Union(v) => v.iter().map(|x| x.universe(ctx)).max().unwrap_or(0),
+            Elab::StructInline(v) => v.iter().map(|(_, x)| x.universe(ctx)).max().unwrap_or(0),
+            Elab::StructIntern(id) => ctx
                 .database()
-                .symbols(ScopeId::Struct(*id, Box::new(env.scope())))
+                .symbols(ScopeId::Struct(*id, Box::new(ctx.scope())))
                 .iter()
                 .map(|x| {
-                    env.database()
-                        .elab(ScopeId::Struct(*id, Box::new(env.scope())), **x)
-                        .map_or(0, |x| x.universe(env))
+                    ctx.database()
+                        .elab(ScopeId::Struct(*id, Box::new(ctx.scope())), **x)
+                        .map_or(0, |x| x.universe(ctx))
                 })
                 .max()
                 .unwrap_or(0),
-            Elab::Fun(_, _, to) => to.universe(env),
+            Elab::Fun(_, _, to) => to.universe(ctx),
             Elab::Project(r, m) => {
-                if let Elab::StructInline(v) = r.get_type(env) {
+                if let Elab::StructInline(v) = r.get_type(ctx) {
                     v.iter()
                         .find(|(s, _)| s.raw() == *m)
                         .unwrap()
                         .1
-                        .universe(env)
+                        .universe(ctx)
                         .saturating_sub(1)
                 } else {
                     unreachable!()
                 }
             }
-            Elab::Data(_, _, t) | Elab::Cons(_, t) => t.universe(env).saturating_sub(1),
-            Elab::Block(_) => self.get_type(env).universe(env).saturating_sub(1),
+            Elab::Data(_, _, t) | Elab::Cons(_, t) => t.universe(ctx).saturating_sub(1),
+            Elab::Block(_) => self.get_type(ctx).universe(ctx).saturating_sub(1),
         }
     }
 
@@ -1132,6 +1185,40 @@ impl Elab {
     }
 }
 
+/// Auxilary function that handles prettifying curried functions.
+/// Does not yet prettify multiple binders with the same type (`fun x y: Int => ...` is `fun (x: Int) (y: Int) => ...`).
+fn pretty_fun(mut args: Vec<Doc>, body: &Elab, ctx: &impl HasBindings) -> Doc {
+    match body {
+        Elab::Fun(cl, arg, body) => {
+            args.push(if cl.implicit {
+                Doc::start("[").chain(arg.pretty(ctx)).add("]")
+            } else {
+                arg.pretty(ctx).nest(Prec::Atom)
+            });
+            pretty_fun(args, body, ctx)
+        }
+        _ => {
+            let until_body = Doc::start("fun")
+                .style(Style::Keyword)
+                .line()
+                .chain(Doc::intersperse(args, Doc::none().line()))
+                .indent()
+                .line()
+                .add("=>");
+            Doc::either(
+                until_body
+                    .clone()
+                    .line()
+                    .add("  ")
+                    .chain(body.pretty(ctx).indent())
+                    .group(),
+                until_body.space().chain(body.pretty(ctx).indent()).group(),
+            )
+            .prec(Prec::Term)
+        }
+    }
+}
+
 impl Pretty for Elab {
     fn pretty(&self, ctx: &impl HasBindings) -> Doc {
         match self {
@@ -1150,33 +1237,15 @@ impl Pretty for Elab {
             Elab::Type(0) => Doc::start("Type"),
             Elab::Type(i) => Doc::start("Type").add(i),
             Elab::Builtin(b) => Doc::start(b),
-            // TODO pretty currying
-            Elab::Fun(cl, from, to) => {
-                let until_body = if cl.is_move {
-                    Doc::start("move").space().add("fun")
-                } else {
-                    Doc::start("fun")
-                }
-                .style(Style::Keyword)
-                .line()
-                .chain(if cl.implicit {
+            Elab::Fun(cl, from, to) => pretty_fun(
+                vec![if cl.implicit {
                     Doc::start("[").chain(from.pretty(ctx)).add("]")
                 } else {
                     from.pretty(ctx).nest(Prec::Atom)
-                })
-                .line()
-                .add("=>");
-                Doc::either(
-                    until_body
-                        .clone()
-                        .line()
-                        .add("  ")
-                        .chain(to.pretty(ctx).indent())
-                        .group(),
-                    until_body.space().chain(to.pretty(ctx).indent()).group(),
-                )
-                .prec(Prec::Term)
-            }
+                }],
+                to,
+                ctx,
+            ),
             Elab::CaseOf(val, cases, _) => Doc::start("case")
                 .style(Style::Keyword)
                 .space()
@@ -1194,12 +1263,23 @@ impl Pretty for Elab {
                             .group()
                     }),
                 )),
-            Elab::App(x, y) => x
-                .pretty(ctx)
-                .nest(Prec::App)
-                .space()
-                .chain(y.pretty(ctx).nest(Prec::Atom))
-                .prec(Prec::App),
+            Elab::App(f, x) => {
+                if f.has_implicit_arg(ctx) {
+                    f.pretty(ctx)
+                        .nest(Prec::App)
+                        .space()
+                        .add("[")
+                        .chain(x.pretty(ctx))
+                        .add("]")
+                        .prec(Prec::App)
+                } else {
+                    f.pretty(ctx)
+                        .nest(Prec::App)
+                        .space()
+                        .chain(x.pretty(ctx).nest(Prec::Atom))
+                        .prec(Prec::App)
+                }
+            }
             Elab::Pair(x, y) => Doc::start("(")
                 .chain(x.pretty(ctx))
                 .add(",")

@@ -6,17 +6,19 @@ id := fun [a:Type] (x:a) => x
 id2 := id id
 
 constTy := fun [a:Type] [b:Type] a b => a
-const : constTy = fun [_] [_] x y: => x
+const : constTy = fun x y: => x
 
 
 # Dependent function composition (higher-order unification example)
 comp
-  : fun [A:Type] [B : fun A => Type] [C : fun [a:Type] (B a) => Type] (f : fun [a:Type] (b : B a) => C b) (g : fun (a : A) => B a) (x : A) => C (g x)
-  = fun [_][_][_] f g a: => f (g a)
+  : fun [A:Type] [B : fun A => Type] [C : fun [a:] (B a) => Type] (f : fun [a:] (b : B a) => C b) (g : fun (a : A) => B a) (x : A) => C (g x)
+  = fun f g a: => f (g a)
 
 Nat := fun (t:Type) (fun t => t) t => t
 suc : (fun Nat => Nat) = fun n t f x: => f (n t f x)
 
+# This doesn't compile right now, because `suc` doesn't take an implicit `a`
+# I'm not really sure what the type of `comp` means anyway, so I'm leaving it failing for now
 compTest1 : fun Nat => Nat
   = comp suc suc
 

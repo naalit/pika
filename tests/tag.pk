@@ -1,12 +1,12 @@
-# `Option`, but without implicits
+# `Option`, but None needs an explicit argument to have an implicit one
 type Option: fun Type => Type of
-  None : fun (a:Type) => Option a
-  Some : fun (a:Type) a => Option a
+  None : fun [a:] () => Option a
+  Some : fun [a:] a => Option a
 
-# This now works!
-unwrap_or : fun (t:Type) (Option t) t => t = fun _ x default: => case x of
-  Option.Some _ a => a
-  Option.None _ => default
+# This now works! Note that we don't need the implicit argument on the right hand side
+unwrap_or : fun [t:] (Option t) t => t = fun x default: => case x of
+  Option.Some a => a
+  Option.None () => default
 
 # Unions
 # f := fun (Int | ()) => ()
@@ -27,14 +27,13 @@ is_zero : (fun Nat => Bool) = fun n: => n Bool (fun Bool => Bool.False) Bool.Tru
 is_zero_zero := is_zero zero
 is_one_zero := is_zero one
 
-s : Option Int = Option.Some Int 3
-n : Option Int = Option.None Int
+s : Option Int = Option.Some 3
+n : Option Int = Option.None ()
 
 # k := g 3
 
 # a := fun ((Int, Int) | Int | ()) => ()
 # b := fun x: Int | () => a x
 
-ui := unwrap_or Int
-si := Option.Some Int 3
-main : Int = unwrap_or Int (Option.Some Int 3) 12
+si := Option.Some 3
+main : Int = unwrap_or (Option.Some 3) 12

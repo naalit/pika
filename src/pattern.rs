@@ -10,7 +10,8 @@ pub enum Pat {
     /// Matches anything and binds it to a variable. Also stores the variable's type.
     Var(Sym, Elab),
     Pair(Box<Pat>, Box<Pat>),
-    App(Box<Pat>, Box<Pat>),
+    /// (implicit, f, x)
+    App(bool, Box<Pat>, Box<Pat>),
     /// Matches a data constructor, often the head of an App. We store the type as well, like in Elab.
     Cons(TagId, Elab),
     Unit,
@@ -100,10 +101,10 @@ pub fn to_pattern(
             let mut pf = pf;
             for _ in 0..implicits {
                 // Add a wild pattern for each implicit; eventually it may be possible to match on them
-                pf = Pat::App(Box::new(pf), Box::new(Pat::Wild));
+                pf = Pat::App(true, Box::new(pf), Box::new(Pat::Wild));
             }
 
-            Some(Pat::App(Box::new(pf), Box::new(px)))
+            Some(Pat::App(false, Box::new(pf), Box::new(px)))
         }
         (Term::Project(_, _), _) => match crate::bicheck::synth(t, tctx) {
             Ok(Elab::Cons(tid, t)) => {
@@ -303,7 +304,7 @@ impl<'a> Iterator for SpineIter<'a> {
 
     fn next(&mut self) -> Option<&'a Pat> {
         match self.0 {
-            Pat::App(f, x) => {
+            Pat::App(_, f, x) => {
                 self.0 = f;
                 Some(x)
             }
@@ -323,7 +324,7 @@ impl Pat {
     pub fn apply_types(&self, tctx: &mut TCtx) {
         match self {
             Pat::Var(s, t) => tctx.set_ty(*s, t.cloned(&mut Cloner::new(tctx))),
-            Pat::Pair(x, y) | Pat::App(x, y) => {
+            Pat::Pair(x, y) | Pat::App(_, x, y) => {
                 x.apply_types(tctx);
                 y.apply_types(tctx);
             }
@@ -339,7 +340,7 @@ impl Pat {
                 Pat::Var(fresh, e.cloned(cln))
             }
             Pat::Pair(x, y) => Pat::Pair(Box::new(x.cloned(cln)), Box::new(y.cloned(cln))),
-            Pat::App(x, y) => Pat::App(Box::new(x.cloned(cln)), Box::new(y.cloned(cln))),
+            Pat::App(i, x, y) => Pat::App(*i, Box::new(x.cloned(cln)), Box::new(y.cloned(cln))),
             Pat::Cons(id, ty) => Pat::Cons(*id, ty.cloned(cln)),
             Pat::Unit => Pat::Unit,
             Pat::I32(i) => Pat::I32(*i),
@@ -354,7 +355,7 @@ impl Pat {
                 bound.insert(*x);
                 t.fvs_(bound, free);
             }
-            Pat::Pair(x, y) | Pat::App(x, y) => {
+            Pat::Pair(x, y) | Pat::App(_, x, y) => {
                 x.fvs_(bound, free);
                 y.fvs_(bound, free);
             }
@@ -365,7 +366,7 @@ impl Pat {
 
     pub fn head(&self) -> &Self {
         match self {
-            Pat::App(f, _) => f.head(),
+            Pat::App(_, f, _) => f.head(),
             _ => self,
         }
     }
@@ -373,7 +374,7 @@ impl Pat {
     /// How many `App` nodes are there chained together left-associatively?
     pub fn spine_len(&self) -> usize {
         match self {
-            Pat::App(f, _) => f.spine_len() + 1,
+            Pat::App(_, f, _) => f.spine_len() + 1,
             _ => 0,
         }
     }
@@ -384,14 +385,14 @@ impl Pat {
             (Pat::Unit, _) | (Pat::Wild, _) => Yes,
             (Pat::I32(n), Elab::I32(m)) => (n == m).into(),
             (Pat::Pair(a1, b1), Elab::Pair(a2, b2)) => a1.matches(a2, ectx) & b1.matches(b2, ectx),
-            (Pat::App(f1, x1), Elab::App(f2, x2)) => f1.matches(f2, ectx) & x1.matches(x2, ectx),
+            (Pat::App(_, f1, x1), Elab::App(f2, x2)) => f1.matches(f2, ectx) & x1.matches(x2, ectx),
             (Pat::Var(s, _), _) => {
                 ectx.set_val(*s, x.cloned(&mut Cloner::new(ectx)));
                 Yes
             }
             (Pat::Cons(a, _), _) if x.cons().is_some() => (*a == x.cons().unwrap()).into(),
             // This is needed for matching constructors of different arity
-            (Pat::App(_, _), _) if x.cons().is_some() => No,
+            (Pat::App(_, _, _), _) if x.cons().is_some() => No,
             // This means we have a variable instead of a pair or constructor or something
             _ => Maybe,
         }
@@ -408,7 +409,7 @@ impl Pat {
     fn bound_<'a>(&'a self, bound: &mut Vec<(Sym, &'a Elab)>) {
         match self {
             Pat::Var(s, t) => bound.push((*s, t)),
-            Pat::Pair(x, y) | Pat::App(x, y) => {
+            Pat::Pair(x, y) | Pat::App(_, x, y) => {
                 x.bound_(bound);
                 y.bound_(bound);
             }
@@ -419,7 +420,7 @@ impl Pat {
     pub fn cons(&self) -> Option<(TagId, &Elab)> {
         match self {
             Pat::Cons(id, t) => Some((*id, t)),
-            Pat::App(f, _) => f.cons(),
+            Pat::App(_, f, _) => f.cons(),
             _ => None,
         }
     }
@@ -427,7 +428,7 @@ impl Pat {
     pub fn uses(&self, s: Sym) -> bool {
         match self {
             Pat::Var(_, t) | Pat::Cons(_, t) => t.uses(s),
-            Pat::Pair(x, y) | Pat::App(x, y) => x.uses(s) || y.uses(s),
+            Pat::Pair(x, y) | Pat::App(_, x, y) => x.uses(s) || y.uses(s),
             Pat::Unit | Pat::I32(_) | Pat::Wild => false,
         }
     }
@@ -435,7 +436,7 @@ impl Pat {
     pub fn binds(&self, s: Sym) -> bool {
         match self {
             Pat::Var(x, _) => *x == s,
-            Pat::Pair(x, y) | Pat::App(x, y) => x.binds(s) || y.binds(s),
+            Pat::Pair(x, y) | Pat::App(_, x, y) => x.binds(s) || y.binds(s),
             Pat::Unit | Pat::I32(_) | Pat::Cons(_, _) | Pat::Wild => false,
         }
     }
@@ -444,7 +445,7 @@ impl Pat {
     /// It applies any constraints to `lctx`, so you might want to clone that first.
     pub fn lower(&self, ty: &Elab, param: Val, lctx: &mut LCtx, yes: Low, no: Low) -> Low {
         match (self, ty) {
-            (Pat::Cons(_, _), _) | (Pat::App(_, _), _) => {
+            (Pat::Cons(_, _), _) | (Pat::App(_, _, _), _) => {
                 let (id, _) = self.cons().unwrap();
 
                 // We do this before setting metas to make sure it includes all constructors
@@ -655,12 +656,23 @@ impl Pretty for Pat {
                 .space()
                 .chain(y.pretty(ctx))
                 .prec(Prec::Term),
-            Pat::App(f, x) => f
-                .pretty(ctx)
-                .nest(Prec::App)
-                .space()
-                .chain(x.pretty(ctx).nest(Prec::Atom))
-                .prec(Prec::App),
+            Pat::App(implicit, f, x) => {
+                if *implicit {
+                    f.pretty(ctx)
+                        .nest(Prec::App)
+                        .space()
+                        .add("[")
+                        .chain(x.pretty(ctx))
+                        .add("]")
+                        .prec(Prec::App)
+                } else {
+                    f.pretty(ctx)
+                        .nest(Prec::App)
+                        .space()
+                        .chain(x.pretty(ctx).nest(Prec::Atom))
+                        .prec(Prec::App)
+                }
+            }
             Pat::Cons(tid, _) => tid.pretty(ctx).style(Style::Binder),
             Pat::Wild => Doc::start("_"),
         }

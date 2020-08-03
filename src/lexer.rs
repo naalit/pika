@@ -142,6 +142,8 @@ impl<'i> Lexer<'i> {
                         while self.peek().map_or(false, |x| x != '\n') {
                             self.next();
                         }
+                        // Consume `\n`
+                        self.next();
                         return self.handle_indent();
                     }
 
@@ -163,6 +165,17 @@ impl<'i> Lexer<'i> {
             while self.peek() == Some(' ') {
                 self.next();
                 *self.indent.last_mut().unwrap() += 1;
+            }
+            if self.peek() == Some('#') {
+                self.indent.pop();
+                // Skip line comments
+                // eat \r here, it's always got a \n after it
+                while self.peek().map_or(false, |x| x != '\n') {
+                    self.next();
+                }
+                // Consume `\n`
+                self.next();
+                return self.handle_indent();
             }
             return Some(Ok(Tok::Indent));
         }
