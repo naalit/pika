@@ -1,0 +1,247 @@
+use std::str::FromStr;
+use crate::query::{Compiler, Name, CompilerExt};
+use crate::error::*;
+use crate::term::*;
+
+// I'd like to only require &dyn Interner, but the calling code has a &dyn Compiler and Rust doesn't have trait object upcasting yet.
+grammar(db: &dyn Compiler);
+
+extern {
+  type Error = Spanned<&'static str>;
+}
+
+Sp<T>: Spanned<T> = {
+  <l:@L> <v:T> <r:@R> => Spanned::new(v, Span(l, r)),
+}
+
+pub Defs: Vec<PreDef> = {
+  "\n"* <first:Def> <mut v:("\n"+ <Def>)*> "\n"* => {
+    v.insert(0, first);
+    v
+  }
+}
+
+// Both definitions and declarations, since they're mostly allowed in the same contexts
+// If declarations aren't allowed (e.g. in structs or the top level), it's nicer to use a handwritten error message for that case.
+pub Def: PreDef = {
+  // -- definitions --
+
+  "fun" <name:Sp<Name>> <args:Args> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
+    let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole));
+    PreDef::Fun(name.unwrap(), args, ty, val)
+  },
+  // You can have a function with an effect type but not a return type
+  "fun" Sp<Name> Args (":" App)? ("with" Term) "=" Term => todo!("effects"),
+  "val" <name:Sp<Name>> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
+    let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole));
+    PreDef::Val(name.unwrap(), ty, val)
+  },
+  "type" <name:Name> <args:Args> "of" <cons:Block<Cons>> => {
+    PreDef::Type(name, args, cons)
+  },
+  "impl" <name:(<Name> ":")?> <ty:Sp<Term>> "=" <val:Sp<Term>> => {
+    PreDef::Impl(name, ty, val)
+  },
+  Sp<Term> => PreDef::Expr(<>),
+
+  // -- declarations --
+
+  // TODO report an error if we use an arg without a type
+  // although I guess elaboration will usually catch it
+  "fun" <name:Sp<Name>> <args:Args> ":" <ty:Sp<Term>> => PreDef::FunDec(name.unwrap(), args, ty),
+  "val" <name:Sp<Name>> ":" <ty:Sp<Term>> => PreDef::ValDec(name.unwrap(), ty),
+};
+
+Args: Vec<(Name, Icit, PreTy)> = {
+  ArgGroupN+ => {
+    <>.into_iter().flat_map(|(names, icit, ty)| if names.len() == 1 {
+      vec![(names[0], icit, ty)]
+    } else {
+      names.into_iter().map(|name| (name, icit, ty.clone())).collect()
+    }).collect()
+  }
+}
+
+#[inline]
+PiArgs: Vec<(Name, Icit, PreTy)> = {
+  ArgGroup+ => {
+    <>.into_iter().flat_map(|(names, icit, ty)| if names.len() == 1 {
+      vec![(names[0], icit, ty)]
+    } else {
+      names.into_iter().map(|name| (name, icit, ty.clone())).collect()
+    }).collect()
+  }
+}
+
+// ArgGroup is also used in Pi, where a bare name isn't allowed.
+ArgGroupN: (Vec<Name>, Icit, PreTy) = {
+  <l:@L> <n:Name> <r:@R> => (vec![n], Icit::Expl, Spanned::new(Pre_::Hole, Span(l, r))),
+  ArgGroup,
+}
+
+ArgGroup: (Vec<Name>, Icit, PreTy) = {
+  // We're fine using the name "_", since it's impossible to access it (it turns into a hole)
+  "(" ":" <ty:Sp<Expr>> ")" => (vec![db.intern_name("_".to_string())], Icit::Expl, ty),
+  "(" <n:Name> ":" <ty:Sp<Expr>> ")" => (vec![n], Icit::Expl, ty),
+  ImpArg => { let (v, t) = <>; (v, Icit::Impl, t) }
+}
+
+ImpArg: (Vec<Name>, PreTy) = {
+  <l:@L> "[" <n:Name+> "]" <r:@R> => (n, Spanned::new(Pre_::Hole, Span(l, r))),
+  "[" <n:Name+> ":" <ty:Sp<Expr>> "]" => (n, ty),
+  "[" ":" <ty:Sp<Expr>> "]" => (vec![db.intern_name("_".to_string())], ty),
+}
+
+ConsArg: Vec<(Name, Icit, PreTy)> = {
+  Sp<Atom> => vec![(db.intern_name("_".to_string()), Icit::Expl, <>)],
+  ArgGroup => {
+    let (names, icit, ty) = <>;
+    if names.len() == 1 {
+      vec![(names[0], icit, ty)]
+    } else {
+      names.into_iter().map(|name| (name, icit, ty.clone())).collect()
+    }
+  },
+}
+
+Cons: PreCons = {
+  <name:Name> <args:ConsArg*> <ty:(":" <Sp<Expr>>)?> => PreCons(name,
+    args.into_iter().flatten().collect(),
+    ty,
+  ),
+}
+
+Block<T>: Vec<T> = {
+  "\n"* "end" => Vec::new(),
+  "\n"* <(<T> "\n"+)+> "end",
+  "\n"* <mut v:(<T> "\n"+)*> <last:T> "end" => {
+    v.push(last);
+    v
+  },
+}
+
+pub Pre: Pre = Sp<Term>;
+
+Term: Pre_ = {
+  Chain,
+  // We only allow RStarts at the end of an application if it's at the top level
+  // Otherwise we get
+  // a \x. x
+  //   .something
+  // which is ambiguous (`x.something` or `(a _).something`? Neither would be clear.)
+  <f:Sp<Chain>> <x:Sp<RStart>> => {
+    Pre_::App(Icit::Expl, f, x)
+  },
+}
+
+Chain: Pre_ = {
+  Expr,
+  // Allow multiline method chaining, like with Rust iterators or builders
+  <f:Chain> NEWLINE_DOT <m:Name> <args:AppArg*> => todo!("member access"),
+}
+
+Expr: Pre_ = {
+  App,
+  <from:Sp<App>> "->" <to:Sp<Expr>> => Pre_::Fun(from, to),
+  // For now `(a : Type) a -> a` is allowed, but we might eventually want to only allow `[a] a -> a`
+  <args:PiArgs> <from:Sp<App>> "->" <to:Sp<Expr>> => {
+    let span = Span(from.span().0, to.span().1);
+    let fun = Spanned::new(Pre_::Fun(from, to), span);
+    args.into_iter().rfold(fun, |to, (name, icit, ty)| {
+      // TODO this span isn't perfect
+      let span = Span(ty.span().0, to.span().1);
+      Spanned::new(Pre_::Pi(name, icit, ty, to), span)
+    }).unwrap()
+  },
+  <args:PiArgs> "->" <to:Sp<Expr>> => {
+    args.into_iter().rfold(to, |to, (name, icit, ty)| {
+      // TODO this span isn't perfect
+      let span = Span(ty.span().0, to.span().1);
+      Spanned::new(Pre_::Pi(name, icit, ty, to), span)
+    }).unwrap()
+  },
+  PiArgs "->" App "with" Expr => todo!("effects"),
+  App Infix App => todo!("operators"),
+  RStart,
+}
+
+// These constructions are recognizable from the first token
+// So they can be the last argument in an application
+RStart: Pre_ = {
+  "sig" Block<Def> => todo!("sigs"),
+  "struct" <Block<Def>> => Pre_::Struct(<>),
+  "do" <Block<Def>> => Pre_::Do(<>),
+  "case" Expr "of" Block<Branch> => todo!("case"),
+  // TODO: Is Expr okay here?
+  // Basically we can't do multiline inside lambdas, we need
+  // \x.(x
+  //     .sort)
+  // and this doesn't work:
+  // (\x.x
+  //     .sort)
+  // which might be unintuitive
+  "\\" <args:Args> "." <body:Sp<Expr>> => {
+    args.into_iter().rfold(body, |body, (name, icit, ty)| {
+      // TODO this span isn't perfect
+      let span = Span(ty.span().0, body.span().1);
+      Spanned::new(Pre_::Lam(name, icit, ty, body), span)
+    }).unwrap()
+  },
+}
+
+Infix: () = {
+  "-",
+  "+",
+  "/",
+  "*",
+  "++",
+}
+
+Branch: () = {
+  Pat "=>" Term => (),
+}
+Pat: () = {
+  App,
+  App "|" Pat => (),
+}
+
+App: Pre_ = {
+  Atom,
+  <f:Sp<Atom>> <args:Sp<AppArg>+> => {
+    args.into_iter().rfold(f, |f, x| {
+      let xspan = x.span();
+      let span = Span(f.span().0, xspan.1);
+      let (icit, x) = x.unwrap();
+      let x = Spanned::new(x, xspan);
+      Spanned::new(Pre_::App(icit, f, x), span)
+    }).unwrap()
+  },
+  <f:Sp<Atom>> <dots:("." <Sp<Name>>)+> <args:AppArg*> => {
+    todo!("member access")
+  },
+}
+
+AppArg: (Icit, Pre_) = {
+  "[" <Expr> "]" => (Icit::Impl, todo!()),
+  Atom => (Icit::Expl, <>),
+}
+
+Atom: Pre_ = {
+  "Type" => Pre_::Type,
+  Name => if &<>.get(db) == "_" { Pre_::Hole } else { Pre_::Var(<>) },
+  Num => todo!("numbers"),
+  r#""[^\n"]*""# => todo!("strings"),
+  "(" <Term> ")" => todo!(),
+  "(" ")" => todo!("()"),
+}
+
+Name: Name = r"[A-Za-z_][A-Za-z_0-9]*" => db.intern_name(String::from(<>));
+Num: i32 = r"-?[0-9]+" => i32::from_str(<>).unwrap();
+
+match {
+  r"\n(#[^\n]*\n|\n|[ \t])*\." => NEWLINE_DOT,
+} else {
+  r"#[^\n]*" => { },
+  r"[ \t]" => { },
+  _,
+}

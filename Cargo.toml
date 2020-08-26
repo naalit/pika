@@ -1,0 +1,17 @@
+[package]
+name = "pika_2_test"
+version = "0.1.0"
+authors = ["Lorxu <sam@dirkback.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lalrpop-util = "*"
+regex = "1"
+salsa = "*"
+codespan-reporting = "*"
+lazy_static = "*"
+
+[build-dependencies]
+lalrpop = { version = "*", features = ["lexer"] }
