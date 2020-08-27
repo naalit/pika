@@ -3,3 +3,5 @@
 val U : Type = Type
 
 fun the (x: Type) (y: x) : x = y
+
+val g : Type = the Type Type

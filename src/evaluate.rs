@@ -6,16 +6,17 @@ use std::collections::VecDeque;
 pub fn evaluate(term: Term, env: &Env) -> Val {
     match term {
         Term::Type => Val::Type,
-        Term::VarLocal(ix) => env.val(ix),
-        Term::VarTop(def) => Val::top(def),
-        Term::VarMeta(meta) => {
+        Term::Var(Var::Local(ix)) => env.val(ix),
+        Term::Var(Var::Top(def)) => Val::top(def),
+        Term::Var(Var::Rec(id)) => Val::rec(id),
+        Term::Var(Var::Meta(meta)) => {
             // TODO check if solved
             Val::meta(meta)
         }
-        Term::Lam(icit, body) => Val::Lam(icit, Clos(env.clone(), body)),
+        Term::Lam(icit, body) => Val::Lam(icit, Clos(Box::new(env.clone()), body)),
         Term::Pi(icit, ty, body) => {
             let ty = evaluate(*ty, env);
-            Val::Pi(icit, Box::new(ty), Clos(env.clone(), body))
+            Val::Pi(icit, Box::new(ty), Clos(Box::new(env.clone()), body))
         }
         Term::Fun(from, to) => {
             let from = evaluate(*from, env);
@@ -48,12 +49,13 @@ impl Val {
 pub fn inline(val: Val, db: &dyn Compiler) -> Val {
     match val {
         Val::App(h, sp) => match h {
-            Head::VarTop(def) => todo!("evaluate in db"),
-            Head::VarMeta(meta) => {
+            Var::Top(def) => todo!("evaluate in db"),
+            Var::Meta(meta) => {
                 // TODO check if solved
                 Val::App(h, sp)
             }
-            Head::VarLocal(_) => Val::App(h, sp),
+            Var::Local(_)
+            | Var::Rec(_) => Val::App(h, sp),
         },
         Val::Pi(icit, mut ty, cl) => {
             // Reuse box
@@ -75,9 +77,10 @@ pub fn quote(val: Val, enclosing: Lvl) -> Term {
         Val::Type => Term::Type,
         Val::App(h, sp) => {
             let h = match h {
-                Head::VarLocal(l) => Term::VarLocal(l.to_ix(enclosing)),
-                Head::VarTop(def) => Term::VarTop(def),
-                Head::VarMeta(meta) => Term::VarMeta(meta),
+                Var::Local(l) => Term::Var(Var::Local(l.to_ix(enclosing))),
+                Var::Top(def) => Term::Var(Var::Top(def)),
+                Var::Meta(meta) => Term::Var(Var::Meta(meta)),
+                Var::Rec(id) => Term::Var(Var::Rec(id)),
             };
             sp.into_iter().fold(h, |f, (icit, x)| {
                 Term::App(icit, Box::new(f), Box::new(quote(x, enclosing)))

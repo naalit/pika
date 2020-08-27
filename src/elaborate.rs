@@ -4,8 +4,28 @@ use crate::query::*;
 use crate::term::*;
 use std::sync::Arc;
 
+pub enum MetaEntry {
+    Solved(Val, Span),
+    Unsolved(Option<Name>, Span),
+}
+
+pub struct MCxt {
+    cxt: Cxt,
+    local_metas: Vec<MetaEntry>,
+}
+impl MCxt {
+    pub fn lookup(&self, name: Name, db: &dyn Compiler) -> Option<NameResult> {
+        self.cxt.lookup(name, db)
+    }
+
+    pub fn define(&mut self, name: Name, info: NameInfo, db: &dyn Compiler) {
+        self.cxt = self.cxt.define(name, info, db);
+    }
+}
+
 pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<(Arc<Term>, Arc<VTy>), DefError> {
     let (predef, cxt) = db.lookup_intern_def(def);
+    let predef = db.lookup_intern_predef(predef);
     let file = cxt.file(db);
     match &*predef {
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
@@ -79,7 +99,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<(Arc<Term>, Arc<VT
                                 Val::Pi(
                                     icit,
                                     Box::new(from),
-                                    Clos(Env::new(size), Box::new(quote(to, size))),
+                                    Clos(Box::new(Env::new(size)), Box::new(quote(to, size))),
                                 ),
                                 size.dec(),
                             )
@@ -238,12 +258,12 @@ fn p_unify(a: Val, b: Val, db: &dyn Compiler) -> TBool {
 
         // Solve metas
         // TODO make order not matter (compare metas?)
-        (Val::App(Head::VarMeta(m), sp), t) | (t, Val::App(Head::VarMeta(m), sp)) => {
+        (Val::App(Var::Meta(m), sp), t) | (t, Val::App(Var::Meta(m), sp)) => {
             todo!("solve metas")
         }
 
         // If the reason we can't unify is that one side is a top variable, then we can try again after inlining.
-        (Val::App(Head::VarTop(_), _), _) | (_, Val::App(Head::VarTop(_), _)) => Maybe,
+        (Val::App(Var::Top(_), _), _) | (_, Val::App(Var::Top(_), _)) => Maybe,
 
         // If that's not the reason, then we know inlining won't help.
         _ => No,
@@ -265,13 +285,16 @@ pub fn infer(pre: &Pre, db: &dyn Compiler, cxt: Cxt) -> Result<(Term, VTy), Type
         Pre_::Var(name) => match cxt.lookup(*name, db) {
             Some(NameResult::Def(def)) => {
                 match db.def_type(def) {
-                    Ok(ty) => Ok((Term::VarTop(def), (*ty).clone())),
+                    Ok(ty) => Ok((Term::Var(Var::Top(def)), (*ty).clone())),
                     // If something else had a type error, try to keep going anyway and maybe catch more
                     Err(DefError::ElabError) => Ok((Term::Error, todo!("hole: add meta"))),
                     Err(DefError::NoValue) => Err(TypeError::NotFound(pre.copy_span(*name))),
                 }
             }
-            Some(NameResult::Local(ix, ty)) => Ok((Term::VarLocal(ix), ty)),
+            Some(NameResult::Rec(id)) => {
+                Ok((Term::Var(Var::Rec(id)), Val::meta(Meta::Type(id))))
+            }
+            Some(NameResult::Local(ix, ty)) => Ok((Term::Var(Var::Local(ix)), ty)),
             None => Err(TypeError::NotFound(pre.copy_span(*name))),
         },
         Pre_::Lam(name, icit, ty, body) => {
@@ -286,7 +309,7 @@ pub fn infer(pre: &Pre, db: &dyn Compiler, cxt: Cxt) -> Result<(Term, VTy), Type
                     *icit,
                     Box::new(vty),
                     // `inc()` since we're wrapping it in a lambda
-                    Clos(cxt.env(db), Box::new(quote(bty, cxt.size(db).inc()))),
+                    Clos(Box::new(cxt.env(db)), Box::new(quote(bty, cxt.size(db).inc()))),
                 ),
             ))
         }

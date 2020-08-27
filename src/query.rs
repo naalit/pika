@@ -5,9 +5,9 @@ use crate::term::*;
 use std::sync::{Arc, Mutex};
 
 macro_rules! intern_id {
-    ($name:ident) => {
+    ($name:ident, $doc:expr) => {
+        #[doc=$doc]
         #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-        /// This is a handle to the actual object stored in the Salsa database.
         pub struct $name(salsa::InternId);
         impl salsa::InternKey for $name {
             fn from_intern_id(id: salsa::InternId) -> Self {
@@ -19,32 +19,28 @@ macro_rules! intern_id {
             }
         }
     };
+    ($name:ident) => {
+        intern_id!($name, "This is a handle to the actual object stored in the Salsa database.")
+    }
 }
 
-intern_id!(Name);
+intern_id!(Name, "An identifier, represented as an interned string.");
 impl Name {
     pub fn get<T: Interner + ?Sized>(self, db: &T) -> String {
         db.lookup_intern_name(self)
     }
 }
-intern_id!(DefId);
-intern_id!(Cxt);
+intern_id!(DefId, "A reference to a definition and the context, which are interned in the Salsa database.");
+intern_id!(PreDefId, r#"A reference to a definition, but without context.
+This is needed for (mutually) recursive definitions, where context for one definition requires the others."#);
+intern_id!(Cxt, r#"The context for resolving names, represented as a linked list of definitions, with the links stored in Salsa.
+This is slower than a hashmap or flat array, but it has better incrementality."#);
 impl Cxt {
     pub fn size<T: ?Sized + Interner>(self, db: &T) -> Lvl {
         match db.lookup_cxt_entry(self) {
             MaybeEntry::Yes(CxtEntry { size, .. }) => size,
             MaybeEntry::No(_) => Lvl::zero(),
         }
-        // let mut cxt = self;
-        // let mut l = Lvl::zero();
-        // while let Some(CxtEntry { name, info, rest }) = db.lookup_cxt_entry(cxt) {
-        //     match info {
-        //         NameInfo::Local(_) => l = l.inc(),
-        //         _ => (),
-        //     }
-        //     cxt = rest;
-        // }
-        // l
     }
 
     pub fn env<T: ?Sized + Interner>(self, db: &T) -> Env {
@@ -78,6 +74,11 @@ impl Cxt {
                         ix = ix.inc()
                     }
                 }
+                NameInfo::Rec(id) => {
+                    if name == sym {
+                        return Some(NameResult::Rec(id));
+                    }
+                }
             }
             cxt = rest;
         }
@@ -108,16 +109,18 @@ impl Cxt {
 pub enum NameResult {
     Def(DefId),
     Local(Ix, VTy),
+    Rec(PreDefId),
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub enum NameInfo {
     Def(DefId),
     Local(VTy),
+    Rec(PreDefId),
 }
 
 /// One cell of the context linked list.
-/// See `Interner::add_def`.
+/// See `Interner::cxt_entry`.
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub struct CxtEntry {
     name: Name,
@@ -138,7 +141,10 @@ pub trait Interner: salsa::Database {
     fn intern_name(&self, s: String) -> Name;
 
     #[salsa::interned]
-    fn intern_def(&self, def: Arc<PreDef>, cxt: Cxt) -> DefId;
+    fn intern_predef(&self, def: Arc<PreDef>) -> PreDefId;
+
+    #[salsa::interned]
+    fn intern_def(&self, def: PreDefId, cxt: Cxt) -> DefId;
 
     /// The context is stored as a linked list, but the links are hashmap keys!
     /// This is... pretty slow, but has really good incrementality.
@@ -186,16 +192,67 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
     let parser = DefsParser::new();
     let cxt = Cxt::new(file, db);
     match parser.parse(db, &source) {
-        Ok(v) => Arc::new(
-            v.into_iter()
-                .map(|def| db.intern_def(Arc::new(def), cxt))
-                .collect(),
-        ),
+        Ok(v) => Arc::new(intern_block(v, db, cxt)),
         Err(e) => {
             db.report_error(e.to_error(file));
             Arc::new(Vec::new())
         }
     }
+}
+
+fn intern_block(v: Vec<PreDef>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<DefId> {
+    let mut rv = Vec::new();
+    // This stores unordered definitions (types and functions) between local variables
+    let mut temp = Vec::new();
+    for def in v {
+        match &def {
+            // Unordered
+            PreDef::Fun(_, _, _, _)
+            | PreDef::Type(_, _, _)
+            | PreDef::FunDec(_, _, _)
+            | PreDef::ValDec(_, _) => {
+                let name = def.name();
+                let id = db.intern_predef(Arc::new(def));
+                if let Some(name) = name {
+                    cxt = cxt.define(name, NameInfo::Rec(id), db);
+                }
+                temp.push((name, id));
+            }
+            // Ordered
+            PreDef::Val(_, _, _)
+            | PreDef::Impl(_, _, _)
+            | PreDef::Expr(_) => {
+                // Process `temp` first
+                for (name, pre) in temp.drain(0..) {
+                    let id = db.intern_def(pre, cxt);
+                    if let Some(name) = name {
+                        // Define it for real now
+                        cxt = cxt.define(name, NameInfo::Def(id), db);
+                    }
+                    rv.push(id);
+                }
+
+                // Then add this one
+                let name = def.name();
+                let pre = db.intern_predef(Arc::new(def));
+                let id = db.intern_def(pre, cxt);
+                if let Some(name) = name {
+                    cxt = cxt.define(name, NameInfo::Def(id), db);
+                }
+                rv.push(id);
+            }
+        }
+    }
+    // If anything is left in `temp`, clear it out
+    for (name, pre) in temp {
+        let id = db.intern_def(pre, cxt);
+        if let Some(name) = name {
+            // Define it for real now
+            cxt = cxt.define(name, NameInfo::Def(id), db);
+        }
+        rv.push(id);
+    }
+    rv
 }
 
 #[salsa::database(InternerDatabase, CompilerDatabase)]
@@ -209,7 +266,12 @@ impl salsa::Database for Database {}
 
 impl CompilerExt for Database {
     fn report_error(&self, error: Error) {
-        self.errors.lock().unwrap().push(error)
+        self.errors.lock().unwrap().push(error);
+
+        use salsa::Database;
+        // Make sure whatever query reported an error runs again next time
+        // We need it to report the error again even if nothing changed
+        self.salsa_runtime().report_untracked_read();
     }
 
     fn num_errors(&self) -> usize {
@@ -225,6 +287,7 @@ impl CompilerExt for Database {
 
 impl Database {
     pub fn check_all(&self, file: FileId) {
+        // TODO: get meta solutions from each elaborate_def() and make sure they match
         for def in &*self.top_level(file) {
             self.elaborate_def(*def);
         }

@@ -2,11 +2,6 @@ use lalrpop_util::lalrpop_mod;
 use std::fs::File;
 use std::io::{BufRead, Read};
 
-// TODO:
-// - Write README
-// - Make `test.pk` a better demo
-// - COMMIT before changing compiler at all yet
-
 pub mod elaborate;
 pub mod error;
 pub mod evaluate;
@@ -14,7 +9,7 @@ pub mod query;
 pub mod term;
 use query::*;
 
-lalrpop_mod!(pub grammar); // synthesized by LALRPOP
+lalrpop_mod!(pub grammar);
 
 fn main() {
     let mut buf = String::new();

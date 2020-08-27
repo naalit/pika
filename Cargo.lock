@@ -431,7 +431,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pika_2_test"
+name = "pika"
 version = "0.1.0"
 dependencies = [
  "codespan-reporting",

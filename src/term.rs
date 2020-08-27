@@ -55,6 +55,19 @@ pub enum PreDef {
     FunDec(Name, Vec<(Name, Icit, PreTy)>, PreTy),
     ValDec(Name, PreTy),
 }
+impl PreDef {
+    pub fn name(&self) -> Option<Name> {
+        match self {
+            PreDef::Fun(n, _, _, _)
+            | PreDef::Val(n, _, _)
+            | PreDef::Type(n, _, _)
+            | PreDef::FunDec(n, _, _)
+            | PreDef::ValDec(n, _) => Some(*n),
+            PreDef::Impl(n, _, _) => *n,
+            PreDef::Expr(_) => None,
+        }
+    }
+}
 
 // TODO NonZeroU32's
 /// A De Bruijn index, representing the number of enclosing lambda abstractions before we get to the one that binds the variable.
@@ -116,16 +129,19 @@ impl Lvl {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Meta(u32);
+pub enum Meta {
+    Type(PreDefId),
+    /// The local meta index is a u16 so that this type fits in a word.
+    /// So no more than 65535 metas are allowed per definition, which is probably fine.
+    Local(DefId, u16),
+}
 
 pub type Ty = Term;
 /// The core syntax. This uses `Ix`, De Bruijn indices.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Term {
     Type,
-    VarLocal(Ix),
-    VarTop(DefId),
-    VarMeta(Meta),
+    Var(Var<Ix>),
     Lam(Icit, Box<Term>),
     Pi(Icit, Box<Ty>, Box<Ty>),
     Fun(Box<Ty>, Box<Ty>),
@@ -180,9 +196,12 @@ impl Env {
     }
 }
 
-// TODO closure environment
+/// A closure, representing a term that's waiting for an argument to be evaluated.
+/// It's used in both lambdas and pi types.
+///
+/// Note that it stores a `Box<Env>`, because we store it inline in `Val` and the `VecDeque` that `Env` uses is actually very big.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Clos(pub Env, pub Box<Term>);
+pub struct Clos(pub Box<Env>, pub Box<Term>);
 impl Clos {
     pub fn env_size(&self) -> Lvl {
         self.0.size
@@ -220,13 +239,12 @@ impl Clos {
     }
 }
 
-/// Only these things are allowed as the head of an application in a value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Head {
-    VarLocal(Lvl),
-    /// Note that this is only allowed in `UVal`s
-    VarTop(DefId),
-    VarMeta(Meta),
+pub enum Var<Local> {
+    Local(Local),
+    Top(DefId),
+    Rec(PreDefId),
+    Meta(Meta),
 }
 
 pub type VTy = Val;
@@ -237,7 +255,7 @@ pub type VTy = Val;
 pub enum Val {
     Type,
     /// The spine are arguments applied in order. It can be empty.
-    App(Head, Vec<(Icit, Val)>),
+    App(Var<Lvl>, Vec<(Icit, Val)>),
     Lam(Icit, Clos),
     Pi(Icit, Box<VTy>, Clos),
     Fun(Box<VTy>, Box<VTy>),
@@ -245,14 +263,18 @@ pub enum Val {
 }
 impl Val {
     pub fn local(lvl: Lvl) -> Val {
-        Val::App(Head::VarLocal(lvl), Vec::new())
+        Val::App(Var::Local(lvl), Vec::new())
     }
 
     pub fn top(def: DefId) -> Val {
-        Val::App(Head::VarTop(def), Vec::new())
+        Val::App(Var::Top(def), Vec::new())
+    }
+
+    pub fn rec(id: PreDefId) -> Val {
+        Val::App(Var::Rec(id), Vec::new())
     }
 
     pub fn meta(meta: Meta) -> Val {
-        Val::App(Head::VarMeta(meta), Vec::new())
+        Val::App(Var::Meta(meta), Vec::new())
     }
 }
