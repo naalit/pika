@@ -67,6 +67,19 @@ impl PreDef {
             PreDef::Expr(_) => None,
         }
     }
+    /// This picks the best span for refering to the definition
+    pub fn span(&self) -> Span {
+        match self {
+            // TODO spanned names
+            PreDef::Fun(_, _, _, t) => t.span(),
+            PreDef::Val(_, _, t) => t.span(),
+            PreDef::Type(_, _, _) => todo!("spanned names"),
+            PreDef::Impl(_, _, t) => t.span(),
+            PreDef::Expr(t) => t.span(),
+            PreDef::FunDec(_, _, t) => t.span(),
+            PreDef::ValDec(_, t) => t.span(),
+        }
+    }
 }
 
 // TODO NonZeroU32's
@@ -125,6 +138,12 @@ impl Lvl {
         );
         // If we go down `self` levels from the root, there are still this many levels between us and the binding.
         Ix(enclosing.0 - self.0)
+    }
+
+    pub fn apply_meta(self, t: Term) -> Term {
+        (0..self.0)
+            .map(|i| Term::Var(Var::Local(Ix(i))))
+            .fold(t, |f, x| Term::App(Icit::Expl, Box::new(f), Box::new(x)))
     }
 }
 
@@ -247,6 +266,8 @@ pub enum Var<Local> {
     Meta(Meta),
 }
 
+pub type Spine = Vec<(Icit, Val)>;
+
 pub type VTy = Val;
 /// A value in normal(-ish) form.
 /// Values are never behind any abstractions, since those use `Clos` to store a `Term`.
@@ -255,7 +276,7 @@ pub type VTy = Val;
 pub enum Val {
     Type,
     /// The spine are arguments applied in order. It can be empty.
-    App(Var<Lvl>, Vec<(Icit, Val)>),
+    App(Var<Lvl>, Spine),
     Lam(Icit, Clos),
     Pi(Icit, Box<VTy>, Clos),
     Fun(Box<VTy>, Box<VTy>),

@@ -30,11 +30,20 @@ impl Name {
         db.lookup_intern_name(self)
     }
 }
-intern_id!(DefId, "A reference to a definition and the context, which are interned in the Salsa database.");
-intern_id!(PreDefId, r#"A reference to a definition, but without context.
-This is needed for (mutually) recursive definitions, where context for one definition requires the others."#);
-intern_id!(Cxt, r#"The context for resolving names, represented as a linked list of definitions, with the links stored in Salsa.
-This is slower than a hashmap or flat array, but it has better incrementality."#);
+intern_id!(
+    DefId,
+    "A reference to a definition and the context, which are interned in the Salsa database."
+);
+intern_id!(
+    PreDefId,
+    r#"A reference to a definition, but without context.
+This is needed for (mutually) recursive definitions, where context for one definition requires the others."#
+);
+intern_id!(
+    Cxt,
+    r#"The context for resolving names, represented as a linked list of definitions, with the links stored in Salsa.
+This is slower than a hashmap or flat array, but it has better incrementality."#
+);
 impl Cxt {
     pub fn size<T: ?Sized + Interner>(self, db: &T) -> Lvl {
         match db.lookup_cxt_entry(self) {
@@ -105,6 +114,12 @@ impl Cxt {
     }
 }
 
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+pub enum RecSolution {
+    Defined(PreDefId, Span, Val),
+    Infered(PreDefId, Span, Val),
+}
+
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum NameResult {
     Def(DefId),
@@ -123,16 +138,23 @@ pub enum NameInfo {
 /// See `Interner::cxt_entry`.
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub struct CxtEntry {
-    name: Name,
-    info: NameInfo,
-    file: FileId,
-    size: Lvl,
-    rest: Cxt,
+    pub name: Name,
+    pub info: NameInfo,
+    pub file: FileId,
+    pub size: Lvl,
+    pub rest: Cxt,
 }
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub enum MaybeEntry {
     Yes(CxtEntry),
     No(FileId),
+}
+
+#[derive(Clone, Eq, PartialEq, Hash, Debug)]
+pub struct ElabInfo {
+    pub term: Arc<Term>,
+    pub typ: Arc<VTy>,
+    pub solved_globals: Arc<Vec<RecSolution>>,
 }
 
 #[salsa::query_group(InternerDatabase)]
@@ -175,13 +197,13 @@ pub trait Compiler: CompilerExt + Interner {
     /// Returns a list of the interned defs
     fn top_level(&self, file: FileId) -> Arc<Vec<DefId>>;
 
-    fn elaborate_def(&self, def: DefId) -> Result<(Arc<Term>, Arc<VTy>), DefError>;
+    fn elaborate_def(&self, def: DefId) -> Result<ElabInfo, DefError>;
 
     fn def_type(&self, def: DefId) -> Result<Arc<VTy>, DefError>;
 }
 
 fn def_type(db: &dyn Compiler, def: DefId) -> Result<Arc<VTy>, DefError> {
-    db.elaborate_def(def).map(|(_, ty)| ty)
+    db.elaborate_def(def).map(|ElabInfo { typ, .. }| typ)
 }
 
 fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
@@ -219,9 +241,7 @@ fn intern_block(v: Vec<PreDef>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<DefId> {
                 temp.push((name, id));
             }
             // Ordered
-            PreDef::Val(_, _, _)
-            | PreDef::Impl(_, _, _)
-            | PreDef::Expr(_) => {
+            PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) => {
                 // Process `temp` first
                 for (name, pre) in temp.drain(0..) {
                     let id = db.intern_def(pre, cxt);

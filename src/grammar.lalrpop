@@ -222,7 +222,7 @@ App: Pre_ = {
 }
 
 AppArg: (Icit, Pre_) = {
-  "[" <Expr> "]" => (Icit::Impl, todo!()),
+  "[" <Expr> "]" => (Icit::Impl, <>),
   Atom => (Icit::Expl, <>),
 }
 
@@ -231,7 +231,7 @@ Atom: Pre_ = {
   Name => if &<>.get(db) == "_" { Pre_::Hole } else { Pre_::Var(<>) },
   Num => todo!("numbers"),
   r#""[^\n"]*""# => todo!("strings"),
-  "(" <Term> ")" => todo!(),
+  "(" <Term> ")" => <>,
   "(" ")" => todo!("()"),
 }
 

@@ -54,8 +54,7 @@ pub fn inline(val: Val, db: &dyn Compiler) -> Val {
                 // TODO check if solved
                 Val::App(h, sp)
             }
-            Var::Local(_)
-            | Var::Rec(_) => Val::App(h, sp),
+            Var::Local(_) | Var::Rec(_) => Val::App(h, sp),
         },
         Val::Pi(icit, mut ty, cl) => {
             // Reuse box

@@ -4,4 +4,14 @@ val U : Type = Type
 
 fun the (x: Type) (y: x) : x = y
 
-val g : Type = the Type Type
+# We can do basic type inference now
+val g = the Type Type
+
+# Infering the argument type
+fun id_type x : Type = x
+
+# We don't inline solved metas after elaborating terms yet, so deleting the `: Type` doesn't actually work
+fun id [t: Type] (x: t) = x
+
+# We can't infer implicit args yet, but we can pass them explicitly
+val x = id [Type] Type
