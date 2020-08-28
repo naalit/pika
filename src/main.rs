@@ -12,7 +12,6 @@ use query::*;
 lalrpop_mod!(pub grammar);
 
 fn main() {
-    let mut buf = String::new();
     if let Some(file_name) = std::env::args().skip(1).next() {
         let mut file = File::open(file_name.clone()).unwrap();
         let mut buf = String::new();
@@ -24,8 +23,13 @@ fn main() {
         let id = error::FILES.write().unwrap().add(file_name, buf.clone());
         db.set_file_source(id, buf);
         db.check_all(id);
-        db.write_errors();
+        if db.num_errors() == 0 {
+            println!("File elaborated successfully!")
+        } else {
+            db.write_errors();
+        }
     } else {
+        // let mut buf = String::new();
         // loop {
         //     std::io::stdin().read_line(&mut buf).unwrap();
         //     if !buf.ends_with("\n\n") {

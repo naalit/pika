@@ -208,7 +208,7 @@ Pat: () = {
 App: Pre_ = {
   Atom,
   <f:Sp<Atom>> <args:Sp<AppArg>+> => {
-    args.into_iter().rfold(f, |f, x| {
+    args.into_iter().fold(f, |f, x| {
       let xspan = x.span();
       let span = Span(f.span().0, xspan.1);
       let (icit, x) = x.unwrap();
