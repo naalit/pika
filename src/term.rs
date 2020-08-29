@@ -215,6 +215,8 @@ impl Env {
     }
 }
 
+use crate::elaborate::MCxt;
+
 /// A closure, representing a term that's waiting for an argument to be evaluated.
 /// It's used in both lambdas and pi types.
 ///
@@ -227,34 +229,34 @@ impl Clos {
     }
 
     /// Quotes the closure back into a `Term`, but leaves it behind the lambda, so don't extract it.
-    pub fn quote(self) -> Term {
+    pub fn quote(self, mcxt: &MCxt) -> Term {
         // We only need to do eval-quote if we've captured variables, which isn't that often
-        // TODO oh wait, but metas?
+        // Otherwise, we just need to inline meta solutions
         if self.0.vals.is_empty() {
             // TODO should this return a box and reuse it?
-            *self.1
+            self.1.inline_metas(mcxt, self.0.size)
         } else {
             use crate::evaluate::{evaluate, quote};
             let Clos(mut env, t) = self;
             env.push(None);
             // `inc()` since it's wrapped in a lambda
-            quote(evaluate(*t, &env), env.size.inc())
+            quote(evaluate(*t, &env, mcxt), env.size.inc(), mcxt)
         }
     }
 
-    /// Equivalent to `self.apply(Val::local(self.env_size()))`
-    pub fn vquote(self) -> Val {
+    /// Equivalent to `self.apply(Val::local(self.env_size()), mcxt)`
+    pub fn vquote(self, mcxt: &MCxt) -> Val {
         use crate::evaluate::evaluate;
         let Clos(mut env, t) = self;
         env.push(None);
-        evaluate(*t, &env)
+        evaluate(*t, &env, mcxt)
     }
 
-    pub fn apply(self, arg: Val) -> Val {
+    pub fn apply(self, arg: Val, mcxt: &MCxt) -> Val {
         use crate::evaluate::evaluate;
         let Clos(mut env, t) = self;
         env.push(Some(arg));
-        evaluate(*t, &env)
+        evaluate(*t, &env, mcxt)
     }
 }
 

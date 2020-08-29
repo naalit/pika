@@ -119,6 +119,19 @@ pub enum RecSolution {
     Defined(PreDefId, Span, Val),
     Infered(PreDefId, Span, Val),
 }
+impl RecSolution {
+    pub fn id(&self) -> PreDefId {
+        match self {
+            RecSolution::Defined(id, _, _) | RecSolution::Infered(id, _, _) => *id,
+        }
+    }
+
+    pub fn val(&self) -> &Val {
+        match self {
+            RecSolution::Defined(_, _, v) | RecSolution::Infered(_, _, v) => v,
+        }
+    }
+}
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum NameResult {

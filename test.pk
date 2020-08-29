@@ -10,8 +10,8 @@ val g = the Type Type
 # Infering the argument type
 fun id_type x : Type = x
 
-# We don't inline solved metas after elaborating terms yet, so deleting the `: Type` doesn't actually work
-fun id [t: Type] (x: t) = x
+# We can now infer the type of this implicit argument
+fun id [t] (x: t) = x
 
 # Implicit parameters are passed implicitly
 val x = id Type
