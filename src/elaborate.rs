@@ -1,5 +1,6 @@
 use crate::error::*;
 use crate::evaluate::*;
+use crate::pretty::*;
 use crate::query::*;
 use crate::term::*;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetaEntry {
     Solved(Val, Span),
-    Unsolved(Option<Name>, Span),
+    Unsolved(Option<Name>, Span, MetaSource),
 }
 
 use std::collections::HashMap;
@@ -117,7 +118,7 @@ impl MCxt {
                 assert_eq!(def, self.def, "local meta escaped its definition!");
                 match &self.local_metas[num as usize] {
                     MetaEntry::Solved(v, _) => Some(v.clone()),
-                    MetaEntry::Unsolved(_, _) => None,
+                    MetaEntry::Unsolved(_, _, _) => None,
                 }
             }
         }
@@ -193,7 +194,7 @@ impl MCxt {
         Ok(())
     }
 
-    pub fn new_meta(&mut self, name: Option<Name>, span: Span) -> Term {
+    pub fn new_meta(&mut self, name: Option<Name>, span: Span, source: MetaSource) -> Term {
         use std::convert::TryInto;
 
         let meta = Meta::Local(
@@ -203,7 +204,8 @@ impl MCxt {
                 .try_into()
                 .expect("Only 65535 metas allowed per definition"),
         );
-        self.local_metas.push(MetaEntry::Unsolved(name, span));
+        self.local_metas
+            .push(MetaEntry::Unsolved(name, span, source));
 
         // Apply it to all the bound variables in scope
         self.size.apply_meta(Term::Var(Var::Meta(meta)))
@@ -213,15 +215,14 @@ impl MCxt {
     /// If some aren't, it reports errors to `db` and returns Err(()).
     pub fn check_locals(&mut self, db: &dyn Compiler) -> Result<(), ()> {
         let mut ret = Ok(());
-        for entry in &self.local_metas {
+        for (i, entry) in self.local_metas.iter().enumerate() {
             match entry {
                 MetaEntry::Solved(_, _) => (),
-                MetaEntry::Unsolved(name, span) => {
-                    // TODO better meta formatting
-                    let name = name.map_or("?hole".to_string(), |x| x.get(db));
+                MetaEntry::Unsolved(name, span, _) => {
                     db.report_error(Error::new(
                         self.cxt.file(db),
-                        format!("Could not find solution for metavariable '{}'", name),
+                        Doc::start("Could not find solution for ")
+                            .chain(Meta::Local(self.def, i as u16).pretty(self, db)),
                         *span,
                         "introduced here",
                     ));
@@ -230,6 +231,35 @@ impl MCxt {
             }
         }
         ret
+    }
+}
+impl Meta {
+    fn pretty(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
+        match self {
+            Meta::Type(id) => match &*db.lookup_intern_predef(id) {
+                PreDef::Fun(n, _, _, _) => Doc::start("type of function ").add(n.get(db)),
+                PreDef::Val(n, _, _) => Doc::start("type of definition ").add(n.get(db)),
+                PreDef::Type(n, _, _) => Doc::start("type of data type ").add(n.get(db)),
+                PreDef::Impl(Some(n), _, _) => Doc::start("type of implicit ").add(n.get(db)),
+                PreDef::Impl(None, _, _) => Doc::start("type of implicit"),
+                PreDef::Expr(_) => Doc::start("type of expression"),
+                PreDef::FunDec(n, _, _) => {
+                    Doc::start("type of function declaration ").add(n.get(db))
+                }
+                PreDef::ValDec(n, _) => Doc::start("type of declaration ").add(n.get(db)),
+            },
+            Meta::Local(_, n) => match &mcxt.local_metas[n as usize] {
+                MetaEntry::Solved(_, _) => panic!("meta already solved"),
+                MetaEntry::Unsolved(_, _, source) => match source {
+                    MetaSource::ImplicitParam(n) => {
+                        Doc::start("implicit parameter ").add(n.get(db))
+                    }
+                    MetaSource::LocalType(n) => Doc::start("type of ").add(n.get(db)),
+                    MetaSource::Hole => Doc::start("hole"),
+                    MetaSource::HoleType => Doc::start("type of hole"),
+                },
+            },
+        }
     }
 }
 
@@ -376,11 +406,10 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
     }
 }
 
-use crate::pretty::*;
-
 impl Val {
     fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
-        quote(self.clone(), mcxt.size, mcxt).pretty(db, &mut Names::new(mcxt.cxt, db))
+        quote(self.clone().inline_metas(mcxt), mcxt.size, mcxt)
+            .pretty(db, &mut Names::new(mcxt.cxt, db))
     }
 }
 
@@ -393,7 +422,7 @@ pub enum TypeError {
     MetaOccurs(Span, Meta),
 }
 impl TypeError {
-    fn to_error(self, file: FileId, db: &dyn Compiler, _mcxt: &MCxt) -> Error {
+    fn to_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
         match self {
             TypeError::NotFound(n) => Error::new(
                 file,
@@ -424,17 +453,19 @@ impl TypeError {
             // TODO show metas nicer
             TypeError::MetaScope(s, m, n) => Error::new(
                 file,
-                format!(
-                    "Solution for meta {:?} requires variable {}, which is not in the meta's scope",
-                    m,
-                    n.get(db)
-                ),
+                Doc::start("Solution for ")
+                    .chain(m.pretty(mcxt, db))
+                    .add(" requires variable ")
+                    .add(n.get(db))
+                    .add(", which is not in its scope"),
                 s,
                 format!("solution found here"),
             ),
             TypeError::MetaOccurs(s, m) => Error::new(
                 file,
-                format!("Solution for meta {:?} would be recursive", m),
+                Doc::start("Solution for ")
+                    .chain(m.pretty(mcxt, db))
+                    .add(" would be recursive"),
                 s,
                 format!("solution found here"),
             ),
@@ -657,7 +688,7 @@ fn insert_metas(insert: bool, term: Term, ty: VTy, span: Span, mcxt: &mut MCxt) 
     match ty {
         Val::Pi(Icit::Impl, arg, cl) if insert => {
             // TODO get the name here
-            let meta = mcxt.new_meta(None, span);
+            let meta = mcxt.new_meta(None, span, MetaSource::ImplicitParam(cl.2));
             let vmeta = evaluate(meta.clone(), &mcxt.env(), mcxt);
             let ret = cl.apply(vmeta, mcxt);
             insert_metas(
@@ -773,9 +804,13 @@ pub fn infer(
         }
         Pre_::Do(_) => todo!("elaborate do"),
         Pre_::Struct(_) => todo!("elaborate struct"),
-        Pre_::Hole => Ok((
-            mcxt.new_meta(None, pre.span()),
-            evaluate(mcxt.new_meta(None, pre.span()), &mcxt.env(), mcxt),
+        Pre_::Hole(source) => Ok((
+            mcxt.new_meta(None, pre.span(), *source),
+            evaluate(
+                mcxt.new_meta(None, pre.span(), MetaSource::HoleType),
+                &mcxt.env(),
+                mcxt,
+            ),
         )),
     }
 }
@@ -794,13 +829,14 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                     (**ty2).clone(),
                 ));
             }
-            // unify(vty.clone(), (**ty2).clone(), pre.span(), db, mcxt)?;
-            if mcxt.size != cl.env_size() {
-                eprintln!("Warning: {:?} vs {:?}", mcxt.size, cl.env_size())
-            }
             mcxt.define(*n, NameInfo::Local(vty), db);
             // TODO not clone ??
-            let body = check(body, &cl.clone().vquote(mcxt), db, mcxt)?;
+            let body = check(
+                body,
+                &cl.clone().apply(Val::local(mcxt.size), mcxt),
+                db,
+                mcxt,
+            )?;
             mcxt.undef(db);
             Ok(Term::Lam(*n, *i, Box::new(body)))
         }
@@ -815,7 +851,6 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                     (**ty2).clone(),
                 ));
             }
-            //unify(vty.clone(), (**ty2).clone(), pre.span(), db, mcxt)?;
             mcxt.define(*n, NameInfo::Local(vty), db);
             let body = check(body, &*body_ty, db, mcxt)?;
             mcxt.undef(db);
@@ -840,7 +875,6 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                     ty.clone(),
                 ));
             }
-            unify(ty.clone(), i_ty, pre.span(), db, mcxt)?;
             Ok(term)
         }
     }

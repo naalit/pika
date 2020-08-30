@@ -10,6 +10,14 @@ use crate::query::*;
 
 pub use std::collections::VecDeque;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+pub enum MetaSource {
+    ImplicitParam(Name),
+    LocalType(Name),
+    Hole,
+    HoleType,
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Icit {
     Impl,
@@ -35,7 +43,7 @@ pub enum Pre_ {
     App(Icit, Pre, Pre),
     Do(Vec<PreDef>),
     Struct(Vec<PreDef>),
-    Hole,
+    Hole(MetaSource),
 }
 
 /// The return type of a constructor is optional even here, since the behaviour is different.

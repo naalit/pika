@@ -27,13 +27,13 @@ pub Def: PreDef = {
   // -- definitions --
 
   "fun" <name:Sp<Name>> <args:Args> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
-    let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole));
+    let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Fun(name.unwrap(), args, ty, val)
   },
   // You can have a function with an effect type but not a return type
   "fun" Sp<Name> Args (":" App)? ("with" Term) "=" Term => todo!("effects"),
   "val" <name:Sp<Name>> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
-    let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole));
+    let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Val(name.unwrap(), ty, val)
   },
   "type" <name:Name> <args:Args> "of" <cons:Block<Cons>> => {
@@ -75,7 +75,7 @@ PiArgs: Vec<(Name, Icit, PreTy)> = {
 
 // ArgGroup is also used in Pi, where a bare name isn't allowed.
 ArgGroupN: (Vec<Name>, Icit, PreTy) = {
-  <l:@L> <n:Name> <r:@R> => (vec![n], Icit::Expl, Spanned::new(Pre_::Hole, Span(l, r))),
+  <l:@L> <n:Name> <r:@R> => (vec![n], Icit::Expl, Spanned::new(Pre_::Hole(MetaSource::LocalType(n)), Span(l, r))),
   ArgGroup,
 }
 
@@ -87,7 +87,8 @@ ArgGroup: (Vec<Name>, Icit, PreTy) = {
 }
 
 ImpArg: (Vec<Name>, PreTy) = {
-  <l:@L> "[" <n:Name+> "]" <r:@R> => (n, Spanned::new(Pre_::Hole, Span(l, r))),
+  // TODO let these arguments have different types
+  <l:@L> "[" <n:Name+> "]" <r:@R> => { let name = n[0]; (n, Spanned::new(Pre_::Hole(MetaSource::LocalType(name)), Span(l, r))) },
   "[" <n:Name+> ":" <ty:Sp<Expr>> "]" => (n, ty),
   "[" ":" <ty:Sp<Expr>> "]" => (vec![db.intern_name("_".to_string())], ty),
 }
@@ -228,7 +229,7 @@ AppArg: (Icit, Pre_) = {
 
 Atom: Pre_ = {
   "Type" => Pre_::Type,
-  Name => if &<>.get(db) == "_" { Pre_::Hole } else { Pre_::Var(<>) },
+  Name => if &<>.get(db) == "_" { Pre_::Hole(MetaSource::Hole) } else { Pre_::Var(<>) },
   Num => todo!("numbers"),
   r#""[^\n"]*""# => todo!("strings"),
   "(" <Term> ")" => <>,
