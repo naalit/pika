@@ -14,10 +14,10 @@ pub fn evaluate(term: Term, env: &Env, mcxt: &MCxt) -> Val {
             Some(v) => v,
             None => Val::meta(meta),
         },
-        Term::Lam(icit, body) => Val::Lam(icit, Clos(Box::new(env.clone()), body)),
-        Term::Pi(icit, ty, body) => {
+        Term::Lam(n, icit, body) => Val::Lam(icit, Clos(Box::new(env.clone()), body, n)),
+        Term::Pi(n, icit, ty, body) => {
             let ty = evaluate(*ty, env, mcxt);
-            Val::Pi(icit, Box::new(ty), Clos(Box::new(env.clone()), body))
+            Val::Pi(icit, Box::new(ty), Clos(Box::new(env.clone()), body, n))
         }
         Term::Fun(from, to) => {
             let from = evaluate(*from, env, mcxt);
@@ -47,25 +47,35 @@ impl Val {
     }
 }
 
-pub fn inline(val: Val, db: &dyn Compiler) -> Val {
+pub fn inline(val: Val, db: &dyn Compiler, mcxt: &MCxt) -> Val {
     match val {
-        Val::App(h, sp) => match h {
-            Var::Top(def) => todo!("evaluate in db"),
-            Var::Meta(meta) => {
-                // TODO check if solved
-                Val::App(h, sp)
-            }
-            Var::Local(_) | Var::Rec(_) => Val::App(h, sp),
-        },
+        Val::App(h, sp) => {
+            let f = match h {
+                // TODO can we move the evaluation to Salsa, so it's memoized?
+                Var::Top(def) => db.elaborate_def(def).map_or(Val::Error, |i| {
+                    evaluate((*i.term).clone(), &mcxt.env(), mcxt)
+                }),
+                Var::Meta(meta) => match mcxt.get_meta(meta) {
+                    Some(v) => v,
+                    None => return Val::App(h, sp),
+                },
+                Var::Local(_) | Var::Rec(_) => return Val::App(h, sp),
+            };
+            inline(
+                sp.into_iter().fold(f, |f, (i, x)| f.app(i, x, mcxt)),
+                db,
+                mcxt,
+            )
+        }
         Val::Pi(icit, mut ty, cl) => {
             // Reuse box
-            *ty = inline(*ty, db);
+            *ty = inline(*ty, db, mcxt);
             Val::Pi(icit, ty, cl)
         }
         Val::Fun(mut from, mut to) => {
             // Reuse boxes
-            *from = inline(*from, db);
-            *to = inline(*to, db);
+            *from = inline(*from, db, mcxt);
+            *to = inline(*to, db, mcxt);
             Val::Fun(from, to)
         }
         v @ Val::Error | v @ Val::Lam(_, _) | v @ Val::Type => v,
@@ -86,8 +96,9 @@ pub fn quote(val: Val, enclosing: Lvl, mcxt: &MCxt) -> Term {
                 Term::App(icit, Box::new(f), Box::new(quote(x, enclosing, mcxt)))
             })
         }
-        Val::Lam(icit, cl) => Term::Lam(icit, Box::new(cl.quote(mcxt))),
+        Val::Lam(icit, cl) => Term::Lam(cl.2, icit, Box::new(cl.quote(mcxt))),
         Val::Pi(icit, ty, cl) => Term::Pi(
+            cl.2,
             icit,
             Box::new(quote(*ty, enclosing, mcxt)),
             Box::new(cl.quote(mcxt)),

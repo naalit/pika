@@ -38,7 +38,7 @@ fun square x = x * x
 # We don't have let-in, we use do-end which works like a Rust block.
 fun fact i = do
   # We can define locals, functions, datatypes, etc. in here.
-  fun go i acc = if i == 1
+  fun go i acc = if i <= 1
     then acc
     else go (i - 1) (i * acc)
 

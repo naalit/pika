@@ -12,6 +12,7 @@ regex = "1"
 salsa = "*"
 codespan-reporting = "*"
 lazy_static = "*"
+pretty = { version = "*", features = ["termcolor"] }
 
 [build-dependencies]
 lalrpop = { version = "*", features = ["lexer"] }

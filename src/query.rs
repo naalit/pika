@@ -100,11 +100,15 @@ impl Cxt {
             MaybeEntry::Yes(CxtEntry { file, size, .. }) => (file, size),
             MaybeEntry::No(file) => (file, Lvl::zero()),
         };
+        let next_size = match &info {
+            NameInfo::Local(_) => size.inc(),
+            _ => size,
+        };
         db.cxt_entry(MaybeEntry::Yes(CxtEntry {
             name,
             info,
             file,
-            size: size.inc(),
+            size: next_size,
             rest: self,
         }))
     }

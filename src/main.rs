@@ -5,6 +5,7 @@ use std::io::{BufRead, Read};
 pub mod elaborate;
 pub mod error;
 pub mod evaluate;
+pub mod pretty;
 pub mod query;
 pub mod term;
 use query::*;
