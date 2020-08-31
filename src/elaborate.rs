@@ -21,16 +21,20 @@ impl Term {
         self,
         meta: Spanned<Meta>,
         ren: &mut Rename,
-        enclosing: Lvl,
+        lfrom: Lvl,
+        lto: Lvl,
         names: &mut Names,
     ) -> Result<Term, TypeError> {
         match self {
             Term::Var(v) => match v {
                 Var::Meta(m) if m == *meta => Err(TypeError::MetaOccurs(meta.span(), *meta)),
                 // We store the renamings as levels and go between here, since indices change inside lambdas but levels don't.
-                Var::Local(ix) => match ren.get(&ix.to_lvl(enclosing)) {
-                    Some(lvl) => Ok(Term::Var(Var::Local(lvl.to_ix(enclosing)))),
-                    None => Err(TypeError::MetaScope(meta.span(), *meta, names.get(ix))),
+                Var::Local(ix) => match ren.get(&ix.to_lvl(lfrom)) {
+                    Some(lvl) => Ok(Term::Var(Var::Local(lvl.to_ix(lto)))),
+                    None => {
+                        println!("wrong {:?} = {:?}", ix, ix.to_lvl(lfrom));
+                        Err(TypeError::MetaScope(meta.span(), *meta, names.get(ix)))
+                    }
                 },
                 // The type of something can't depend on its own value
                 // TODO a different error for this case? Is this even possible?
@@ -46,28 +50,26 @@ impl Term {
                 v => Ok(Term::Var(v)),
             },
             Term::Lam(n, i, mut t) => {
-                let new_lvl = enclosing.inc();
                 // Allow the body to use the bound variable
-                ren.insert(new_lvl, new_lvl);
-                *t = t.check_solution(meta, ren, new_lvl, names.add(n))?;
+                ren.insert(lfrom.inc(), lto.inc());
+                *t = t.check_solution(meta, ren, lfrom.inc(), lto.inc(), names.add(n))?;
                 Ok(Term::Lam(n, i, t))
             }
             Term::Pi(n, i, mut a, mut b) => {
-                *a = a.check_solution(meta.clone(), ren, enclosing, names)?;
-                let new_lvl = enclosing.inc();
+                *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
                 // Allow the body to use the bound variable
-                ren.insert(new_lvl, new_lvl);
-                *b = b.check_solution(meta, ren, new_lvl, names.add(n))?;
+                ren.insert(lfrom.inc(), lto.inc());
+                *b = b.check_solution(meta, ren, lfrom.inc(), lto.inc(), names.add(n))?;
                 Ok(Term::Pi(n, i, a, b))
             }
             Term::Fun(mut a, mut b) => {
-                *a = a.check_solution(meta.clone(), ren, enclosing, names)?;
-                *b = b.check_solution(meta, ren, enclosing, names)?;
+                *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
+                *b = b.check_solution(meta, ren, lfrom, lto, names)?;
                 Ok(Term::Fun(a, b))
             }
             Term::App(i, mut a, mut b) => {
-                *a = a.check_solution(meta.clone(), ren, enclosing, names)?;
-                *b = b.check_solution(meta, ren, enclosing, names)?;
+                *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
+                *b = b.check_solution(meta, ren, lfrom, lto, names)?;
                 Ok(Term::App(i, a, b))
             }
             Term::Error => Ok(Term::Error),
@@ -161,12 +163,13 @@ impl MCxt {
                 _ => panic!("Compiler error: meta spine contains non-variable"),
             })
             .collect();
-        // We need to pass it the level it *will* be at after we wrap it in lambdas
+        let term = quote(val, self.size, &self);
+        // The level it will be at after we wrap it in lambdas
         let to_lvl = (0..spine.len()).fold(self.size, |x, _| x.inc());
-        let term = quote(val, to_lvl, &self);
         let term = term.check_solution(
             Spanned::new(meta, span),
             &mut meta_scope,
+            self.size,
             to_lvl,
             &mut Names::new(self.cxt, db),
         )?;
@@ -859,7 +862,13 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
 
         // We implicitly insert lambdas so `\x.x : [a] -> a -> a` typechecks
         (_, Val::Pi(Icit::Impl, ty, cl)) => {
-            mcxt.define(cl.2, NameInfo::Local((**ty).clone()), db);
+            // Add a ' after the name so it doesn't shadow names the term defined
+            let name = {
+                let mut s = cl.2.get(db);
+                s.push('\'');
+                db.intern_name(s)
+            };
+            mcxt.define(name, NameInfo::Local((**ty).clone()), db);
             let body = check(pre, &cl.clone().vquote(mcxt), db, mcxt)?;
             mcxt.undef(db);
             Ok(Term::Lam(cl.2, Icit::Impl, Box::new(body)))

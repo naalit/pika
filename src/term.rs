@@ -370,8 +370,8 @@ impl Clos {
             use crate::evaluate::{evaluate, quote};
             let Clos(mut env, t, _) = self;
             env.push(None);
-            // `inc()` since it's wrapped in a lambda
-            quote(evaluate(*t, &env, mcxt), env.size.inc(), mcxt)
+            // No `inc` since we pushed to it (and increased the size) already
+            quote(evaluate(*t, &env, mcxt), env.size, mcxt)
         }
     }
 
