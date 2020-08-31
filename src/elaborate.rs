@@ -687,7 +687,14 @@ pub fn unify(
     }
 }
 
-fn insert_metas(insert: bool, term: Term, ty: VTy, span: Span, mcxt: &mut MCxt) -> (Term, VTy) {
+fn insert_metas(
+    insert: bool,
+    term: Term,
+    ty: VTy,
+    span: Span,
+    mcxt: &mut MCxt,
+    db: &dyn Compiler,
+) -> (Term, VTy) {
     match ty {
         Val::Pi(Icit::Impl, arg, cl) if insert => {
             // TODO get the name here
@@ -700,7 +707,15 @@ fn insert_metas(insert: bool, term: Term, ty: VTy, span: Span, mcxt: &mut MCxt) 
                 ret,
                 span,
                 mcxt,
+                db,
             )
+        }
+        Val::App(v, sp) => {
+            match inline(Val::App(v, sp), db, mcxt) {
+                // Avoid infinite recursion
+                Val::App(v2, sp) if v2 == v => (term, Val::App(v2, sp)),
+                ty => insert_metas(insert, term, ty, span, mcxt, db),
+            }
         }
         ty => (term, ty),
     }
@@ -718,8 +733,7 @@ pub fn infer(
             let (term, ty) = match mcxt.lookup(*name, db) {
                 Some(NameResult::Def(def)) => {
                     match db.def_type(def) {
-                        // TODO put back
-                        Ok(ty) => Ok((Term::Var(Var::Top(def)), inline((*ty).clone(), db, mcxt))),
+                        Ok(ty) => Ok((Term::Var(Var::Top(def)), (*ty).clone())),
                         // If something else had a type error, try to keep going anyway and maybe catch more
                         Err(DefError::ElabError) => Ok((
                             Term::Error,
@@ -734,7 +748,7 @@ pub fn infer(
                 Some(NameResult::Local(ix, ty)) => Ok((Term::Var(Var::Local(ix)), ty)),
                 None => Err(TypeError::NotFound(pre.copy_span(*name))),
             }?;
-            Ok(insert_metas(insert, term, ty, pre.span(), mcxt))
+            Ok(insert_metas(insert, term, ty, pre.span(), mcxt, db))
         }
         Pre_::Lam(name, icit, ty, body) => {
             let ty = check(ty, &Val::Type, db, mcxt)?;
@@ -779,7 +793,6 @@ pub fn infer(
             let fspan = f.span();
             // Don't insert metas in `f` if we're passing an implicit argument
             let (f, fty) = infer(*icit == Icit::Expl, f, db, mcxt)?;
-            let fty = inline(fty, db, mcxt);
 
             let (term, ty) = match fty {
                 Val::Pi(icit2, from, cl) => {
@@ -803,7 +816,7 @@ pub fn infer(
                     ))
                 }
             }?;
-            Ok(insert_metas(insert, term, ty, pre.span(), mcxt))
+            Ok(insert_metas(insert, term, ty, pre.span(), mcxt, db))
         }
         Pre_::Do(_) => todo!("elaborate do"),
         Pre_::Struct(_) => todo!("elaborate struct"),
