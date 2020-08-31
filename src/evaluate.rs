@@ -96,12 +96,12 @@ pub fn quote(val: Val, enclosing: Lvl, mcxt: &MCxt) -> Term {
                 Term::App(icit, Box::new(f), Box::new(quote(x, enclosing, mcxt)))
             })
         }
-        Val::Lam(icit, cl) => Term::Lam(cl.2, icit, Box::new(cl.quote(mcxt))),
+        Val::Lam(icit, cl) => Term::Lam(cl.2, icit, Box::new(cl.quote(enclosing, mcxt))),
         Val::Pi(icit, ty, cl) => Term::Pi(
             cl.2,
             icit,
             Box::new(quote(*ty, enclosing, mcxt)),
-            Box::new(cl.quote(mcxt)),
+            Box::new(cl.quote(enclosing, mcxt)),
         ),
         Val::Fun(from, to) => Term::Fun(
             Box::new(quote(*from, enclosing, mcxt)),

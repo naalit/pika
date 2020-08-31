@@ -360,18 +360,18 @@ impl Clos {
     }
 
     /// Quotes the closure back into a `Term`, but leaves it behind the lambda, so don't extract it.
-    pub fn quote(self, mcxt: &MCxt) -> Term {
+    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt) -> Term {
         // We only need to do eval-quote if we've captured variables, which isn't that often
         // Otherwise, we just need to inline meta solutions
+        // TODO is this still true?
         if self.0.vals.is_empty() {
             // TODO should this return a box and reuse it?
             self.1.inline_metas(mcxt, self.0.size)
         } else {
             use crate::evaluate::{evaluate, quote};
             let Clos(mut env, t, _) = self;
-            env.push(None);
-            // No `inc` since we pushed to it (and increased the size) already
-            quote(evaluate(*t, &env, mcxt), env.size, mcxt)
+            env.push(Some(Val::local(enclosing.inc())));
+            quote(evaluate(*t, &env, mcxt), enclosing.inc(), mcxt)
         }
     }
 
