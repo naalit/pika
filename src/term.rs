@@ -375,11 +375,11 @@ impl Clos {
         }
     }
 
-    /// Equivalent to `self.apply(Val::local(self.env_size()), mcxt)`
-    pub fn vquote(self, mcxt: &MCxt) -> Val {
+    /// Equivalent to `self.apply(Val::local(l), mcxt)`
+    pub fn vquote(self, l: Lvl, mcxt: &MCxt) -> Val {
         use crate::evaluate::evaluate;
         let Clos(mut env, t, _) = self;
-        env.push(None);
+        env.push(Some(Val::local(l)));
         evaluate(*t, &env, mcxt)
     }
 

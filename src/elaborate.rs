@@ -574,6 +574,7 @@ impl Val {
 fn p_unify(
     a: Val,
     b: Val,
+    l: Lvl,
     span: Span,
     db: &dyn Compiler,
     mcxt: &mut MCxt,
@@ -586,37 +587,41 @@ fn p_unify(
             let mut r = Yes;
             for ((i, a), (i2, b)) in v.into_iter().zip(v2.into_iter()) {
                 assert_eq!(i, i2);
-                r = r & p_unify(a, b, span, db, mcxt)?;
+                r = r & p_unify(a, b, l, span, db, mcxt)?;
             }
             r
         }
 
         // Since our terms are locally nameless (we're using De Bruijn levels), we automatically get alpha equivalence.
         // Also, we call `unify` instead of `p_unify` here so we can `inline()` the values we're creating here if necessary.
-        (Val::Lam(_, cl), Val::Lam(_, cl2)) => {
-            unify(cl.vquote(mcxt), cl2.vquote(mcxt), span, db, mcxt)?.into()
-        }
+        (Val::Lam(_, cl), Val::Lam(_, cl2)) => unify(
+            cl.vquote(l, mcxt),
+            cl2.vquote(l, mcxt),
+            l.inc(),
+            span,
+            db,
+            mcxt,
+        )?
+        .into(),
 
         // If one side is a lambda, the other side just needs to unify to the same thing when we apply it to the same thing
-        (Val::Lam(icit, cl), t) | (t, Val::Lam(icit, cl)) => {
-            let var = Val::local(cl.env_size());
-            unify(
-                cl.apply(var.clone(), mcxt),
-                t.app(icit, var, mcxt),
-                span,
-                db,
-                mcxt,
-            )?
-            .into()
-        }
+        (Val::Lam(icit, cl), t) | (t, Val::Lam(icit, cl)) => unify(
+            cl.vquote(l, mcxt),
+            t.app(icit, Val::local(l), mcxt),
+            l.inc(),
+            span,
+            db,
+            mcxt,
+        )?
+        .into(),
 
         (Val::Pi(i, ty, cl), Val::Pi(i2, ty2, cl2)) if i == i2 => {
-            // Make sure we're applying them to the same thing
-            let var = Val::local(cl.env_size().max(cl2.env_size()));
-            p_unify(*ty, *ty2, span, db, mcxt)?
+            p_unify(*ty, *ty2, l, span, db, mcxt)?
+                // Applying both to the same thing (Local(l))
                 & unify(
-                    cl.apply(var.clone(), mcxt),
-                    cl2.apply(var, mcxt),
+                    cl.vquote(l, mcxt),
+                    cl2.vquote(l, mcxt),
+                    l.inc(),
                     span,
                     db,
                     mcxt,
@@ -625,10 +630,11 @@ fn p_unify(
         (Val::Pi(Icit::Expl, ty, cl), Val::Fun(from, to))
         | (Val::Fun(from, to), Val::Pi(Icit::Expl, ty, cl)) => {
             // TODO: I'm not 100% this is right
-            p_unify(*ty, *from, span, db, mcxt)? & unify(cl.vquote(mcxt), *to, span, db, mcxt)?
+            p_unify(*ty, *from, l, span, db, mcxt)?
+                & unify(cl.vquote(l, mcxt), *to, l.inc(), span, db, mcxt)?
         }
         (Val::Fun(a, b), Val::Fun(a2, b2)) => {
-            p_unify(*a, *a2, span, db, mcxt)? & p_unify(*b, *b2, span, db, mcxt)?
+            p_unify(*a, *a2, l, span, db, mcxt)? & p_unify(*b, *b2, l, span, db, mcxt)?
         }
 
         // Solve metas
@@ -637,6 +643,7 @@ fn p_unify(
         (Val::App(Var::Meta(m), s), Val::App(Var::Meta(m2), s2)) if m2 > m => p_unify(
             Val::App(Var::Meta(m2), s2),
             Val::App(Var::Meta(m), s),
+            l,
             span,
             db,
             mcxt,
@@ -648,7 +655,7 @@ fn p_unify(
                     // println!("Meta solution = {}", v.pretty(db, mcxt).ansi_string());
                     let v = sp.into_iter().fold(v, |f, (i, x)| f.app(i, x, mcxt));
                     // println!("Applied = {}", v.pretty(db, mcxt).ansi_string());
-                    unify(v, t, span, db, mcxt)?.into()
+                    unify(v, t, l, span, db, mcxt)?.into()
                 }
                 None => {
                     mcxt.solve(span, m, &sp, t, db)?;
@@ -669,16 +676,18 @@ fn p_unify(
 pub fn unify(
     a: Val,
     b: Val,
+    l: Lvl,
     span: Span,
     db: &dyn Compiler,
     mcxt: &mut MCxt,
 ) -> Result<bool, TypeError> {
-    match p_unify(a.clone(), b.clone(), span, db, mcxt)? {
+    match p_unify(a.clone(), b.clone(), l, span, db, mcxt)? {
         Yes => Ok(true),
         No => Ok(false),
         Maybe => Ok(p_unify(
             inline(a.clone(), db, mcxt),
             inline(b.clone(), db, mcxt),
+            l,
             span,
             db,
             mcxt,
@@ -838,7 +847,14 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
         (Pre_::Lam(n, i, ty, body), Val::Pi(i2, ty2, cl)) if i == i2 => {
             let vty = check(ty, &Val::Type, db, mcxt)?;
             let vty = evaluate(vty, &mcxt.env(), mcxt);
-            if !unify(vty.clone(), (**ty2).clone(), pre.span(), db, mcxt)? {
+            if !unify(
+                vty.clone(),
+                (**ty2).clone(),
+                mcxt.size,
+                pre.span(),
+                db,
+                mcxt,
+            )? {
                 return Err(TypeError::Unify(
                     mcxt.clone(),
                     ty.copy_span(vty),
@@ -860,7 +876,14 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
         (Pre_::Lam(n, Icit::Expl, ty, body), Val::Fun(ty2, body_ty)) => {
             let vty = check(ty, &Val::Type, db, mcxt)?;
             let vty = evaluate(vty, &mcxt.env(), mcxt);
-            if !unify(vty.clone(), (**ty2).clone(), pre.span(), db, mcxt)? {
+            if !unify(
+                vty.clone(),
+                (**ty2).clone(),
+                mcxt.size,
+                pre.span(),
+                db,
+                mcxt,
+            )? {
                 return Err(TypeError::Unify(
                     mcxt.clone(),
                     ty.copy_span(vty),
@@ -882,7 +905,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                 db.intern_name(s)
             };
             mcxt.define(name, NameInfo::Local((**ty).clone()), db);
-            let body = check(pre, &cl.clone().vquote(mcxt), db, mcxt)?;
+            let body = check(pre, &cl.clone().vquote(mcxt.size, mcxt), db, mcxt)?;
             mcxt.undef(db);
             Ok(Term::Lam(cl.2, Icit::Impl, Box::new(body)))
         }
@@ -890,7 +913,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
         _ => {
             let (term, i_ty) = infer(true, pre, db, mcxt)?;
             // TODO should we take `ty` by value?
-            if !unify(ty.clone(), i_ty.clone(), pre.span(), db, mcxt)? {
+            if !unify(ty.clone(), i_ty.clone(), mcxt.size, pre.span(), db, mcxt)? {
                 return Err(TypeError::Unify(
                     mcxt.clone(),
                     pre.copy_span(i_ty),
