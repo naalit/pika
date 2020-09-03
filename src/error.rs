@@ -230,7 +230,7 @@ impl fmt::Display for Alternatives {
     }
 }
 
-impl<L: std::fmt::Display, U: Into<String>> ToError for ParseError<usize, L, Spanned<U>> {
+impl<L: std::fmt::Display, U: ToString> ToError for ParseError<usize, L, Spanned<U>> {
     fn to_error(self, file: FileId) -> Error {
         let (message, span) = match self {
             ParseError::InvalidToken { location } => {
@@ -255,7 +255,7 @@ impl<L: std::fmt::Display, U: Into<String>> ToError for ParseError<usize, L, Spa
             ),
             ParseError::User { error } => {
                 let span = error.span();
-                (error.unwrap().into(), span)
+                (error.unwrap().to_string(), span)
             }
         };
         Error::new(file, format!("Parse error: {}", message), span, message)

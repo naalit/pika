@@ -49,22 +49,29 @@ val Bool = (B : Type) -> B -> B -> B
 val true  : Bool = \ _ t f. t
 val false : Bool = \ _ t f. f
 
-val and : Bool -> Bool -> Bool = \ b1 b2. b1 Bool true b2
+# 'and' is a reserved word in Pika
+val and2 : Bool -> Bool -> Bool
+  = \ b1 b2. b1 Bool true b2
 
 # Church natural numbers
 # --------------------------------------------------------------------------------
-val Nat : Type = (n : Type) -> (n -> n) -> n -> n
+val Nat : Type
+  = (n : Type) -> (n -> n) -> n -> n
 
-val zero : Nat = \ n s z. z
+val zero : Nat
+  = \ n s z. z
 
-val suc : Nat -> Nat = \ a n s z. s (a n s z)
+val suc : Nat -> Nat
+  = \ a n s z. s (a n s z)
 
 val n2 : Nat = \ n s z. s (s z)
 val n5 : Nat = \ n s z. s (s (s (s (s z))))
 
-val mul : Nat -> Nat -> Nat = \ a b n s z. a n (b n s) z
+val mul : Nat -> Nat -> Nat
+  = \ a b n s z. a n (b n s) z
 
-val add : Nat -> Nat -> Nat = \ a b n s z. a n s (b n s z)
+val add : Nat -> Nat -> Nat
+  = \ a b n s z. a n s (b n s z)
 
 val n10    = mul n2    n5
 val n10b   = mul n5    n2
@@ -89,15 +96,19 @@ val lcons : [a] -> a -> List a -> List a = \ a as l c n. c a (as l c n)
 
 val list1 = lcons true (lcons false (lcons false lnil))
 
-val map : [a b] -> (a -> b) -> List a -> List b = \ f as l c. as l (\ a. c (f a))
+val map : [a b] -> (a -> b) -> List a -> List b
+  = \ f as l c. as l (\ a. c (f a))
 
 # Church vectors
 # --------------------------------------------------------------------------------
-val Vec : Type -> Nat -> Type = \ a n. (V : Nat -> Type) -> V zero -> ([n] -> a -> V n -> V (suc n)) -> V n
+val Vec : Type -> Nat -> Type
+  = \ a n. (V : Nat -> Type) -> V zero -> ([n] -> a -> V n -> V (suc n)) -> V n
 
-val vnil : [a] -> Vec a zero = \ V n c. n
+val vnil : [a] -> Vec a zero
+  = \ V n c. n
 
-val vcons : [a n] -> a -> Vec a n -> Vec a (suc n) = \ a as V n c. c a (as V n c)
+val vcons : [a n] -> a -> Vec a n -> Vec a (suc n)
+  = \ a as V n c. c a (as V n c)
 
 val vec1 = vcons true (vcons false (vcons true vnil))
 
@@ -106,46 +117,69 @@ val vec1 = vcons true (vcons false (vcons true vnil))
 # Leibniz (Church) propositional equality, useful for testing conversion.
 # Also note the implicit lambdas.
 # ----------------------------------------------------------------------------------
-val Eq : [A] -> A -> A -> Type = \ [A] x y. (P : A -> Type) -> P x -> P y
+val Eq : [A] -> A -> A -> Type
+  = \ [A] x y. (P : A -> Type) -> P x -> P y
 
-val refl : [A][x : A] -> Eq x x = \ P px. px
+val refl : [A][x : A] -> Eq x x
+  = \ P px. px
 
-val trans : [A][x y z : A] -> Eq x y -> Eq y z -> Eq x z = \ p q. q _ p
+val trans : [A][x y z : A] -> Eq x y -> Eq y z -> Eq x z
+  = \ p q. q _ p
 
-val sym : [A][x y : A] -> Eq x y -> Eq y x = \ [_][x][y] p. p (\ y. Eq y x) refl
+val sym : [A][x y : A] -> Eq x y -> Eq y x
+  = \ [_][x][y] p. p (\ y. Eq y x) refl
 
-val ap : [A B](f : A -> B)[x y : A] -> Eq x y -> Eq (f x) (f y) = \ f [x][y] p. p (\ y. Eq (f x) (f y)) refl
+val ap : [A B](f : A -> B)[x y : A] -> Eq x y -> Eq (f x) (f y)
+  = \ f [x][y] p. p (\ y. Eq (f x) (f y)) refl
 
 # Pairs, Top, Bot
 # --------------------------------------------------------------------------------
-val Pair : Type -> Type -> Type = \ A B. (Pair : Type)(pair : A -> B -> Pair) -> Pair
+val Pair : Type -> Type -> Type
+  = \ A B. (Pair : Type)(pair : A -> B -> Pair) -> Pair
 
-val pair : [A B] -> A -> B -> Pair A B = \ a b Pair pair. pair a b
+val pair : [A B] -> A -> B -> Pair A B
+  = \ a b Pair pair. pair a b
 
-val proj1 : [A B] -> Pair A B -> A = \ p. p _ (\ x y. x)
+val proj1 : [A B] -> Pair A B -> A
+  = \ p. p _ (\ x y. x)
 
-val proj2 : [A B] -> Pair A B -> B = \ p. p _ (\ x y. y)
+val proj2 : [A B] -> Pair A B -> B
+  = \ p. p _ (\ x y. y)
 
-val Top : Type = (Top : Type)(tt : Top) -> Top
+val Top : Type
+  = (Top : Type)(tt : Top) -> Top
 
-val tt : Top = \ Top tt. tt
+val tt : Top
+  = \ Top tt. tt
 
-val Bot : Type = (Bot : Type) -> Bot
+val Bot : Type
+  = (Bot : Type) -> Bot
 
 # Dependent function composition (higher-order unification example)
 # --------------------------------------------------------------------------------
 
-val comp : [A][B : A -> Type][C : [a] -> B a -> Type](f : [a](b : B a) -> C b)(g : (a : A) -> B a)(x : A) -> C (g x) = \ f g a. f (g a)
+val comp :
+    [A]
+    [B : A -> Type]
+    [C : [a] -> B a -> Type]
+    (f : [a](b : B a) -> C b)
+    (g : (a : A) -> B a)
+    (x : A)
+    -> C (g x)
+  = \ f g a. f (g a)
 
-val compTest1 : Nat -> Nat = comp suc suc
+val compTest1 : Nat -> Nat
+  = comp suc suc
 
-val compTest2 : [m A] -> A -> Vec A m -> Vec A (suc (suc m)) = \ a. comp (vcons a) (vcons a)
+val compTest2 : [m A] -> A -> Vec A m -> Vec A (suc (suc m))
+  = \ a. comp (vcons a) (vcons a)
 
 # Some stress tests
 # --------------------------------------------------------------------------------
 
 # computing an N-sized function type for testing purposes
-val nfun : Nat -> Type = \ n. n Type (\ A. Type -> A) Type
+val nfun : Nat -> Type
+  = \ n. n Type (\ A. Type -> A) Type
 
 # Tests for approximate equality, i.e. the ability to tell terms equal
 # without fully reducing them.
@@ -176,7 +210,9 @@ val synEqTest2 : Eq n1M n1M = refl
 # Agda   : instant
 # Coq    : doesn't finish
 # Pika   : doesn't finish
-# val idStress : [A] -> A -> A = id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id
+# val idStress : [A] -> A -> A
+# = id id id id id id id id id id id id id id id id id id id id
+#   id id id id id id id id id id id id id id id id id id id id
 
 # TODO let
 # smalltt : 1.55s
@@ -210,7 +246,8 @@ val synEqTest2 : Eq n1M n1M = refl
 # --------------------------------------------------------------------------------
 
 # A simple way to force a Church Nat.
-val forceNat : Nat -> Bool = \ n. n _ (\ x. x) true
+val forceNat : Nat -> Bool
+  = \ n. n _ (\ x. x) true
 
 
 # Note: [normalize] prints normalization time for definition on load
@@ -253,41 +290,79 @@ val lazyU = const Type (forceNat n10M)
 # Church-coded simply typed lambda calculus
 # --------------------------------------------------------------------------------
 
-val Ty : Type = (Ty  : Type) (l: Ty) (fn : Ty -> Ty -> Ty) -> Ty
+val Ty : Type
+  = (Ty  : Type)
+    (l: Ty)
+    (fn : Ty -> Ty -> Ty)
+  -> Ty
 
-val l : Ty = \ _ l _. l
+val l : Ty
+  = \ _ l _. l
 
-val fn : Ty -> Ty -> Ty = \ A B Ty l fn. fn (A Ty l fn) (B Ty l fn)
+val fn : Ty -> Ty -> Ty
+  = \ A B Ty l fn. fn (A Ty l fn) (B Ty l fn)
 
-val Con : Type = (Con : Type) (nil  : Con) (cons : Con -> Ty -> Con) -> Con
+val Con : Type
+  = (Con : Type)
+    (nil  : Con)
+    (cons : Con -> Ty -> Con)
+  -> Con
 
-val nil : Con = \ Con nil cons. nil
+val nil : Con
+  = \ Con nil cons. nil
 
-val cons : Con -> Ty -> Con = \ P A Con nil cons. cons (P Con nil cons) A
+val cons : Con -> Ty -> Con
+  = \ P A Con nil cons. cons (P Con nil cons) A
 
-val Var : Con -> Ty -> Type = \ P A. (Var : Con -> Ty -> Type) (vz  : [P A] -> Var (cons P A) A) (vs  : [P B A] -> Var P A -> Var (cons P B) A) -> Var P A
+val Var : Con -> Ty -> Type
+  = \ P A.
+    (Var : Con -> Ty -> Type)
+    (vz  : [P A] -> Var (cons P A) A)
+    (vs  : [P B A] -> Var P A -> Var (cons P B) A)
+  -> Var P A
 
-val vz : [P A] -> Var (cons P A) A = \ Var vz vs. vz
+val vz : [P A] -> Var (cons P A) A
+  = \ Var vz vs. vz
 
-val vs : [P B A] -> Var P A -> Var (cons P B) A = \ x Var vz vs. vs (x Var vz vs)
+val vs : [P B A] -> Var P A -> Var (cons P B) A
+  = \ x Var vz vs. vs (x Var vz vs)
 
-val Tm : Con -> Ty -> Type = \ P A. (Tm  : Con -> Ty -> Type) (var : [P A] -> Var P A -> Tm P A) (lam : [P A B] -> Tm (cons P A) B -> Tm P (fn A B)) (app : [P A B] -> Tm P (fn A B) -> Tm P A -> Tm P B) -> Tm P A
+val Tm : Con -> Ty -> Type
+  = \ P A.
+    (Tm  : Con -> Ty -> Type)
+    (var : [P A] -> Var P A -> Tm P A)
+    (lam : [P A B] -> Tm (cons P A) B -> Tm P (fn A B))
+    (app : [P A B] -> Tm P (fn A B) -> Tm P A -> Tm P B)
+  -> Tm P A
 
-val var : [P A] -> Var P A -> Tm P A = \ x Tm var lam app. var x
+val var : [P A] -> Var P A -> Tm P A
+  = \ x Tm var lam app. var x
 
-val lam : [P A B] -> Tm (cons P A) B -> Tm P (fn A B) = \ t Tm var lam app. lam (t Tm var lam app)
+val lam : [P A B] -> Tm (cons P A) B -> Tm P (fn A B)
+  = \ t Tm var lam app. lam (t Tm var lam app)
 
-val app : [P A B] -> Tm P (fn A B) -> Tm P A -> Tm P B = \ t u Tm var lam app. app (t Tm var lam app) (u Tm var lam app)
+val app : [P A B] -> Tm P (fn A B) -> Tm P A -> Tm P B
+  = \ t u Tm var lam app. app (t Tm var lam app) (u Tm var lam app)
 
 # Well-typed interpreter for Church-coded STLC
 # --------------------------------------------------------------------------------
 
-val EvalTy : Ty -> Type = \ A. A _ Bot (\ A B. A -> B)
+val EvalTy : Ty -> Type
+  = \ A. A _ Bot (\ A B. A -> B)
 
-val EvalCon : Con -> Type = \ P. P _ Top (\ D A. Pair D (EvalTy A))
+val EvalCon : Con -> Type
+  = \ P. P _ Top (\ D A. Pair D (EvalTy A))
 
-val EvalVar : [P A] -> Var P A -> EvalCon P -> EvalTy A = \ x. x (\ P A. EvalCon P -> EvalTy A) (\ env. proj2 env) (\ rec env. rec (proj1 env))
+val EvalVar : [P A] -> Var P A -> EvalCon P -> EvalTy A
+  = \ x. (x
+           (\ P A. EvalCon P -> EvalTy A)
+           (\ env. proj2 env)
+           (\ rec env. rec (proj1 env)))
 
-val EvalTm : [P A] -> Tm P A -> EvalCon P -> EvalTy A = \ t. t (\ P A. EvalCon P -> EvalTy A) EvalVar (\ t env a. t (pair env a)) (\ t u env. t env (u env))
+val EvalTm : [P A] -> Tm P A -> EvalCon P -> EvalTy A
+  = \ t. (t
+            (\ P A. EvalCon P -> EvalTy A) EvalVar
+            (\ t env a. t (pair env a))
+            (\ t u env. t env (u env)))
 
 # TODO STLCStress

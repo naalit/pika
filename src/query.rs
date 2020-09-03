@@ -230,7 +230,7 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
 
     let parser = DefsParser::new();
     let cxt = Cxt::new(file, db);
-    match parser.parse(db, &source) {
+    match parser.parse(db, crate::lexer::Lexer::new(&source)) {
         Ok(v) => Arc::new(intern_block(v, db, cxt)),
         Err(e) => {
             db.report_error(e.to_error(file));

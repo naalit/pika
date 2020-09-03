@@ -2,12 +2,76 @@ use std::str::FromStr;
 use crate::query::{Compiler, Name, CompilerExt};
 use crate::error::*;
 use crate::term::*;
+use crate::lexer::*;
 
 // I'd like to only require &dyn Interner, but the calling code has a &dyn Compiler and Rust doesn't have trait object upcasting yet.
-grammar(db: &dyn Compiler);
+grammar<'input>(db: &dyn Compiler);
 
 extern {
-  type Error = Spanned<&'static str>;
+  type Location = usize;
+  type Error = Spanned<LexError>;
+
+  enum Tok<'input> {
+    // Keywords
+    "fun" => Tok::Fun,
+    "val" => Tok::Val,
+    "impl" => Tok::Impl,
+    "do" => Tok::Do,
+    "struct" => Tok::Struct,
+    "sig" => Tok::Sig,
+    "type" => Tok::Type,
+    "case" => Tok::Case,
+    "of" => Tok::Of,
+    "end" => Tok::End,
+    "Type" => Tok::TypeType,
+    "with" => Tok::With,
+    "pure" => Tok::Pure,
+    "where" => Tok::Where,
+    "raise" => Tok::Raise,
+    "catch" => Tok::Catch,
+    "and" => Tok::And,
+    "or" => Tok::Or,
+
+    // Symbols the lexer recognizes as a "binary operator"
+    ":" => Tok::Colon,
+    "=" => Tok::Equals,
+    "->" => Tok::Arrow,
+    "=>" => Tok::WideArrow,
+    "+" => Tok::Plus,
+    "-" => Tok::Minus,
+    "*" => Tok::Times,
+    "/" => Tok::Div,
+    "|" => Tok::Bar,
+    "." => Tok::Dot,
+    "," => Tok::Comma,
+    "**" => Tok::Exp,
+    "^^" => Tok::Xor,
+    "<<" => Tok::LShift,
+    ">>" => Tok::RShift,
+    "&" => Tok::BitAnd,
+    ">" => Tok::Gt,
+    ">=" => Tok::GtE,
+    "<" => Tok::Lt,
+    "<=" => Tok::LtE,
+    "==" => Tok::Eq,
+    "<|" => Tok::LPipe,
+    "|>" => Tok::RPipe,
+
+    // Tokens with a payload
+    Lit => Tok::Lit(<Literal>),
+    NAME => Tok::Name(<&'input str>),
+
+    // Other tokens
+    "(" => Tok::POpen,
+    ")" => Tok::PClose,
+    "[" => Tok::SOpen,
+    "]" => Tok::SClose,
+    "{" => Tok::COpen,
+    "}" => Tok::CClose,
+    "\n" => Tok::Newline,
+    OpNL => Tok::OpNewline,
+    "\\" => Tok::Backslash,
+  }
 }
 
 Sp<T>: Spanned<T> = {
@@ -26,20 +90,20 @@ pub Defs: Vec<PreDef> = {
 pub Def: PreDef = {
   // -- definitions --
 
-  "fun" <name:Sp<Name>> <args:Args> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
+  "fun" "\n"* <name:Sp<Name>> <args:Args> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Fun(name.unwrap(), args, ty, val)
   },
   // You can have a function with an effect type but not a return type
-  "fun" Sp<Name> Args (":" App)? ("with" Term) "=" Term => todo!("effects"),
-  "val" <name:Sp<Name>> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
+  "fun" "\n"* Sp<Name> Args (":" App)? ("with" Term) "=" Term => todo!("effects"),
+  "val" "\n"* <name:Sp<Name>> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Val(name.unwrap(), ty, val)
   },
-  "type" <name:Name> <args:Args> "of" <cons:Block<Cons>> => {
+  "type" "\n"* <name:Name> <args:Args> "of" <cons:Block<Cons>> => {
     PreDef::Type(name, args, cons)
   },
-  "impl" <name:(<Name> ":")?> <ty:Sp<Term>> "=" <val:Sp<Term>> => {
+  "impl" <name:("\n"* <Name> ":")?> <ty:Sp<Term>> "=" <val:Sp<Term>> => {
     PreDef::Impl(name, ty, val)
   },
   Sp<Term> => PreDef::Expr(<>),
@@ -48,12 +112,184 @@ pub Def: PreDef = {
 
   // TODO report an error if we use an arg without a type
   // although I guess elaboration will usually catch it
-  "fun" <name:Sp<Name>> <args:Args> ":" <ty:Sp<Term>> => PreDef::FunDec(name.unwrap(), args, ty),
-  "val" <name:Sp<Name>> ":" <ty:Sp<Term>> => PreDef::ValDec(name.unwrap(), ty),
+  "fun" "\n"* <name:Sp<Name>> <args:Args> ":" <ty:Sp<Term>> => PreDef::FunDec(name.unwrap(), args, ty),
+  "val" "\n"* <name:Sp<Name>> ":" <ty:Sp<Term>> => PreDef::ValDec(name.unwrap(), ty),
 };
 
+// Top-level expression groups
+
+pub Pre: Pre = Sp<Term>;
+
+Term: Pre_ = {
+  Expr,
+  // We only allow RStarts at the end of an application if it's at the top level
+  // Otherwise we get
+  // a \x. x
+  //   .something
+  // which is ambiguous (`x.something` or `(a _).something`? Neither would be clear.)
+  <f:Sp<Expr>> <x:Sp<RStart>> => {
+    Pre_::App(Icit::Expl, f, x)
+  },
+}
+
+Expr: Pre_ = {
+  Op,
+  <from:Sp<App>> "->" <to:Sp<Expr>> => Pre_::Fun(from, to),
+  // For now `(a : Type) a -> a` is allowed, but we might eventually want to only allow `[a] a -> a`
+  <args:PiArgs> <from:Sp<App>> "->" <to:Sp<Expr>> => {
+    let span = Span(from.span().0, to.span().1);
+    let fun = Spanned::new(Pre_::Fun(from, to), span);
+    args.into_iter().rfold(fun, |to, (name, icit, ty)| {
+      // TODO this span isn't perfect
+      let span = Span(ty.span().0, to.span().1);
+      Spanned::new(Pre_::Pi(name, icit, ty, to), span)
+    }).unwrap()
+  },
+  <args:PiArgs> "->" <to:Sp<Expr>> => {
+    args.into_iter().rfold(to, |to, (name, icit, ty)| {
+      // TODO this span isn't perfect
+      let span = Span(ty.span().0, to.span().1);
+      Spanned::new(Pre_::Pi(name, icit, ty, to), span)
+    }).unwrap()
+  },
+  PiArgs "->" App "with" Expr => todo!("effects"),
+  RStart,
+}
+
+// These constructions are recognizable from the first token
+// So they can be the last argument in an application
+RStart: Pre_ = {
+  "sig" Block<Def> => todo!("sigs"),
+  "struct" <Block<Def>> => Pre_::Struct(<>),
+  "do" <Block<Def>> => Pre_::Do(<>),
+  "case" Expr "of" Block<Branch> => todo!("case"),
+  // TODO: Is Expr okay here?
+  // Basically we can't do multiline inside lambdas, we need
+  // \x.(x
+  //     .sort)
+  // and this doesn't work:
+  // \x.x
+  //    .sort
+  // unless we're in parentheses, which might be unintuitive
+  "\\" "\n"* <args:Args> OpNL? "." <body:Sp<Expr>> => {
+    args.into_iter().rfold(body, |body, (name, icit, ty)| {
+      // TODO this span isn't perfect
+      let span = Span(ty.span().0, body.span().1);
+      Spanned::new(Pre_::Lam(name, icit, ty, body), span)
+    }).unwrap()
+  },
+}
+
+Branch: () = {
+  Pat "=>" Term => (),
+}
+Pat: () = {
+  App,
+  App "|" Pat => (),
+}
+
+App: Pre_ = {
+  Atom,
+  <f:Sp<Atom>> <args:Sp<AppArg>+> => {
+    args.into_iter().fold(f, |f, x| {
+      let xspan = x.span();
+      let span = Span(f.span().0, xspan.1);
+      let (icit, x) = x.unwrap();
+      let x = Spanned::new(x, xspan);
+      Spanned::new(Pre_::App(icit, f, x), span)
+    }).unwrap()
+  },
+}
+
+Atom: Pre_ = {
+  "Type" => Pre_::Type,
+  Name => if &<>.get(db) == "_" { Pre_::Hole(MetaSource::Hole) } else { Pre_::Var(<>) },
+  Lit => todo!("numbers"),
+  "(" <Term> ")" => <>,
+  "(" ")" => todo!("()"),
+}
+
+
+// Infix precedence handling.
+// Precedence is only defined when it's clear.
+// Like Haskell, all operators have lower precedence than function application.
+
+LHS: Pre_ = {
+  App,
+  // Allow `a + b \n * x` = `(a + b) * x`
+  <Op> OpNL,
+}
+RHS: Pre_ = {
+  App,
+}
+
+// Standard precedence for arithmetic operators
+Arith<S>: Pre_ = {
+  Factor<S>,
+  Arith<S> "+" Factor<RHS> => todo!(),
+  Arith<S> "-" Factor<RHS> => todo!(),
+}
+Factor<S>: Pre_ = {
+  Exp<S>,
+  Factor<S> "*" Exp<RHS> => todo!(),
+  Factor<S> "/" Exp<RHS> => todo!(),
+}
+Exp<S>: Pre_ = {
+  S,
+  Exp<S> "**" RHS => todo!(),
+}
+
+// No precedence for bitwise operators, but all are left-associative.
+Bitwise<S>: Pre_ = {
+  // You can't use arithmetic with bitwise operators without parens, but we need a single chain.
+  Arith<S>,
+  S ("&" RHS)+ => todo!(),
+  S ("|" RHS)+ => todo!(),
+  // Single "^" is ambiguous: exponentiation or xor?
+  S ("^^" RHS)+ => todo!(),
+  // I'd like << and >> for function composition, too - maybe the same operator, e.g. `impl [T P Q] ShiftRight (x: T -> P x) (y: [x] P x -> Q y) = ...`?
+  // The alternative would be <<< and >>>.
+  S ("<<" RHS)+ => todo!(),
+  S (">>" RHS)+ => todo!(),
+}
+
+// No precedence or associativity within comparison operators.
+// But, they're lower precedence than arithmetic or bitwise - `x + 2 == z * 3` works fine.
+Comparison<S>: Pre_ = {
+  Bitwise<S>,
+  Bitwise<S> "==" Bitwise<RHS> => todo!(),
+  Bitwise<S> ">"  Bitwise<RHS> => todo!(),
+  Bitwise<S> "<"  Bitwise<RHS> => todo!(),
+  Bitwise<S> "<=" Bitwise<RHS> => todo!(),
+  Bitwise<S> ">=" Bitwise<RHS> => todo!(),
+}
+
+// No precedence between `and` and `or`, but one can be repeated: `x and y and z` works but not `x and y or z`.
+// These are lower precedence than Comparison, and are keywords since they don't actually behave like operators (lazy evaluation of the rhs).
+Logical<S>: Pre_ = {
+  Comparison<S>,
+  Comparison<S> ("and" Comparison<RHS>)+ => todo!(),
+  Comparison<S> ("or"  Comparison<RHS>)+ => todo!(),
+}
+
+// <| and |> have no precedence, but are left-associative: `x |> y |> z` = `z(y(x))`, `x <| y <| z` = `x y z`.
+Op: Pre_ = {
+  Logical<LHS>,
+  LHS "<|" RHS => todo!(),
+  LHS "|>" RHS => todo!(),
+  // `a . b c d` = `b c d a`, where `b` is looked up in the context of `a`'s type.
+  // Unless `a.b` is a field, in which case it's `(a.b) c d`.
+  // `a b . c d` isn't allowed.
+  // `a b \n . c d` is, though, like other operators.
+  Atom "." Name AppArg* => todo!(),
+  Op OpNL "." Name AppArg* => todo!(),
+}
+
+
+// Argument helpers
+
 Args: Vec<(Name, Icit, PreTy)> = {
-  ArgGroupN+ => {
+  (<ArgGroupN> "\n"*)+ => {
     <>.into_iter().flat_map(|(names, icit, ty)| if names.len() == 1 {
       vec![(names[0], icit, ty)]
     } else {
@@ -64,7 +300,7 @@ Args: Vec<(Name, Icit, PreTy)> = {
 
 #[inline]
 PiArgs: Vec<(Name, Icit, PreTy)> = {
-  ArgGroup+ => {
+  (<ArgGroup> "\n"*)+ => {
     <>.into_iter().flat_map(|(names, icit, ty)| if names.len() == 1 {
       vec![(names[0], icit, ty)]
     } else {
@@ -93,6 +329,11 @@ ImpArg: (Vec<Name>, PreTy) = {
   "[" ":" <ty:Sp<Expr>> "]" => (vec![db.intern_name("_".to_string())], ty),
 }
 
+AppArg: (Icit, Pre_) = {
+  "[" <Expr> "]" => (Icit::Impl, <>),
+  Atom => (Icit::Expl, <>),
+}
+
 ConsArg: Vec<(Name, Icit, PreTy)> = {
   Sp<Atom> => vec![(db.intern_name("_".to_string()), Icit::Expl, <>)],
   ArgGroup => {
@@ -104,6 +345,8 @@ ConsArg: Vec<(Name, Icit, PreTy)> = {
     }
   },
 }
+
+// Different language structures
 
 Cons: PreCons = {
   <name:Name> <args:ConsArg*> <ty:(":" <Sp<Expr>>)?> => PreCons(name,
@@ -121,128 +364,6 @@ Block<T>: Vec<T> = {
   },
 }
 
-pub Pre: Pre = Sp<Term>;
+// Basic tokens
 
-Term: Pre_ = {
-  Chain,
-  // We only allow RStarts at the end of an application if it's at the top level
-  // Otherwise we get
-  // a \x. x
-  //   .something
-  // which is ambiguous (`x.something` or `(a _).something`? Neither would be clear.)
-  <f:Sp<Chain>> <x:Sp<RStart>> => {
-    Pre_::App(Icit::Expl, f, x)
-  },
-}
-
-Chain: Pre_ = {
-  Expr,
-  // Allow multiline method chaining, like with Rust iterators or builders
-  <f:Chain> NEWLINE_DOT <m:Name> <args:AppArg*> => todo!("member access"),
-}
-
-Expr: Pre_ = {
-  App,
-  <from:Sp<App>> "->" <to:Sp<Expr>> => Pre_::Fun(from, to),
-  // For now `(a : Type) a -> a` is allowed, but we might eventually want to only allow `[a] a -> a`
-  <args:PiArgs> <from:Sp<App>> "->" <to:Sp<Expr>> => {
-    let span = Span(from.span().0, to.span().1);
-    let fun = Spanned::new(Pre_::Fun(from, to), span);
-    args.into_iter().rfold(fun, |to, (name, icit, ty)| {
-      // TODO this span isn't perfect
-      let span = Span(ty.span().0, to.span().1);
-      Spanned::new(Pre_::Pi(name, icit, ty, to), span)
-    }).unwrap()
-  },
-  <args:PiArgs> "->" <to:Sp<Expr>> => {
-    args.into_iter().rfold(to, |to, (name, icit, ty)| {
-      // TODO this span isn't perfect
-      let span = Span(ty.span().0, to.span().1);
-      Spanned::new(Pre_::Pi(name, icit, ty, to), span)
-    }).unwrap()
-  },
-  PiArgs "->" App "with" Expr => todo!("effects"),
-  App Infix App => todo!("operators"),
-  RStart,
-}
-
-// These constructions are recognizable from the first token
-// So they can be the last argument in an application
-RStart: Pre_ = {
-  "sig" Block<Def> => todo!("sigs"),
-  "struct" <Block<Def>> => Pre_::Struct(<>),
-  "do" <Block<Def>> => Pre_::Do(<>),
-  "case" Expr "of" Block<Branch> => todo!("case"),
-  // TODO: Is Expr okay here?
-  // Basically we can't do multiline inside lambdas, we need
-  // \x.(x
-  //     .sort)
-  // and this doesn't work:
-  // (\x.x
-  //     .sort)
-  // which might be unintuitive
-  "\\" <args:Args> "." <body:Sp<Expr>> => {
-    args.into_iter().rfold(body, |body, (name, icit, ty)| {
-      // TODO this span isn't perfect
-      let span = Span(ty.span().0, body.span().1);
-      Spanned::new(Pre_::Lam(name, icit, ty, body), span)
-    }).unwrap()
-  },
-}
-
-Infix: () = {
-  "-",
-  "+",
-  "/",
-  "*",
-  "++",
-}
-
-Branch: () = {
-  Pat "=>" Term => (),
-}
-Pat: () = {
-  App,
-  App "|" Pat => (),
-}
-
-App: Pre_ = {
-  Atom,
-  <f:Sp<Atom>> <args:Sp<AppArg>+> => {
-    args.into_iter().fold(f, |f, x| {
-      let xspan = x.span();
-      let span = Span(f.span().0, xspan.1);
-      let (icit, x) = x.unwrap();
-      let x = Spanned::new(x, xspan);
-      Spanned::new(Pre_::App(icit, f, x), span)
-    }).unwrap()
-  },
-  <f:Sp<Atom>> <dots:("." <Sp<Name>>)+> <args:AppArg*> => {
-    todo!("member access")
-  },
-}
-
-AppArg: (Icit, Pre_) = {
-  "[" <Expr> "]" => (Icit::Impl, <>),
-  Atom => (Icit::Expl, <>),
-}
-
-Atom: Pre_ = {
-  "Type" => Pre_::Type,
-  Name => if &<>.get(db) == "_" { Pre_::Hole(MetaSource::Hole) } else { Pre_::Var(<>) },
-  Num => todo!("numbers"),
-  r#""[^\n"]*""# => todo!("strings"),
-  "(" <Term> ")" => <>,
-  "(" ")" => todo!("()"),
-}
-
-Name: Name = r"[A-Za-z_][A-Za-z_0-9]*" => db.intern_name(String::from(<>));
-Num: i32 = r"-?[0-9]+" => i32::from_str(<>).unwrap();
-
-match {
-  r"\n(#[^\n]*\n|\n|[ \t])*\." => NEWLINE_DOT,
-} else {
-  r"#[^\n]*" => { },
-  r"[ \t]" => { },
-  _,
-}
+Name: Name = NAME => db.intern_name(String::from(<>));

@@ -15,3 +15,17 @@ fun id [t] (x: t) = x
 
 # Implicit parameters are passed implicitly
 val x = id Type
+
+# Pika is now pretty flexible about newlines (and still ignores indentation completely), so this works:
+# val y : Type -> Type = \x. x
+val
+y
+:
+Type
+->
+Type
+=
+\
+x
+.
+x
