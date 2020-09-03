@@ -20,6 +20,8 @@ pub enum LexError {
     InvalidLiteral(String),
     MissingTerminator(NestType),
     UnexpectedTerminator(NestType),
+    /// This is used for specific errors that occur in one place, in the parser or lexer.
+    Other(String),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -193,7 +195,11 @@ impl<'i> Lexer<'i> {
         let p = self.nesting.pop();
         match p {
             Some(p) if p == t => Ok(()),
-            Some(p) => Err(Spanned::new(LexError::MissingTerminator(p), self.span())),
+            Some(p) => Err(Spanned::new(
+                LexError::MissingTerminator(p),
+                // Don't point at the current token, point at the spot where it's missing
+                Span(self.tok_start, self.tok_start),
+            )),
             None => Err(Spanned::new(LexError::UnexpectedTerminator(t), self.span())),
         }
     }
@@ -213,6 +219,7 @@ impl<'i> Lexer<'i> {
         self.tok_in_place(Tok::Lit(if neg {
             Literal::Negative(
                 i64::from_str(self.slice()).map_err(|e| {
+                    // TODO when `ParseIntError::kind()` gets stabilized (or Pika switches to nightly Rust) make custom error messages
                     Spanned::new(LexError::InvalidLiteral(e.to_string()), self.span())
                 })?,
             )
@@ -303,7 +310,7 @@ impl<'i> Lexer<'i> {
                 if self.peek() == Some('^') {
                     Some(self.tok(Tok::Xor))
                 } else {
-                    todo!("error: ambiguous operator: e ** for exponentiation, and ^^ for bitwise xor")
+                    Some(Err(Spanned::new(LexError::Other("ambiguous operator '^': use '**' for exponentiation, and '^^' for bitwise xor".into()), self.span())))
                 }
             }
             '<' => {
@@ -326,9 +333,10 @@ impl<'i> Lexer<'i> {
             '&' => {
                 self.next();
                 if self.peek() == Some('&') {
-                    todo!("error: use `and` for logical and");
+                    Some(Err(Spanned::new(LexError::Other("invalid operator '&&': use 'and' for logical and".into()), self.span())))
+                } else {
+                    Some(self.tok_in_place(Tok::BitAnd))
                 }
-                Some(self.tok_in_place(Tok::BitAnd))
             }
 
             '=' => {
@@ -472,20 +480,21 @@ impl fmt::Display for LexError {
             ),
             LexError::UnexpectedTerminator(t) => write!(
                 f,
-                "unexpected terminator {} without {}",
+                "unexpected {} {}",
                 match t {
                     NestType::Block => "'end'",
-                    NestType::Curly => "'}'",
-                    NestType::Paren => "')'",
-                    NestType::Square => "']'",
+                    NestType::Curly => "closing '}'",
+                    NestType::Paren => "closing ')'",
+                    NestType::Square => "closing ']'",
                 },
                 match t {
-                    NestType::Block => "block starting keyword (like `do`, `struct`)",
-                    NestType::Curly => "'{'",
-                    NestType::Paren => "'('",
-                    NestType::Square => "'['",
+                    NestType::Block => "outside of a block (like a `do` or `struct`)",
+                    NestType::Curly => "without an opening '{'",
+                    NestType::Paren => "without an opening '('",
+                    NestType::Square => "without an opening '['",
                 }
             ),
+            LexError::Other(s) => write!(f, "{}", s),
         }
     }
 }
