@@ -6,10 +6,10 @@ pub mod elaborate;
 pub mod error;
 pub mod evaluate;
 pub mod lexer;
+pub mod lower;
 pub mod pretty;
 pub mod query;
 pub mod term;
-pub mod lower;
 use query::*;
 
 lalrpop_mod!(pub grammar);

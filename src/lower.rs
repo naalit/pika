@@ -1,27 +1,63 @@
 //! This module deals with translation to Durin.
 
-use std::collections::HashMap;
-use smallvec::smallvec;
-use durin::ir;
-use crate::term::*;
+use crate::elaborate::MCxt;
 use crate::query::*;
+use crate::term::*;
+use durin::ir;
+use smallvec::smallvec;
+use std::collections::HashMap;
+
+pub struct ModCxt<'m> {
+    db: &'m dyn Compiler,
+    defs: HashMap<PreDefId, ir::Val>,
+    module: ir::Module,
+}
+impl<'m> ModCxt<'m> {
+    pub fn new(db: &'m dyn Compiler) -> Self {
+        ModCxt {
+            db,
+            defs: HashMap::new(),
+            module: ir::Module::default(),
+        }
+    }
+
+    pub fn local(&mut self, def: DefId, f: impl FnOnce(&mut LCxt) -> ir::Val) {
+        let (pre, cxt) = self.db.lookup_intern_def(def);
+        let mut lcxt = LCxt::new(
+            self.db,
+            MCxt::new(cxt, def, self.db),
+            &mut self.module,
+            &self.defs,
+        );
+        let val = f(&mut lcxt);
+        let name = self.db.lookup_intern_predef(pre).name();
+        self.module
+            .set_name(val, name.map(|x| self.db.lookup_intern_name(x)));
+        self.defs.insert(pre, val);
+    }
+}
 
 pub struct LCxt<'db> {
     db: &'db dyn Compiler,
-    cxt: Cxt,
     locals: IVec<ir::Val>,
-    defs: HashMap<PreDefId, ir::Val>,
+    defs: &'db HashMap<PreDefId, ir::Val>,
     builder: Builder<'db>,
+    mcxt: MCxt,
 }
 impl<'db> LCxt<'db> {
-    pub fn new(db: &'db dyn Compiler, cxt: Cxt, m: &'db mut ir::Module) -> Self {
+    fn new(
+        db: &'db dyn Compiler,
+        mcxt: MCxt,
+        m: &'db mut ir::Module,
+        defs: &'db HashMap<PreDefId, ir::Val>,
+    ) -> Self {
         let builder = Builder::new(m);
         LCxt {
             db,
-            cxt,
             locals: IVec::new(),
-            defs: HashMap::new(),
+            defs,
             builder,
+            mcxt,
         }
     }
 }
@@ -31,8 +67,8 @@ struct Builder<'m> {
     module: &'m mut ir::Module,
     block: ir::Val,
     params: Vec<ir::Val>,
-    /// (block, params, cont)
-    funs: Vec<(ir::Val, Vec<ir::Val>, ir::Val)>,
+    /// (fun, block, params, cont)
+    funs: Vec<(ir::Val, ir::Val, Vec<ir::Val>, ir::Val)>,
 }
 impl<'m> Builder<'m> {
     fn new(m: &'m mut ir::Module) -> Self {
@@ -45,15 +81,18 @@ impl<'m> Builder<'m> {
         }
     }
 
-    fn call(&mut self, f: ir::Val, x: ir::Val) -> ir::Val {
+    fn call(&mut self, f: ir::Val, x: ir::Val, ret_ty: ir::Val) -> ir::Val {
         let cont = self.module.reserve(None);
-        self.module.replace(self.block, ir::Node::Fun(ir::Function {
-            params: self.params.drain(0..).collect(),
-            callee: f,
-            call_args: smallvec![x, cont],
-        }));
+        self.module.replace(
+            self.block,
+            ir::Node::Fun(ir::Function {
+                params: self.params.drain(0..).collect(),
+                callee: f,
+                call_args: smallvec![x, cont],
+            }),
+        );
         self.block = cont;
-        self.params.push(todo!("type"));
+        self.params.push(ret_ty);
         self.module.add(ir::Node::Param(cont, 0), None)
     }
 
@@ -63,7 +102,8 @@ impl<'m> Builder<'m> {
 
     fn fun_type(&mut self, from: ir::Val, to: ir::Val) -> ir::Val {
         let cont_ty = self.module.add(ir::Node::FunType(smallvec![to]), None);
-        self.module.add(ir::Node::FunType(smallvec![from, cont_ty]), None)
+        self.module
+            .add(ir::Node::FunType(smallvec![from, cont_ty]), None)
     }
 
     fn reserve(&mut self, name: Option<String>) -> ir::Val {
@@ -74,30 +114,38 @@ impl<'m> Builder<'m> {
     fn push_fun(&mut self, param: Option<String>, param_ty: ir::Val, ret_ty: ir::Val) -> ir::Val {
         let fun = self.module.reserve(None);
         let cont = self.module.add(ir::Node::Param(fun, 1), None);
-        self.funs.push((self.block, self.params.clone(), cont));
+        self.funs.push((fun, self.block, self.params.clone(), cont));
         self.block = fun;
         let cont_ty = self.module.add(ir::Node::FunType(smallvec![ret_ty]), None);
         self.params = vec![param_ty, cont_ty];
-        self.module.add(ir::Node::Param(fun, 0), None)
+        self.module.add(ir::Node::Param(fun, 0), param)
     }
 
     fn pop_fun(&mut self, ret: ir::Val) -> ir::Val {
-        let (block, params, cont) = self.funs.pop().unwrap();
-        let fun = self.block;
+        let (fun, block, params, cont) = self.funs.pop().unwrap();
         // We don't use self.call since we don't add the cont parameter here
-        self.module.replace(fun, ir::Node::Fun(ir::Function {
-            params: self.params.drain(0..).collect(),
-            callee: cont,
-            call_args: smallvec![cont],
-        }));
+        self.module.replace(
+            self.block,
+            ir::Node::Fun(ir::Function {
+                params: self.params.drain(0..).collect(),
+                callee: cont,
+                call_args: smallvec![ret],
+            }),
+        );
         self.block = block;
         self.params = params;
         fun
     }
 }
 
+impl Val {
+    pub fn lower(self, cxt: &mut LCxt) -> ir::Val {
+        crate::evaluate::quote(self, cxt.mcxt.size, &cxt.mcxt).lower(cxt)
+    }
+}
+
 impl Term {
-    pub fn lower(&self, cxt: &mut LCxt, ty: &Ty) -> ir::Val {
+    pub fn lower(&self, cxt: &mut LCxt) -> ir::Val {
         match self {
             Term::Type => cxt.builder.cons(ir::Constant::TypeType),
             Term::Var(v) => match v {
@@ -108,38 +156,40 @@ impl Term {
                 }
                 Var::Rec(i) => *cxt.defs.get(i).unwrap(),
                 Var::Meta(m) => todo!("how are global meta solutions handled?"),
-            }
+            },
             // \x.f x
             // -->
             // fun a (x, r) = f x k
             // fun k y = r y
-            Term::Lam(name, _icit, body) => {
-                let (param_ty, ret_ty) = match ty {
-                    Term::Fun(from, to) => (from, to),
-                    Term::Pi(_, _, from, to) => (from, to),
+            Term::Lam(name, _icit, _arg_ty, body) => {
+                let (param_ty, ret_ty) = match self.ty(&cxt.mcxt, cxt.db) {
+                    Val::Fun(from, to) => (*from, *to),
+                    Val::Pi(_, from, to) => (*from, to.vquote(cxt.mcxt.size, &cxt.mcxt)),
                     _ => unreachable!(),
                 };
-                let param_ty = param_ty.lower(cxt, &Term::Type);
-                let ret_ty_ = ret_ty.lower(cxt, &Term::Type);
-                let arg = cxt.builder.push_fun(Some(cxt.db.lookup_intern_name(*name)), param_ty, ret_ty_);
+                let param_ty = param_ty.lower(cxt);
+                let ret_ty_ = ret_ty.lower(cxt);
+                let arg =
+                    cxt.builder
+                        .push_fun(Some(cxt.db.lookup_intern_name(*name)), param_ty, ret_ty_);
                 cxt.locals.add(arg);
-                let ret = body.lower(cxt, ret_ty);
+                let ret = body.lower(cxt);
                 cxt.locals.remove();
                 cxt.builder.pop_fun(ret)
             }
             Term::App(_icit, f, x) => {
-                let f = f.lower(cxt, &Term::Fun(todo!("x type"), Box::new(ty.clone())));
-                let x = x.lower(cxt, todo!("x type"));
-                cxt.builder.call(f, x)
+                let ret_ty = self.ty(&cxt.mcxt, cxt.db);
+                let ret_ty = ret_ty.lower(cxt);
+                let f = f.lower(cxt);
+                let x = x.lower(cxt);
+                cxt.builder.call(f, x, ret_ty)
             }
             Term::Fun(from, to) => {
-                let from = from.lower(cxt, &Term::Type);
-                let to = to.lower(cxt, &Term::Type);
+                let from = from.lower(cxt);
+                let to = to.lower(cxt);
                 cxt.builder.fun_type(from, to)
             }
-            Term::Pi(_n, _i, from, to) => {
-                todo!("pi types in Durin")
-            }
+            Term::Pi(_n, _i, from, to) => todo!("pi types in Durin"),
             Term::Error => panic!("type errors should have been caught by now!"),
         }
     }
@@ -151,23 +201,24 @@ mod tests {
 
     #[test]
     fn basic() {
-        let buf = String::from(r#"
+        let buf = String::from(
+            r#"
             fun f (x : Type) = x
             fun g (y : Type) = f y
-        "#);
+        "#,
+        );
         let mut db = Database::default();
-        let id = crate::error::FILES.write().unwrap().add("file_name".into(), buf.clone());
+        let id = crate::error::FILES
+            .write()
+            .unwrap()
+            .add("file_name".into(), buf.clone());
         db.set_file_source(id, buf);
-        let mut m = ir::Module::default();
-        let cxt = db.cxt_entry(MaybeEntry::No(id));
-        let mut lcxt = LCxt::new(&db, cxt, &mut m);
+        let mut mcxt = ModCxt::new(&db);
         for &def in &*db.top_level(id) {
-            let mcxt = crate::elaborate::MCxt::new(cxt, def, &db);
-            if let Ok(def) = db.elaborate_def(def) {
-                def.term.lower(&mut lcxt, &crate::evaluate::quote((*def.typ).clone(), Lvl::zero(), &mcxt));
+            if let Ok(info) = db.elaborate_def(def) {
+                mcxt.local(def, |lcxt| info.term.lower(lcxt));
             }
         }
-        println!("module: {}", lcxt.builder.module.emit());
-        panic!("done")
+        println!("module: {}", mcxt.module.emit());
     }
 }

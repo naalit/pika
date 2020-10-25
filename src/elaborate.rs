@@ -49,11 +49,12 @@ impl Term {
                 }
                 v => Ok(Term::Var(v)),
             },
-            Term::Lam(n, i, mut t) => {
+            Term::Lam(n, i, mut ty, mut t) => {
+                *ty = ty.check_solution(meta.clone(), ren, lfrom, lto, names)?;
                 // Allow the body to use the bound variable
                 ren.insert(lfrom.inc(), lto.inc());
                 *t = t.check_solution(meta, ren, lfrom.inc(), lto.inc(), names.add(n))?;
-                Ok(Term::Lam(n, i, t))
+                Ok(Term::Lam(n, i, ty, t))
             }
             Term::Pi(n, i, mut a, mut b) => {
                 *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
@@ -80,8 +81,8 @@ impl Term {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MCxt {
-    cxt: Cxt,
-    size: Lvl,
+    pub cxt: Cxt,
+    pub size: Lvl,
     def: DefId,
     local_metas: Vec<MetaEntry>,
     solved_globals: Vec<RecSolution>,
@@ -94,6 +95,29 @@ impl MCxt {
             def,
             local_metas: Vec::new(),
             solved_globals: Vec::new(),
+        }
+    }
+
+    pub fn local_ty(&self, mut ix: Ix, db: &dyn Compiler) -> VTy {
+        let mut cxt = self.cxt;
+        loop {
+            match db.lookup_cxt_entry(cxt) {
+                MaybeEntry::Yes(CxtEntry { rest, info, .. }) => {
+                    cxt = rest;
+                    match info {
+                        NameInfo::Def(_) => continue,
+                        NameInfo::Rec(_) => continue,
+                        NameInfo::Local(ty) => {
+                            if ix == Ix::zero() {
+                                break ty;
+                            } else {
+                                ix = ix.dec();
+                            }
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -173,11 +197,19 @@ impl MCxt {
             to_lvl,
             &mut Names::new(self.cxt, db),
         )?;
+        // Innermost first
+        let (tys, _, _) =
+            (0..spine.len()).fold((Vec::new(), Ix::zero(), to_lvl), |(mut v, i, l), _| {
+                let ty = self.local_ty(i, db);
+                let ty = crate::evaluate::quote(ty, l, &self);
+                v.push(ty);
+                (v, i.inc(), l.dec())
+            });
         // Actually wrap it in lambdas
         // We could look up the local variables' names in the cxt, but it's probably not worth it
         let empty_name = db.intern_name("_".to_string());
-        let term = (0..spine.len()).fold(term, |term, _| {
-            Term::Lam(empty_name, Icit::Expl, Box::new(term))
+        let term = tys.into_iter().fold(term, |term, ty| {
+            Term::Lam(empty_name, Icit::Expl, Box::new(ty), Box::new(term))
         });
 
         // Reevaluating the term so we don't have to clone it to quote it, and it should inline solved metas as well
@@ -329,8 +361,13 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 }
             };
             Ok((
-                targs.iter().rfold(body, |body, (name, icit, _)| {
-                    Term::Lam(*name, *icit, Box::new(body))
+                targs.iter().rfold(body, |body, (name, icit, ty)| {
+                    Term::Lam(
+                        *name,
+                        *icit,
+                        Box::new(quote(ty.clone(), mcxt.size, &mcxt)),
+                        Box::new(body),
+                    )
                 }),
                 targs
                     .into_iter()
@@ -541,10 +578,11 @@ impl Term {
                 None => Term::Var(Var::Meta(m)),
             },
             Term::Var(v) => Term::Var(v),
-            Term::Lam(n, i, mut t) => {
-                // Reuse Box
+            Term::Lam(n, i, mut ty, mut t) => {
+                // Reuse Boxes
+                *ty = ty.inline_metas(mcxt, l);
                 *t = t.inline_metas(mcxt, l.inc());
-                Term::Lam(n, i, t)
+                Term::Lam(n, i, ty, t)
             }
             Term::Pi(n, i, mut from, mut to) => {
                 *from = from.inline_metas(mcxt, l);
@@ -594,7 +632,7 @@ fn p_unify(
 
         // Since our terms are locally nameless (we're using De Bruijn levels), we automatically get alpha equivalence.
         // Also, we call `unify` instead of `p_unify` here so we can `inline()` the values we're creating here if necessary.
-        (Val::Lam(_, cl), Val::Lam(_, cl2)) => unify(
+        (Val::Lam(_, _, cl), Val::Lam(_, _, cl2)) => unify(
             cl.vquote(l, mcxt),
             cl2.vquote(l, mcxt),
             l.inc(),
@@ -605,7 +643,7 @@ fn p_unify(
         .into(),
 
         // If one side is a lambda, the other side just needs to unify to the same thing when we apply it to the same thing
-        (Val::Lam(icit, cl), t) | (t, Val::Lam(icit, cl)) => unify(
+        (Val::Lam(icit, _, cl), t) | (t, Val::Lam(icit, _, cl)) => unify(
             cl.vquote(l, mcxt),
             t.app(icit, Val::local(l), mcxt),
             l.inc(),
@@ -761,14 +799,14 @@ pub fn infer(
         }
         Pre_::Lam(name, icit, ty, body) => {
             let ty = check(ty, &Val::Type, db, mcxt)?;
-            let vty = evaluate(ty, &mcxt.env(), mcxt);
+            let vty = evaluate(ty.clone(), &mcxt.env(), mcxt);
             // TODO Rc to get rid of the clone()?
             mcxt.define(*name, NameInfo::Local(vty.clone()), db);
             let (body, bty) = infer(true, body, db, mcxt)?;
             mcxt.undef(db);
             // TODO do we insert metas here?
             Ok((
-                Term::Lam(*name, *icit, Box::new(body)),
+                Term::Lam(*name, *icit, Box::new(ty), Box::new(body)),
                 Val::Pi(
                     *icit,
                     Box::new(vty),
@@ -845,8 +883,8 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
     let ty = inline(ty.clone(), db, mcxt);
     match (&**pre, &ty) {
         (Pre_::Lam(n, i, ty, body), Val::Pi(i2, ty2, cl)) if i == i2 => {
-            let vty = check(ty, &Val::Type, db, mcxt)?;
-            let vty = evaluate(vty, &mcxt.env(), mcxt);
+            let ety = check(ty, &Val::Type, db, mcxt)?;
+            let vty = evaluate(ety.clone(), &mcxt.env(), mcxt);
             if !unify(
                 vty.clone(),
                 (**ty2).clone(),
@@ -870,12 +908,12 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                 mcxt,
             )?;
             mcxt.undef(db);
-            Ok(Term::Lam(*n, *i, Box::new(body)))
+            Ok(Term::Lam(*n, *i, Box::new(ety), Box::new(body)))
         }
 
         (Pre_::Lam(n, Icit::Expl, ty, body), Val::Fun(ty2, body_ty)) => {
-            let vty = check(ty, &Val::Type, db, mcxt)?;
-            let vty = evaluate(vty, &mcxt.env(), mcxt);
+            let ety = check(ty, &Val::Type, db, mcxt)?;
+            let vty = evaluate(ety.clone(), &mcxt.env(), mcxt);
             if !unify(
                 vty.clone(),
                 (**ty2).clone(),
@@ -893,7 +931,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             mcxt.define(*n, NameInfo::Local(vty), db);
             let body = check(body, &*body_ty, db, mcxt)?;
             mcxt.undef(db);
-            Ok(Term::Lam(*n, Icit::Expl, Box::new(body)))
+            Ok(Term::Lam(*n, Icit::Expl, Box::new(ety), Box::new(body)))
         }
 
         // We implicitly insert lambdas so `\x.x : [a] -> a -> a` typechecks
@@ -907,7 +945,8 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             mcxt.define(name, NameInfo::Local((**ty).clone()), db);
             let body = check(pre, &cl.clone().vquote(mcxt.size, mcxt), db, mcxt)?;
             mcxt.undef(db);
-            Ok(Term::Lam(cl.2, Icit::Impl, Box::new(body)))
+            let ty = quote((**ty).clone(), mcxt.size, mcxt);
+            Ok(Term::Lam(cl.2, Icit::Impl, Box::new(ty), Box::new(body)))
         }
 
         _ => {

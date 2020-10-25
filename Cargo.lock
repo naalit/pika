@@ -207,6 +207,7 @@ dependencies = [
 [[package]]
 name = "durin"
 version = "0.1.0"
+source = "git+https://github.com/tolziplohu/durin?rev=f7661a242c6d6f21529d40d1c87bf25a9f4a2862#f7661a242c6d6f21529d40d1c87bf25a9f4a2862"
 dependencies = [
  "either",
  "inkwell",

@@ -14,7 +14,11 @@ pub fn evaluate(term: Term, env: &Env, mcxt: &MCxt) -> Val {
             Some(v) => v,
             None => Val::meta(meta),
         },
-        Term::Lam(n, icit, body) => Val::Lam(icit, Clos(Box::new(env.clone()), body, n)),
+        Term::Lam(n, icit, ty, body) => Val::Lam(
+            icit,
+            Box::new(evaluate(*ty, env, mcxt)),
+            Clos(Box::new(env.clone()), body, n),
+        ),
         Term::Pi(n, icit, ty, body) => {
             let ty = evaluate(*ty, env, mcxt);
             Val::Pi(icit, Box::new(ty), Clos(Box::new(env.clone()), body, n))
@@ -40,7 +44,7 @@ impl Val {
                 sp.push((icit, x));
                 Val::App(h, sp)
             }
-            Val::Lam(_, cl) => cl.apply(x, mcxt),
+            Val::Lam(_, _, cl) => cl.apply(x, mcxt),
             Val::Error => Val::Error,
             _ => unreachable!(),
         }
@@ -78,7 +82,7 @@ pub fn inline(val: Val, db: &dyn Compiler, mcxt: &MCxt) -> Val {
             *to = inline(*to, db, mcxt);
             Val::Fun(from, to)
         }
-        v @ Val::Error | v @ Val::Lam(_, _) | v @ Val::Type => v,
+        v @ Val::Error | v @ Val::Lam(_, _, _) | v @ Val::Type => v,
     }
 }
 
@@ -96,7 +100,12 @@ pub fn quote(val: Val, enclosing: Lvl, mcxt: &MCxt) -> Term {
                 Term::App(icit, Box::new(f), Box::new(quote(x, enclosing, mcxt)))
             })
         }
-        Val::Lam(icit, cl) => Term::Lam(cl.2, icit, Box::new(cl.quote(enclosing, mcxt))),
+        Val::Lam(icit, ty, cl) => Term::Lam(
+            cl.2,
+            icit,
+            Box::new(quote(*ty, enclosing, mcxt)),
+            Box::new(cl.quote(enclosing, mcxt)),
+        ),
         Val::Pi(icit, ty, cl) => Term::Pi(
             cl.2,
             icit,

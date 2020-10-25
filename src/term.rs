@@ -178,12 +178,55 @@ pub type Ty = Term;
 pub enum Term {
     Type,
     Var(Var<Ix>),
-    Lam(Name, Icit, Box<Term>),
+    Lam(Name, Icit, Box<Ty>, Box<Term>),
     Pi(Name, Icit, Box<Ty>, Box<Ty>),
     Fun(Box<Ty>, Box<Ty>),
     App(Icit, Box<Term>, Box<Term>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
+}
+
+impl Term {
+    pub fn ty(&self, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+        match self {
+            Term::Type | Term::Pi(_, _, _, _) | Term::Fun(_, _) => Val::Type,
+            Term::Var(v) => match *v {
+                Var::Local(i) => mcxt.local_ty(i, db).clone(),
+                Var::Top(i) => (*db.elaborate_def(i).unwrap().typ).clone(),
+                Var::Rec(_) => todo!("find meta solution"),
+                Var::Meta(_) => todo!("find meta solution"),
+            },
+            Term::Lam(n, i, ty, body) => {
+                let ty = crate::evaluate::evaluate((**ty).clone(), &mcxt.env(), mcxt);
+                Val::Pi(
+                    *i,
+                    Box::new(ty.clone()),
+                    Clos(
+                        Box::new(mcxt.env()),
+                        Box::new(crate::evaluate::quote(
+                            {
+                                let mut mcxt = mcxt.clone();
+                                mcxt.define(*n, NameInfo::Local(ty), db);
+                                body.ty(&mcxt, db)
+                            },
+                            mcxt.size,
+                            mcxt,
+                        )),
+                        *n,
+                    ),
+                )
+            }
+            Term::App(_, f, x) => match f.ty(mcxt, db) {
+                Val::Fun(_, to) => *to,
+                Val::Pi(_, _, cl) => cl.apply(
+                    crate::evaluate::evaluate((**x).clone(), &mcxt.env(), mcxt),
+                    mcxt,
+                ),
+                _ => unreachable!(),
+            },
+            Term::Error => Val::Error,
+        }
+    }
 }
 
 /// Like `Names`, but generalized to arbitrary types.
@@ -270,7 +313,7 @@ impl Term {
                     Meta::Local(def, id) => Doc::start("?").add(id),
                 },
             },
-            Term::Lam(n, i, t) => {
+            Term::Lam(n, i, _ty, t) => {
                 let n = names.disamb(*n, db);
                 match i {
                     Icit::Impl => Doc::start("\\[").add(n.get(db)).add("]"),
@@ -432,7 +475,7 @@ pub enum Val {
     Type,
     /// The spine are arguments applied in order. It can be empty.
     App(Var<Lvl>, Spine),
-    Lam(Icit, Clos),
+    Lam(Icit, Box<VTy>, Clos),
     Pi(Icit, Box<VTy>, Clos),
     Fun(Box<VTy>, Box<VTy>),
     Error,

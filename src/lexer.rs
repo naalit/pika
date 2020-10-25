@@ -217,12 +217,10 @@ impl<'i> Lexer<'i> {
             }
         }
         self.tok_in_place(Tok::Lit(if neg {
-            Literal::Negative(
-                i64::from_str(self.slice()).map_err(|e| {
-                    // TODO when `ParseIntError::kind()` gets stabilized (or Pika switches to nightly Rust) make custom error messages
-                    Spanned::new(LexError::InvalidLiteral(e.to_string()), self.span())
-                })?,
-            )
+            Literal::Negative(i64::from_str(self.slice()).map_err(|e| {
+                // TODO when `ParseIntError::kind()` gets stabilized (or Pika switches to nightly Rust) make custom error messages
+                Spanned::new(LexError::InvalidLiteral(e.to_string()), self.span())
+            })?)
         } else {
             Literal::Positive(
                 u64::from_str(self.slice()).map_err(|e| {
@@ -333,7 +331,10 @@ impl<'i> Lexer<'i> {
             '&' => {
                 self.next();
                 if self.peek() == Some('&') {
-                    Some(Err(Spanned::new(LexError::Other("invalid operator '&&': use 'and' for logical and".into()), self.span())))
+                    Some(Err(Spanned::new(
+                        LexError::Other("invalid operator '&&': use 'and' for logical and".into()),
+                        self.span(),
+                    )))
                 } else {
                     Some(self.tok_in_place(Tok::BitAnd))
                 }
