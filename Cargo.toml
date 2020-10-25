@@ -13,7 +13,7 @@ salsa = "*"
 codespan-reporting = "*"
 lazy_static = "*"
 pretty = { version = "*", features = ["termcolor"] }
-durin = { git = "https://github.com/tolziplohu/durin", rev = "f7661a242c6d6f21529d40d1c87bf25a9f4a2862" }
+durin = { git = "https://github.com/tolziplohu/durin", rev = "4cbb04bea1fb7f84ae609988b17284777cd91cd0" }
 smallvec = "*"
 
 [build-dependencies]

@@ -94,13 +94,13 @@ impl PreDef {
 /// A De Bruijn index, representing the number of enclosing lambda abstractions before we get to the one that binds the variable.
 ///
 /// `\x.(\y.yx)x` is `\.(\.01)0`
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Ord, PartialOrd)]
 pub struct Ix(u32);
 /// A De Bruijn level, the opposite of an index.
 /// It represents the number of lambda abstractions we have to descend into from the root to get to the one that binds the variable.
 ///
 /// `\x.(\y.yx)x` is `\.(\.10)0`
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Ord, PartialOrd)]
 pub struct Lvl(u32);
 impl Ix {
     pub fn zero() -> Self {

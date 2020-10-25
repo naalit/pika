@@ -62,6 +62,11 @@ impl<'db> LCxt<'db> {
     }
 }
 
+struct Pi {
+    pub arg: ir::Val,
+    from: ir::Val,
+}
+
 /// Takes care of the transformation from direct style to CPS.
 struct Builder<'m> {
     module: &'m mut ir::Module,
@@ -104,6 +109,23 @@ impl<'m> Builder<'m> {
         let cont_ty = self.module.add(ir::Node::FunType(smallvec![to]), None);
         self.module
             .add(ir::Node::FunType(smallvec![from, cont_ty]), None)
+    }
+
+    fn start_pi(&mut self, param: Option<String>, from: ir::Val) -> Pi {
+        Pi {
+            arg: self.module.reserve(param),
+            from,
+        }
+    }
+
+    fn end_pi(&mut self, pi: Pi, to: ir::Val) -> ir::Val {
+        let Pi { arg, from } = pi;
+        let cont_ty = self.module.add(ir::Node::FunType(smallvec![to]), None);
+        let fun = self
+            .module
+            .add(ir::Node::FunType(smallvec![from, cont_ty]), None);
+        self.module.replace(arg, ir::Node::Param(fun, 0));
+        fun
     }
 
     fn reserve(&mut self, name: Option<String>) -> ir::Val {
@@ -189,7 +211,16 @@ impl Term {
                 let to = to.lower(cxt);
                 cxt.builder.fun_type(from, to)
             }
-            Term::Pi(_n, _i, from, to) => todo!("pi types in Durin"),
+            Term::Pi(name, _icit, from, to) => {
+                let from = from.lower(cxt);
+                let pi = cxt
+                    .builder
+                    .start_pi(Some(cxt.db.lookup_intern_name(*name)), from);
+                cxt.locals.add(pi.arg);
+                let to = to.lower(cxt);
+                cxt.locals.remove();
+                cxt.builder.end_pi(pi, to)
+            }
             Term::Error => panic!("type errors should have been caught by now!"),
         }
     }

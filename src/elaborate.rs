@@ -190,6 +190,22 @@ impl MCxt {
         let term = quote(val, self.size, &self);
         // The level it will be at after we wrap it in lambdas
         let to_lvl = (0..spine.len()).fold(self.size, |x, _| x.inc());
+
+        // Get the type of each argument
+        let tys: Vec<Ty> = spine
+            .iter()
+            .zip(std::iter::successors(Some(self.size.inc()), |lvl| {
+                Some(lvl.inc())
+            }))
+            .map(|((_, v), l)| match v {
+                Val::App(Var::Local(from_lvl), sp) if sp.is_empty() => {
+                    let ty = self.local_ty(from_lvl.to_ix(self.size), db);
+                    quote(ty, l, self)
+                }
+                _ => panic!("Compiler error: meta spine contains non-variable"),
+            })
+            .collect();
+
         let term = term.check_solution(
             Spanned::new(meta, span),
             &mut meta_scope,
@@ -197,18 +213,10 @@ impl MCxt {
             to_lvl,
             &mut Names::new(self.cxt, db),
         )?;
-        // Innermost first
-        let (tys, _, _) =
-            (0..spine.len()).fold((Vec::new(), Ix::zero(), to_lvl), |(mut v, i, l), _| {
-                let ty = self.local_ty(i, db);
-                let ty = crate::evaluate::quote(ty, l, &self);
-                v.push(ty);
-                (v, i.inc(), l.dec())
-            });
         // Actually wrap it in lambdas
         // We could look up the local variables' names in the cxt, but it's probably not worth it
         let empty_name = db.intern_name("_".to_string());
-        let term = tys.into_iter().fold(term, |term, ty| {
+        let term = tys.into_iter().rev().fold(term, |term, ty| {
             Term::Lam(empty_name, Icit::Expl, Box::new(ty), Box::new(term))
         });
 
@@ -447,7 +455,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 }
 
 impl Val {
-    fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
+    pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
         quote(self.clone().inline_metas(mcxt), mcxt.size, mcxt)
             .pretty(db, &mut Names::new(mcxt.cxt, db))
     }
