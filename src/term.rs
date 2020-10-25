@@ -186,6 +186,28 @@ pub enum Term {
     Error,
 }
 
+/// Like `Names`, but generalized to arbitrary types.
+#[derive(Clone, Default, Debug)]
+pub struct IVec<T>(VecDeque<T>);
+impl<T> IVec<T> {
+    pub fn new() -> Self {
+        IVec(VecDeque::new())
+    }
+
+    pub fn get(&self, ix: Ix) -> &T {
+        &self.0[ix.0 as usize]
+    }
+
+    pub fn add(&mut self, n: T) -> &mut Self {
+        self.0.push_front(n);
+        self
+    }
+
+    pub fn remove(&mut self) -> Option<T> {
+        self.0.pop_front()
+    }
+}
+
 // -- pretty printing --
 
 pub struct Names(VecDeque<Name>);

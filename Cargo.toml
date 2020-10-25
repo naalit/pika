@@ -13,6 +13,8 @@ salsa = "*"
 codespan-reporting = "*"
 lazy_static = "*"
 pretty = { version = "*", features = ["termcolor"] }
+durin = { path = "../durin" }
+smallvec = "*"
 
 [build-dependencies]
 lalrpop = { version = "*", features = ["lexer"] }

@@ -9,6 +9,7 @@ pub mod lexer;
 pub mod pretty;
 pub mod query;
 pub mod term;
+pub mod lower;
 use query::*;
 
 lalrpop_mod!(pub grammar);
