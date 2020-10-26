@@ -209,7 +209,7 @@ impl Term {
                                 mcxt.define(*n, NameInfo::Local(ty), db);
                                 body.ty(&mcxt, db)
                             },
-                            mcxt.size,
+                            mcxt.size.inc(),
                             mcxt,
                         )),
                         *n,
@@ -238,7 +238,13 @@ impl<T> IVec<T> {
     }
 
     pub fn get(&self, ix: Ix) -> &T {
-        &self.0[ix.0 as usize]
+        self.0.get(ix.0 as usize).unwrap_or_else(|| {
+            panic!(
+                "Tried to access ix {} of IVec but size is {}",
+                ix.0,
+                self.0.len()
+            )
+        })
     }
 
     pub fn add(&mut self, n: T) -> &mut Self {
@@ -248,6 +254,10 @@ impl<T> IVec<T> {
 
     pub fn remove(&mut self) -> Option<T> {
         self.0.pop_front()
+    }
+
+    pub fn size(&self) -> Lvl {
+        Lvl(self.0.len() as u32)
     }
 }
 
@@ -425,6 +435,7 @@ impl Clos {
     }
 
     /// Quotes the closure back into a `Term`, but leaves it behind the lambda, so don't extract it.
+    /// Note, then, that `enclosing` is the number of abstractions enclosing the *lambda*, it doesn't include the lambda.
     pub fn quote(self, enclosing: Lvl, mcxt: &MCxt) -> Term {
         // We only need to do eval-quote if we've captured variables, which isn't that often
         // Otherwise, we just need to inline meta solutions

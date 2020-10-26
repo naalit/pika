@@ -369,14 +369,22 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 }
             };
             Ok((
-                targs.iter().rfold(body, |body, (name, icit, ty)| {
-                    Term::Lam(
-                        *name,
-                        *icit,
-                        Box::new(quote(ty.clone(), mcxt.size, &mcxt)),
-                        Box::new(body),
-                    )
-                }),
+                targs
+                    .iter()
+                    .rfold((body, mcxt.size), |(body, mut size), (name, icit, ty)| {
+                        // We're going to need to quote the types, so undefine the most recent arg
+                        size = size.dec();
+                        (
+                            Term::Lam(
+                                *name,
+                                *icit,
+                                Box::new(quote(ty.clone(), size, &mcxt)),
+                                Box::new(body),
+                            ),
+                            size,
+                        )
+                    })
+                    .0,
                 targs
                     .into_iter()
                     .rfold((vty, mcxt.size), |(to, size), (name, icit, from)| {

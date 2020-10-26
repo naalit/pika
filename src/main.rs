@@ -27,7 +27,9 @@ fn main() {
         db.set_file_source(id, buf);
         db.check_all(id);
         if db.num_errors() == 0 {
-            println!("File elaborated successfully!")
+            println!("File elaborated successfully!");
+            let durin = db.durin(id);
+            println!("Durin module:\n{}", durin.emit());
         } else {
             db.write_errors();
         }

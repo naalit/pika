@@ -1,8 +1,10 @@
 //! This module deals with translation to Durin.
 
 use crate::elaborate::MCxt;
+use crate::error::FileId;
 use crate::query::*;
 use crate::term::*;
+use durin::builder::*;
 use durin::ir;
 use smallvec::smallvec;
 use std::collections::HashMap;
@@ -13,6 +15,10 @@ pub struct ModCxt<'m> {
     module: ir::Module,
 }
 impl<'m> ModCxt<'m> {
+    pub fn finish(self) -> ir::Module {
+        self.module
+    }
+
     pub fn new(db: &'m dyn Compiler) -> Self {
         ModCxt {
             db,
@@ -30,6 +36,7 @@ impl<'m> ModCxt<'m> {
             &self.defs,
         );
         let val = f(&mut lcxt);
+        lcxt.builder.finish();
         let name = self.db.lookup_intern_predef(pre).name();
         self.module
             .set_name(val, name.map(|x| self.db.lookup_intern_name(x)));
@@ -60,103 +67,15 @@ impl<'db> LCxt<'db> {
             mcxt,
         }
     }
-}
 
-struct Pi {
-    pub arg: ir::Val,
-    from: ir::Val,
-}
-
-/// Takes care of the transformation from direct style to CPS.
-struct Builder<'m> {
-    module: &'m mut ir::Module,
-    block: ir::Val,
-    params: Vec<ir::Val>,
-    /// (fun, block, params, cont)
-    funs: Vec<(ir::Val, ir::Val, Vec<ir::Val>, ir::Val)>,
-}
-impl<'m> Builder<'m> {
-    fn new(m: &'m mut ir::Module) -> Self {
-        let block = m.reserve(None);
-        Builder {
-            module: m,
-            block,
-            params: Vec::new(),
-            funs: Vec::new(),
-        }
+    pub fn local(&mut self, name: Name, val: ir::Val, ty: VTy) {
+        self.locals.add(val);
+        self.mcxt.define(name, NameInfo::Local(ty), self.db);
     }
 
-    fn call(&mut self, f: ir::Val, x: ir::Val, ret_ty: ir::Val) -> ir::Val {
-        let cont = self.module.reserve(None);
-        self.module.replace(
-            self.block,
-            ir::Node::Fun(ir::Function {
-                params: self.params.drain(0..).collect(),
-                callee: f,
-                call_args: smallvec![x, cont],
-            }),
-        );
-        self.block = cont;
-        self.params.push(ret_ty);
-        self.module.add(ir::Node::Param(cont, 0), None)
-    }
-
-    fn cons(&mut self, c: ir::Constant) -> ir::Val {
-        self.module.add(ir::Node::Const(c), None)
-    }
-
-    fn fun_type(&mut self, from: ir::Val, to: ir::Val) -> ir::Val {
-        let cont_ty = self.module.add(ir::Node::FunType(smallvec![to]), None);
-        self.module
-            .add(ir::Node::FunType(smallvec![from, cont_ty]), None)
-    }
-
-    fn start_pi(&mut self, param: Option<String>, from: ir::Val) -> Pi {
-        Pi {
-            arg: self.module.reserve(param),
-            from,
-        }
-    }
-
-    fn end_pi(&mut self, pi: Pi, to: ir::Val) -> ir::Val {
-        let Pi { arg, from } = pi;
-        let cont_ty = self.module.add(ir::Node::FunType(smallvec![to]), None);
-        let fun = self
-            .module
-            .add(ir::Node::FunType(smallvec![from, cont_ty]), None);
-        self.module.replace(arg, ir::Node::Param(fun, 0));
-        fun
-    }
-
-    fn reserve(&mut self, name: Option<String>) -> ir::Val {
-        self.module.reserve(name)
-    }
-
-    /// Returns the parameter value
-    fn push_fun(&mut self, param: Option<String>, param_ty: ir::Val, ret_ty: ir::Val) -> ir::Val {
-        let fun = self.module.reserve(None);
-        let cont = self.module.add(ir::Node::Param(fun, 1), None);
-        self.funs.push((fun, self.block, self.params.clone(), cont));
-        self.block = fun;
-        let cont_ty = self.module.add(ir::Node::FunType(smallvec![ret_ty]), None);
-        self.params = vec![param_ty, cont_ty];
-        self.module.add(ir::Node::Param(fun, 0), param)
-    }
-
-    fn pop_fun(&mut self, ret: ir::Val) -> ir::Val {
-        let (fun, block, params, cont) = self.funs.pop().unwrap();
-        // We don't use self.call since we don't add the cont parameter here
-        self.module.replace(
-            self.block,
-            ir::Node::Fun(ir::Function {
-                params: self.params.drain(0..).collect(),
-                callee: cont,
-                call_args: smallvec![ret],
-            }),
-        );
-        self.block = block;
-        self.params = params;
-        fun
+    pub fn pop_local(&mut self) {
+        self.locals.remove();
+        self.mcxt.undef(self.db);
     }
 }
 
@@ -164,6 +83,16 @@ impl Val {
     pub fn lower(self, cxt: &mut LCxt) -> ir::Val {
         crate::evaluate::quote(self, cxt.mcxt.size, &cxt.mcxt).lower(cxt)
     }
+}
+
+pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
+    let mut mcxt = ModCxt::new(db);
+    for &def in &*db.top_level(file) {
+        if let Ok(info) = db.elaborate_def(def) {
+            mcxt.local(def, |lcxt| info.term.lower(lcxt));
+        }
+    }
+    mcxt.finish()
 }
 
 impl Term {
@@ -185,19 +114,22 @@ impl Term {
             // fun k y = r y
             Term::Lam(name, _icit, _arg_ty, body) => {
                 let (param_ty, ret_ty) = match self.ty(&cxt.mcxt, cxt.db) {
-                    Val::Fun(from, to) => (*from, *to),
-                    Val::Pi(_, from, to) => (*from, to.vquote(cxt.mcxt.size, &cxt.mcxt)),
+                    Val::Fun(from, to) => {
+                        (*from, crate::evaluate::quote(*to, cxt.mcxt.size, &cxt.mcxt))
+                    }
+                    Val::Pi(_, from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt)),
                     _ => unreachable!(),
                 };
-                let param_ty = param_ty.lower(cxt);
-                let ret_ty_ = ret_ty.lower(cxt);
-                let arg =
-                    cxt.builder
-                        .push_fun(Some(cxt.db.lookup_intern_name(*name)), param_ty, ret_ty_);
-                cxt.locals.add(arg);
+                assert_eq!(cxt.mcxt.size, cxt.locals.size());
+                let param_ty_ = param_ty.clone().lower(cxt);
+                let arg = cxt
+                    .builder
+                    .push_fun(Some(cxt.db.lookup_intern_name(*name)), param_ty_);
+                cxt.local(*name, arg, param_ty);
+                let ret_ty = ret_ty.lower(cxt);
                 let ret = body.lower(cxt);
-                cxt.locals.remove();
-                cxt.builder.pop_fun(ret)
+                cxt.pop_local();
+                cxt.builder.pop_fun(ret, ret_ty)
             }
             Term::App(_icit, f, x) => {
                 let ret_ty = self.ty(&cxt.mcxt, cxt.db);
@@ -212,13 +144,17 @@ impl Term {
                 cxt.builder.fun_type(from, to)
             }
             Term::Pi(name, _icit, from, to) => {
-                let from = from.lower(cxt);
+                let from_ = from.lower(cxt);
                 let pi = cxt
                     .builder
-                    .start_pi(Some(cxt.db.lookup_intern_name(*name)), from);
-                cxt.locals.add(pi.arg);
+                    .start_pi(Some(cxt.db.lookup_intern_name(*name)), from_);
+                cxt.local(
+                    *name,
+                    pi.arg,
+                    crate::evaluate::evaluate((**from).clone(), &cxt.mcxt.env(), &cxt.mcxt),
+                );
                 let to = to.lower(cxt);
-                cxt.locals.remove();
+                cxt.pop_local();
                 cxt.builder.end_pi(pi, to)
             }
             Term::Error => panic!("type errors should have been caught by now!"),
