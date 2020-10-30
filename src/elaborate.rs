@@ -147,7 +147,7 @@ impl MCxt {
             Meta::Local(def, num) => {
                 assert_eq!(def, self.def, "local meta escaped its definition!");
                 match &self.local_metas[num as usize] {
-                    MetaEntry::Solved(v, _) => Some(v.clone()),
+                    MetaEntry::Solved(v, _) => Some(v.clone()).map(|x| x.inline_metas(self)),
                     MetaEntry::Unsolved(_, _, _) => None,
                 }
             }
@@ -198,7 +198,7 @@ impl MCxt {
         // Get the type of each argument
         let tys: Vec<Ty> = spine
             .iter()
-            .zip(std::iter::successors(Some(self.size.inc()), |lvl| {
+            .zip(std::iter::successors(Some(self.size), |lvl| {
                 Some(lvl.inc())
             }))
             .map(|((_, v), l)| match v {
@@ -625,7 +625,41 @@ impl Term {
 
 impl Val {
     pub fn inline_metas(self, mcxt: &MCxt) -> Self {
-        evaluate(quote(self, mcxt.size, mcxt), &mcxt.env(), mcxt)
+        match self {
+            Val::Type => Val::Type,
+            Val::App(h, sp) => {
+                let h = match h {
+                    Var::Meta(m) => match mcxt.get_meta(m) {
+                        Some(v) => return v,
+                        None => Var::Meta(m),
+                    },
+                    h => h,
+                };
+                let sp = sp
+                    .into_iter()
+                    .map(|(i, x)| (i, x.inline_metas(mcxt)))
+                    .collect();
+                Val::App(h, sp)
+            }
+            Val::Lam(i, mut ty, mut cl) => {
+                *ty = ty.inline_metas(mcxt);
+                let l = cl.env_size();
+                *cl.1 = cl.1.inline_metas(mcxt, l);
+                Val::Lam(i, ty, cl)
+            }
+            Val::Pi(i, mut ty, mut cl) => {
+                *ty = ty.inline_metas(mcxt);
+                let l = cl.env_size();
+                *cl.1 = cl.1.inline_metas(mcxt, l);
+                Val::Pi(i, ty, cl)
+            }
+            Val::Fun(mut from, mut to) => {
+                *from = from.inline_metas(mcxt);
+                *to = to.inline_metas(mcxt);
+                Val::Fun(from, to)
+            }
+            Val::Error => Val::Error,
+        }
     }
 }
 

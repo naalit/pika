@@ -222,7 +222,15 @@ impl Term {
                     crate::evaluate::evaluate((**x).clone(), &mcxt.env(), mcxt),
                     mcxt,
                 ),
-                _ => unreachable!(),
+                // It might be a name that refers to a function type, so we need to inline it
+                ty => match crate::evaluate::inline(ty, db, mcxt) {
+                    Val::Fun(_, to) => *to,
+                    Val::Pi(_, _, cl) => cl.apply(
+                        crate::evaluate::evaluate((**x).clone(), &mcxt.env(), mcxt),
+                        mcxt,
+                    ),
+                    _ => unreachable!(),
+                },
             },
             Term::Error => Val::Error,
         }
@@ -247,9 +255,8 @@ impl<T> IVec<T> {
         })
     }
 
-    pub fn add(&mut self, n: T) -> &mut Self {
+    pub fn add(&mut self, n: T) {
         self.0.push_front(n);
-        self
     }
 
     pub fn remove(&mut self) -> Option<T> {
@@ -340,7 +347,6 @@ impl Term {
             Term::Pi(n, i, from, to) => {
                 let n = names.disamb(*n, db);
                 {
-                    names.add(n);
                     let r = match i {
                         Icit::Impl => Doc::start("[")
                             .add(n.get(db))
@@ -352,12 +358,14 @@ impl Term {
                             .add(" : ")
                             .chain(from.pretty(db, names))
                             .add(")"),
-                    }
-                    .space()
-                    .add("->")
-                    .space()
-                    .chain(to.pretty(db, names))
-                    .prec(Prec::Term);
+                    };
+                    names.add(n);
+                    let r = r
+                        .space()
+                        .add("->")
+                        .space()
+                        .chain(to.pretty(db, names))
+                        .prec(Prec::Term);
                     names.remove();
                     r
                 }
@@ -394,7 +402,7 @@ pub struct Env {
     /// When elaborating, we often want to evaluate something without any locals, or just add one or two at the front.
     /// To make that efficient, we leave off the tail of `None`s, and if an index goes past the length, it's `None`.
     vals: VecDeque<Option<Val>>,
-    size: Lvl,
+    pub size: Lvl,
 }
 impl Env {
     pub fn new(size: Lvl) -> Self {
