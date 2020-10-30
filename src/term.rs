@@ -292,9 +292,8 @@ impl Names {
         }
         n
     }
-    pub fn add(&mut self, n: Name) -> &mut Names {
+    pub fn add(&mut self, n: Name) {
         self.0.push_front(n);
-        self
     }
     pub fn remove(&mut self) {
         self.0.pop_front();
@@ -325,33 +324,43 @@ impl Term {
             },
             Term::Lam(n, i, _ty, t) => {
                 let n = names.disamb(*n, db);
-                match i {
-                    Icit::Impl => Doc::start("\\[").add(n.get(db)).add("]"),
-                    Icit::Expl => Doc::start("\\").add(n.get(db)),
+                {
+                    names.add(n);
+                    let r = match i {
+                        Icit::Impl => Doc::start("\\[").add(n.get(db)).add("]"),
+                        Icit::Expl => Doc::start("\\").add(n.get(db)),
+                    }
+                    .add(". ")
+                    .chain(t.pretty(db, names))
+                    .prec(Prec::Term);
+                    names.remove();
+                    r
                 }
-                .add(". ")
-                .chain(t.pretty(db, names.add(n)))
-                .prec(Prec::Term)
             }
             Term::Pi(n, i, from, to) => {
                 let n = names.disamb(*n, db);
-                match i {
-                    Icit::Impl => Doc::start("[")
-                        .add(n.get(db))
-                        .add(" : ")
-                        .chain(from.pretty(db, names))
-                        .add("]"),
-                    Icit::Expl => Doc::start("(")
-                        .add(n.get(db))
-                        .add(" : ")
-                        .chain(from.pretty(db, names))
-                        .add(")"),
+                {
+                    names.add(n);
+                    let r = match i {
+                        Icit::Impl => Doc::start("[")
+                            .add(n.get(db))
+                            .add(" : ")
+                            .chain(from.pretty(db, names))
+                            .add("]"),
+                        Icit::Expl => Doc::start("(")
+                            .add(n.get(db))
+                            .add(" : ")
+                            .chain(from.pretty(db, names))
+                            .add(")"),
+                    }
+                    .space()
+                    .add("->")
+                    .space()
+                    .chain(to.pretty(db, names))
+                    .prec(Prec::Term);
+                    names.remove();
+                    r
                 }
-                .space()
-                .add("->")
-                .space()
-                .chain(to.pretty(db, names.add(n)))
-                .prec(Prec::Term)
             }
             Term::Fun(from, to) => from
                 .pretty(db, names)

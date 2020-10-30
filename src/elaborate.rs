@@ -53,14 +53,18 @@ impl Term {
                 *ty = ty.check_solution(meta.clone(), ren, lfrom, lto, names)?;
                 // Allow the body to use the bound variable
                 ren.insert(lfrom.inc(), lto.inc());
-                *t = t.check_solution(meta, ren, lfrom.inc(), lto.inc(), names.add(n))?;
+                names.add(n);
+                *t = t.check_solution(meta, ren, lfrom.inc(), lto.inc(), names)?;
+                names.remove();
                 Ok(Term::Lam(n, i, ty, t))
             }
             Term::Pi(n, i, mut a, mut b) => {
                 *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
                 // Allow the body to use the bound variable
                 ren.insert(lfrom.inc(), lto.inc());
-                *b = b.check_solution(meta, ren, lfrom.inc(), lto.inc(), names.add(n))?;
+                names.add(n);
+                *b = b.check_solution(meta, ren, lfrom.inc(), lto.inc(), names)?;
+                names.remove();
                 Ok(Term::Pi(n, i, a, b))
             }
             Term::Fun(mut a, mut b) => {
