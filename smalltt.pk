@@ -252,11 +252,11 @@ val forceNat : Nat -> Bool
 
 # Note: [normalize] prints normalization time for definition on load
 
-@[elaborate]
+# smalltt : 10ms
+# Pika    : 2.6s
 @[normalize]
-val compute10k = forceNat n10k
+val compute100k = forceNat n100k
 
-# TODO [normalize]
 # GHC -O2 -fllvm            : 14ms   , 0 MB
 # Coq (Eval vm_compute)     : 0.23s  , 82 MB
 # smalltt                   : 0.53s  , 6.3 MB

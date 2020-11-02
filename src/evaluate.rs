@@ -17,11 +17,11 @@ pub fn evaluate(term: Term, env: &Env, mcxt: &MCxt) -> Val {
         Term::Lam(n, icit, ty, body) => Val::Lam(
             icit,
             Box::new(evaluate(*ty, env, mcxt)),
-            Clos(Box::new(env.clone()), body, n),
+            Box::new(Clos(env.clone(), *body, n)),
         ),
         Term::Pi(n, icit, ty, body) => {
             let ty = evaluate(*ty, env, mcxt);
-            Val::Pi(icit, Box::new(ty), Clos(Box::new(env.clone()), body, n))
+            Val::Pi(icit, Box::new(ty), Box::new(Clos(env.clone(), *body, n)))
         }
         Term::Fun(from, to) => {
             let from = evaluate(*from, env, mcxt);

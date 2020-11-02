@@ -228,9 +228,9 @@ impl Term {
                 Val::Pi(
                     *i,
                     Box::new(ty.clone()),
-                    Clos(
-                        Box::new(mcxt.env()),
-                        Box::new(crate::evaluate::quote(
+                    Box::new(Clos(
+                        mcxt.env(),
+                        crate::evaluate::quote(
                             {
                                 let mut mcxt = mcxt.clone();
                                 mcxt.define(*n, NameInfo::Local(ty), db);
@@ -238,9 +238,9 @@ impl Term {
                             },
                             mcxt.size.inc(),
                             mcxt,
-                        )),
+                        ),
                         *n,
-                    ),
+                    )),
                 )
             }
             Term::App(_, f, x) => match f.ty(mcxt, db) {
@@ -472,7 +472,7 @@ use crate::elaborate::MCxt;
 ///
 /// Note that it stores a `Box<Env>`, because we store it inline in `Val` and the `VecDeque` that `Env` uses is actually very big.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Clos(pub Box<Env>, pub Box<Term>, pub Name);
+pub struct Clos(pub Env, pub Term, pub Name);
 impl Clos {
     pub fn env_size(&self) -> Lvl {
         self.0.size
@@ -491,7 +491,7 @@ impl Clos {
             use crate::evaluate::{evaluate, quote};
             let Clos(mut env, t, _) = self;
             env.push(Some(Val::local(enclosing.inc())));
-            quote(evaluate(*t, &env, mcxt), enclosing.inc(), mcxt)
+            quote(evaluate(t, &env, mcxt), enclosing.inc(), mcxt)
         }
     }
 
@@ -500,14 +500,14 @@ impl Clos {
         use crate::evaluate::evaluate;
         let Clos(mut env, t, _) = self;
         env.push(Some(Val::local(l)));
-        evaluate(*t, &env, mcxt)
+        evaluate(t, &env, mcxt)
     }
 
     pub fn apply(self, arg: Val, mcxt: &MCxt) -> Val {
         use crate::evaluate::evaluate;
         let Clos(mut env, t, _) = self;
         env.push(Some(arg));
-        evaluate(*t, &env, mcxt)
+        evaluate(t, &env, mcxt)
     }
 }
 
@@ -530,8 +530,8 @@ pub enum Val {
     Type,
     /// The spine are arguments applied in order. It can be empty.
     App(Var<Lvl>, Spine),
-    Lam(Icit, Box<VTy>, Clos),
-    Pi(Icit, Box<VTy>, Clos),
+    Lam(Icit, Box<VTy>, Box<Clos>),
+    Pi(Icit, Box<VTy>, Box<Clos>),
     Fun(Box<VTy>, Box<VTy>),
     Error,
 }

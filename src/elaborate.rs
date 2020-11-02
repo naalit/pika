@@ -399,11 +399,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                             Val::Pi(
                                 icit,
                                 Box::new(from),
-                                Clos(
-                                    Box::new(Env::new(size)),
-                                    Box::new(quote(to, size, &mcxt)),
-                                    name,
-                                ),
+                                Box::new(Clos(Env::new(size), quote(to, size, &mcxt), name)),
                             ),
                             size.dec(),
                         )
@@ -673,13 +669,13 @@ impl Val {
             Val::Lam(i, mut ty, mut cl) => {
                 *ty = ty.inline_metas(mcxt);
                 let l = cl.env_size();
-                *cl.1 = cl.1.inline_metas(mcxt, l);
+                cl.1 = cl.1.inline_metas(mcxt, l);
                 Val::Lam(i, ty, cl)
             }
             Val::Pi(i, mut ty, mut cl) => {
                 *ty = ty.inline_metas(mcxt);
                 let l = cl.env_size();
-                *cl.1 = cl.1.inline_metas(mcxt, l);
+                cl.1 = cl.1.inline_metas(mcxt, l);
                 Val::Pi(i, ty, cl)
             }
             Val::Fun(mut from, mut to) => {
@@ -894,11 +890,7 @@ pub fn infer(
                     *icit,
                     Box::new(vty),
                     // `inc()` since we're wrapping it in a lambda
-                    Clos(
-                        Box::new(mcxt.env()),
-                        Box::new(quote(bty, mcxt.size.inc(), mcxt)),
-                        *name,
-                    ),
+                    Box::new(Clos(mcxt.env(), quote(bty, mcxt.size.inc(), mcxt), *name)),
                 ),
             ))
         }
