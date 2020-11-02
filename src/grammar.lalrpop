@@ -3,6 +3,7 @@ use crate::query::{Compiler, Name, CompilerExt};
 use crate::error::*;
 use crate::term::*;
 use crate::lexer::*;
+use lalrpop_util::ParseError;
 
 // I'd like to only require &dyn Interner, but the calling code has a &dyn Compiler and Rust doesn't have trait object upcasting yet.
 grammar<'input>(db: &dyn Compiler);
@@ -62,6 +63,7 @@ extern {
     NAME => Tok::Name(<&'input str>),
 
     // Other tokens
+    "@" => Tok::At,
     "(" => Tok::POpen,
     ")" => Tok::PClose,
     "[" => Tok::SOpen,
@@ -78,16 +80,23 @@ Sp<T>: Spanned<T> = {
   <l:@L> <v:T> <r:@R> => Spanned::new(v, Span(l, r)),
 }
 
-pub Defs: Vec<PreDef> = {
+pub Defs: Vec<PreDefAn> = {
   "\n"* <first:Def> <mut v:("\n"+ <Def>)*> "\n"* => {
     v.insert(0, first);
     v
   }
 }
 
+pub Def: PreDefAn = {
+  <a:("@" "[" <Attr> "]" "\n"*)*> <d:Def_> => PreDefAn {
+    attributes: a,
+    inner: d,
+  },
+}
+
 // Both definitions and declarations, since they're mostly allowed in the same contexts
 // If declarations aren't allowed (e.g. in structs or the top level), it's nicer to use a handwritten error message for that case.
-pub Def: PreDef = {
+Def_: PreDef = {
   // -- definitions --
 
   "fun" "\n"* <name:Sp<Name>> <args:Args> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
@@ -366,4 +375,7 @@ Block<T>: Vec<T> = {
 
 // Basic tokens
 
+Attr: Attribute = <l:@L> <n:NAME> <r:@R> =>? Attribute::parse(n).map_err(|x| ParseError::User {
+  error: Spanned::new(LexError::Other(x), Span(l, r))
+});
 Name: Name = NAME => db.intern_name(String::from(<>));

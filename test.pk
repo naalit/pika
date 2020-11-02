@@ -29,3 +29,7 @@ Type
 x
 .
 x
+
+@[elaborate]
+@[normalize]
+val test : [t] t -> t = id id

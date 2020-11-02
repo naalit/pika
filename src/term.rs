@@ -41,9 +41,36 @@ pub enum Pre_ {
     /// It could be represented as `Pi`, but it's so common that this is worth it, for better performance and errors.
     Fun(PreTy, PreTy),
     App(Icit, Pre, Pre),
-    Do(Vec<PreDef>),
-    Struct(Vec<PreDef>),
+    Do(Vec<PreDefAn>),
+    Struct(Vec<PreDefAn>),
     Hole(MetaSource),
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Attribute {
+    Normalize,
+    Elaborate,
+}
+impl Attribute {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "normalize" => Ok(Attribute::Normalize),
+            "elaborate" => Ok(Attribute::Elaborate),
+            _ => Err(format!("unknown attribute: @[{}]", s)),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct PreDefAn {
+    pub attributes: Vec<Attribute>,
+    pub inner: PreDef,
+}
+impl std::ops::Deref for PreDefAn {
+    type Target = PreDef;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 /// The return type of a constructor is optional even here, since the behaviour is different.

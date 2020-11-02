@@ -252,6 +252,10 @@ val forceNat : Nat -> Bool
 
 # Note: [normalize] prints normalization time for definition on load
 
+@[elaborate]
+@[normalize]
+val compute10k = forceNat n10k
+
 # TODO [normalize]
 # GHC -O2 -fllvm            : 14ms   , 0 MB
 # Coq (Eval vm_compute)     : 0.23s  , 82 MB
@@ -261,6 +265,8 @@ val forceNat : Nat -> Bool
 # Coq (Eval lazy)           : 2.8s   , 290 MB
 # Agda                      : ~5.5s  , ~635 MB
 # Coq (Eval native_compute) : compilation failure
+# Pika                      : stack overflow
+# @[normalize]
 val compute10M  = forceNat n10M
 
 # Lazy/call-by-need evaluation
@@ -269,6 +275,8 @@ val compute10M  = forceNat n10M
 # smalltt         : instantly normalized
 # Agda            : instantly normalized
 # Coq (Eval lazy) : instantly normalized
+# Pika            : stack overflow
+# @[normalize]
 val lazyU = const Type (forceNat n10M)
 
 # TODO local definitions

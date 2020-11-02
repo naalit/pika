@@ -181,7 +181,7 @@ pub trait Interner: salsa::Database {
     fn intern_name(&self, s: String) -> Name;
 
     #[salsa::interned]
-    fn intern_predef(&self, def: Arc<PreDef>) -> PreDefId;
+    fn intern_predef(&self, def: Arc<PreDefAn>) -> PreDefId;
 
     #[salsa::interned]
     fn intern_def(&self, def: PreDefId, cxt: Cxt) -> DefId;
@@ -242,12 +242,12 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
     }
 }
 
-fn intern_block(v: Vec<PreDef>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<DefId> {
+fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<DefId> {
     let mut rv = Vec::new();
     // This stores unordered definitions (types and functions) between local variables
     let mut temp = Vec::new();
     for def in v {
-        match &def {
+        match &*def {
             // Unordered
             PreDef::Fun(_, _, _, _)
             | PreDef::Type(_, _, _)

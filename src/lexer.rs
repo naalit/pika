@@ -85,6 +85,7 @@ pub enum Tok<'i> {
     Name(&'i str),
 
     // Other tokens
+    At,        // @
     POpen,     // (
     PClose,    // )
     SOpen,     // [
@@ -393,6 +394,7 @@ impl<'i> Lexer<'i> {
                 self.tok(Tok::CClose)
             }
 
+            '@' => self.tok(Tok::At),
             '\\' => self.tok(Tok::Backslash),
             ';' => self.tok(Tok::Newline),
 
@@ -546,6 +548,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::RPipe => "'|>'",
             Tok::Lit(_) => "literal",
             Tok::Name(_) => "name",
+            Tok::At => "'@'",
             Tok::POpen => "'('",
             Tok::PClose => "')'",
             Tok::SOpen => "'['",
@@ -553,7 +556,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::COpen => "'{'",
             Tok::CClose => "'}'",
             Tok::Newline => "newline",
-            Tok::OpNewline => "newline",
+            Tok::OpNewline => "newline_",
             Tok::Backslash => "'\\'",
         })
     }

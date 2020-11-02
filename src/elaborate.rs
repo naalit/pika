@@ -4,6 +4,7 @@ use crate::pretty::*;
 use crate::query::*;
 use crate::term::*;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetaEntry {
@@ -283,7 +284,7 @@ impl MCxt {
 impl Meta {
     fn pretty(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
         match self {
-            Meta::Type(id) => match &*db.lookup_intern_predef(id) {
+            Meta::Type(id) => match &**db.lookup_intern_predef(id) {
                 PreDef::Fun(n, _, _, _) => Doc::start("type of function ").add(n.get(db)),
                 PreDef::Val(n, _, _) => Doc::start("type of definition ").add(n.get(db)),
                 PreDef::Type(n, _, _) => Doc::start("type of data type ").add(n.get(db)),
@@ -311,11 +312,13 @@ impl Meta {
 }
 
 pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError> {
+    let start_time = Instant::now();
+
     let (predef_id, cxt) = db.lookup_intern_def(def);
     let predef = db.lookup_intern_predef(predef_id);
     let file = cxt.file(db);
     let mut mcxt = MCxt::new(cxt, def, db);
-    let (term, ty): (Term, VTy) = match &*predef {
+    let (term, ty): (Term, VTy) = match &**predef {
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
             match check(ty, &Val::Type, db, &mut mcxt) {
                 Ok(ty) => {
@@ -435,7 +438,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
     }?;
     mcxt.solved_globals
         .push(RecSolution::Defined(predef_id, predef.span(), ty.clone()));
-    match mcxt.check_locals(db) {
+    let ret = match mcxt.check_locals(db) {
         Ok(()) => {
             let term = term.inline_metas(&mcxt, mcxt.size);
             let ty = ty.inline_metas(&mcxt);
@@ -463,7 +466,33 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             // We don't want the term with local metas in it getting out
             Err(DefError::ElabError)
         }
+    };
+
+    if let Ok(ret) = &ret {
+        if predef.attributes.contains(&Attribute::Elaborate) {
+            let end_time = Instant::now();
+            let name = predef
+                .name()
+                .map(|x| db.lookup_intern_name(x))
+                .unwrap_or("<unnamed>".into());
+            println!("Elaborate time for {}: {:?}", name, end_time - start_time);
+        }
+        if predef.attributes.contains(&Attribute::Normalize) {
+            let mcxt = MCxt::new(cxt, def, db);
+            let term = (*ret.term).clone();
+
+            let n_start = Instant::now();
+            let _ = inline(evaluate(term, &mcxt.env(), &mcxt), db, &mcxt);
+            let n_end = Instant::now();
+            let name = predef
+                .name()
+                .map(|x| db.lookup_intern_name(x))
+                .unwrap_or("<unnamed>".into());
+            println!("Normalize time for {}: {:?}", name, n_end - n_start);
+        }
     }
+
+    ret
 }
 
 impl Val {
