@@ -1,13 +1,35 @@
 # Pika
-This is a rewrite of the Pika compiler.
-Currently it doesn't really work, but it should be significantly faster and more robust than the old version eventually.
-The new typechecker is heavily inspired by [smalltt](https://github.com/AndrasKovacs/smalltt).
-
 Pika is a small, dependently typed ML with algebraic effects and unboxed types.
-The language has also been redesigned since the last compiler, so for details see `demo.pk`.
+This is the rewritten version of the compiler, and the new typechecker is heavily inspired by [smalltt](https://github.com/AndrasKovacs/smalltt).
 
-### Why rewrite the compiler?
-Well, parts of the old one were annoying, and it wasn't very fast.
-The language was due for a redesign anyway.
+Currently, Pika can compile dependently-typed lambda calculus to LLVM (through [Durin](https://github.com/tolziplohu/durin), an dependently typed optimizing intermediate language) and thus native code, but it doesn't have many features implemented yet.
 
-Plus, it seems that's [what everybody](https://github.com/brendanzab/rust-nbe-for-mltt) is [doing nowadays](https://github.com/ollef/sixty).
+### Example
+Pika doesn't have many features implemented yet, but here are some that currently work.
+For a demonstration of planned features, see `demo.pk`.
+```
+# Syntax is similar to Standard ML, but comments use #
+# Pika doesn't have universes, so Type has type Type
+val U : Type = Type
+
+# Functions can have implicit parameters with []
+fun id [T] (x : T) : T = x
+
+# And types can be inferred
+fun one (x : Type) = x
+fun two y = one y
+
+# You can pass implicit parameters implicitly or explicitly
+val test = id Type
+val test2 = id [Type] Type
+
+# And you can use explicit lambdas instead of `fun`
+# Also, `_` introduces a hole filled by unification
+val id2 : [T] T -> _ = \x. x
+```
+
+#### Why "Pika"?
+Lots of languages has animal mascots, so Pika's is the pika.
+Pikas are little mammals that live on mountains, close relatives of rabbits.
+Pika the language is also small, but it isn't a close relative of any rabbits.
+Since it has dependent types, it has pi types, and "Pika" has "Pi" in it, so that's something else.
