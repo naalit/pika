@@ -9,6 +9,7 @@ use crate::error::*;
 use crate::query::*;
 
 pub use std::collections::VecDeque;
+pub use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum MetaSource {
@@ -428,7 +429,7 @@ pub struct Env {
     /// Or `im::Vector`?
     /// When elaborating, we often want to evaluate something without any locals, or just add one or two at the front.
     /// To make that efficient, we leave off the tail of `None`s, and if an index goes past the length, it's `None`.
-    vals: VecDeque<Option<Val>>,
+    vals: VecDeque<Option<Arc<Val>>>,
     pub size: Lvl,
 }
 impl Env {
@@ -446,6 +447,7 @@ impl Env {
             // Option<Option<&Val>>
             .map(Option::as_ref)
             .flatten()
+            .map(Arc::as_ref)
     }
 
     /// If it's not present, returns a local variable value
@@ -454,13 +456,14 @@ impl Env {
             .get(i.0 as usize)
             .cloned()
             .flatten()
+            .map(Val::Arc)
             .unwrap_or(Val::local(i.to_lvl(self.size)))
     }
 
     pub fn push(&mut self, v: Option<Val>) {
         self.size = self.size.inc();
         if v.is_some() || !self.vals.is_empty() {
-            self.vals.push_front(v);
+            self.vals.push_front(v.map(Arc::new));
         }
     }
 }
@@ -528,6 +531,7 @@ pub type VTy = Val;
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Val {
     Type,
+    Arc(Arc<Val>),
     /// The spine are arguments applied in order. It can be empty.
     App(Var<Lvl>, Spine),
     Lam(Icit, Box<VTy>, Box<Clos>),
@@ -536,6 +540,13 @@ pub enum Val {
     Error,
 }
 impl Val {
+    pub fn unarc(&self) -> &Val {
+        match self {
+            Val::Arc(x) => x.unarc(),
+            x => x,
+        }
+    }
+
     pub fn local(lvl: Lvl) -> Val {
         Val::App(Var::Local(lvl), Vec::new())
     }

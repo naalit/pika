@@ -8,7 +8,7 @@ use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetaEntry {
-    Solved(Val, Span),
+    Solved(Arc<Val>, Span),
     Unsolved(Option<Name>, Span, MetaSource),
 }
 
@@ -148,7 +148,7 @@ impl MCxt {
             Meta::Local(def, num) => {
                 assert_eq!(def, self.def, "local meta escaped its definition!");
                 match &self.local_metas[num as usize] {
-                    MetaEntry::Solved(v, _) => Some(v.clone()).map(|x| x.inline_metas(self)),
+                    MetaEntry::Solved(v, _) => Some(Val::Arc(v.clone())), //.map(|x| x.inline_metas(self)),
                     MetaEntry::Unsolved(_, _, _) => None,
                 }
             }
@@ -187,7 +187,7 @@ impl MCxt {
             .zip(std::iter::successors(Some(self.size.inc()), |lvl| {
                 Some(lvl.inc())
             }))
-            .map(|((_, x), to_lvl)| match x {
+            .map(|((_, x), to_lvl)| match x.unarc() {
                 Val::App(Var::Local(from_lvl), sp) if sp.is_empty() => (*from_lvl, to_lvl),
                 _ => panic!("Compiler error: meta spine contains non-variable"),
             })
@@ -202,7 +202,7 @@ impl MCxt {
             .zip(std::iter::successors(Some(self.size), |lvl| {
                 Some(lvl.inc())
             }))
-            .map(|((_, v), l)| match v {
+            .map(|((_, v), l)| match v.unarc() {
                 Val::App(Var::Local(from_lvl), sp) if sp.is_empty() => {
                     let ty = self.local_ty(from_lvl.to_ix(self.size), db);
                     quote(ty, l, self)
@@ -236,7 +236,7 @@ impl MCxt {
             Meta::Local(def, idx) => {
                 assert_eq!(def, self.def, "local meta escaped its definition!");
                 // TODO should we do anything with the span we already have in `local_metas`, where it was introduced?
-                self.local_metas[idx as usize] = MetaEntry::Solved(val, span);
+                self.local_metas[idx as usize] = MetaEntry::Solved(Arc::new(val), span);
             }
         }
         Ok(())
@@ -684,6 +684,7 @@ impl Val {
                 Val::Fun(from, to)
             }
             Val::Error => Val::Error,
+            Val::Arc(x) => Arc::try_unwrap(x).unwrap_or_else(|x| (*x).clone()),
         }
     }
 }
@@ -697,6 +698,11 @@ fn p_unify(
     mcxt: &mut MCxt,
 ) -> Result<TBool, TypeError> {
     Ok(match (a, b) {
+        (Val::Arc(a), b) | (b, Val::Arc(a)) => {
+            let a = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            p_unify(a, b, l, span, db, mcxt)?
+        }
+
         (Val::Error, _) | (_, Val::Error) => Yes,
         (Val::Type, Val::Type) => Yes,
 
@@ -836,12 +842,16 @@ fn insert_metas(
                 db,
             )
         }
-        Val::App(v, sp) => {
+        Val::App(v, sp) if insert => {
             match inline(Val::App(v, sp), db, mcxt) {
                 // Avoid infinite recursion
                 Val::App(v2, sp) if v2 == v => (term, Val::App(v2, sp)),
                 ty => insert_metas(insert, term, ty, span, mcxt, db),
             }
+        }
+        Val::Arc(x) if insert => {
+            let x = Arc::try_unwrap(x).unwrap_or_else(|x| (*x).clone());
+            insert_metas(insert, term, x, span, mcxt, db)
         }
         ty => (term, ty),
     }
@@ -957,6 +967,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
     // TODO not clone (take `ty` by value)
     let ty = inline(ty.clone(), db, mcxt);
     match (&**pre, &ty) {
+        (_, Val::Arc(x)) => check(pre, x, db, mcxt),
         (Pre_::Lam(n, i, ty, body), Val::Pi(i2, ty2, cl)) if i == i2 => {
             let ety = check(ty, &Val::Type, db, mcxt)?;
             let vty = evaluate(ety.clone(), &mcxt.env(), mcxt);

@@ -46,6 +46,9 @@ impl Val {
             }
             Val::Lam(_, _, cl) => cl.apply(x, mcxt),
             Val::Error => Val::Error,
+            Val::Arc(a) => Arc::try_unwrap(a)
+                .unwrap_or_else(|a| (*a).clone())
+                .app(icit, x, mcxt),
             _ => unreachable!(),
         }
     }
@@ -83,6 +86,11 @@ pub fn inline(val: Val, db: &dyn Compiler, mcxt: &MCxt) -> Val {
             Val::Fun(from, to)
         }
         v @ Val::Error | v @ Val::Lam(_, _, _) | v @ Val::Type => v,
+        Val::Arc(x) => inline(
+            Arc::try_unwrap(x).unwrap_or_else(|x| (*x).clone()),
+            db,
+            mcxt,
+        ),
     }
 }
 
@@ -117,5 +125,10 @@ pub fn quote(val: Val, enclosing: Lvl, mcxt: &MCxt) -> Term {
             Box::new(quote(*to, enclosing, mcxt)),
         ),
         Val::Error => Term::Error,
+        Val::Arc(x) => quote(
+            Arc::try_unwrap(x).unwrap_or_else(|x| (*x).clone()),
+            enclosing,
+            mcxt,
+        ),
     }
 }

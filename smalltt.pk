@@ -252,8 +252,8 @@ val forceNat : Nat -> Bool
 
 # Note: [normalize] prints normalization time for definition on load
 
-# smalltt : 10ms
-# Pika    : 2.6s
+# smalltt :  10ms
+# Pika    : 285ms (with `ulimit -s 131072`, i.e. 128MB stack, otherwise stack overflow)
 @[normalize]
 val compute100k = forceNat n100k
 
