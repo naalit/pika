@@ -188,7 +188,7 @@ impl MCxt {
                 Some(lvl.inc())
             }))
             .map(|((_, x), to_lvl)| match x.unarc() {
-                Val::App(Var::Local(from_lvl), sp) if sp.is_empty() => (*from_lvl, to_lvl),
+                Val::App(Var::Local(from_lvl), sp, _) if sp.is_empty() => (*from_lvl, to_lvl),
                 _ => panic!("Compiler error: meta spine contains non-variable"),
             })
             .collect();
@@ -203,7 +203,7 @@ impl MCxt {
                 Some(lvl.inc())
             }))
             .map(|((_, v), l)| match v.unarc() {
-                Val::App(Var::Local(from_lvl), sp) if sp.is_empty() => {
+                Val::App(Var::Local(from_lvl), sp, _) if sp.is_empty() => {
                     let ty = self.local_ty(from_lvl.to_ix(self.size), db);
                     quote(ty, l, self)
                 }
@@ -439,18 +439,18 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             let term = term.inline_metas(&mcxt, mcxt.size);
             let ty = ty.inline_metas(&mcxt);
 
-            let d = Doc::keyword("val")
-                .space()
-                .add(predef.name().map_or("_".to_string(), |x| x.get(db)))
-                .space()
-                .add(":")
-                .space()
-                .chain(ty.pretty(db, &mcxt))
-                .space()
-                .add("=")
-                .space()
-                .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)));
-            println!("{}\n", d.ansi_string());
+            // let d = Doc::keyword("val")
+            //     .space()
+            //     .add(predef.name().map_or("_".to_string(), |x| x.get(db)))
+            //     .space()
+            //     .add(":")
+            //     .space()
+            //     .chain(ty.pretty(db, &mcxt))
+            //     .space()
+            //     .add("=")
+            //     .space()
+            //     .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)));
+            // println!("{}\n", d.ansi_string());
 
             Ok(ElabInfo {
                 term: Arc::new(term),
@@ -478,7 +478,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             let term = (*ret.term).clone();
 
             let n_start = Instant::now();
-            let _ = inline(evaluate(term, &mcxt.env(), &mcxt), db, &mcxt);
+            let _ = evaluate(term, &mcxt.env(), &mcxt).force(mcxt.size, db, &mcxt);
             let n_end = Instant::now();
             let name = predef
                 .name()
@@ -619,8 +619,11 @@ impl Term {
         match self {
             Term::Type => Term::Type,
             Term::Var(Var::Meta(m)) => match mcxt.get_meta(m) {
-                Some(v) => quote(v, l, mcxt),
-                None => Term::Var(Var::Meta(m)),
+                Some(v) => quote(v.inline_metas(mcxt), l, mcxt),
+                None => {
+                    println!("[T] Unsolved meta: {:?}", m);
+                    Term::Var(Var::Meta(m))
+                }
             },
             Term::Var(v) => Term::Var(v),
             Term::Lam(n, i, mut ty, mut t) => {
@@ -641,7 +644,11 @@ impl Term {
             }
             Term::App(i, mut f, mut x) => {
                 // We have to beta-reduce meta applications
-                quote(evaluate(Term::App(i, f, x), &Env::new(l), mcxt), l, mcxt)
+                quote(
+                    evaluate(Term::App(i, f, x), &Env::new(l), mcxt).inline_metas(mcxt),
+                    l,
+                    mcxt,
+                )
             }
             Term::Error => Term::Error,
         }
@@ -652,11 +659,14 @@ impl Val {
     pub fn inline_metas(self, mcxt: &MCxt) -> Self {
         match self {
             Val::Type => Val::Type,
-            Val::App(h, sp) => {
+            Val::App(h, sp, g) => {
                 let h = match h {
-                    Var::Meta(m) => match mcxt.get_meta(m) {
-                        Some(v) => return v,
-                        None => Var::Meta(m),
+                    Var::Meta(m) => match g.resolve_meta(h, &sp, mcxt) {
+                        Some(v) => return v.inline_metas(mcxt),
+                        None => {
+                            println!("[V] Unsolved meta: {:?}", m);
+                            Var::Meta(m)
+                        }
                     },
                     h => h,
                 };
@@ -664,18 +674,21 @@ impl Val {
                     .into_iter()
                     .map(|(i, x)| (i, x.inline_metas(mcxt)))
                     .collect();
-                Val::App(h, sp)
+                // Reset the Glued in case it has metas inside
+                Val::App(h, sp, Glued::new())
             }
             Val::Lam(i, mut ty, mut cl) => {
                 *ty = ty.inline_metas(mcxt);
                 let l = cl.env_size();
-                cl.1 = cl.1.inline_metas(mcxt, l);
+                cl.0.inline_metas(mcxt);
+                cl.1 = cl.1.inline_metas(mcxt, l.inc());
                 Val::Lam(i, ty, cl)
             }
             Val::Pi(i, mut ty, mut cl) => {
                 *ty = ty.inline_metas(mcxt);
                 let l = cl.env_size();
-                cl.1 = cl.1.inline_metas(mcxt, l);
+                cl.0.inline_metas(mcxt);
+                cl.1 = cl.1.inline_metas(mcxt, l.inc());
                 Val::Pi(i, ty, cl)
             }
             Val::Fun(mut from, mut to) => {
@@ -684,12 +697,15 @@ impl Val {
                 Val::Fun(from, to)
             }
             Val::Error => Val::Error,
-            Val::Arc(x) => Arc::try_unwrap(x).unwrap_or_else(|x| (*x).clone()),
+            Val::Arc(x) => Arc::try_unwrap(x)
+                .unwrap_or_else(|x| (*x).clone())
+                .inline_metas(mcxt),
         }
     }
 }
 
 fn p_unify(
+    inline: bool,
     a: Val,
     b: Val,
     l: Lvl,
@@ -697,102 +713,118 @@ fn p_unify(
     db: &dyn Compiler,
     mcxt: &mut MCxt,
 ) -> Result<TBool, TypeError> {
-    Ok(match (a, b) {
+    match (a, b) {
         (Val::Arc(a), b) | (b, Val::Arc(a)) => {
             let a = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            p_unify(a, b, l, span, db, mcxt)?
+            p_unify(inline, a, b, l, span, db, mcxt)
         }
 
-        (Val::Error, _) | (_, Val::Error) => Yes,
-        (Val::Type, Val::Type) => Yes,
+        (Val::Error, _) | (_, Val::Error) => Ok(Yes),
+        (Val::Type, Val::Type) => Ok(Yes),
 
-        (Val::App(h, v), Val::App(h2, v2)) if h == h2 => {
+        (Val::App(h, v, _), Val::App(h2, v2, _)) if h == h2 => {
             let mut r = Yes;
             for ((i, a), (i2, b)) in v.into_iter().zip(v2.into_iter()) {
                 assert_eq!(i, i2);
-                r = r & p_unify(a, b, l, span, db, mcxt)?;
+                r = r & p_unify(inline, a, b, l, span, db, mcxt)?;
             }
-            r
+            Ok(r)
         }
 
         // Since our terms are locally nameless (we're using De Bruijn levels), we automatically get alpha equivalence.
-        // Also, we call `unify` instead of `p_unify` here so we can `inline()` the values we're creating here if necessary.
-        (Val::Lam(_, _, cl), Val::Lam(_, _, cl2)) => unify(
+        (Val::Lam(_, _, cl), Val::Lam(_, _, cl2)) => p_unify(
+            inline,
             cl.vquote(l, mcxt),
             cl2.vquote(l, mcxt),
             l.inc(),
             span,
             db,
             mcxt,
-        )?
-        .into(),
+        ),
 
         // If one side is a lambda, the other side just needs to unify to the same thing when we apply it to the same thing
-        (Val::Lam(icit, _, cl), t) | (t, Val::Lam(icit, _, cl)) => unify(
+        (Val::Lam(icit, _, cl), t) | (t, Val::Lam(icit, _, cl)) => p_unify(
+            inline,
             cl.vquote(l, mcxt),
             t.app(icit, Val::local(l), mcxt),
             l.inc(),
             span,
             db,
             mcxt,
-        )?
-        .into(),
+        ),
 
         (Val::Pi(i, ty, cl), Val::Pi(i2, ty2, cl2)) if i == i2 => {
-            p_unify(*ty, *ty2, l, span, db, mcxt)?
+            Ok(p_unify(inline, *ty, *ty2, l, span, db, mcxt)?
                 // Applying both to the same thing (Local(l))
-                & unify(
+                & p_unify(
+                    inline,
                     cl.vquote(l, mcxt),
                     cl2.vquote(l, mcxt),
                     l.inc(),
                     span,
                     db,
                     mcxt,
-                )?
+                )?)
         }
         (Val::Pi(Icit::Expl, ty, cl), Val::Fun(from, to))
         | (Val::Fun(from, to), Val::Pi(Icit::Expl, ty, cl)) => {
             // TODO: I'm not 100% this is right
-            p_unify(*ty, *from, l, span, db, mcxt)?
-                & unify(cl.vquote(l, mcxt), *to, l.inc(), span, db, mcxt)?
+            Ok(p_unify(inline, *ty, *from, l, span, db, mcxt)?
+                & p_unify(inline, cl.vquote(l, mcxt), *to, l.inc(), span, db, mcxt)?)
         }
-        (Val::Fun(a, b), Val::Fun(a2, b2)) => {
-            p_unify(*a, *a2, l, span, db, mcxt)? & p_unify(*b, *b2, l, span, db, mcxt)?
-        }
+        (Val::Fun(a, b), Val::Fun(a2, b2)) => Ok(p_unify(inline, *a, *a2, l, span, db, mcxt)?
+            & p_unify(inline, *b, *b2, l, span, db, mcxt)?),
 
         // Solve metas
 
         // Make sure order doesn't matter - switch sides if the second one is higher
-        (Val::App(Var::Meta(m), s), Val::App(Var::Meta(m2), s2)) if m2 > m => p_unify(
-            Val::App(Var::Meta(m2), s2),
-            Val::App(Var::Meta(m), s),
+        (Val::App(Var::Meta(m), s, g), Val::App(Var::Meta(m2), s2, g2)) if m2 > m => p_unify(
+            inline,
+            Val::App(Var::Meta(m2), s2, g2),
+            Val::App(Var::Meta(m), s, g),
             l,
             span,
             db,
             mcxt,
-        )?,
+        ),
 
-        (Val::App(Var::Meta(m), sp), t) | (t, Val::App(Var::Meta(m), sp)) => {
+        (Val::App(Var::Meta(m), sp, _), t) | (t, Val::App(Var::Meta(m), sp, _)) => {
             match mcxt.get_meta(m) {
                 Some(v) => {
-                    // println!("Meta solution = {}", v.pretty(db, mcxt).ansi_string());
                     let v = sp.into_iter().fold(v, |f, (i, x)| f.app(i, x, mcxt));
-                    // println!("Applied = {}", v.pretty(db, mcxt).ansi_string());
-                    unify(v, t, l, span, db, mcxt)?.into()
+                    p_unify(inline, v, t, l, span, db, mcxt)
                 }
                 None => {
                     mcxt.solve(span, m, &sp, t, db)?;
-                    Yes
+                    Ok(Yes)
                 }
             }
         }
 
         // If the reason we can't unify is that one side is a top variable, then we can try again after inlining.
-        (Val::App(Var::Top(_), _), _) | (_, Val::App(Var::Top(_), _)) => Maybe,
+        (Val::App(Var::Top(_), _, _), _) | (_, Val::App(Var::Top(_), _, _)) if !inline => Ok(Maybe),
+
+        (Val::App(h, sp, g), Val::App(h2, sp2, g2)) if inline => {
+            if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
+                p_unify(inline, Val::App(h2, sp2, g2), v, l, span, db, mcxt)
+            } else if let Some(v) = g2.resolve(h2, sp2, l, db, mcxt) {
+                p_unify(inline, Val::App(h, sp, g), v, l, span, db, mcxt)
+            } else {
+                Ok(No)
+            }
+        }
+
+        (Val::App(h, sp, g), x) | (x, Val::App(h, sp, g)) if inline => {
+            if let Some(v) = g.resolve(h, sp, l, db, mcxt) {
+                p_unify(inline, x, v, l, span, db, mcxt)
+            } else {
+                Ok(No)
+            }
+        }
 
         // If that's not the reason, then we know inlining won't help.
-        _ => No,
-    })
+        _ => Ok(No),
+    }
 }
 
 /// Note that the order of `a` and `b` doesn't matter - Pika doesn't have subtyping.
@@ -804,18 +836,10 @@ pub fn unify(
     db: &dyn Compiler,
     mcxt: &mut MCxt,
 ) -> Result<bool, TypeError> {
-    match p_unify(a.clone(), b.clone(), l, span, db, mcxt)? {
+    match p_unify(false, a.clone(), b.clone(), l, span, db, mcxt)? {
         Yes => Ok(true),
         No => Ok(false),
-        Maybe => Ok(p_unify(
-            inline(a.clone(), db, mcxt),
-            inline(b.clone(), db, mcxt),
-            l,
-            span,
-            db,
-            mcxt,
-        )?
-        .not_maybe()),
+        Maybe => Ok(p_unify(true, a, b, l, span, db, mcxt)?.not_maybe()),
     }
 }
 
@@ -842,13 +866,10 @@ fn insert_metas(
                 db,
             )
         }
-        Val::App(v, sp) if insert => {
-            match inline(Val::App(v, sp), db, mcxt) {
-                // Avoid infinite recursion
-                Val::App(v2, sp) if v2 == v => (term, Val::App(v2, sp)),
-                ty => insert_metas(insert, term, ty, span, mcxt, db),
-            }
-        }
+        Val::App(h, sp, g) if insert => match g.resolve(h, &sp, mcxt.size, db, mcxt) {
+            Some(ty) => insert_metas(insert, term, ty, span, mcxt, db),
+            None => (term, Val::App(h, sp, g)),
+        },
         Val::Arc(x) if insert => {
             let x = Arc::try_unwrap(x).unwrap_or_else(|x| (*x).clone());
             insert_metas(insert, term, x, span, mcxt, db)
@@ -964,10 +985,9 @@ pub fn infer(
 }
 
 pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<Term, TypeError> {
-    // TODO not clone (take `ty` by value)
-    let ty = inline(ty.clone(), db, mcxt);
-    match (&**pre, &ty) {
+    match (&**pre, ty) {
         (_, Val::Arc(x)) => check(pre, x, db, mcxt),
+
         (Pre_::Lam(n, i, ty, body), Val::Pi(i2, ty2, cl)) if i == i2 => {
             let ety = check(ty, &Val::Type, db, mcxt)?;
             let vty = evaluate(ety.clone(), &mcxt.env(), mcxt);
@@ -1036,13 +1056,19 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
         }
 
         _ => {
+            if let Val::App(h, sp, g) = ty {
+                if let Some(v) = g.resolve(*h, sp, mcxt.size, db, mcxt) {
+                    return check(pre, &v, db, mcxt);
+                }
+            }
+
             let (term, i_ty) = infer(true, pre, db, mcxt)?;
             // TODO should we take `ty` by value?
             if !unify(ty.clone(), i_ty.clone(), mcxt.size, pre.span(), db, mcxt)? {
                 return Err(TypeError::Unify(
                     mcxt.clone(),
-                    pre.copy_span(i_ty),
-                    ty.clone(),
+                    pre.copy_span(i_ty.inline_metas(mcxt)),
+                    ty.clone().inline_metas(mcxt),
                 ));
             }
             Ok(term)

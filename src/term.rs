@@ -251,14 +251,15 @@ impl Term {
                     mcxt,
                 ),
                 // It might be a name that refers to a function type, so we need to inline it
-                ty => match crate::evaluate::inline(ty, db, mcxt) {
-                    Val::Fun(_, to) => *to,
-                    Val::Pi(_, _, cl) => cl.apply(
+                Val::App(h, sp, g) => match g.resolve(h, sp, mcxt.size, db, mcxt) {
+                    Some(Val::Fun(_, to)) => *to,
+                    Some(Val::Pi(_, _, cl)) => cl.apply(
                         crate::evaluate::evaluate((**x).clone(), &mcxt.env(), mcxt),
                         mcxt,
                     ),
                     _ => unreachable!(),
                 },
+                _ => unreachable!(),
             },
             Term::Error => Val::Error,
         }
@@ -354,7 +355,7 @@ impl Term {
                     Meta::Type(id) => Doc::start("<type of ")
                         .add(db.lookup_intern_predef(*id).name().unwrap().get(db))
                         .add(">"),
-                    Meta::Local(def, id) => Doc::start("?").add(id),
+                    Meta::Local(def, id) => Doc::none().debug(def).add("?").add(id),
                 },
             },
             Term::Lam(n, i, _ty, t) => {
@@ -433,6 +434,14 @@ pub struct Env {
     pub size: Lvl,
 }
 impl Env {
+    pub fn inline_metas(&mut self, mcxt: &MCxt) {
+        for i in &mut self.vals {
+            if let Some(x) = i {
+                *x = Arc::new((**x).clone().inline_metas(mcxt));
+            }
+        }
+    }
+
     pub fn new(size: Lvl) -> Self {
         Env {
             vals: VecDeque::new(),
@@ -524,6 +533,119 @@ pub enum Var<Local> {
 
 pub type Spine = Vec<(Icit, Val)>;
 
+/// A helper trait for accepting either owned or borrowed data, and cloning when necessary
+pub trait IntoOwned<T> {
+    fn into_owned(self) -> T;
+}
+impl<T> IntoOwned<T> for T {
+    fn into_owned(self) -> T {
+        self
+    }
+}
+impl<T: Clone> IntoOwned<T> for &T {
+    fn into_owned(self) -> T {
+        self.clone()
+    }
+}
+
+use std::sync::RwLock;
+#[derive(Clone, Debug)]
+pub struct Glued(Arc<RwLock<Option<Val>>>);
+
+/// Always returns true, should only be used as part of <Val as PartialEq>
+impl PartialEq for Glued {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for Glued {}
+/// Does nothing, should only be used as part of <Val as Hash>
+impl std::hash::Hash for Glued {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
+}
+
+impl Glued {
+    pub fn new() -> Self {
+        Glued(Arc::new(RwLock::new(None)))
+    }
+
+    pub fn resolve_meta(&self, h: Var<Lvl>, sp: impl IntoOwned<Spine>, mcxt: &MCxt) -> Option<Val> {
+        let guard = self.0.read().unwrap();
+        if let Some(v) = &*guard {
+            Some(v.clone())
+        } else {
+            drop(guard);
+            match h {
+                // We won't inline the local
+                Var::Local(_) => None,
+                // If we inlined the Rec, it would probably lead to infinite recursion
+                Var::Rec(_) => None,
+                Var::Top(_) => None,
+                Var::Meta(m) => {
+                    if let Some(val) = mcxt.get_meta(m) {
+                        let val = sp
+                            .into_owned()
+                            .into_iter()
+                            .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                        let val = Val::Arc(Arc::new(val));
+                        *self.0.write().unwrap() = Some(val.clone());
+                        Some(val)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn resolve(
+        &self,
+        h: Var<Lvl>,
+        sp: impl IntoOwned<Spine>,
+        l: Lvl,
+        db: &dyn Compiler,
+        mcxt: &MCxt,
+    ) -> Option<Val> {
+        let guard = self.0.read().unwrap();
+        if let Some(v) = &*guard {
+            Some(v.clone())
+        } else {
+            drop(guard);
+            match h {
+                // We won't inline the local
+                Var::Local(_) => None,
+                // If we inlined the Rec, it would probably lead to infinite recursion
+                Var::Rec(_) => None,
+                Var::Top(def) => {
+                    let val = db.elaborate_def(def).ok()?.term;
+                    let val = (*val).clone();
+                    let val = crate::evaluate::evaluate(val, &Env::new(l), mcxt);
+                    let val = sp
+                        .into_owned()
+                        .into_iter()
+                        .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                    let val = Val::Arc(Arc::new(val));
+                    *self.0.write().unwrap() = Some(val.clone());
+                    Some(val)
+                }
+                Var::Meta(m) => {
+                    if let Some(val) = mcxt.get_meta(m) {
+                        let val = sp
+                            .into_owned()
+                            .into_iter()
+                            .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                        let val = Val::Arc(Arc::new(val));
+                        *self.0.write().unwrap() = Some(val.clone());
+                        Some(val)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub type VTy = Val;
 /// A value in normal(-ish) form.
 /// Values are never behind any abstractions, since those use `Clos` to store a `Term`.
@@ -533,7 +655,7 @@ pub enum Val {
     Type,
     Arc(Arc<Val>),
     /// The spine are arguments applied in order. It can be empty.
-    App(Var<Lvl>, Spine),
+    App(Var<Lvl>, Spine, Glued),
     Lam(Icit, Box<VTy>, Box<Clos>),
     Pi(Icit, Box<VTy>, Box<Clos>),
     Fun(Box<VTy>, Box<VTy>),
@@ -548,18 +670,18 @@ impl Val {
     }
 
     pub fn local(lvl: Lvl) -> Val {
-        Val::App(Var::Local(lvl), Vec::new())
+        Val::App(Var::Local(lvl), Vec::new(), Glued::new())
     }
 
     pub fn top(def: DefId) -> Val {
-        Val::App(Var::Top(def), Vec::new())
+        Val::App(Var::Top(def), Vec::new(), Glued::new())
     }
 
     pub fn rec(id: PreDefId) -> Val {
-        Val::App(Var::Rec(id), Vec::new())
+        Val::App(Var::Rec(id), Vec::new(), Glued::new())
     }
 
     pub fn meta(meta: Meta) -> Val {
-        Val::App(Var::Meta(meta), Vec::new())
+        Val::App(Var::Meta(meta), Vec::new(), Glued::new())
     }
 }

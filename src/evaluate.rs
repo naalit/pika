@@ -38,11 +38,51 @@ pub fn evaluate(term: Term, env: &Env, mcxt: &MCxt) -> Val {
 }
 
 impl Val {
+    pub fn force(self, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
+        match self {
+            Val::Type => Val::Type,
+            Val::Arc(x) => (*x).clone().force(l, db, mcxt),
+            Val::App(h, sp, g) => {
+                if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
+                    v.force(l, db, mcxt)
+                } else {
+                    Val::App(h, sp, g)
+                }
+            }
+            Val::Fun(mut a, mut b) => {
+                *a = a.force(l, db, mcxt);
+                *b = b.force(l, db, mcxt);
+                Val::Fun(a, b)
+            }
+            Val::Error => Val::Error,
+
+            Val::Lam(i, mut ty, mut cl) => {
+                *ty = ty.force(l, db, mcxt);
+                cl.1 = quote(
+                    (*cl).clone().vquote(l, mcxt).force(l, db, mcxt),
+                    l.inc(),
+                    mcxt,
+                );
+                Val::Lam(i, ty, cl)
+            }
+            Val::Pi(i, mut ty, mut cl) => {
+                *ty = ty.force(l, db, mcxt);
+                cl.1 = quote(
+                    (*cl).clone().vquote(l, mcxt).force(l, db, mcxt),
+                    l.inc(),
+                    mcxt,
+                );
+                Val::Pi(i, ty, cl)
+            }
+        }
+    }
+
     pub fn app(self, icit: Icit, x: Val, mcxt: &MCxt) -> Val {
         match self {
-            Val::App(h, mut sp) => {
+            Val::App(h, mut sp, _) => {
                 sp.push((icit, x));
-                Val::App(h, sp)
+                // Throw away the old Glued, since that could have been resolved already
+                Val::App(h, sp, Glued::new())
             }
             Val::Lam(_, _, cl) => cl.apply(x, mcxt),
             Val::Error => Val::Error,
@@ -54,50 +94,10 @@ impl Val {
     }
 }
 
-pub fn inline(val: Val, db: &dyn Compiler, mcxt: &MCxt) -> Val {
-    match val {
-        Val::App(h, sp) => {
-            let f = match h {
-                // TODO can we move the evaluation to Salsa, so it's memoized?
-                Var::Top(def) => db.elaborate_def(def).map_or(Val::Error, |i| {
-                    evaluate((*i.term).clone(), &mcxt.env(), mcxt)
-                }),
-                Var::Meta(meta) => match mcxt.get_meta(meta) {
-                    Some(v) => v,
-                    None => return Val::App(h, sp),
-                },
-                Var::Local(_) | Var::Rec(_) => return Val::App(h, sp),
-            };
-            inline(
-                sp.into_iter().fold(f, |f, (i, x)| f.app(i, x, mcxt)),
-                db,
-                mcxt,
-            )
-        }
-        Val::Pi(icit, mut ty, cl) => {
-            // Reuse box
-            *ty = inline(*ty, db, mcxt);
-            Val::Pi(icit, ty, cl)
-        }
-        Val::Fun(mut from, mut to) => {
-            // Reuse boxes
-            *from = inline(*from, db, mcxt);
-            *to = inline(*to, db, mcxt);
-            Val::Fun(from, to)
-        }
-        v @ Val::Error | v @ Val::Lam(_, _, _) | v @ Val::Type => v,
-        Val::Arc(x) => inline(
-            Arc::try_unwrap(x).unwrap_or_else(|x| (*x).clone()),
-            db,
-            mcxt,
-        ),
-    }
-}
-
 pub fn quote(val: Val, enclosing: Lvl, mcxt: &MCxt) -> Term {
     match val {
         Val::Type => Term::Type,
-        Val::App(h, sp) => {
+        Val::App(h, sp, _) => {
             let h = match h {
                 Var::Local(l) => Term::Var(Var::Local(l.to_ix(enclosing))),
                 Var::Top(def) => Term::Var(Var::Top(def)),

@@ -112,7 +112,116 @@ val vcons : [a n] -> a -> Vec a n -> Vec a (suc n)
 
 val vec1 = vcons true (vcons false (vcons true vnil))
 
-# TODO vecStress
+
+# Note: putting [elaborate] after a top-level name will cause
+# elaboration time for that entry to be displayed on load.
+
+
+# Type checking vecStress:
+# smalltt : 19ms  , 6.3 MB
+# Coq     : 300ms , 280 MB
+# Agda    : ~3s   , 330 MB
+# ------------------------
+# smalltt : 37ms
+# Pika    : 67ms
+@[elaborate]
+val vecStress =
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true (vcons true (vcons true (vcons true (vcons true
+   (vcons true (vcons true
+   vnil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+   )))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+   )))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+   )))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+   )))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+   )))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+   )))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+   )))))))))))))))))))
 
 # Leibniz (Church) propositional equality, useful for testing conversion.
 # Also note the implicit lambdas.
@@ -187,13 +296,15 @@ val nfun : Nat -> Type
 # smalltt : approx check succeeds
 # Coq     : approx check succeeds
 # Agda    : approx check fails
-# Pika    : approx check fails (actually causes a stack overflow)
-# val synEqTest1 : nfun n10k -> nfun n10k = \ x. x
+# Pika    : approx check succeeds
+@[elaborate]
+val synEqTest1 : nfun n10k -> nfun n10k = \ x. x
 
 # Coq     : approx check succeeds
 # Agda    : approx check succeeds
 # smalltt : approx check fails
 # Pika    : approx check succeeds
+@[elaborate]
 val synEqTest2 : Eq n1M n1M = refl
 
 # I'm not doing anything special to get the second one to succeed, which I think means Pika misses out on possible solutions in some cases.
@@ -205,14 +316,16 @@ val synEqTest2 : Eq n1M n1M = refl
 # Suprisingly, Agda-2018-sept manages the following fine, although in 2018-jan
 # it also failed.
 
-# TODO [elaborate]
 # smalltt: instant
 # Agda   : instant
 # Coq    : doesn't finish
-# Pika   : doesn't finish
-# val idStress : [A] -> A -> A
-# = id id id id id id id id id id id id id id id id id id id id
-#   id id id id id id id id id id id id id id id id id id id id
+# -------------------------
+# smalltt : 73µs
+# Pika    : 2.4s
+@[elaborate]
+val idStress : [A] -> A -> A
+= id id id id id id id id id id id id id id id id id id id id
+  id id id id id id id id id id id id id id id id id id id id
 
 # TODO let
 # smalltt : 1.55s
@@ -253,7 +366,7 @@ val forceNat : Nat -> Bool
 # Note: [normalize] prints normalization time for definition on load
 
 # smalltt :  10ms
-# Pika    : 285ms (with `ulimit -s 131072`, i.e. 128MB stack, otherwise stack overflow)
+# Pika    : 440ms (with `ulimit -s 65536`, i.e. 64MB stack, otherwise stack overflow)
 @[normalize]
 val compute100k = forceNat n100k
 
@@ -275,8 +388,8 @@ val compute10M  = forceNat n10M
 # smalltt         : instantly normalized
 # Agda            : instantly normalized
 # Coq (Eval lazy) : instantly normalized
-# Pika            : stack overflow
-# @[normalize]
+# Pika            : instantly normalized
+@[normalize]
 val lazyU = const Type (forceNat n10M)
 
 # TODO local definitions
