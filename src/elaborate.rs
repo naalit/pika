@@ -408,12 +408,13 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             ))
         }
         PreDef::Type(_, _, _) => todo!("data types"),
-        PreDef::Expr(e) => {
-            if let Err(e) = infer(true, e, db, &mut mcxt) {
+        PreDef::Expr(e) => match infer(true, e, db, &mut mcxt) {
+            Err(e) => {
                 db.report_error(e.to_error(file, db, &mcxt));
+                Err(DefError::ElabError)
             }
-            Err(DefError::NoValue)
-        }
+            Ok(stuff) => Ok(stuff),
+        },
         PreDef::FunDec(_, from, to) => {
             for (_, _, from) in from {
                 if let Err(e) = check(from, &Val::Type, db, &mut mcxt) {
@@ -971,7 +972,28 @@ pub fn infer(
             }?;
             Ok(insert_metas(insert, term, ty, pre.span(), mcxt, db))
         }
-        Pre_::Do(_) => todo!("elaborate do"),
+        Pre_::Do(v) => {
+            // We store the whole block in Salsa, then query the last expression
+            let block = crate::query::intern_block(v.clone(), db, mcxt.cxt);
+            // Make sure any type errors get reported
+            for &i in &block {
+                let _ = db.elaborate_def(i);
+            }
+            // Now query the last expression again
+            if let Some(&last) = block.last() {
+                let (pre, _) = db.lookup_intern_def(last);
+                // If it's not an expression, don't return anything
+                if let PreDef::Expr(_) = &**db.lookup_intern_predef(pre) {
+                    if let Ok(info) = db.elaborate_def(last) {
+                        return Ok(((*info.term).clone(), Val::Arc(info.typ)));
+                    } else {
+                        // If there was a type error inside the block, we'll leave it, we don't want a cascade of errors
+                        return Ok((Term::Error, Val::Error));
+                    }
+                }
+            }
+            todo!("return ()")
+        }
         Pre_::Struct(_) => todo!("elaborate struct"),
         Pre_::Hole(source) => Ok((
             mcxt.new_meta(None, pre.span(), *source),

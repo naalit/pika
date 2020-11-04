@@ -30,6 +30,12 @@ x
 .
 x
 
+val local = do
+  fun f x = the Type x
+  val t = Type -> Type
+  f t
+end
+
 @[elaborate]
 @[normalize]
 val test : [t] t -> t = id id

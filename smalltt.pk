@@ -321,39 +321,43 @@ val synEqTest2 : Eq n1M n1M = refl
 # Coq    : doesn't finish
 # -------------------------
 # smalltt : 73µs
-# Pika    : 2.4s
-@[elaborate]
-val idStress : [A] -> A -> A
-= id id id id id id id id id id id id id id id id id id id id
-  id id id id id id id id id id id id id id id id id id id id
+# Pika    : doesn't finish
+# @[elaborate]
+# val idStress : [A] -> A -> A
+# = id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id id
 
 # TODO let
 # smalltt : 1.55s
 # Agda    : doesn't finish
 # Coq     : doesn't finish
-# pairStress [elaborate] : Top
-#  = let x0  = pair tt  tt  in
-#    let x1  = pair x0  x0  in
-#    let x2  = pair x1  x1  in
-#    let x3  = pair x2  x2  in
-#    let x4  = pair x3  x3  in
-#    let x5  = pair x4  x4  in
-#    let x6  = pair x5  x5  in
-#    let x7  = pair x6  x6  in
-#    let x8  = pair x7  x7  in
-#    let x9  = pair x8  x8  in
-#    let x10 = pair x9  x9  in
-#    let x11 = pair x10 x10 in
-#    let x12 = pair x11 x11 in
-#    let x13 = pair x12 x12 in
-#    let x14 = pair x13 x13 in
-#    let x15 = pair x14 x14 in
-#    let x16 = pair x15 x15 in
-#    let x17 = pair x16 x16 in
-#    let x18 = pair x17 x17 in
-#    let x19 = pair x18 x18 in
-#    let x20 = pair x19 x19 in
-#    tt
+# ---------------------------
+# smalltt : 2.6s
+# Pika    : 20s
+@[elaborate]
+val pairStress : Top = do
+  val x0  = pair tt  tt
+  val x1  = pair x0  x0
+  val x2  = pair x1  x1
+  val x3  = pair x2  x2
+  val x4  = pair x3  x3
+  val x5  = pair x4  x4
+  val x6  = pair x5  x5
+  val x7  = pair x6  x6
+  val x8  = pair x7  x7
+  val x9  = pair x8  x8
+  val x10 = pair x9  x9
+  val x11 = pair x10 x10
+  val x12 = pair x11 x11
+  val x13 = pair x12 x12
+  val x14 = pair x13 x13
+  val x15 = pair x14 x14
+  val x16 = pair x15 x15
+  val x17 = pair x16 x16
+  val x18 = pair x17 x17
+  val x19 = pair x18 x18
+  val x20 = pair x19 x19
+  tt
+ end
 
 # Raw compute performance
 # --------------------------------------------------------------------------------
