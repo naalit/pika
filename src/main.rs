@@ -33,6 +33,7 @@ fn main() {
         // println!("Durin module:\n{}", durin.emit());
         } else {
             db.write_errors();
+            std::process::exit(1);
         }
     } else {
         // let mut buf = String::new();
