@@ -1,6 +1,5 @@
 use crate::elaborate::*;
 use crate::error::*;
-use crate::evaluate::*;
 use crate::lower::durin;
 use crate::term::*;
 use std::sync::{Arc, Mutex};
@@ -329,7 +328,8 @@ impl Database {
     pub fn check_all(&self, file: FileId) {
         // TODO: get meta solutions from each elaborate_def() and make sure they match
         for def in &*self.top_level(file) {
-            self.elaborate_def(*def);
+            // They already reported any errors to the database, so we ignore them here
+            let _ = self.elaborate_def(*def);
         }
     }
 }

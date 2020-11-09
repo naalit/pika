@@ -1,7 +1,8 @@
 use lalrpop_util::lalrpop_mod;
 use std::fs::File;
-use std::io::{BufRead, Read};
+use std::io::Read;
 
+pub mod common;
 pub mod elaborate;
 pub mod error;
 pub mod evaluate;

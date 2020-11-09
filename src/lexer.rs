@@ -1,9 +1,7 @@
 //! Pika now uses a custom lexer, mostly to be more flexible about newlines.
 //! Specifically, the lexer ignores newlines before or after a binary operator token, and inside parentheses (like Python).
 //! Except, when there's a newline before an operator, it overrides the precedence so that the (last expression of the) last line is essentially inside parentheses.
-//! Also, semicolons and newlines are 100% equivalent to the *parser*, so they use the same token, but the lexer never ignores them like it does newlines.
-
-// TODO special precedence token replacing N newlines before an operator
+//! Also, semicolons and newlines are 100% equivalent to the *parser*, so they use the same token, but the lexer never ignores semicolons like it does newlines.
 
 use crate::error::{Span, Spanned};
 use std::collections::VecDeque;

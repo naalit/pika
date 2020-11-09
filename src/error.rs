@@ -7,7 +7,7 @@ use codespan_reporting::term::{emit, Config};
 use lalrpop_util::ParseError;
 use lazy_static::lazy_static;
 use std::ops::Range;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 pub type FileId = usize;
 
@@ -119,7 +119,7 @@ impl<T> std::ops::Deref for Spanned<T> {
         &(self.0).0
     }
 }
-impl<T: std::clone::Clone> std::ops::DerefMut for Spanned<T> {
+impl<T> std::ops::DerefMut for Spanned<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut (self.0).0
     }
@@ -204,6 +204,7 @@ impl Error {
     }
 }
 
+/// Used only to format the "expected x, y, or z" text in parse errors
 struct Alternatives(Vec<String>);
 use std::fmt;
 impl fmt::Display for Alternatives {

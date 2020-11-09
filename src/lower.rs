@@ -6,7 +6,6 @@ use crate::query::*;
 use crate::term::*;
 use durin::builder::*;
 use durin::ir;
-use smallvec::smallvec;
 use std::collections::HashMap;
 
 pub struct ModCxt<'m> {
@@ -81,7 +80,7 @@ impl<'db> LCxt<'db> {
 
 impl Val {
     pub fn lower(self, cxt: &mut LCxt) -> ir::Val {
-        crate::evaluate::quote(self, cxt.mcxt.size, &cxt.mcxt).lower(cxt)
+        self.quote(cxt.mcxt.size, &cxt.mcxt).lower(cxt)
     }
 }
 
@@ -106,7 +105,7 @@ impl Term {
                     *cxt.defs.get(&i).unwrap()
                 }
                 Var::Rec(i) => *cxt.defs.get(i).unwrap(),
-                Var::Meta(m) => todo!("how are global meta solutions handled?"),
+                Var::Meta(_) => panic!("unsolved meta passed to lower()"),
             },
             // \x.f x
             // -->
@@ -114,9 +113,7 @@ impl Term {
             // fun k y = r y
             Term::Lam(name, _icit, _arg_ty, body) => {
                 let (param_ty, ret_ty) = match self.ty(&cxt.mcxt, cxt.db) {
-                    Val::Fun(from, to) => {
-                        (*from, crate::evaluate::quote(*to, cxt.mcxt.size, &cxt.mcxt))
-                    }
+                    Val::Fun(from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt)),
                     Val::Pi(_, from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt)),
                     _ => unreachable!(),
                 };
@@ -151,7 +148,7 @@ impl Term {
                 cxt.local(
                     *name,
                     pi.arg,
-                    crate::evaluate::evaluate((**from).clone(), &cxt.mcxt.env(), &cxt.mcxt),
+                    (**from).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt),
                 );
                 let to = to.lower(cxt);
                 cxt.pop_local();

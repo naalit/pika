@@ -1,16 +1,11 @@
 //! We have three IRs in the frontend:
 //! - `Pre` or presyntax is what we get from the parser.
 //! - `Term` or core syntax is what we get after elaborating (name resolution, type checking, etc.).
-//! - `Val` is a value, where local variables are inlined and beta reduction is performed.
-//!   - If we inline all variables, it's a `IVal` (for "inlined"), otherwise it's a `UVal` (for "un-inlined").
-//!   - We try unification first on `UVal`s, and if that fails we try it on `IVal`s.
-//!   - We can get an `IVal` from a `UVal`, but not vice versa.
-use crate::error::*;
-use crate::query::*;
+//! - `Val` is a value, where beta reduction and associated substitution has been performed.
+use crate::common::*;
+use crate::elaborate::MCxt;
 
-pub use std::collections::VecDeque;
-pub use std::sync::Arc;
-
+/// Records the reason we introduced a meta, used when reporting an unsolved meta to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum MetaSource {
     ImplicitParam(Name),
@@ -47,6 +42,7 @@ pub enum Pre_ {
     Hole(MetaSource),
 }
 
+/// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Attribute {
     Normalize,
@@ -62,6 +58,7 @@ impl Attribute {
     }
 }
 
+/// A `PreDef`, plus any attributes that were applied to that definition.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct PreDefAn {
     pub attributes: Vec<Attribute>,
@@ -79,6 +76,9 @@ impl std::ops::Deref for PreDefAn {
 /// and add the type parameters declared there as implicit parameters to the constructor.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct PreCons(pub Name, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
+/// A definition, declaration, or statement - anything that can appear in a `do`, `struct`, or `sig` block.
+///
+/// `PreDef` doesn't keep track of attributes; see `PreDefAn` for that.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PreDef {
     Fun(Name, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
@@ -103,6 +103,7 @@ impl PreDef {
             PreDef::Expr(_) => None,
         }
     }
+
     /// This picks the best span for refering to the definition
     pub fn span(&self) -> Span {
         match self {
@@ -194,6 +195,7 @@ impl Lvl {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Ord, PartialOrd)]
 pub enum Meta {
+    /// A meta representing the type of a definition that doesn't have one yet, used for (mutual) recursion.
     Type(PreDefId),
     /// The local meta index is a u16 so that this type fits in a word.
     /// So no more than 65535 metas are allowed per definition, which is probably fine.
@@ -225,38 +227,30 @@ impl Term {
                 Var::Meta(_) => todo!("find meta solution"),
             },
             Term::Lam(n, i, ty, body) => {
-                let ty = crate::evaluate::evaluate((**ty).clone(), &mcxt.env(), mcxt);
+                let ty = (**ty).clone().evaluate(&mcxt.env(), mcxt);
                 Val::Pi(
                     *i,
                     Box::new(ty.clone()),
                     Box::new(Clos(
                         mcxt.env(),
-                        crate::evaluate::quote(
-                            {
-                                let mut mcxt = mcxt.clone();
-                                mcxt.define(*n, NameInfo::Local(ty), db);
-                                body.ty(&mcxt, db)
-                            },
-                            mcxt.size.inc(),
-                            mcxt,
-                        ),
+                        {
+                            let mut mcxt = mcxt.clone();
+                            mcxt.define(*n, NameInfo::Local(ty), db);
+                            body.ty(&mcxt, db).quote(mcxt.size, &mcxt)
+                        },
                         *n,
                     )),
                 )
             }
             Term::App(_, f, x) => match f.ty(mcxt, db) {
                 Val::Fun(_, to) => *to,
-                Val::Pi(_, _, cl) => cl.apply(
-                    crate::evaluate::evaluate((**x).clone(), &mcxt.env(), mcxt),
-                    mcxt,
-                ),
+                Val::Pi(_, _, cl) => cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt), mcxt),
                 // It might be a name that refers to a function type, so we need to inline it
                 Val::App(h, sp, g) => match g.resolve(h, sp, mcxt.size, db, mcxt) {
                     Some(Val::Fun(_, to)) => *to,
-                    Some(Val::Pi(_, _, cl)) => cl.apply(
-                        crate::evaluate::evaluate((**x).clone(), &mcxt.env(), mcxt),
-                        mcxt,
-                    ),
+                    Some(Val::Pi(_, _, cl)) => {
+                        cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt), mcxt)
+                    }
                     _ => unreachable!(),
                 },
                 _ => unreachable!(),
@@ -335,8 +329,6 @@ impl Names {
         self.0.pop_front();
     }
 }
-
-use crate::pretty::*;
 
 impl Term {
     pub fn pretty(&self, db: &dyn Compiler, names: &mut Names) -> Doc {
@@ -426,8 +418,6 @@ impl Term {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Env {
     /// Since locals are De Bruijn indices, we store a `VecDeque`, push to the front and index normally.
-    /// TODO try (A)Rc<Val> here, because closures?
-    /// Or `im::Vector`?
     /// When elaborating, we often want to evaluate something without any locals, or just add one or two at the front.
     /// To make that efficient, we leave off the tail of `None`s, and if an index goes past the length, it's `None`.
     vals: VecDeque<Option<Arc<Val>>>,
@@ -450,10 +440,10 @@ impl Env {
     }
 
     pub fn get(&self, i: Ix) -> Option<&Val> {
-        // Option<&Option<Val>>
+        // Option<&Option<Arc<Val>>>
         self.vals
             .get(i.0 as usize)
-            // Option<Option<&Val>>
+            // Option<Option<&Arc<Val>>>
             .map(Option::as_ref)
             .flatten()
             .map(Arc::as_ref)
@@ -477,12 +467,10 @@ impl Env {
     }
 }
 
-use crate::elaborate::MCxt;
-
 /// A closure, representing a term that's waiting for an argument to be evaluated.
 /// It's used in both lambdas and pi types.
 ///
-/// Note that it stores a `Box<Env>`, because we store it inline in `Val` and the `VecDeque` that `Env` uses is actually very big.
+/// Note that a `Clos` is very big (contains an inline `Env` and `Term`), so storing it behind a Box is advised.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Clos(pub Env, pub Term, pub Name);
 impl Clos {
@@ -490,8 +478,8 @@ impl Clos {
         self.0.size
     }
 
-    /// Quotes the closure back into a `Term`, but leaves it behind the lambda, so don't extract it.
-    /// Note, then, that `enclosing` is the number of abstractions enclosing the *lambda*, it doesn't include the lambda.
+    /// Quotes the closure back into a `Term`, but leaves it behind the lambda.
+    /// So `enclosing` is the number of abstractions enclosing the *lambda*, it doesn't include the lambda.
     pub fn quote(self, enclosing: Lvl, mcxt: &MCxt) -> Term {
         // We only need to do eval-quote if we've captured variables, which isn't that often
         // Otherwise, we just need to inline meta solutions
@@ -500,29 +488,29 @@ impl Clos {
             // TODO should this return a box and reuse it?
             self.1.inline_metas(mcxt, self.0.size)
         } else {
-            use crate::evaluate::{evaluate, quote};
             let Clos(mut env, t, _) = self;
             env.push(Some(Val::local(enclosing.inc())));
-            quote(evaluate(t, &env, mcxt), enclosing.inc(), mcxt)
+            t.evaluate(&env, mcxt).quote(enclosing.inc(), mcxt)
         }
     }
 
     /// Equivalent to `self.apply(Val::local(l), mcxt)`
     pub fn vquote(self, l: Lvl, mcxt: &MCxt) -> Val {
-        use crate::evaluate::evaluate;
         let Clos(mut env, t, _) = self;
         env.push(Some(Val::local(l)));
-        evaluate(t, &env, mcxt)
+        t.evaluate(&env, mcxt)
     }
 
     pub fn apply(self, arg: Val, mcxt: &MCxt) -> Val {
-        use crate::evaluate::evaluate;
         let Clos(mut env, t, _) = self;
         env.push(Some(arg));
-        evaluate(t, &env, mcxt)
+        t.evaluate(&env, mcxt)
     }
 }
 
+/// The head of an application in a `Val`, which is some sort of variable which may or may not have a value yet.
+///
+/// The `Local` type parameter should be the type of a local variable, either `Lvl` or `Ix`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Var<Local> {
     Local(Local),
@@ -533,22 +521,12 @@ pub enum Var<Local> {
 
 pub type Spine = Vec<(Icit, Val)>;
 
-/// A helper trait for accepting either owned or borrowed data, and cloning when necessary
-pub trait IntoOwned<T> {
-    fn into_owned(self) -> T;
-}
-impl<T> IntoOwned<T> for T {
-    fn into_owned(self) -> T {
-        self
-    }
-}
-impl<T: Clone> IntoOwned<T> for &T {
-    fn into_owned(self) -> T {
-        self.clone()
-    }
-}
-
-use std::sync::RwLock;
+/// A `Glued` represents what a `Val::App` evaluates to.
+/// Each `Val::App` has a `Glued` associated with it, which lazily inlines and beta-reduces the value.
+/// It caches the value for future uses.
+///
+/// The most common place where a `Glued` is resolved in during unification:
+/// we try to unify without resolving `Glued`s, but if that fails, we try again with resolving them.
 #[derive(Clone, Debug)]
 pub struct Glued(Arc<RwLock<Option<Val>>>);
 
@@ -569,6 +547,7 @@ impl Glued {
         Glued(Arc::new(RwLock::new(None)))
     }
 
+    /// Like `resolve()`, but only inlines metas, not definitions. So, it doesn't need a database or quote level.
     pub fn resolve_meta(&self, h: Var<Lvl>, sp: impl IntoOwned<Spine>, mcxt: &MCxt) -> Option<Val> {
         let guard = self.0.read().unwrap();
         if let Some(v) = &*guard {
@@ -598,6 +577,8 @@ impl Glued {
         }
     }
 
+    /// Resolves the `Glued`: returns a `Val::Arc` to the cached value if available, otherwise inlines the head and beta-reduces, returning the result.
+    /// If the head can't be inlined, e.g. because it's a parameter, returns None.
     pub fn resolve(
         &self,
         h: Var<Lvl>,
@@ -619,7 +600,7 @@ impl Glued {
                 Var::Top(def) => {
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
-                    let val = crate::evaluate::evaluate(val, &Env::new(l), mcxt);
+                    let val = val.evaluate(&Env::new(l), mcxt);
                     let val = sp
                         .into_owned()
                         .into_iter()
@@ -662,6 +643,14 @@ pub enum Val {
     Error,
 }
 impl Val {
+    pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
+        self.clone()
+            .inline_metas(mcxt)
+            .quote(mcxt.size, mcxt)
+            .pretty(db, &mut Names::new(mcxt.cxt, db))
+    }
+
+    /// Unwraps any top-level `Val::Arc`s, so you don't have to recurse to deal with that case when matching on a reference.
     pub fn unarc(&self) -> &Val {
         match self {
             Val::Arc(x) => x.unarc(),
