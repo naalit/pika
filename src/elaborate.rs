@@ -81,6 +81,12 @@ impl Term {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub struct CxtState {
+    pub cxt: Cxt,
+    pub size: Lvl,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MCxt {
     pub cxt: Cxt,
@@ -90,6 +96,18 @@ pub struct MCxt {
     solved_globals: Vec<RecSolution>,
 }
 impl MCxt {
+    pub fn state(&self) -> CxtState {
+        CxtState {
+            cxt: self.cxt,
+            size: self.size,
+        }
+    }
+    pub fn set_state(&mut self, state: CxtState) {
+        let CxtState { cxt, size } = state;
+        self.cxt = cxt;
+        self.size = size;
+    }
+
     pub fn new(cxt: Cxt, def: DefId, db: &dyn Compiler) -> Self {
         MCxt {
             cxt,
@@ -404,7 +422,172 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     .0,
             ))
         }
-        PreDef::Type(_, _, _) => todo!("data types"),
+        PreDef::Type(name, args, cons) => {
+            // A copy of the context before we added the type arguments
+            let cxt_before = mcxt.state();
+
+            // Evaluate the argument types and collect them up
+            let mut targs = Vec::new();
+            for (name, icit, ty) in args {
+                let ty = match check(ty, &Val::Type, db, &mut mcxt) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        db.report_error(e.to_error(file, db, &mcxt));
+                        // TODO make a meta? or just call `infer()`?
+                        Term::Error
+                    }
+                };
+                let vty = ty.evaluate(&mcxt.env(), &mcxt);
+                targs.push((*name, *icit, vty.clone()));
+                mcxt.define(*name, NameInfo::Local(vty), db);
+            }
+
+            // We have to do this now, so that the constructors can use the type
+            let (ty_ty, _) = targs
+                .iter()
+                .rfold((Val::Type, mcxt.size), |(to, l), (n, i, from)| {
+                    (
+                        Val::Pi(
+                            *i,
+                            Box::new(from.clone()),
+                            Box::new(Clos(Env::new(l.dec()), to.clone().quote(l, &mcxt), *n)),
+                        ),
+                        l.dec(),
+                    )
+                });
+            mcxt.solved_globals.push(RecSolution::Defined(
+                predef_id,
+                predef.span(),
+                ty_ty.clone(),
+            ));
+
+            let cxt_after = mcxt.state();
+
+            // Go through the constructors
+            let mut seen: HashMap<Name, Span> = HashMap::new();
+            for PreCons(cname, args, cty) in cons {
+                if let Some(&span) = seen.get(cname) {
+                    let e = Error::new(
+                        file,
+                        format!(
+                            "Duplicate constructor name '{}' in type definition",
+                            db.lookup_intern_name(**cname)
+                        ),
+                        cname.span(),
+                        "declared again here",
+                    )
+                    .with_label(file, span, "previously declared here");
+                    db.report_error(e);
+                    continue;
+                } else {
+                    seen.insert(**cname, cname.span());
+                }
+
+                let mut cargs = Vec::new();
+
+                // If the user provided a type for the constructor, they can't use the type arguments
+                // Either way, we need to reset it somewhat so we can't use arguments from other constructors
+                // But we want to use the same mcxt, so meta solutions get saved
+                if cty.is_some() {
+                    mcxt.set_state(cxt_before);
+                } else {
+                    mcxt.set_state(cxt_after);
+                    // If they can use the type parameters, add them all as implicit arguments
+                    // They go in the same order as the type parameters, so we don't need to change the mcxt
+                    for (n, _i, t) in &targs {
+                        cargs.push((*n, Icit::Impl, t.clone()));
+                    }
+                }
+
+                // TODO this should be a function
+                for (name, icit, ty) in args {
+                    let ty = match check(ty, &Val::Type, db, &mut mcxt) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            db.report_error(e.to_error(file, db, &mcxt));
+                            // TODO make a meta? or just call `infer()`?
+                            Term::Error
+                        }
+                    };
+                    let vty = ty.evaluate(&mcxt.env(), &mcxt);
+                    cargs.push((*name, *icit, vty.clone()));
+                    mcxt.define(*name, NameInfo::Local(vty), db);
+                }
+
+                // If the user provided a type for the constructor, typecheck it
+                let cty = if let Some(cty) = cty {
+                    match check(cty, &Val::Type, db, &mut mcxt) {
+                        Ok(x) => match x.ret().head() {
+                            Term::Var(Var::Rec(id)) if *id == predef_id => x,
+                            _ => {
+                                // We want the type to appear in the error message as it was written
+                                let mut type_string = db.lookup_intern_name(**name);
+                                for (n, _, _) in &targs {
+                                    type_string.push(' ');
+                                    type_string.push_str(&db.lookup_intern_name(*n));
+                                }
+                                let e = Error::new(
+                                    file,
+                                    "Constructor return type must be the type it's a part of",
+                                    cty.span(),
+                                    format!("expected return type '{}'", type_string),
+                                );
+                                db.report_error(e);
+                                Term::Error
+                            }
+                        },
+                        Err(e) => {
+                            db.report_error(e.to_error(file, db, &mcxt));
+                            // TODO make a meta? or just call `infer()`?
+                            Term::Error
+                        }
+                    }
+                // If they didn't provide a return type, use the type constructor applied to all args
+                } else {
+                    // predef_id is for the type being declared
+                    // Ty a b of C [a] [b] ... : Ty a b
+                    // so Ix's decrease from left to right, and start at the first implicit argument
+                    // which is right after the state cxt_before stores
+                    targs
+                        .iter()
+                        .fold(
+                            (
+                                Term::Var(Var::Rec(predef_id)),
+                                cxt_before.size.to_ix(mcxt.size),
+                            ),
+                            |(f, ix), (_n, i, _t)| {
+                                let ix = ix.dec();
+                                (
+                                    Term::App(*i, Box::new(f), Box::new(Term::Var(Var::Local(ix)))),
+                                    ix,
+                                )
+                            },
+                        )
+                        .0
+                };
+
+                let (full_ty, _) =
+                    cargs
+                        .into_iter()
+                        .rfold((cty, mcxt.size), |(to, l), (n, i, from)| {
+                            (
+                                Term::Pi(n, i, Box::new(from.quote(l.dec(), &mcxt)), Box::new(to)),
+                                l.dec(),
+                            )
+                        });
+
+                // TODO put these somewhere where they can be accessed with dot syntax
+                println!(
+                    "Constructor {} of type {}",
+                    db.lookup_intern_name(**cname),
+                    full_ty
+                        .pretty(db, &mut Names::new(cxt_before.cxt, db))
+                        .ansi_string()
+                );
+            }
+
+            Ok((Term::Var(Var::Type(def)), ty_ty))
+        }
         PreDef::Expr(e) => match infer(true, e, db, &mut mcxt) {
             Err(e) => {
                 db.report_error(e.to_error(file, db, &mcxt));

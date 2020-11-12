@@ -9,6 +9,12 @@ macro_rules! intern_id {
         #[doc=$doc]
         #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
         pub struct $name(salsa::InternId);
+        impl $name {
+            /// Returns the underlying number identifying the object, for debugging purposes
+            pub fn num(self) -> u32 {
+                self.0.as_u32()
+            }
+        }
         impl salsa::InternKey for $name {
             fn from_intern_id(id: salsa::InternId) -> Self {
                 Self(id)

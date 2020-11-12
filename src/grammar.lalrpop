@@ -101,18 +101,18 @@ Def_: PreDef = {
 
   "fun" "\n"* <name:Sp<Name>> <args:Args> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
-    PreDef::Fun(name.unwrap(), args, ty, val)
+    PreDef::Fun(name, args, ty, val)
   },
   // You can have a function with an effect type but not a return type
   "fun" "\n"* Sp<Name> Args (":" App)? ("with" Term) "=" Term => todo!("effects"),
   "val" "\n"* <name:Sp<Name>> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
-    PreDef::Val(name.unwrap(), ty, val)
+    PreDef::Val(name, ty, val)
   },
-  "type" "\n"* <name:Name> <args:Args> "of" <cons:Block<Cons>> => {
-    PreDef::Type(name, args, cons)
+  "type" "\n"* <name:Sp<Name>> <args:Args?> "of" <cons:Block<Cons>> => {
+    PreDef::Type(name, args.unwrap_or_else(Vec::new), cons)
   },
-  "impl" <name:("\n"* <Name> ":")?> <ty:Sp<Term>> "=" <val:Sp<Term>> => {
+  "impl" <name:("\n"* <Sp<Name>> ":")?> <ty:Sp<Term>> "=" <val:Sp<Term>> => {
     PreDef::Impl(name, ty, val)
   },
   Sp<Term> => PreDef::Expr(<>),
@@ -121,8 +121,8 @@ Def_: PreDef = {
 
   // TODO report an error if we use an arg without a type
   // although I guess elaboration will usually catch it
-  "fun" "\n"* <name:Sp<Name>> <args:Args> ":" <ty:Sp<Term>> => PreDef::FunDec(name.unwrap(), args, ty),
-  "val" "\n"* <name:Sp<Name>> ":" <ty:Sp<Term>> => PreDef::ValDec(name.unwrap(), ty),
+  "fun" "\n"* <name:Sp<Name>> <args:Args> ":" <ty:Sp<Term>> => PreDef::FunDec(name, args, ty),
+  "val" "\n"* <name:Sp<Name>> ":" <ty:Sp<Term>> => PreDef::ValDec(name, ty),
 };
 
 // Top-level expression groups
@@ -358,7 +358,8 @@ ConsArg: Vec<(Name, Icit, PreTy)> = {
 // Different language structures
 
 Cons: PreCons = {
-  <name:Name> <args:ConsArg*> <ty:(":" <Sp<Expr>>)?> => PreCons(name,
+  <name:Sp<Name>> <args:ConsArg*> <ty:(":" <Sp<Expr>>)?> => PreCons(
+    name,
     args.into_iter().flatten().collect(),
     ty,
   ),

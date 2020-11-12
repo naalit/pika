@@ -1,0 +1,5 @@
+type Test of
+  Something
+  # duplicate
+  Something Type
+end

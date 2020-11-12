@@ -1,5 +1,6 @@
 use assert_cmd::*;
 use predicates::prelude::*;
+use predicates::str::*;
 
 #[test]
 fn test_basic() {
@@ -17,6 +18,35 @@ fn test_smalltt() {
         .args(&["tests/smalltt.pk"])
         .assert()
         .success();
+}
+
+#[test]
+fn test_data() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/data.pk"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_duplicate_constructor() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/duplicate_constructor.pk"])
+        .assert()
+        .stderr(contains("Duplicate"))
+        .failure();
+}
+
+#[test]
+fn test_wrong_constructor_type() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/wrong_constructor_type.pk"])
+        .assert()
+        .stderr(contains("Constructor return type"))
+        .failure();
 }
 
 #[test]

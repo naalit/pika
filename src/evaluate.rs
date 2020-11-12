@@ -7,6 +7,7 @@ impl Term {
         match self {
             Term::Type => Val::Type,
             Term::Var(Var::Local(ix)) => env.val(ix),
+            Term::Var(Var::Type(id)) => Val::datatype(id),
             Term::Var(Var::Top(def)) => Val::top(def),
             Term::Var(Var::Rec(id)) => Val::rec(id),
             Term::Var(Var::Meta(meta)) => match mcxt.get_meta(meta) {
@@ -103,6 +104,7 @@ impl Val {
                     Var::Top(def) => Term::Var(Var::Top(def)),
                     Var::Meta(meta) => Term::Var(Var::Meta(meta)),
                     Var::Rec(id) => Term::Var(Var::Rec(id)),
+                    Var::Type(id) => Term::Var(Var::Type(id)),
                 };
                 sp.into_iter().fold(h, |f, (icit, x)| {
                     Term::App(icit, Box::new(f), Box::new(x.quote(enclosing, mcxt)))

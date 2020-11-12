@@ -1,0 +1,11 @@
+type Term a of
+  # Type stated
+  TypeType : Term Type
+  # Normal ADT
+  Lit a
+  # Mixed before and after colon
+  Fun [a] [b] : Term (a -> b) -> Term (a -> b)
+end
+
+# val one : Test = Test.One
+# val two : Test = Test.Two Test

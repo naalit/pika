@@ -71,25 +71,27 @@ impl std::ops::Deref for PreDefAn {
     }
 }
 
+/// PreDefs all have spans, usually the span of the name
+pub type SName = Spanned<Name>;
 /// The return type of a constructor is optional even here, since the behaviour is different.
 /// When a constructor return type is missing, we don't unify it, we use the type declaration,
 /// and add the type parameters declared there as implicit parameters to the constructor.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct PreCons(pub Name, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
+pub struct PreCons(pub SName, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
 /// A definition, declaration, or statement - anything that can appear in a `do`, `struct`, or `sig` block.
 ///
 /// `PreDef` doesn't keep track of attributes; see `PreDefAn` for that.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PreDef {
-    Fun(Name, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
-    Val(Name, PreTy, Pre),
-    Type(Name, Vec<(Name, Icit, PreTy)>, Vec<PreCons>),
-    Impl(Option<Name>, PreTy, Pre),
+    Fun(SName, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
+    Val(SName, PreTy, Pre),
+    Type(SName, Vec<(Name, Icit, PreTy)>, Vec<PreCons>),
+    Impl(Option<SName>, PreTy, Pre),
     Expr(Pre),
 
     // Declarations
-    FunDec(Name, Vec<(Name, Icit, PreTy)>, PreTy),
-    ValDec(Name, PreTy),
+    FunDec(SName, Vec<(Name, Icit, PreTy)>, PreTy),
+    ValDec(SName, PreTy),
 }
 impl PreDef {
     pub fn name(&self) -> Option<Name> {
@@ -98,8 +100,8 @@ impl PreDef {
             | PreDef::Val(n, _, _)
             | PreDef::Type(n, _, _)
             | PreDef::FunDec(n, _, _)
-            | PreDef::ValDec(n, _) => Some(*n),
-            PreDef::Impl(n, _, _) => *n,
+            | PreDef::ValDec(n, _) => Some(**n),
+            PreDef::Impl(n, _, _) => n.as_ref().map(|x| **x),
             PreDef::Expr(_) => None,
         }
     }
@@ -107,14 +109,14 @@ impl PreDef {
     /// This picks the best span for refering to the definition
     pub fn span(&self) -> Span {
         match self {
-            // TODO spanned names
-            PreDef::Fun(_, _, _, t) => t.span(),
-            PreDef::Val(_, _, t) => t.span(),
-            PreDef::Type(_, _, _) => todo!("spanned names"),
-            PreDef::Impl(_, _, t) => t.span(),
+            PreDef::Fun(n, _, _, _) => n.span(),
+            PreDef::Val(n, _, _) => n.span(),
+            PreDef::Type(n, _, _) => n.span(),
+            PreDef::Impl(Some(n), _, _) => n.span(),
+            PreDef::Impl(None, _, t) => t.span(),
             PreDef::Expr(t) => t.span(),
-            PreDef::FunDec(_, _, t) => t.span(),
-            PreDef::ValDec(_, t) => t.span(),
+            PreDef::FunDec(n, _, _) => n.span(),
+            PreDef::ValDec(n, _) => n.span(),
         }
     }
 }
@@ -217,12 +219,30 @@ pub enum Term {
 }
 
 impl Term {
+    /// If this is an application, return its head. Otherwise, return itself unchanged.
+    pub fn head(&self) -> &Term {
+        match self {
+            Term::App(_, f, _) => f.head(),
+            x => x,
+        }
+    }
+
+    /// If this is a function type, give the return type. It *might not be valid at the original level* since this could be a Pi.
+    /// Returns itself unchanged if it isn't a function type.
+    pub fn ret(&self) -> &Term {
+        match self {
+            Term::Fun(_, to) => to.ret(),
+            Term::Pi(_, _, _, to) => to.ret(),
+            x => x,
+        }
+    }
+
     pub fn ty(&self, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
             Term::Type | Term::Pi(_, _, _, _) | Term::Fun(_, _) => Val::Type,
             Term::Var(v) => match *v {
                 Var::Local(i) => mcxt.local_ty(i, db).clone(),
-                Var::Top(i) => (*db.elaborate_def(i).unwrap().typ).clone(),
+                Var::Top(i) | Var::Type(i) => (*db.elaborate_def(i).unwrap().typ).clone(),
                 Var::Rec(_) => todo!("find meta solution"),
                 Var::Meta(_) => todo!("find meta solution"),
             },
@@ -336,7 +356,7 @@ impl Term {
             Term::Type => Doc::start("Type"),
             Term::Var(v) => match v {
                 Var::Local(ix) => Doc::start(names.get(*ix).get(db)),
-                Var::Top(id) => Doc::start(
+                Var::Top(id) | Var::Type(id) => Doc::start(
                     db.lookup_intern_predef(db.lookup_intern_def(*id).0)
                         .name()
                         .unwrap()
@@ -347,7 +367,7 @@ impl Term {
                     Meta::Type(id) => Doc::start("<type of ")
                         .add(db.lookup_intern_predef(*id).name().unwrap().get(db))
                         .add(">"),
-                    Meta::Local(def, id) => Doc::none().debug(def).add("?").add(id),
+                    Meta::Local(def, id) => Doc::start("?").add(def.num()).add(".").add(id),
                 },
             },
             Term::Lam(n, i, _ty, t) => {
@@ -517,6 +537,10 @@ pub enum Var<Local> {
     Top(DefId),
     Rec(PreDefId),
     Meta(Meta),
+    /// Datatypes are identified by their DefId as well, since they all have one and they're distinct.
+    /// A `Type(id)` is the same as a `Top(id)`, except that it can't be inlined.
+    /// You can still call `elaborate_def()` on it to get its type.
+    Type(DefId),
 }
 
 pub type Spine = Vec<(Icit, Val)>;
@@ -559,6 +583,7 @@ impl Glued {
                 Var::Local(_) => None,
                 // If we inlined the Rec, it would probably lead to infinite recursion
                 Var::Rec(_) => None,
+                Var::Type(_) => None,
                 Var::Top(_) => None,
                 Var::Meta(m) => {
                     if let Some(val) = mcxt.get_meta(m) {
@@ -597,6 +622,8 @@ impl Glued {
                 Var::Local(_) => None,
                 // If we inlined the Rec, it would probably lead to infinite recursion
                 Var::Rec(_) => None,
+                // A datatype is already fully evaluated
+                Var::Type(_) => None,
                 Var::Top(def) => {
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
@@ -660,6 +687,10 @@ impl Val {
 
     pub fn local(lvl: Lvl) -> Val {
         Val::App(Var::Local(lvl), Vec::new(), Glued::new())
+    }
+
+    pub fn datatype(def: DefId) -> Val {
+        Val::App(Var::Type(def), Vec::new(), Glued::new())
     }
 
     pub fn top(def: DefId) -> Val {
