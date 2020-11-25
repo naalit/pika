@@ -310,6 +310,7 @@ impl Meta {
                     Doc::start("type of function declaration ").add(n.get(db))
                 }
                 PreDef::ValDec(n, _) => Doc::start("type of declaration ").add(n.get(db)),
+                PreDef::Cons(_, _) => unreachable!("Constructor types should already be solved!"),
             },
             Meta::Local(_, n) => match &mcxt.local_metas[n as usize] {
                 MetaEntry::Solved(_, _) => panic!("meta already solved"),
@@ -422,6 +423,10 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     .0,
             ))
         }
+        PreDef::Cons(_name, ty) => {
+            // We don't have to do anything since the type was already determined
+            Ok((Term::Var(Var::Cons(def)), ty.clone()))
+        }
         PreDef::Type(name, args, cons) => {
             // A copy of the context before we added the type arguments
             let cxt_before = mcxt.state();
@@ -462,6 +467,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             ));
 
             let cxt_after = mcxt.state();
+
+            let mut scope = Vec::new();
 
             // Go through the constructors
             let mut seen: HashMap<Name, Span> = HashMap::new();
@@ -576,17 +583,18 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                             )
                         });
 
-                // TODO put these somewhere where they can be accessed with dot syntax
-                println!(
-                    "Constructor {} of type {}",
-                    db.lookup_intern_name(**cname),
-                    full_ty
-                        .pretty(db, &mut Names::new(cxt_before.cxt, db))
-                        .ansi_string()
+                let full_ty = full_ty.evaluate(&mcxt.env(), &mcxt).inline_metas(&mcxt);
+
+                let def_id = db.intern_def(
+                    db.intern_predef(Arc::new(PreDef::Cons(cname.clone(), full_ty).into())),
+                    cxt_before.cxt,
                 );
+                scope.push((**cname, def_id));
             }
 
-            Ok((Term::Var(Var::Type(def)), ty_ty))
+            let scope = db.intern_scope(Arc::new(scope));
+
+            Ok((Term::Var(Var::Type(def, scope)), ty_ty))
         }
         PreDef::Expr(e) => match infer(true, e, db, &mut mcxt) {
             Err(e) => {
@@ -674,6 +682,12 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
     ret
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ScopeType {
+    Type,
+    Struct,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeError {
     NotFound(Spanned<Name>),
@@ -681,6 +695,8 @@ pub enum TypeError {
     Unify(MCxt, Spanned<VTy>, VTy),
     MetaScope(Span, Meta, Name),
     MetaOccurs(Span, Meta),
+    NotStruct(Spanned<VTy>),
+    MemberNotFound(Span, ScopeType, Name),
 }
 impl TypeError {
     fn to_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
@@ -730,6 +746,26 @@ impl TypeError {
                 s,
                 format!("solution found here"),
             ),
+            TypeError::NotStruct(ty) => Error::new(
+                file,
+                Doc::start("Value of type ")
+                    .chain(ty.pretty(db, mcxt).style(Style::None))
+                    .add(" does not have members"),
+                ty.span(),
+                format!("tried to access member here"),
+            ),
+            TypeError::MemberNotFound(span, sctype, m) => Error::new(
+                file,
+                Doc::start("Could not find member ")
+                    .add(db.lookup_intern_name(m))
+                    .add(" in ")
+                    .add(match sctype {
+                        ScopeType::Type => "type namespace",
+                        ScopeType::Struct => "struct",
+                    }),
+                span,
+                format!("not found: {}", db.lookup_intern_name(m)),
+            ),
         }
     }
 }
@@ -752,7 +788,7 @@ fn p_unify(
         (Val::Error, _) | (_, Val::Error) => Ok(Yes),
         (Val::Type, Val::Type) => Ok(Yes),
 
-        (Val::App(h, v, _), Val::App(h2, v2, _)) if h == h2 => {
+        (Val::App(h, v, _), Val::App(h2, v2, _)) if h.unify(h2, db) => {
             let mut r = Yes;
             for ((i, a), (i2, b)) in v.into_iter().zip(v2.into_iter()) {
                 assert_eq!(i, i2);
@@ -982,29 +1018,7 @@ pub fn infer(
             // Don't insert metas in `f` if we're passing an implicit argument
             let (f, fty) = infer(*icit == Icit::Expl, f, db, mcxt)?;
 
-            let (term, ty) = match fty {
-                Val::Pi(icit2, from, cl) => {
-                    assert_eq!(*icit, icit2);
-
-                    let x = check(x, &*from, db, mcxt)?;
-                    // TODO Rc to get rid of the clone()?
-                    let to = cl.apply(x.clone().evaluate(&mcxt.env(), mcxt), mcxt);
-                    Ok((Term::App(*icit, Box::new(f), Box::new(x)), to))
-                }
-                Val::Fun(from, to) => {
-                    let x = check(x, &*from, db, mcxt)?;
-                    Ok((Term::App(*icit, Box::new(f), Box::new(x)), *to))
-                }
-                // The type was already Error, so we'll leave it there, not introduce a meta
-                Val::Error => Ok((Term::Error, Val::Error)),
-                fty => {
-                    return Err(TypeError::NotFunction(
-                        mcxt.clone(),
-                        Spanned::new(fty, fspan),
-                    ))
-                }
-            }?;
-            Ok(insert_metas(insert, term, ty, pre.span(), mcxt, db))
+            infer_app(insert, pre.span(), f, fty, fspan, *icit, x, db, mcxt)
         }
 
         Pre_::Do(v) => {
@@ -1037,7 +1051,107 @@ pub fn infer(
             mcxt.new_meta(None, pre.span(), MetaSource::HoleType)
                 .evaluate(&mcxt.env(), mcxt),
         )),
+
+        Pre_::Dot(head, m, args) => {
+            match infer(true, head, db, mcxt).map(|(x, ty)| {
+                (
+                    x.evaluate(&mcxt.env(), mcxt).inline(mcxt.size, db, mcxt),
+                    ty,
+                )
+            })? {
+                (_, Val::Error) => return Ok((Term::Error, Val::Error)),
+                (Val::App(Var::Type(_id, scope), sp, _), _) if sp.is_empty() => {
+                    let scope = db.lookup_intern_scope(scope);
+                    for &(n, v) in scope.iter().rev() {
+                        if n == **m {
+                            match db.elaborate_def(v) {
+                                Ok(info) => {
+                                    let f = Term::Var(Var::Top(v));
+                                    let fty = info.typ.into_owned();
+                                    return args
+                                        .iter()
+                                        .try_fold(
+                                            (f, fty, Span(head.span().0, m.span().1)),
+                                            |(f, fty, fspan), (i, x)| {
+                                                let (f, fty) = insert_metas(
+                                                    *i == Icit::Expl,
+                                                    f,
+                                                    fty,
+                                                    fspan,
+                                                    mcxt,
+                                                    db,
+                                                );
+                                                let (f, fty) = infer_app(
+                                                    false,
+                                                    pre.span(),
+                                                    f,
+                                                    fty,
+                                                    fspan,
+                                                    *i,
+                                                    x,
+                                                    db,
+                                                    mcxt,
+                                                )?;
+                                                Ok((f, fty, Span(fspan.0, x.span().1)))
+                                            },
+                                        )
+                                        .map(|(f, fty, fspan)| {
+                                            insert_metas(insert, f, fty, fspan, mcxt, db)
+                                        });
+                                }
+                                Err(_) => return Ok((Term::Error, Val::Error)),
+                            }
+                        }
+                    }
+                    Err(TypeError::MemberNotFound(
+                        Span(head.span().0, m.span().1),
+                        ScopeType::Type,
+                        **m,
+                    ))
+                }
+                (_, ty) => Err(TypeError::NotStruct(Spanned::new(
+                    ty,
+                    Span(head.span().0, m.span().1),
+                ))),
+            }
+        }
     }
+}
+
+fn infer_app(
+    insert: bool,
+    pre_span: Span,
+    f: Term,
+    fty: VTy,
+    fspan: Span,
+    icit: Icit,
+    x: &Pre,
+    db: &dyn Compiler,
+    mcxt: &mut MCxt,
+) -> Result<(Term, VTy), TypeError> {
+    let (term, ty) = match fty {
+        Val::Pi(icit2, from, cl) => {
+            assert_eq!(icit, icit2);
+
+            let x = check(x, &*from, db, mcxt)?;
+            // TODO Rc to get rid of the clone()?
+            let to = cl.apply(x.clone().evaluate(&mcxt.env(), mcxt), mcxt);
+            Ok((Term::App(icit, Box::new(f), Box::new(x)), to))
+        }
+        Val::Fun(from, to) => {
+            let x = check(x, &*from, db, mcxt)?;
+            Ok((Term::App(icit, Box::new(f), Box::new(x)), *to))
+        }
+        // The type was already Error, so we'll leave it there, not introduce a meta
+        Val::Error => Ok((Term::Error, Val::Error)),
+        fty => {
+            return Err(TypeError::NotFunction(
+                mcxt.clone(),
+                Spanned::new(fty, fspan),
+            ))
+        }
+    }?;
+    Ok(insert_metas(insert, term, ty, pre_span, mcxt, db))
 }
 
 pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<Term, TypeError> {
@@ -1121,6 +1235,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             let (term, i_ty) = infer(true, pre, db, mcxt)?;
             // TODO should we take `ty` by value?
             if !unify(ty.clone(), i_ty.clone(), mcxt.size, pre.span(), db, mcxt)? {
+                eprintln!("{:?} vs {:?}", i_ty, ty);
                 return Err(TypeError::Unify(
                     mcxt.clone(),
                     pre.copy_span(i_ty.inline_metas(mcxt)),

@@ -235,63 +235,70 @@ RHS: Pre_ = {
 // Standard precedence for arithmetic operators
 Arith<S>: Pre_ = {
   Factor<S>,
-  Arith<S> "+" Factor<RHS> => todo!(),
-  Arith<S> "-" Factor<RHS> => todo!(),
+  Arith<S> "+" Factor<RHS> => todo!("+"),
+  Arith<S> "-" Factor<RHS> => todo!("-"),
 }
 Factor<S>: Pre_ = {
   Exp<S>,
-  Factor<S> "*" Exp<RHS> => todo!(),
-  Factor<S> "/" Exp<RHS> => todo!(),
+  Factor<S> "*" Exp<RHS> => todo!("*"),
+  Factor<S> "/" Exp<RHS> => todo!("/"),
 }
 Exp<S>: Pre_ = {
   S,
-  Exp<S> "**" RHS => todo!(),
+  Exp<S> "**" RHS => todo!("**"),
 }
 
 // No precedence for bitwise operators, but all are left-associative.
 Bitwise<S>: Pre_ = {
   // You can't use arithmetic with bitwise operators without parens, but we need a single chain.
   Arith<S>,
-  S ("&" RHS)+ => todo!(),
-  S ("|" RHS)+ => todo!(),
+  S ("&" RHS)+ => todo!("&"),
+  S ("|" RHS)+ => todo!("|"),
   // Single "^" is ambiguous: exponentiation or xor?
-  S ("^^" RHS)+ => todo!(),
+  S ("^^" RHS)+ => todo!("^^"),
   // I'd like << and >> for function composition, too - maybe the same operator, e.g. `impl [T P Q] ShiftRight (x: T -> P x) (y: [x] P x -> Q y) = ...`?
   // The alternative would be <<< and >>>.
-  S ("<<" RHS)+ => todo!(),
-  S (">>" RHS)+ => todo!(),
+  S ("<<" RHS)+ => todo!(">>"),
+  S (">>" RHS)+ => todo!("<<"),
 }
 
 // No precedence or associativity within comparison operators.
 // But, they're lower precedence than arithmetic or bitwise - `x + 2 == z * 3` works fine.
 Comparison<S>: Pre_ = {
   Bitwise<S>,
-  Bitwise<S> "==" Bitwise<RHS> => todo!(),
-  Bitwise<S> ">"  Bitwise<RHS> => todo!(),
-  Bitwise<S> "<"  Bitwise<RHS> => todo!(),
-  Bitwise<S> "<=" Bitwise<RHS> => todo!(),
-  Bitwise<S> ">=" Bitwise<RHS> => todo!(),
+  Bitwise<S> "==" Bitwise<RHS> => todo!("=="),
+  Bitwise<S> ">"  Bitwise<RHS> => todo!(">"),
+  Bitwise<S> "<"  Bitwise<RHS> => todo!("<"),
+  Bitwise<S> "<=" Bitwise<RHS> => todo!("<="),
+  Bitwise<S> ">=" Bitwise<RHS> => todo!(">="),
 }
 
 // No precedence between `and` and `or`, but one can be repeated: `x and y and z` works but not `x and y or z`.
 // These are lower precedence than Comparison, and are keywords since they don't actually behave like operators (lazy evaluation of the rhs).
 Logical<S>: Pre_ = {
   Comparison<S>,
-  Comparison<S> ("and" Comparison<RHS>)+ => todo!(),
-  Comparison<S> ("or"  Comparison<RHS>)+ => todo!(),
+  Comparison<S> ("and" Comparison<RHS>)+ => todo!("and"),
+  Comparison<S> ("or"  Comparison<RHS>)+ => todo!("or"),
 }
 
 // <| and |> have no precedence, but are left-associative: `x |> y |> z` = `z(y(x))`, `x <| y <| z` = `x y z`.
 Op: Pre_ = {
   Logical<LHS>,
-  LHS "<|" RHS => todo!(),
-  LHS "|>" RHS => todo!(),
+  LHS "<|" RHS => todo!("<|"),
+  LHS "|>" RHS => todo!("|>"),
   // `a . b c d` = `b c d a`, where `b` is looked up in the context of `a`'s type.
   // Unless `a.b` is a field, in which case it's `(a.b) c d`.
   // `a b . c d` isn't allowed.
   // `a b \n . c d` is, though, like other operators.
-  Atom "." Name AppArg* => todo!(),
-  Op OpNL "." Name AppArg* => todo!(),
+  <f:Sp<Atom>> "." <n:Sp<Name>> <v:Sp<AppArg>*> => {
+    let v = v.into_iter().map(|x| {
+      let span = x.span();
+      let (icit, pre) = x.unwrap();
+      (icit, Spanned::new(pre, span))
+    }).collect();
+    Pre_::Dot(f, n, v)
+  },
+  Op OpNL "." Name AppArg* => todo!("op dot"),
 }
 
 

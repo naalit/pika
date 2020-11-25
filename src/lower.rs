@@ -106,7 +106,7 @@ impl Term {
                 }
                 Var::Rec(i) => *cxt.defs.get(i).unwrap(),
                 Var::Meta(_) => panic!("unsolved meta passed to lower()"),
-                Var::Type(_) => todo!("lowering datatypes"),
+                Var::Type(_, _) | Var::Cons(_) => todo!("lowering datatypes"),
             },
             // \x.f x
             // -->

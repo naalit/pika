@@ -46,6 +46,10 @@ intern_id!(
 This is needed for (mutually) recursive definitions, where context for one definition requires the others."#
 );
 intern_id!(
+    ScopeId,
+    "A reference to a child scope attached to its parent, for a datatype's associated module or a structure."
+);
+intern_id!(
     Cxt,
     r#"The context for resolving names, represented as a linked list of definitions, with the links stored in Salsa.
 This is slower than a hashmap or flat array, but it has better incrementality."#
@@ -191,6 +195,9 @@ pub trait Interner: salsa::Database {
     #[salsa::interned]
     fn intern_def(&self, def: PreDefId, cxt: Cxt) -> DefId;
 
+    #[salsa::interned]
+    fn intern_scope(&self, scope: Arc<Vec<(Name, DefId)>>) -> ScopeId;
+
     /// The context is stored as a linked list, but the links are hashmap keys!
     /// This is... pretty slow, but has really good incrementality.
     #[salsa::interned]
@@ -266,7 +273,7 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
                 temp.push((name, id));
             }
             // Ordered
-            PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) => {
+            PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) | PreDef::Cons(_, _) => {
                 // Process `temp` first
                 for (name, pre) in temp.drain(0..) {
                     let id = db.intern_def(pre, cxt);

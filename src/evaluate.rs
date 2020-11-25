@@ -7,9 +7,10 @@ impl Term {
         match self {
             Term::Type => Val::Type,
             Term::Var(Var::Local(ix)) => env.val(ix),
-            Term::Var(Var::Type(id)) => Val::datatype(id),
+            Term::Var(Var::Type(id, scope)) => Val::datatype(id, scope),
             Term::Var(Var::Top(def)) => Val::top(def),
             Term::Var(Var::Rec(id)) => Val::rec(id),
+            Term::Var(Var::Cons(id)) => Val::cons(id),
             Term::Var(Var::Meta(meta)) => match mcxt.get_meta(meta) {
                 Some(v) => v,
                 None => Val::meta(meta),
@@ -39,6 +40,21 @@ impl Term {
 }
 
 impl Val {
+    /// If self is an App, resolve it recursively; only on the top level.
+    pub fn inline(self, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
+        match self {
+            Val::App(h, sp, g) => {
+                if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
+                    v.inline(l, db, mcxt)
+                } else {
+                    Val::App(h, sp, g)
+                }
+            }
+            Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline(l, db, mcxt),
+            x => x,
+        }
+    }
+
     /// Evaluates closures, inlines variables, and calls `force()` recursively, returning a term in normal form.
     /// This should never be used during normal compilation - it's only for benchmarking.
     pub fn force(self, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
@@ -104,7 +120,8 @@ impl Val {
                     Var::Top(def) => Term::Var(Var::Top(def)),
                     Var::Meta(meta) => Term::Var(Var::Meta(meta)),
                     Var::Rec(id) => Term::Var(Var::Rec(id)),
-                    Var::Type(id) => Term::Var(Var::Type(id)),
+                    Var::Type(id, scope) => Term::Var(Var::Type(id, scope)),
+                    Var::Cons(id) => Term::Var(Var::Cons(id)),
                 };
                 sp.into_iter().fold(h, |f, (icit, x)| {
                     Term::App(icit, Box::new(f), Box::new(x.quote(enclosing, mcxt)))
@@ -138,10 +155,7 @@ impl Term {
             Term::Type => Term::Type,
             Term::Var(Var::Meta(m)) => match mcxt.get_meta(m) {
                 Some(v) => v.inline_metas(mcxt).quote(l, mcxt),
-                None => {
-                    println!("[T] Unsolved meta: {:?}", m);
-                    Term::Var(Var::Meta(m))
-                }
+                None => Term::Var(Var::Meta(m)),
             },
             Term::Var(v) => Term::Var(v),
             Term::Lam(n, i, mut ty, mut t) => {
@@ -180,10 +194,7 @@ impl Val {
                 let h = match h {
                     Var::Meta(m) => match g.resolve_meta(h, &sp, mcxt) {
                         Some(v) => return v.inline_metas(mcxt),
-                        None => {
-                            println!("[V] Unsolved meta: {:?}", m);
-                            Var::Meta(m)
-                        }
+                        None => Var::Meta(m),
                     },
                     h => h,
                 };

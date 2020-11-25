@@ -7,5 +7,5 @@ type Term a of
   Fun [a] [b] : Term (a -> b) -> Term (a -> b)
 end
 
-# val one : Test = Test.One
-# val two : Test = Test.Two Test
+val one : Term Type = Term.TypeType
+val two : Term (Term Type -> Term Type) = Term.Fun (Term.Lit (\x. x))

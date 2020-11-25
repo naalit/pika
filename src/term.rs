@@ -40,6 +40,8 @@ pub enum Pre_ {
     Do(Vec<PreDefAn>),
     Struct(Vec<PreDefAn>),
     Hole(MetaSource),
+    /// Dot(a, b, [c, d]) = a.b c d
+    Dot(Pre, SName, Vec<(Icit, Pre)>),
 }
 
 /// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.
@@ -63,6 +65,14 @@ impl Attribute {
 pub struct PreDefAn {
     pub attributes: Vec<Attribute>,
     pub inner: PreDef,
+}
+impl From<PreDef> for PreDefAn {
+    fn from(inner: PreDef) -> PreDefAn {
+        PreDefAn {
+            inner,
+            attributes: Vec::new(),
+        }
+    }
 }
 impl std::ops::Deref for PreDefAn {
     type Target = PreDef;
@@ -92,6 +102,9 @@ pub enum PreDef {
     // Declarations
     FunDec(SName, Vec<(Name, Icit, PreTy)>, PreTy),
     ValDec(SName, PreTy),
+
+    /// Pre-typed term, used for data constructors.
+    Cons(SName, VTy),
 }
 impl PreDef {
     pub fn name(&self) -> Option<Name> {
@@ -100,6 +113,7 @@ impl PreDef {
             | PreDef::Val(n, _, _)
             | PreDef::Type(n, _, _)
             | PreDef::FunDec(n, _, _)
+            | PreDef::Cons(n, _)
             | PreDef::ValDec(n, _) => Some(**n),
             PreDef::Impl(n, _, _) => n.as_ref().map(|x| **x),
             PreDef::Expr(_) => None,
@@ -117,6 +131,7 @@ impl PreDef {
             PreDef::Expr(t) => t.span(),
             PreDef::FunDec(n, _, _) => n.span(),
             PreDef::ValDec(n, _) => n.span(),
+            PreDef::Cons(n, _) => n.span(),
         }
     }
 }
@@ -242,7 +257,9 @@ impl Term {
             Term::Type | Term::Pi(_, _, _, _) | Term::Fun(_, _) => Val::Type,
             Term::Var(v) => match *v {
                 Var::Local(i) => mcxt.local_ty(i, db).clone(),
-                Var::Top(i) | Var::Type(i) => (*db.elaborate_def(i).unwrap().typ).clone(),
+                Var::Top(i) | Var::Type(i, _) | Var::Cons(i) => {
+                    (*db.elaborate_def(i).unwrap().typ).clone()
+                }
                 Var::Rec(_) => todo!("find meta solution"),
                 Var::Meta(_) => todo!("find meta solution"),
             },
@@ -356,7 +373,7 @@ impl Term {
             Term::Type => Doc::start("Type"),
             Term::Var(v) => match v {
                 Var::Local(ix) => Doc::start(names.get(*ix).get(db)),
-                Var::Top(id) | Var::Type(id) => Doc::start(
+                Var::Top(id) | Var::Type(id, _) | Var::Cons(id) => Doc::start(
                     db.lookup_intern_predef(db.lookup_intern_def(*id).0)
                         .name()
                         .unwrap()
@@ -540,7 +557,34 @@ pub enum Var<Local> {
     /// Datatypes are identified by their DefId as well, since they all have one and they're distinct.
     /// A `Type(id)` is the same as a `Top(id)`, except that it can't be inlined.
     /// You can still call `elaborate_def()` on it to get its type.
-    Type(DefId),
+    Type(DefId, ScopeId),
+    Cons(DefId),
+}
+impl<T: PartialEq> Var<T> {
+    /// Checks whether two heads can be considered equivalent.
+    /// Either they're actually equal, or one is Rec and one is Top, etc.
+    pub fn unify(self, other: Var<T>, db: &dyn Compiler) -> bool {
+        match (self, other) {
+            (x, y) if x == y => true,
+
+            (Var::Rec(a), Var::Type(b, _))
+            | (Var::Type(b, _), Var::Rec(a))
+            | (Var::Rec(a), Var::Top(b))
+            | (Var::Top(b), Var::Rec(a))
+            | (Var::Cons(b), Var::Rec(a))
+            | (Var::Rec(a), Var::Cons(b)) => {
+                let (b, _) = db.lookup_intern_def(b);
+                a == b
+            }
+
+            (Var::Top(a), Var::Type(b, _))
+            | (Var::Type(b, _), Var::Top(a))
+            | (Var::Top(a), Var::Cons(b))
+            | (Var::Cons(b), Var::Top(a)) => a == b,
+
+            _ => false,
+        }
+    }
 }
 
 pub type Spine = Vec<(Icit, Val)>;
@@ -583,7 +627,8 @@ impl Glued {
                 Var::Local(_) => None,
                 // If we inlined the Rec, it would probably lead to infinite recursion
                 Var::Rec(_) => None,
-                Var::Type(_) => None,
+                Var::Type(_, _) => None,
+                Var::Cons(_) => None,
                 Var::Top(_) => None,
                 Var::Meta(m) => {
                     if let Some(val) = mcxt.get_meta(m) {
@@ -623,7 +668,8 @@ impl Glued {
                 // If we inlined the Rec, it would probably lead to infinite recursion
                 Var::Rec(_) => None,
                 // A datatype is already fully evaluated
-                Var::Type(_) => None,
+                Var::Type(_, _) => None,
+                Var::Cons(_) => None,
                 Var::Top(def) => {
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
@@ -689,8 +735,8 @@ impl Val {
         Val::App(Var::Local(lvl), Vec::new(), Glued::new())
     }
 
-    pub fn datatype(def: DefId) -> Val {
-        Val::App(Var::Type(def), Vec::new(), Glued::new())
+    pub fn datatype(def: DefId, scope: ScopeId) -> Val {
+        Val::App(Var::Type(def, scope), Vec::new(), Glued::new())
     }
 
     pub fn top(def: DefId) -> Val {
@@ -699,6 +745,10 @@ impl Val {
 
     pub fn rec(id: PreDefId) -> Val {
         Val::App(Var::Rec(id), Vec::new(), Glued::new())
+    }
+
+    pub fn cons(id: DefId) -> Val {
+        Val::App(Var::Cons(id), Vec::new(), Glued::new())
     }
 
     pub fn meta(meta: Meta) -> Val {
