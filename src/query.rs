@@ -47,7 +47,7 @@ This is needed for (mutually) recursive definitions, where context for one defin
 );
 intern_id!(
     ScopeId,
-    "A reference to a child scope attached to its parent, for a datatype's associated module or a structure."
+    "A reference to a scope with members, for a datatype's associated module or a structure."
 );
 intern_id!(
     Cxt,
@@ -96,6 +96,11 @@ impl Cxt {
                 NameInfo::Rec(id) => {
                     if name == sym {
                         return Some(NameResult::Rec(id));
+                    }
+                }
+                NameInfo::TypedRec(id, ty) => {
+                    if name == sym {
+                        return Some(NameResult::TypedRec(id, ty));
                     }
                 }
             }
@@ -152,6 +157,7 @@ pub enum NameResult {
     Def(DefId),
     Local(Ix, VTy),
     Rec(PreDefId),
+    TypedRec(PreDefId, VTy),
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
@@ -159,6 +165,7 @@ pub enum NameInfo {
     Def(DefId),
     Local(VTy),
     Rec(PreDefId),
+    TypedRec(PreDefId, VTy),
 }
 
 /// One cell of the context linked list.
@@ -262,7 +269,7 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
         match &*def {
             // Unordered
             PreDef::Fun(_, _, _, _)
-            | PreDef::Type(_, _, _)
+            | PreDef::Type(_, _, _, _)
             | PreDef::FunDec(_, _, _)
             | PreDef::ValDec(_, _) => {
                 let name = def.name();

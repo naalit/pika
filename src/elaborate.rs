@@ -125,8 +125,6 @@ impl MCxt {
                 MaybeEntry::Yes(CxtEntry { rest, info, .. }) => {
                     cxt = rest;
                     match info {
-                        NameInfo::Def(_) => continue,
-                        NameInfo::Rec(_) => continue,
                         NameInfo::Local(ty) => {
                             if ix == Ix::zero() {
                                 break ty;
@@ -134,6 +132,7 @@ impl MCxt {
                                 ix = ix.dec();
                             }
                         }
+                        _ => continue,
                     }
                 }
                 _ => unreachable!(),
@@ -302,7 +301,7 @@ impl Meta {
             Meta::Type(id) => match &**db.lookup_intern_predef(id) {
                 PreDef::Fun(n, _, _, _) => Doc::start("type of function ").add(n.get(db)),
                 PreDef::Val(n, _, _) => Doc::start("type of definition ").add(n.get(db)),
-                PreDef::Type(n, _, _) => Doc::start("type of data type ").add(n.get(db)),
+                PreDef::Type(n, _, _, _) => Doc::start("type of data type ").add(n.get(db)),
                 PreDef::Impl(Some(n), _, _) => Doc::start("type of implicit ").add(n.get(db)),
                 PreDef::Impl(None, _, _) => Doc::start("type of implicit"),
                 PreDef::Expr(_) => Doc::start("type of expression"),
@@ -427,7 +426,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             // We don't have to do anything since the type was already determined
             Ok((Term::Var(Var::Cons(def)), ty.clone()))
         }
-        PreDef::Type(name, args, cons) => {
+        PreDef::Type(name, args, cons, assoc) => {
             // A copy of the context before we added the type arguments
             let cxt_before = mcxt.state();
 
@@ -591,6 +590,24 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 );
                 scope.push((**cname, def_id));
             }
+
+            // Add definitions from the associated namespace
+            // They need the type of the datatype we're defining
+            let assoc_cxt = cxt.define(**name, NameInfo::TypedRec(predef_id, ty_ty.clone()), db);
+            // And they have access to all the constructors in `scope`
+            let assoc_cxt = scope.iter().fold(assoc_cxt, |cxt, &(n, v)| {
+                cxt.define(n, NameInfo::Def(v), db)
+            });
+            scope.extend(
+                intern_block(assoc.clone(), db, assoc_cxt)
+                    .into_iter()
+                    .filter_map(|id| {
+                        let (pre, _) = db.lookup_intern_def(id);
+                        let pre = db.lookup_intern_predef(pre);
+                        // If it doesn't have a name, we don't include it in the Vec
+                        pre.name().map(|n| (n, id))
+                    }),
+            );
 
             let scope = db.intern_scope(Arc::new(scope));
 
@@ -969,6 +986,7 @@ pub fn infer(
                 Some(NameResult::Rec(id)) => {
                     Ok((Term::Var(Var::Rec(id)), Val::meta(Meta::Type(id))))
                 }
+                Some(NameResult::TypedRec(id, ty)) => Ok((Term::Var(Var::Rec(id)), ty)),
                 Some(NameResult::Local(ix, ty)) => Ok((Term::Var(Var::Local(ix)), ty)),
                 None => Err(TypeError::NotFound(pre.copy_span(*name))),
             }?;
@@ -1018,7 +1036,8 @@ pub fn infer(
             // Don't insert metas in `f` if we're passing an implicit argument
             let (f, fty) = infer(*icit == Icit::Expl, f, db, mcxt)?;
 
-            infer_app(insert, pre.span(), f, fty, fspan, *icit, x, db, mcxt)
+            infer_app(f, fty, fspan, *icit, x, db, mcxt)
+                .map(|(term, ty)| insert_metas(insert, term, ty, pre.span(), mcxt, db))
         }
 
         Pre_::Do(v) => {
@@ -1081,17 +1100,8 @@ pub fn infer(
                                                     mcxt,
                                                     db,
                                                 );
-                                                let (f, fty) = infer_app(
-                                                    false,
-                                                    pre.span(),
-                                                    f,
-                                                    fty,
-                                                    fspan,
-                                                    *i,
-                                                    x,
-                                                    db,
-                                                    mcxt,
-                                                )?;
+                                                let (f, fty) =
+                                                    infer_app(f, fty, fspan, *i, x, db, mcxt)?;
                                                 Ok((f, fty, Span(fspan.0, x.span().1)))
                                             },
                                         )
@@ -1118,9 +1128,9 @@ pub fn infer(
     }
 }
 
+/// Handles common logic of checking an argument to an application.
+/// Doesn't insert metas, so do that after if applicable.
 fn infer_app(
-    insert: bool,
-    pre_span: Span,
     f: Term,
     fty: VTy,
     fspan: Span,
@@ -1151,7 +1161,7 @@ fn infer_app(
             ))
         }
     }?;
-    Ok(insert_metas(insert, term, ty, pre_span, mcxt, db))
+    Ok((term, ty))
 }
 
 pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<Term, TypeError> {
@@ -1235,7 +1245,6 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             let (term, i_ty) = infer(true, pre, db, mcxt)?;
             // TODO should we take `ty` by value?
             if !unify(ty.clone(), i_ty.clone(), mcxt.size, pre.span(), db, mcxt)? {
-                eprintln!("{:?} vs {:?}", i_ty, ty);
                 return Err(TypeError::Unify(
                     mcxt.clone(),
                     pre.copy_span(i_ty.inline_metas(mcxt)),

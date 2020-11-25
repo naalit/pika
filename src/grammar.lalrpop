@@ -76,6 +76,7 @@ extern {
   }
 }
 
+#[inline]
 Sp<T>: Spanned<T> = {
   <l:@L> <v:T> <r:@R> => Spanned::new(v, Span(l, r)),
 }
@@ -109,8 +110,8 @@ Def_: PreDef = {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Val(name, ty, val)
   },
-  "type" "\n"* <name:Sp<Name>> <args:Args?> "of" <cons:Block<Cons>> => {
-    PreDef::Type(name, args.unwrap_or_else(Vec::new), cons)
+  "type" "\n"* <name:Sp<Name>> <args:Args?> "of" <cons:ConsBlock> => {
+    PreDef::Type(name, args.unwrap_or_else(Vec::new), cons.0, cons.1)
   },
   "impl" <name:("\n"* <Sp<Name>> ":")?> <ty:Sp<Term>> "=" <val:Sp<Term>> => {
     PreDef::Impl(name, ty, val)
@@ -298,7 +299,14 @@ Op: Pre_ = {
     }).collect();
     Pre_::Dot(f, n, v)
   },
-  Op OpNL "." Name AppArg* => todo!("op dot"),
+  <f:Sp<Op>> OpNL "." <n:Sp<Name>> <v:Sp<AppArg>*> => {
+    let v = v.into_iter().map(|x| {
+      let span = x.span();
+      let (icit, pre) = x.unwrap();
+      (icit, Spanned::new(pre, span))
+    }).collect();
+    Pre_::Dot(f, n, v)
+  },
 }
 
 
@@ -378,6 +386,22 @@ Block<T>: Vec<T> = {
   "\n"* <mut v:(<T> "\n"+)*> <last:T> "end" => {
     v.push(last);
     v
+  },
+}
+
+ConsBlock: (Vec<PreCons>, Vec<PreDefAn>) = {
+  "\n"* "end" => (Vec::new(), Vec::new()),
+  "\n"* <(<Cons> "\n"+)+> "end" => (<>, Vec::new()),
+  "\n"* <mut v:(<Cons> "\n"+)*> <last:Cons> "end" => {
+    v.push(last);
+    (v, Vec::new())
+  },
+
+  "\n"* "where" <Block<Def>> => (Vec::new(), <>),
+  "\n"* <(<Cons> "\n"+)+> "where" <Block<Def>>,
+  "\n"* <mut v:(<Cons> "\n"+)*> <last:Cons> "where" <v2:Block<Def>> => {
+    v.push(last);
+    (v, v2)
   },
 }
 

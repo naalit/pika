@@ -95,7 +95,7 @@ pub struct PreCons(pub SName, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
 pub enum PreDef {
     Fun(SName, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
     Val(SName, PreTy, Pre),
-    Type(SName, Vec<(Name, Icit, PreTy)>, Vec<PreCons>),
+    Type(SName, Vec<(Name, Icit, PreTy)>, Vec<PreCons>, Vec<PreDefAn>),
     Impl(Option<SName>, PreTy, Pre),
     Expr(Pre),
 
@@ -111,7 +111,7 @@ impl PreDef {
         match self {
             PreDef::Fun(n, _, _, _)
             | PreDef::Val(n, _, _)
-            | PreDef::Type(n, _, _)
+            | PreDef::Type(n, _, _, _)
             | PreDef::FunDec(n, _, _)
             | PreDef::Cons(n, _)
             | PreDef::ValDec(n, _) => Some(**n),
@@ -125,7 +125,7 @@ impl PreDef {
         match self {
             PreDef::Fun(n, _, _, _) => n.span(),
             PreDef::Val(n, _, _) => n.span(),
-            PreDef::Type(n, _, _) => n.span(),
+            PreDef::Type(n, _, _, _) => n.span(),
             PreDef::Impl(Some(n), _, _) => n.span(),
             PreDef::Impl(None, _, t) => t.span(),
             PreDef::Expr(t) => t.span(),
