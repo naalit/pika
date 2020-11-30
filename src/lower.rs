@@ -80,7 +80,7 @@ impl<'db> LCxt<'db> {
 
 impl Val {
     pub fn lower(self, cxt: &mut LCxt) -> ir::Val {
-        self.quote(cxt.mcxt.size, &cxt.mcxt).lower(cxt)
+        self.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db).lower(cxt)
     }
 }
 
@@ -114,8 +114,8 @@ impl Term {
             // fun k y = r y
             Term::Lam(name, _icit, _arg_ty, body) => {
                 let (param_ty, ret_ty) = match self.ty(&cxt.mcxt, cxt.db) {
-                    Val::Fun(from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt)),
-                    Val::Pi(_, from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt)),
+                    Val::Fun(from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)),
+                    Val::Pi(_, from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)),
                     _ => unreachable!(),
                 };
                 assert_eq!(cxt.mcxt.size, cxt.locals.size());
@@ -149,13 +149,16 @@ impl Term {
                 cxt.local(
                     *name,
                     pi.arg,
-                    (**from).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt),
+                    (**from)
+                        .clone()
+                        .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
                 );
                 let to = to.lower(cxt);
                 cxt.pop_local();
                 cxt.builder.end_pi(pi, to)
             }
             Term::Error => panic!("type errors should have been caught by now!"),
+            Term::Case(_, _) => todo!("lowering case"),
         }
     }
 }

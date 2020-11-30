@@ -77,6 +77,28 @@ impl Term {
             }
             Term::Error => Ok(Term::Error),
             Term::Type => Ok(Term::Type),
+            Term::Case(mut x, cases) => {
+                let cases = cases
+                    .into_iter()
+                    .map(|(pat, body)| {
+                        let mut names = names.clone();
+                        let mut lfold = lfrom;
+                        let lfrom = pat.add_names(lfrom, &mut names);
+                        let mut lto = lto;
+                        // Adjust lfrom and lto by the same amount
+                        while lfold != lfrom {
+                            lfold = lfold.inc();
+                            lto = lto.inc();
+                        }
+                        Ok((
+                            pat,
+                            body.check_solution(meta.clone(), ren, lfrom, lto, &mut names)?,
+                        ))
+                    })
+                    .collect::<Result<_, _>>()?;
+                *x = x.check_solution(meta, ren, lfrom, lto, names)?;
+                Ok(Term::Case(x, cases))
+            }
         }
     }
 }
@@ -206,7 +228,7 @@ impl MCxt {
                 _ => panic!("Compiler error: meta spine contains non-variable"),
             })
             .collect();
-        let term = val.quote(self.size, &self);
+        let term = val.quote(self.size, &self, db);
         // The level it will be at after we wrap it in lambdas
         let to_lvl = (0..spine.len()).fold(self.size, |x, _| x.inc());
 
@@ -219,7 +241,7 @@ impl MCxt {
             .map(|((_, v), l)| match v.unarc() {
                 Val::App(Var::Local(from_lvl), sp, _) if sp.is_empty() => {
                     let ty = self.local_ty(from_lvl.to_ix(self.size), db);
-                    ty.quote(l, self)
+                    ty.quote(l, self, db)
                 }
                 _ => panic!("Compiler error: meta spine contains non-variable"),
             })
@@ -240,7 +262,7 @@ impl MCxt {
         });
 
         // Reevaluating the term so we don't have to clone it to quote it, and it should inline solved metas as well
-        let val = term.evaluate(&Env::new(self.size), &self);
+        let val = term.evaluate(&Env::new(self.size), &self, db);
         // Now add it to the solved metas
         match meta {
             Meta::Type(id) => {
@@ -337,7 +359,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
             match check(ty, &Val::Type, db, &mut mcxt) {
                 Ok(ty) => {
-                    let ty = ty.evaluate(&mcxt.env(), &mcxt);
+                    let ty = ty.evaluate(&mcxt.env(), &mcxt, db);
                     match check(val, &ty, db, &mut mcxt) {
                         Ok(val) => Ok((val, ty)),
                         Err(e) => {
@@ -370,7 +392,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         Term::Error
                     }
                 };
-                let vty = ty.evaluate(&mcxt.env(), &mcxt);
+                let vty = ty.evaluate(&mcxt.env(), &mcxt, db);
                 targs.push((*name, *icit, vty.clone()));
                 mcxt.define(*name, NameInfo::Local(vty), db);
             }
@@ -382,7 +404,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     Term::Error
                 }
             };
-            let vty = body_ty.evaluate(&mcxt.env(), &mcxt);
+            let vty = body_ty.evaluate(&mcxt.env(), &mcxt, db);
             let body = match check(body, &vty, db, &mut mcxt) {
                 Ok(x) => x,
                 Err(e) => {
@@ -400,7 +422,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                             Term::Lam(
                                 *name,
                                 *icit,
-                                Box::new(ty.clone().quote(size, &mcxt)),
+                                Box::new(ty.clone().quote(size, &mcxt, db)),
                                 Box::new(body),
                             ),
                             size,
@@ -414,7 +436,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                             Val::Pi(
                                 icit,
                                 Box::new(from),
-                                Box::new(Clos(Env::new(size), to.quote(size, &mcxt), name)),
+                                Box::new(Clos(Env::new(size), to.quote(size, &mcxt, db), name)),
                             ),
                             size.dec(),
                         )
@@ -441,7 +463,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         Term::Error
                     }
                 };
-                let vty = ty.evaluate(&mcxt.env(), &mcxt);
+                let vty = ty.evaluate(&mcxt.env(), &mcxt, db);
                 targs.push((*name, *icit, vty.clone()));
                 mcxt.define(*name, NameInfo::Local(vty), db);
             }
@@ -454,7 +476,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         Val::Pi(
                             *i,
                             Box::new(from.clone()),
-                            Box::new(Clos(Env::new(l.dec()), to.clone().quote(l, &mcxt), *n)),
+                            Box::new(Clos(Env::new(l.dec()), to.clone().quote(l, &mcxt, db), *n)),
                         ),
                         l.dec(),
                     )
@@ -511,11 +533,10 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         Ok(x) => x,
                         Err(e) => {
                             db.report_error(e.to_error(file, db, &mcxt));
-                            // TODO make a meta? or just call `infer()`?
                             Term::Error
                         }
                     };
-                    let vty = ty.evaluate(&mcxt.env(), &mcxt);
+                    let vty = ty.evaluate(&mcxt.env(), &mcxt, db);
                     cargs.push((*name, *icit, vty.clone()));
                     mcxt.define(*name, NameInfo::Local(vty), db);
                 }
@@ -577,12 +598,19 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         .into_iter()
                         .rfold((cty, mcxt.size), |(to, l), (n, i, from)| {
                             (
-                                Term::Pi(n, i, Box::new(from.quote(l.dec(), &mcxt)), Box::new(to)),
+                                Term::Pi(
+                                    n,
+                                    i,
+                                    Box::new(from.quote(l.dec(), &mcxt, db)),
+                                    Box::new(to),
+                                ),
                                 l.dec(),
                             )
                         });
 
-                let full_ty = full_ty.evaluate(&mcxt.env(), &mcxt).inline_metas(&mcxt);
+                let full_ty = full_ty
+                    .evaluate(&mcxt.env(), &mcxt, db)
+                    .inline_metas(&mcxt, db);
 
                 let def_id = db.intern_def(
                     db.intern_predef(Arc::new(PreDef::Cons(cname.clone(), full_ty).into())),
@@ -606,6 +634,10 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         let pre = db.lookup_intern_predef(pre);
                         // If it doesn't have a name, we don't include it in the Vec
                         pre.name().map(|n| (n, id))
+                    })
+                    .inspect(|(_, id)| {
+                        // Report any errors
+                        let _ = db.elaborate_def(*id);
                     }),
             );
 
@@ -642,8 +674,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         .push(RecSolution::Defined(predef_id, predef.span(), ty.clone()));
     let ret = match mcxt.check_locals(db) {
         Ok(()) => {
-            let term = term.inline_metas(&mcxt, mcxt.size);
-            let ty = ty.inline_metas(&mcxt);
+            let term = term.inline_metas(&mcxt, mcxt.size, db);
+            let ty = ty.inline_metas(&mcxt, db);
 
             // let d = Doc::keyword("val")
             //     .space()
@@ -685,7 +717,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
             let n_start = Instant::now();
             let _ = term
-                .evaluate(&mcxt.env(), &mcxt)
+                .evaluate(&mcxt.env(), &mcxt, db)
                 .force(mcxt.size, db, &mcxt);
             let n_end = Instant::now();
             let name = predef
@@ -714,6 +746,8 @@ pub enum TypeError {
     MetaOccurs(Span, Meta),
     NotStruct(Spanned<VTy>),
     MemberNotFound(Span, ScopeType, Name),
+    InvalidPattern(Span),
+    WrongNumConsArgs(Span, usize, usize),
 }
 impl TypeError {
     fn to_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
@@ -783,6 +817,23 @@ impl TypeError {
                 span,
                 format!("not found: {}", db.lookup_intern_name(m)),
             ),
+            TypeError::InvalidPattern(span) => Error::new(
+                file,
+                Doc::start(
+                    "Invalid pattern: expected _, variable, literal, or constructor application",
+                ),
+                span,
+                format!("invalid pattern"),
+            ),
+            TypeError::WrongNumConsArgs(span, expected, got) => Error::new(
+                file,
+                Doc::start("Expected ")
+                    .add(expected)
+                    .add(" arguments to constructor in pattern, got ")
+                    .add(got),
+                span,
+                format!("expected {} arguments", expected),
+            ),
         }
     }
 }
@@ -817,8 +868,8 @@ fn p_unify(
         // Since our terms are locally nameless (we're using De Bruijn levels), we automatically get alpha equivalence.
         (Val::Lam(_, _, cl), Val::Lam(_, _, cl2)) => p_unify(
             inline,
-            cl.vquote(l, mcxt),
-            cl2.vquote(l, mcxt),
+            cl.vquote(l, mcxt, db),
+            cl2.vquote(l, mcxt, db),
             l.inc(),
             span,
             db,
@@ -828,8 +879,8 @@ fn p_unify(
         // If one side is a lambda, the other side just needs to unify to the same thing when we apply it to the same thing
         (Val::Lam(icit, _, cl), t) | (t, Val::Lam(icit, _, cl)) => p_unify(
             inline,
-            cl.vquote(l, mcxt),
-            t.app(icit, Val::local(l), mcxt),
+            cl.vquote(l, mcxt, db),
+            t.app(icit, Val::local(l), mcxt, db),
             l.inc(),
             span,
             db,
@@ -841,8 +892,8 @@ fn p_unify(
                 // Applying both to the same thing (Local(l))
                 & p_unify(
                     inline,
-                    cl.vquote(l, mcxt),
-                    cl2.vquote(l, mcxt),
+                    cl.vquote(l, mcxt, db),
+                    cl2.vquote(l, mcxt, db),
                     l.inc(),
                     span,
                     db,
@@ -853,7 +904,7 @@ fn p_unify(
         | (Val::Fun(from, to), Val::Pi(Icit::Expl, ty, cl)) => {
             // TODO: I'm not 100% this is right
             Ok(p_unify(inline, *ty, *from, l, span, db, mcxt)?
-                & p_unify(inline, cl.vquote(l, mcxt), *to, l.inc(), span, db, mcxt)?)
+                & p_unify(inline, cl.vquote(l, mcxt, db), *to, l.inc(), span, db, mcxt)?)
         }
         (Val::Fun(a, b), Val::Fun(a2, b2)) => Ok(p_unify(inline, *a, *a2, l, span, db, mcxt)?
             & p_unify(inline, *b, *b2, l, span, db, mcxt)?),
@@ -874,7 +925,7 @@ fn p_unify(
         (Val::App(Var::Meta(m), sp, _), t) | (t, Val::App(Var::Meta(m), sp, _)) => {
             match mcxt.get_meta(m) {
                 Some(v) => {
-                    let v = sp.into_iter().fold(v, |f, (i, x)| f.app(i, x, mcxt));
+                    let v = sp.into_iter().fold(v, |f, (i, x)| f.app(i, x, mcxt, db));
                     p_unify(inline, v, t, l, span, db, mcxt)
                 }
                 None => {
@@ -938,8 +989,8 @@ fn insert_metas(
     match ty {
         Val::Pi(Icit::Impl, _pty, cl) if insert => {
             let meta = mcxt.new_meta(None, span, MetaSource::ImplicitParam(cl.2));
-            let vmeta = meta.clone().evaluate(&mcxt.env(), mcxt);
-            let ret = cl.apply(vmeta, mcxt);
+            let vmeta = meta.clone().evaluate(&mcxt.env(), mcxt, db);
+            let ret = cl.apply(vmeta, mcxt, db);
             insert_metas(
                 insert,
                 Term::App(Icit::Impl, Box::new(term), Box::new(meta)),
@@ -995,7 +1046,7 @@ pub fn infer(
 
         Pre_::Lam(name, icit, ty, body) => {
             let ty = check(ty, &Val::Type, db, mcxt)?;
-            let vty = ty.clone().evaluate(&mcxt.env(), mcxt);
+            let vty = ty.clone().evaluate(&mcxt.env(), mcxt, db);
             // TODO Rc to get rid of the clone()?
             mcxt.define(*name, NameInfo::Local(vty.clone()), db);
             let (body, bty) = infer(true, body, db, mcxt)?;
@@ -1007,7 +1058,11 @@ pub fn infer(
                     *icit,
                     Box::new(vty),
                     // `inc()` since we're wrapping it in a lambda
-                    Box::new(Clos(mcxt.env(), bty.quote(mcxt.size.inc(), mcxt), *name)),
+                    Box::new(Clos(
+                        mcxt.env(),
+                        bty.quote(mcxt.size.inc(), mcxt, db),
+                        *name,
+                    )),
                 ),
             ))
         }
@@ -1015,7 +1070,7 @@ pub fn infer(
         Pre_::Pi(name, icit, ty, ret) => {
             let ty = check(ty, &Val::Type, db, mcxt)?;
             // TODO Rc to get rid of the clone()?
-            let vty = ty.clone().evaluate(&mcxt.env(), mcxt);
+            let vty = ty.clone().evaluate(&mcxt.env(), mcxt, db);
             mcxt.define(*name, NameInfo::Local(vty), db);
             let ret = check(ret, &Val::Type, db, mcxt)?;
             mcxt.undef(db);
@@ -1068,13 +1123,14 @@ pub fn infer(
         Pre_::Hole(source) => Ok((
             mcxt.new_meta(None, pre.span(), *source),
             mcxt.new_meta(None, pre.span(), MetaSource::HoleType)
-                .evaluate(&mcxt.env(), mcxt),
+                .evaluate(&mcxt.env(), mcxt, db),
         )),
 
         Pre_::Dot(head, m, args) => {
             match infer(true, head, db, mcxt).map(|(x, ty)| {
                 (
-                    x.evaluate(&mcxt.env(), mcxt).inline(mcxt.size, db, mcxt),
+                    x.evaluate(&mcxt.env(), mcxt, db)
+                        .inline(mcxt.size, db, mcxt),
                     ty,
                 )
             })? {
@@ -1125,6 +1181,13 @@ pub fn infer(
                 ))),
             }
         }
+
+        Pre_::Case(x, cases) => {
+            let (x, x_ty) = infer(true, x, db, mcxt)?;
+            crate::pattern::elab_case(x, x_ty, cases, None, mcxt, db)
+        }
+
+        Pre_::OrPat(_, _) => unreachable!("| is only allowed in patterns"),
     }
 }
 
@@ -1145,7 +1208,7 @@ fn infer_app(
 
             let x = check(x, &*from, db, mcxt)?;
             // TODO Rc to get rid of the clone()?
-            let to = cl.apply(x.clone().evaluate(&mcxt.env(), mcxt), mcxt);
+            let to = cl.apply(x.clone().evaluate(&mcxt.env(), mcxt, db), mcxt, db);
             Ok((Term::App(icit, Box::new(f), Box::new(x)), to))
         }
         Val::Fun(from, to) => {
@@ -1170,7 +1233,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
 
         (Pre_::Lam(n, i, ty, body), Val::Pi(i2, ty2, cl)) if i == i2 => {
             let ety = check(ty, &Val::Type, db, mcxt)?;
-            let vty = ety.clone().evaluate(&mcxt.env(), mcxt);
+            let vty = ety.clone().evaluate(&mcxt.env(), mcxt, db);
             if !unify(
                 vty.clone(),
                 (**ty2).clone(),
@@ -1189,7 +1252,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             let body = check(
                 body,
                 // TODO not clone ??
-                &cl.clone().apply(Val::local(mcxt.size), mcxt),
+                &cl.clone().apply(Val::local(mcxt.size), mcxt, db),
                 db,
                 mcxt,
             )?;
@@ -1199,7 +1262,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
 
         (Pre_::Lam(n, Icit::Expl, ty, body), Val::Fun(ty2, body_ty)) => {
             let ety = check(ty, &Val::Type, db, mcxt)?;
-            let vty = ety.clone().evaluate(&mcxt.env(), mcxt);
+            let vty = ety.clone().evaluate(&mcxt.env(), mcxt, db);
             if !unify(
                 vty.clone(),
                 (**ty2).clone(),
@@ -1229,9 +1292,9 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                 db.intern_name(s)
             };
             mcxt.define(name, NameInfo::Local((**ty).clone()), db);
-            let body = check(pre, &cl.clone().vquote(mcxt.size, mcxt), db, mcxt)?;
+            let body = check(pre, &cl.clone().vquote(mcxt.size, mcxt, db), db, mcxt)?;
             mcxt.undef(db);
-            let ty = (**ty).clone().quote(mcxt.size, mcxt);
+            let ty = (**ty).clone().quote(mcxt.size, mcxt, db);
             Ok(Term::Lam(cl.2, Icit::Impl, Box::new(ty), Box::new(body)))
         }
 
@@ -1247,8 +1310,8 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             if !unify(ty.clone(), i_ty.clone(), mcxt.size, pre.span(), db, mcxt)? {
                 return Err(TypeError::Unify(
                     mcxt.clone(),
-                    pre.copy_span(i_ty.inline_metas(mcxt)),
-                    ty.clone().inline_metas(mcxt),
+                    pre.copy_span(i_ty.inline_metas(mcxt, db)),
+                    ty.clone().inline_metas(mcxt, db),
                 ));
             }
             Ok(term)

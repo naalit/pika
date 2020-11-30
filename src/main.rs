@@ -8,6 +8,7 @@ pub mod error;
 pub mod evaluate;
 pub mod lexer;
 pub mod lower;
+pub mod pattern;
 pub mod pretty;
 pub mod query;
 pub mod term;

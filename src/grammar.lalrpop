@@ -172,7 +172,7 @@ RStart: Pre_ = {
   "sig" Block<Def> => todo!("sigs"),
   "struct" <Block<Def>> => Pre_::Struct(<>),
   "do" <Block<Def>> => Pre_::Do(<>),
-  "case" Expr "of" Block<Branch> => todo!("case"),
+  "case" <x:Sp<Expr>> "of" <v:Block<Branch>> => Pre_::Case(x, v),
   // TODO: Is Expr okay here?
   // Basically we can't do multiline inside lambdas, we need
   // \x.(x
@@ -190,12 +190,20 @@ RStart: Pre_ = {
   },
 }
 
-Branch: () = {
-  Pat "=>" Term => (),
+Branch: (Pre, Pre) = {
+  <Sp<Pat>> "=>" <Sp<Term>>,
 }
-Pat: () = {
+Pat: Pre_ = {
   App,
-  App "|" Pat => (),
+  <f:Sp<Atom>> "." <n:Sp<Name>> <v:Sp<AppArg>*> => {
+    let v = v.into_iter().map(|x| {
+      let span = x.span();
+      let (icit, pre) = x.unwrap();
+      (icit, Spanned::new(pre, span))
+    }).collect();
+    Pre_::Dot(f, n, v)
+  },
+  <a:Sp<App>> "|" <b:Sp<Pat>> => Pre_::OrPat(a, b),
 }
 
 App: Pre_ = {

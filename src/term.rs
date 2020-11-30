@@ -4,6 +4,7 @@
 //! - `Val` is a value, where beta reduction and associated substitution has been performed.
 use crate::common::*;
 use crate::elaborate::MCxt;
+use crate::pattern::Pat;
 
 /// Records the reason we introduced a meta, used when reporting an unsolved meta to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
@@ -42,6 +43,8 @@ pub enum Pre_ {
     Hole(MetaSource),
     /// Dot(a, b, [c, d]) = a.b c d
     Dot(Pre, SName, Vec<(Icit, Pre)>),
+    OrPat(Pre, Pre),
+    Case(Pre, Vec<(Pre, Pre)>),
 }
 
 /// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.
@@ -229,6 +232,7 @@ pub enum Term {
     Pi(Name, Icit, Box<Ty>, Box<Ty>),
     Fun(Box<Ty>, Box<Ty>),
     App(Icit, Box<Term>, Box<Term>),
+    Case(Box<Term>, Vec<(Pat, Term)>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
 }
@@ -252,6 +256,23 @@ impl Term {
         }
     }
 
+    pub fn arity(&self, only_expl: bool) -> usize {
+        match self {
+            Term::Fun(_, to) => 1 + to.arity(only_expl),
+            Term::Pi(_, Icit::Impl, _, to) if only_expl => to.arity(only_expl),
+            Term::Pi(_, Icit::Impl, _, to) => 1 + to.arity(only_expl),
+            Term::Pi(_, Icit::Expl, _, to) => 1 + to.arity(only_expl),
+            _ => 0,
+        }
+    }
+
+    pub fn is_cons(&self) -> bool {
+        match self {
+            Term::Var(Var::Cons(_)) => true,
+            _ => false,
+        }
+    }
+
     pub fn ty(&self, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
             Term::Type | Term::Pi(_, _, _, _) | Term::Fun(_, _) => Val::Type,
@@ -264,7 +285,7 @@ impl Term {
                 Var::Meta(_) => todo!("find meta solution"),
             },
             Term::Lam(n, i, ty, body) => {
-                let ty = (**ty).clone().evaluate(&mcxt.env(), mcxt);
+                let ty = (**ty).clone().evaluate(&mcxt.env(), mcxt, db);
                 Val::Pi(
                     *i,
                     Box::new(ty.clone()),
@@ -273,7 +294,7 @@ impl Term {
                         {
                             let mut mcxt = mcxt.clone();
                             mcxt.define(*n, NameInfo::Local(ty), db);
-                            body.ty(&mcxt, db).quote(mcxt.size, &mcxt)
+                            body.ty(&mcxt, db).quote(mcxt.size, &mcxt, db)
                         },
                         *n,
                     )),
@@ -281,18 +302,28 @@ impl Term {
             }
             Term::App(_, f, x) => match f.ty(mcxt, db) {
                 Val::Fun(_, to) => *to,
-                Val::Pi(_, _, cl) => cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt), mcxt),
+                Val::Pi(_, _, cl) => {
+                    cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt, db), mcxt, db)
+                }
                 // It might be a name that refers to a function type, so we need to inline it
                 Val::App(h, sp, g) => match g.resolve(h, sp, mcxt.size, db, mcxt) {
                     Some(Val::Fun(_, to)) => *to,
                     Some(Val::Pi(_, _, cl)) => {
-                        cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt), mcxt)
+                        cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt, db), mcxt, db)
                     }
                     _ => unreachable!(),
                 },
                 _ => unreachable!(),
             },
             Term::Error => Val::Error,
+            Term::Case(_, cases) => {
+                let (pat, body) = cases.first().unwrap_or_else(|| {
+                    panic!("Empty cases not allowed 'til we have a Never type!")
+                });
+                let mut mcxt = mcxt.clone();
+                pat.add_locals(&mut mcxt, db);
+                body.ty(&mcxt, db)
+            }
         }
     }
 }
@@ -330,6 +361,7 @@ impl<T> IVec<T> {
 
 // -- pretty printing --
 
+#[derive(Clone, Debug)]
 pub struct Names(VecDeque<Name>);
 impl Names {
     pub fn new(mut cxt: Cxt, db: &dyn Compiler) -> Names {
@@ -446,6 +478,25 @@ impl Term {
                 })
                 .prec(Prec::App),
             Term::Error => Doc::start("<error>"),
+            Term::Case(x, cases) => Doc::keyword("case")
+                .space()
+                .chain(x.pretty(db, names))
+                .space()
+                .chain(Doc::keyword("of"))
+                .line()
+                .chain(Doc::intersperse(
+                    cases.iter().map(|(pat, body)| {
+                        pat.pretty(db, &mut names.clone())
+                            .space()
+                            .add("=>")
+                            .space()
+                            .chain(body.pretty(db, names))
+                    }),
+                    Doc::none().line(),
+                ))
+                .indent()
+                .line()
+                .add("end"),
         }
     }
 }
@@ -461,10 +512,10 @@ pub struct Env {
     pub size: Lvl,
 }
 impl Env {
-    pub fn inline_metas(&mut self, mcxt: &MCxt) {
+    pub fn inline_metas(&mut self, mcxt: &MCxt, db: &dyn Compiler) {
         for i in &mut self.vals {
             if let Some(x) = i {
-                *x = Arc::new((**x).clone().inline_metas(mcxt));
+                *x = Arc::new((**x).clone().inline_metas(mcxt, db));
             }
         }
     }
@@ -517,31 +568,31 @@ impl Clos {
 
     /// Quotes the closure back into a `Term`, but leaves it behind the lambda.
     /// So `enclosing` is the number of abstractions enclosing the *lambda*, it doesn't include the lambda.
-    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt) -> Term {
+    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         // We only need to do eval-quote if we've captured variables, which isn't that often
         // Otherwise, we just need to inline meta solutions
         // TODO is this still true?
         if self.0.vals.is_empty() {
             // TODO should this return a box and reuse it?
-            self.1.inline_metas(mcxt, self.0.size)
+            self.1.inline_metas(mcxt, self.0.size, db)
         } else {
             let Clos(mut env, t, _) = self;
             env.push(Some(Val::local(enclosing.inc())));
-            t.evaluate(&env, mcxt).quote(enclosing.inc(), mcxt)
+            t.evaluate(&env, mcxt, db).quote(enclosing.inc(), mcxt, db)
         }
     }
 
     /// Equivalent to `self.apply(Val::local(l), mcxt)`
-    pub fn vquote(self, l: Lvl, mcxt: &MCxt) -> Val {
+    pub fn vquote(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         let Clos(mut env, t, _) = self;
         env.push(Some(Val::local(l)));
-        t.evaluate(&env, mcxt)
+        t.evaluate(&env, mcxt, db)
     }
 
-    pub fn apply(self, arg: Val, mcxt: &MCxt) -> Val {
+    pub fn apply(self, arg: Val, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         let Clos(mut env, t, _) = self;
         env.push(Some(arg));
-        t.evaluate(&env, mcxt)
+        t.evaluate(&env, mcxt, db)
     }
 }
 
@@ -616,7 +667,13 @@ impl Glued {
     }
 
     /// Like `resolve()`, but only inlines metas, not definitions. So, it doesn't need a database or quote level.
-    pub fn resolve_meta(&self, h: Var<Lvl>, sp: impl IntoOwned<Spine>, mcxt: &MCxt) -> Option<Val> {
+    pub fn resolve_meta(
+        &self,
+        h: Var<Lvl>,
+        sp: impl IntoOwned<Spine>,
+        mcxt: &MCxt,
+        db: &dyn Compiler,
+    ) -> Option<Val> {
         let guard = self.0.read().unwrap();
         if let Some(v) = &*guard {
             Some(v.clone())
@@ -635,7 +692,7 @@ impl Glued {
                         let val = sp
                             .into_owned()
                             .into_iter()
-                            .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                            .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                         let val = Val::Arc(Arc::new(val));
                         *self.0.write().unwrap() = Some(val.clone());
                         Some(val)
@@ -673,11 +730,11 @@ impl Glued {
                 Var::Top(def) => {
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
-                    let val = val.evaluate(&Env::new(l), mcxt);
+                    let val = val.evaluate(&Env::new(l), mcxt, db);
                     let val = sp
                         .into_owned()
                         .into_iter()
-                        .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                     let val = Val::Arc(Arc::new(val));
                     *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
@@ -687,7 +744,7 @@ impl Glued {
                         let val = sp
                             .into_owned()
                             .into_iter()
-                            .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                            .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                         let val = Val::Arc(Arc::new(val));
                         *self.0.write().unwrap() = Some(val.clone());
                         Some(val)
@@ -718,8 +775,8 @@ pub enum Val {
 impl Val {
     pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
         self.clone()
-            .inline_metas(mcxt)
-            .quote(mcxt.size, mcxt)
+            .inline_metas(mcxt, db)
+            .quote(mcxt.size, mcxt, db)
             .pretty(db, &mut Names::new(mcxt.cxt, db))
     }
 
@@ -728,6 +785,16 @@ impl Val {
         match self {
             Val::Arc(x) => x.unarc(),
             x => x,
+        }
+    }
+
+    pub fn arity(&self, only_expl: bool) -> usize {
+        match self {
+            Val::Fun(_, to) => 1 + to.arity(only_expl),
+            Val::Pi(Icit::Impl, _, cl) if only_expl => cl.1.arity(only_expl),
+            Val::Pi(Icit::Impl, _, cl) => 1 + cl.1.arity(only_expl),
+            Val::Pi(Icit::Expl, _, cl) => 1 + cl.1.arity(only_expl),
+            _ => 0,
         }
     }
 

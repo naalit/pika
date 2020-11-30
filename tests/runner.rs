@@ -30,6 +30,15 @@ fn test_data() {
 }
 
 #[test]
+fn test_match() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/match.pk"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_duplicate_constructor() {
     Command::cargo_bin("pika")
         .unwrap()
