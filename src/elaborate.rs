@@ -162,7 +162,7 @@ impl MCxt {
         }
     }
 
-    pub fn lookup(&self, name: Name, db: &dyn Compiler) -> Option<NameResult> {
+    pub fn lookup(&self, name: Name, db: &dyn Compiler) -> Result<(Var<Ix>, VTy), DefError> {
         self.cxt.lookup(name, db)
     }
 
@@ -364,7 +364,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         Ok(val) => Ok((val, ty)),
                         Err(e) => {
                             db.report_error(e.to_error(file, db, &mcxt));
-                            Err(DefError::ElabError)
+                            Err(DefError::ElabError(def))
                         }
                     }
                 }
@@ -375,7 +375,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         Ok(x) => Ok(x),
                         Err(e) => {
                             db.report_error(e.to_error(file, db, &mcxt));
-                            Err(DefError::ElabError)
+                            Err(DefError::ElabError(def))
                         }
                     }
                 }
@@ -409,7 +409,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 Ok(x) => x,
                 Err(e) => {
                     db.report_error(e.to_error(file, db, &mcxt));
-                    return Err(DefError::ElabError);
+                    return Err(DefError::ElabError(def));
                 }
             };
             Ok((
@@ -621,8 +621,15 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
             // Add definitions from the associated namespace
             // They need the type of the datatype we're defining
-            let assoc_cxt = cxt.define(**name, NameInfo::TypedRec(predef_id, ty_ty.clone()), db);
-            // And they have access to all the constructors in `scope`
+            // They also need the constructors, so we create a temporary scope.
+            // Since Var::unify doesn't compare the scope ids, it works.
+            let tscope = db.intern_scope(Arc::new(scope.clone()));
+            let assoc_cxt = cxt.define(
+                **name,
+                NameInfo::Other(Var::Type(def, tscope), ty_ty.clone()),
+                db,
+            );
+            // And they have access to all the constructors in `scope` at the top level
             let assoc_cxt = scope.iter().fold(assoc_cxt, |cxt, &(n, v)| {
                 cxt.define(n, NameInfo::Def(v), db)
             });
@@ -648,7 +655,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         PreDef::Expr(e) => match infer(true, e, db, &mut mcxt) {
             Err(e) => {
                 db.report_error(e.to_error(file, db, &mcxt));
-                Err(DefError::ElabError)
+                Err(DefError::ElabError(def))
             }
             Ok(stuff) => Ok(stuff),
         },
@@ -698,7 +705,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         }
         Err(()) => {
             // We don't want the term with local metas in it getting out
-            Err(DefError::ElabError)
+            Err(DefError::ElabError(def))
         }
     };
 
@@ -748,6 +755,7 @@ pub enum TypeError {
     MemberNotFound(Span, ScopeType, Name),
     InvalidPattern(Span),
     WrongNumConsArgs(Span, usize, usize),
+    Inexhaustive(Span, crate::pattern::Cov, VTy),
 }
 impl TypeError {
     fn to_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
@@ -833,6 +841,14 @@ impl TypeError {
                     .add(got),
                 span,
                 format!("expected {} arguments", expected),
+            ),
+            TypeError::Inexhaustive(span, cov, ty) => Error::new(
+                file,
+                Doc::start("Inexhaustive match: patterns '")
+                    .chain(cov.pretty_rest(&ty, db, mcxt))
+                    .add("' not covered"),
+                span,
+                Doc::start("help: this has type ").chain(ty.pretty(db, mcxt).style(Style::None)),
             ),
         }
     }
@@ -1023,23 +1039,13 @@ pub fn infer(
 
         Pre_::Var(name) => {
             let (term, ty) = match mcxt.lookup(*name, db) {
-                Some(NameResult::Def(def)) => {
-                    match db.def_type(def) {
-                        Ok(ty) => Ok((Term::Var(Var::Top(def)), (*ty).clone())),
-                        // If something else had a type error, try to keep going anyway and maybe catch more
-                        Err(DefError::ElabError) => Ok((
-                            Term::Error,
-                            Val::meta(Meta::Type(db.lookup_intern_def(def).0)),
-                        )),
-                        Err(DefError::NoValue) => Err(TypeError::NotFound(pre.copy_span(*name))),
-                    }
-                }
-                Some(NameResult::Rec(id)) => {
-                    Ok((Term::Var(Var::Rec(id)), Val::meta(Meta::Type(id))))
-                }
-                Some(NameResult::TypedRec(id, ty)) => Ok((Term::Var(Var::Rec(id)), ty)),
-                Some(NameResult::Local(ix, ty)) => Ok((Term::Var(Var::Local(ix)), ty)),
-                None => Err(TypeError::NotFound(pre.copy_span(*name))),
+                Ok((v, ty)) => Ok((Term::Var(v), ty)),
+                // If something else had a type error, try to keep going anyway and maybe catch more
+                Err(DefError::ElabError(def)) => Ok((
+                    Term::Error,
+                    Val::meta(Meta::Type(db.lookup_intern_def(def).0)),
+                )),
+                Err(DefError::NoValue) => Err(TypeError::NotFound(pre.copy_span(*name))),
             }?;
             Ok(insert_metas(insert, term, ty, pre.span(), mcxt, db))
         }
@@ -1183,8 +1189,9 @@ pub fn infer(
         }
 
         Pre_::Case(x, cases) => {
+            let xspan = x.span();
             let (x, x_ty) = infer(true, x, db, mcxt)?;
-            crate::pattern::elab_case(x, x_ty, cases, None, mcxt, db)
+            crate::pattern::elab_case(x, xspan, x_ty, cases, None, mcxt, db)
         }
 
         Pre_::OrPat(_, _) => unreachable!("| is only allowed in patterns"),

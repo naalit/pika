@@ -9,7 +9,196 @@ pub enum Pat {
     Cons(DefId, Vec<Pat>),
     Or(Box<Pat>, Box<Pat>),
 }
+
+#[derive(Clone, Eq, PartialEq, Hash, Debug)]
+pub enum Cov {
+    /// We covered everything, there's nothing left
+    All,
+    /// We didn't cover anything yet
+    None,
+    /// We *did* cover these constructors
+    Cons(Vec<(DefId, Vec<Cov>)>),
+}
+impl Cov {
+    pub fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Cov::All, _) | (_, Cov::All) => Cov::All,
+            (Cov::None, x) | (x, Cov::None) => x,
+            (Cov::Cons(mut v), Cov::Cons(v2)) => {
+                for (cons, cov) in v2 {
+                    if let Some((_, cov2)) = v.iter_mut().find(|(c, _)| *c == cons) {
+                        *cov2 = std::mem::take(cov2)
+                            .into_iter()
+                            .zip(cov)
+                            .map(|(x, y)| x.or(y))
+                            .collect();
+                    } else {
+                        v.push((cons, cov));
+                    }
+                }
+                Cov::Cons(v)
+            }
+        }
+    }
+
+    pub fn pretty_rest(&self, ty: &VTy, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
+        match self {
+            Cov::All => Doc::start("<nothing>"),
+            Cov::None => Doc::start("_"),
+            Cov::Cons(covs) => match ty {
+                Val::App(Var::Type(_, sid), _, _) => {
+                    let mut v = Vec::new();
+                    let mut unmatched: Vec<DefId> = db
+                        .lookup_intern_scope(*sid)
+                        .iter()
+                        .filter_map(|&(_name, id)| match &*db.elaborate_def(id).ok()?.term {
+                            Term::Var(Var::Cons(cid)) if id == *cid => Some(id),
+                            _ => None,
+                        })
+                        .collect();
+
+                    for (cons, args) in covs {
+                        unmatched.retain(|id| id != cons);
+                        if args.iter().any(|x| *x != Cov::All) {
+                            let (pre, _) = db.lookup_intern_def(*cons);
+                            let pre = db.lookup_intern_predef(pre);
+                            let name = pre.name().unwrap();
+
+                            let mut cons_ty = (*db
+                                .elaborate_def(*cons)
+                                .expect("probably an invalid constructor?")
+                                .typ)
+                                .clone();
+                            let mut l = mcxt.size;
+
+                            let mut v2 = vec![Doc::start(name.get(db))];
+                            for x in args {
+                                let ty = match cons_ty {
+                                    Val::Fun(from, to) => {
+                                        cons_ty = *to;
+                                        *from
+                                    }
+                                    Val::Pi(_, from, to) => {
+                                        cons_ty = to.vquote(l.inc(), mcxt, db);
+                                        l = l.inc();
+                                        *from
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                v2.push(x.pretty_rest(&ty, db, mcxt));
+                            }
+
+                            v.push(Doc::intersperse(v2, Doc::none().space()));
+                        }
+                    }
+
+                    for cons in unmatched {
+                        let (pre, _) = db.lookup_intern_def(cons);
+                        let pre = db.lookup_intern_predef(pre);
+                        let name = pre.name().unwrap();
+
+                        let mut cons_ty = (*db
+                            .elaborate_def(cons)
+                            .expect("probably an invalid constructor?")
+                            .typ)
+                            .clone();
+                        let mut l = mcxt.size;
+
+                        let mut v2 = vec![Doc::start(name.get(db))];
+                        loop {
+                            match cons_ty {
+                                Val::Fun(_, to) => {
+                                    cons_ty = *to;
+                                }
+                                Val::Pi(_, _, to) => {
+                                    cons_ty = to.vquote(l.inc(), mcxt, db);
+                                    l = l.inc();
+                                }
+                                _ => break,
+                            };
+                            v2.push(Doc::start("_"));
+                        }
+
+                        v.push(Doc::intersperse(v2, Doc::none().space()));
+                    }
+
+                    Doc::intersperse(v, Doc::start("; "))
+                }
+                _ => unreachable!(),
+            },
+        }
+    }
+
+    pub fn simplify(self, ty: &VTy, db: &dyn Compiler, mcxt: &MCxt) -> Self {
+        match self {
+            Cov::All => Cov::All,
+            Cov::None => Cov::None,
+            Cov::Cons(mut covs) => match ty {
+                Val::App(Var::Type(_, sid), _, _) => {
+                    // TODO unification for GADTs
+                    let mut unmatched: Vec<DefId> = db
+                        .lookup_intern_scope(*sid)
+                        .iter()
+                        .filter_map(|&(_name, id)| match &*db.elaborate_def(id).ok()?.term {
+                            Term::Var(Var::Cons(cid)) if id == *cid => Some(id),
+                            _ => None,
+                        })
+                        .collect();
+                    for (cons, args) in &mut covs {
+                        let mut cons_ty = (*db
+                            .elaborate_def(*cons)
+                            .expect("probably an invalid constructor?")
+                            .typ)
+                            .clone();
+                        let mut l = mcxt.size;
+
+                        for x in std::mem::take(args) {
+                            let ty = match cons_ty {
+                                Val::Fun(from, to) => {
+                                    cons_ty = *to;
+                                    *from
+                                }
+                                Val::Pi(_, from, to) => {
+                                    cons_ty = to.vquote(l.inc(), mcxt, db);
+                                    l = l.inc();
+                                    *from
+                                }
+                                _ => unreachable!(),
+                            };
+                            args.push(x.simplify(&ty, db, mcxt));
+                        }
+
+                        if args.iter().all(|x| *x == Cov::All) {
+                            // This pattern is guaranteed to cover this constructor completely
+                            unmatched.retain(|id| id != cons);
+                        }
+                    }
+
+                    if unmatched.is_empty() {
+                        Cov::All
+                    } else {
+                        Cov::Cons(covs)
+                    }
+                }
+                _ => panic!(
+                    "Called Cov::simplify() on a Cov::Cons but passed non-datatype {:?}",
+                    ty
+                ),
+            },
+        }
+    }
+}
+
 impl Pat {
+    pub fn cov(&self) -> Cov {
+        match self {
+            Pat::Any => Cov::All,
+            Pat::Var(_, _) => Cov::All,
+            Pat::Cons(id, v) => Cov::Cons(vec![(*id, v.into_iter().map(Pat::cov).collect())]),
+            Pat::Or(x, y) => x.cov().or(y.cov()),
+        }
+    }
+
     pub fn pretty(&self, db: &dyn Compiler, names: &mut Names) -> Doc {
         match self {
             Pat::Any => Doc::start("_"),
@@ -119,6 +308,7 @@ impl Pat {
 
 pub fn elab_case(
     value: Term,
+    vspan: Span,
     val_ty: VTy,
     cases: &[(Pre, Pre)],
     mut ret_ty: Option<VTy>,
@@ -127,6 +317,8 @@ pub fn elab_case(
 ) -> Result<(Term, VTy), TypeError> {
     let state = mcxt.state();
     let mut rcases = Vec::new();
+    let mut last_cov = Cov::None;
+
     for (pat, body) in cases {
         mcxt.set_state(state);
         let pat = elab_pat(pat, &val_ty, mcxt, db)?;
@@ -138,15 +330,28 @@ pub fn elab_case(
                 term
             }
         };
+
+        let cov = last_cov.clone().or(pat.cov()).simplify(&val_ty, db, mcxt);
+        if cov == last_cov {
+            // TODO real warnings
+            eprintln!("warning: redundant pattern");
+        }
+        last_cov = cov;
+
         rcases.push((pat, body));
     }
-    Ok((Term::Case(Box::new(value), rcases), ret_ty.unwrap()))
+
+    if last_cov == Cov::All {
+        Ok((Term::Case(Box::new(value), rcases), ret_ty.unwrap()))
+    } else {
+        Err(TypeError::Inexhaustive(vspan, last_cov, val_ty))
+    }
 }
 
 pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Result<Pat, TypeError> {
     match &**pre {
         Pre_::Var(n) => {
-            if let Some(NameResult::Def(id)) = mcxt.lookup(*n, db) {
+            if let Ok((Var::Top(id), _)) = mcxt.lookup(*n, db) {
                 if let Ok(info) = db.elaborate_def(id) {
                     if let Term::Var(Var::Cons(id2)) = &*info.term {
                         if id == *id2 {
@@ -211,6 +416,7 @@ fn elab_pat_app(
     );
 
     let (term, mut ty) = infer(false, head, db, mcxt)?;
+    let mut l = mcxt.size;
     match term.inline_top(db) {
         Term::Var(Var::Cons(id)) => {
             let mut pspine = Vec::new();
@@ -229,12 +435,14 @@ fn elab_pat_app(
                             db,
                         );
                         pspine.push(Pat::Var(cl.2, from));
-                        ty = cl.vquote(mcxt.size, mcxt, db);
+                        ty = cl.vquote(l.inc(), mcxt, db);
+                        l = l.inc();
                     }
                     Val::Pi(i2, from, cl) if i == i2 => {
                         let pat = elab_pat(pat, &from, mcxt, db)?;
                         pspine.push(pat);
-                        ty = cl.vquote(mcxt.size, mcxt, db);
+                        ty = cl.vquote(l.inc(), mcxt, db);
+                        l = l.inc();
                     }
                     Val::Fun(from, to) if i == Icit::Expl => {
                         let pat = elab_pat(pat, &from, mcxt, db)?;

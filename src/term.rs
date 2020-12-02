@@ -618,6 +618,9 @@ impl<T: PartialEq> Var<T> {
         match (self, other) {
             (x, y) if x == y => true,
 
+            // Ignore the scope id's, just make sure they're the same datatype
+            (Var::Type(a, _), Var::Type(b, _)) => a == b,
+
             (Var::Rec(a), Var::Type(b, _))
             | (Var::Type(b, _), Var::Rec(a))
             | (Var::Rec(a), Var::Top(b))

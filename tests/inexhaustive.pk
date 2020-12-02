@@ -1,0 +1,9 @@
+type Bool of
+  True
+  False
+where
+  fun wrong (b: Bool) = case b of
+    True => False
+    True => True
+  end
+end

@@ -50,6 +50,10 @@ intern_id!(
     "A reference to a scope with members, for a datatype's associated module or a structure."
 );
 intern_id!(
+    TypeId,
+    "A reference to a datatype and its constructors, but not its associated module."
+);
+intern_id!(
     Cxt,
     r#"The context for resolving names, represented as a linked list of definitions, with the links stored in Salsa.
 This is slower than a hashmap or flat array, but it has better incrementality."#
@@ -73,7 +77,7 @@ impl Cxt {
         }
     }
 
-    pub fn lookup<T: ?Sized + Interner>(self, sym: Name, db: &T) -> Option<NameResult> {
+    pub fn lookup(self, sym: Name, db: &dyn Compiler) -> Result<(Var<Ix>, VTy), DefError> {
         let mut cxt = self;
         let mut ix = Ix::zero();
         while let MaybeEntry::Yes(CxtEntry {
@@ -83,30 +87,30 @@ impl Cxt {
             match info {
                 NameInfo::Def(id) => {
                     if name == sym {
-                        return Some(NameResult::Def(id));
+                        return Ok((Var::Top(id), (*db.def_type(id)?).clone()));
                     }
                 }
                 NameInfo::Local(ty) => {
                     if name == sym {
-                        return Some(NameResult::Local(ix, ty));
+                        return Ok((Var::Local(ix), ty));
                     } else {
                         ix = ix.inc()
                     }
                 }
                 NameInfo::Rec(id) => {
                     if name == sym {
-                        return Some(NameResult::Rec(id));
+                        return Ok((Var::Rec(id), Val::meta(Meta::Type(id))));
                     }
                 }
-                NameInfo::TypedRec(id, ty) => {
+                NameInfo::Other(v, ty) => {
                     if name == sym {
-                        return Some(NameResult::TypedRec(id, ty));
+                        return Ok((v, ty));
                     }
                 }
             }
             cxt = rest;
         }
-        None
+        Err(DefError::NoValue)
     }
 
     #[must_use]
@@ -152,20 +156,12 @@ impl RecSolution {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub enum NameResult {
-    Def(DefId),
-    Local(Ix, VTy),
-    Rec(PreDefId),
-    TypedRec(PreDefId, VTy),
-}
-
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub enum NameInfo {
     Def(DefId),
     Local(VTy),
     Rec(PreDefId),
-    TypedRec(PreDefId, VTy),
+    Other(Var<Ix>, VTy),
 }
 
 /// One cell of the context linked list.
@@ -205,6 +201,9 @@ pub trait Interner: salsa::Database {
     #[salsa::interned]
     fn intern_scope(&self, scope: Arc<Vec<(Name, DefId)>>) -> ScopeId;
 
+    #[salsa::interned]
+    fn intern_type(&self, constructors: Arc<Vec<(Name, DefId)>>) -> TypeId;
+
     /// The context is stored as a linked list, but the links are hashmap keys!
     /// This is... pretty slow, but has really good incrementality.
     #[salsa::interned]
@@ -221,9 +220,9 @@ pub trait CompilerExt: Interner {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DefError {
-    /// This happens when we try to get the value of a definition that doesn't have one, like a declaration
+    /// This happens when we can't find a variable, or we try to get the value of a definition that doesn't have one, like a declaration.
     NoValue,
-    ElabError,
+    ElabError(DefId),
 }
 
 #[salsa::query_group(CompilerDatabase)]

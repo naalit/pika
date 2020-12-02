@@ -39,6 +39,27 @@ fn test_match() {
 }
 
 #[test]
+fn test_inexhaustive() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/inexhaustive.pk"])
+        .assert()
+        .stderr(contains("Inexhaustive"))
+        .stderr(contains("'False' not covered"))
+        .failure();
+}
+
+#[test]
+fn test_wrong_cons() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/wrong_cons.pk"])
+        .assert()
+        .stderr(contains("Invalid"))
+        .failure();
+}
+
+#[test]
 fn test_duplicate_constructor() {
     Command::cargo_bin("pika")
         .unwrap()
