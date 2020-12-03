@@ -356,7 +356,7 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
                     if let Term::Var(Var::Cons(id2)) = &*info.term {
                         if id == *id2 {
                             // This is a constructor
-                            return Ok(Pat::Cons(id, Vec::new()));
+                            return elab_pat_app(pre, VecDeque::new(), ty, mcxt, db);
                         }
                     }
                 }
@@ -379,11 +379,12 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
             }
             let (head, spine) = sep(pre);
 
-            elab_pat_app(head, spine, mcxt, db)
+            elab_pat_app(head, spine, ty, mcxt, db)
         }
         Pre_::Dot(head, member, spine) => elab_pat_app(
             &pre.copy_span(Pre_::Dot(head.clone(), member.clone(), Vec::new())),
             spine.iter().map(|(i, x)| (*i, x)).collect(),
+            ty,
             mcxt,
             db,
         ),
@@ -407,6 +408,7 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
 fn elab_pat_app(
     head: &Pre,
     mut spine: VecDeque<(Icit, &Pre)>,
+    expected_ty: &VTy,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
 ) -> Result<Pat, TypeError> {
@@ -457,8 +459,18 @@ fn elab_pat_app(
                 Val::Fun(_, _) | Val::Pi(_, _, _) => {
                     return Err(TypeError::WrongNumConsArgs(span, arity, f_arity))
                 }
-                // TODO unify with expected type for GADTs
-                _ => (),
+                ty => {
+                    // Unify with the expected type, for GADTs and constructors of different datatypes
+                    match crate::elaborate::local_unify(ty.clone(), expected_ty.clone(), l, span, db, mcxt) {
+                        Ok(true) => (),
+                        Ok(false) => return Err(TypeError::InvalidPatternBecause(Box::new(TypeError::Unify(
+                            mcxt.clone(),
+                            Spanned::new(ty.inline_metas(mcxt, db), span),
+                            expected_ty.clone().inline_metas(mcxt, db),
+                        )))),
+                        Err(e) => return Err(TypeError::InvalidPatternBecause(Box::new(e))),
+                    }
+                },
             }
 
             Ok(Pat::Cons(id, pspine))

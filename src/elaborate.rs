@@ -17,15 +17,15 @@ impl Term {
     /// Checks to make sure any locals it uses are in `ren` ("scope check"), and that it doesn't contain `meta` ("occurs check").
     fn check_solution(
         self,
-        meta: Spanned<Meta>,
+        meta: Spanned<Var<Lvl>>,
         ren: &mut Rename,
         lfrom: Lvl,
         lto: Lvl,
         names: &mut Names,
     ) -> Result<Term, TypeError> {
         match self {
+            Term::Var(v) if v.cvt(lfrom) == *meta => Err(TypeError::MetaOccurs(meta.span(), *meta)),
             Term::Var(v) => match v {
-                Var::Meta(m) if m == *meta => Err(TypeError::MetaOccurs(meta.span(), *meta)),
                 // We store the renamings as levels and go between here, since indices change inside lambdas but levels don't.
                 Var::Local(ix) => match ren.get(&ix.to_lvl(lfrom)) {
                     Some(lvl) => Ok(Term::Var(Var::Local(lvl.to_ix(lto)))),
@@ -37,7 +37,7 @@ impl Term {
                 // The type of something can't depend on its own value
                 // TODO a different error for this case? Is this even possible?
                 Var::Rec(id)
-                    if (if let Meta::Type(id2) = *meta {
+                    if (if let Var::Meta(Meta::Type(id2)) = *meta {
                         id2 == id
                     } else {
                         false
@@ -115,6 +115,7 @@ pub struct MCxt {
     pub size: Lvl,
     def: DefId,
     local_metas: Vec<MetaEntry>,
+    local_constraints: HashMap<Lvl, Term>,
     solved_globals: Vec<RecSolution>,
 }
 impl MCxt {
@@ -136,8 +137,13 @@ impl MCxt {
             size: cxt.size(db),
             def,
             local_metas: Vec::new(),
+            local_constraints: HashMap::new(),
             solved_globals: Vec::new(),
         }
+    }
+
+    pub fn local_val(&self, lvl: Lvl) -> Option<&Term> {
+        self.local_constraints.get(&lvl)
     }
 
     pub fn local_ty(&self, mut ix: Ix, db: &dyn Compiler) -> VTy {
@@ -208,6 +214,68 @@ impl MCxt {
         Env::new(self.size)
     }
 
+    /// The process for solving local constraints is basically the same as solving metas
+    pub fn solve_local(
+        &mut self,
+        span: Span,
+        local: Lvl,
+        spine: &Spine,
+        val: Val,
+        db: &dyn Compiler,
+    ) -> Result<(), TypeError> {
+        // The value can only use variables that we're passing to the meta
+        let mut meta_scope: Rename = spine
+            .iter()
+            // Each argument is another lambda we're going to wrap it in
+            .zip(std::iter::successors(Some(self.size.inc()), |lvl| {
+                Some(lvl.inc())
+            }))
+            .map(|((_, x), to_lvl)| match x.unarc() {
+                Val::App(Var::Local(from_lvl), sp, _) if sp.is_empty() => (*from_lvl, to_lvl),
+                _ => panic!("Compiler error: meta spine contains non-variable"),
+            })
+            .collect();
+        let term = val.quote(self.size, &self, db);
+        // The level it will be at after we wrap it in lambdas
+        let to_lvl = (0..spine.len()).fold(self.size, |x, _| x.inc());
+
+        // Get the type of each argument
+        let tys: Vec<Ty> = spine
+            .iter()
+            .zip(std::iter::successors(Some(self.size), |lvl| {
+                Some(lvl.inc())
+            }))
+            .map(|((_, v), l)| match v.unarc() {
+                Val::App(Var::Local(from_lvl), sp, _) if sp.is_empty() => {
+                    let ty = self.local_ty(from_lvl.to_ix(self.size), db);
+                    ty.quote(l, self, db)
+                }
+                _ => panic!("Compiler error: meta spine contains non-variable"),
+            })
+            .collect();
+
+        let term = term.check_solution(
+            Spanned::new(Var::Local(local), span),
+            &mut meta_scope,
+            self.size,
+            to_lvl,
+            &mut Names::new(self.cxt, db),
+        )?;
+        // Actually wrap it in lambdas
+        // We could look up the local variables' names in the cxt, but it's probably not worth it
+        let empty_name = db.intern_name("_".to_string());
+        let term = tys.into_iter().rev().fold(term, |term, ty| {
+            Term::Lam(empty_name, Icit::Expl, Box::new(ty), Box::new(term))
+        });
+
+        // Unlike with metas, we don't reevaluate it, we leave it as a Term
+
+        // Now add it to the local constraints
+        self.local_constraints.insert(local, term);
+
+        Ok(())
+    }
+
     pub fn solve(
         &mut self,
         span: Span,
@@ -248,7 +316,7 @@ impl MCxt {
             .collect();
 
         let term = term.check_solution(
-            Spanned::new(meta, span),
+            Spanned::new(Var::Meta(meta), span),
             &mut meta_scope,
             self.size,
             to_lvl,
@@ -315,6 +383,18 @@ impl MCxt {
             }
         }
         ret
+    }
+}
+impl Var<Lvl> {
+    fn pretty_meta(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
+        match self {
+            Var::Meta(m) => m.pretty(mcxt, db),
+
+            Var::Local(l) => Doc::start("constrained value of local ")
+                .chain(Val::local(l).pretty(db, mcxt)),
+
+            _ => unreachable!(),
+        }
     }
 }
 impl Meta {
@@ -749,13 +829,14 @@ pub enum TypeError {
     NotFound(Spanned<Name>),
     NotFunction(MCxt, Spanned<VTy>),
     Unify(MCxt, Spanned<VTy>, VTy),
-    MetaScope(Span, Meta, Name),
-    MetaOccurs(Span, Meta),
+    MetaScope(Span, Var<Lvl>, Name),
+    MetaOccurs(Span, Var<Lvl>),
     NotStruct(Spanned<VTy>),
     MemberNotFound(Span, ScopeType, Name),
     InvalidPattern(Span),
     WrongNumConsArgs(Span, usize, usize),
     Inexhaustive(Span, crate::pattern::Cov, VTy),
+    InvalidPatternBecause(Box<TypeError>),
 }
 impl TypeError {
     fn to_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
@@ -790,7 +871,7 @@ impl TypeError {
             TypeError::MetaScope(s, m, n) => Error::new(
                 file,
                 Doc::start("Solution for ")
-                    .chain(m.pretty(mcxt, db))
+                    .chain(m.pretty_meta(mcxt, db))
                     .add(" requires variable ")
                     .add(n.get(db))
                     .add(", which is not in its scope"),
@@ -800,7 +881,7 @@ impl TypeError {
             TypeError::MetaOccurs(s, m) => Error::new(
                 file,
                 Doc::start("Solution for ")
-                    .chain(m.pretty(mcxt, db))
+                    .chain(m.pretty_meta(mcxt, db))
                     .add(" would be recursive"),
                 s,
                 format!("solution found here"),
@@ -850,12 +931,32 @@ impl TypeError {
                 span,
                 Doc::start("help: this has type ").chain(ty.pretty(db, mcxt).style(Style::None)),
             ),
+            TypeError::InvalidPatternBecause(e) => {
+                let mut e = e.to_error(file, db, mcxt);
+                let message = format!("Invalid pattern: {}", e.message());
+                *e.message() = message;
+                e
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnifyMode {
+    inline: bool,
+    local: bool,
+}
+impl UnifyMode {
+    fn new(local: bool, inline: bool) -> UnifyMode {
+        UnifyMode {
+            inline,
+            local,
         }
     }
 }
 
 fn p_unify(
-    inline: bool,
+    mode: UnifyMode,
     a: Val,
     b: Val,
     l: Lvl,
@@ -866,7 +967,7 @@ fn p_unify(
     match (a, b) {
         (Val::Arc(a), b) | (b, Val::Arc(a)) => {
             let a = a.into_owned();
-            p_unify(inline, a, b, l, span, db, mcxt)
+            p_unify(mode, a, b, l, span, db, mcxt)
         }
 
         (Val::Error, _) | (_, Val::Error) => Ok(Yes),
@@ -876,14 +977,14 @@ fn p_unify(
             let mut r = Yes;
             for ((i, a), (i2, b)) in v.into_iter().zip(v2.into_iter()) {
                 assert_eq!(i, i2);
-                r = r & p_unify(inline, a, b, l, span, db, mcxt)?;
+                r = r & p_unify(mode, a, b, l, span, db, mcxt)?;
             }
             Ok(r)
         }
 
         // Since our terms are locally nameless (we're using De Bruijn levels), we automatically get alpha equivalence.
         (Val::Lam(_, _, cl), Val::Lam(_, _, cl2)) => p_unify(
-            inline,
+            mode,
             cl.vquote(l, mcxt, db),
             cl2.vquote(l, mcxt, db),
             l.inc(),
@@ -894,7 +995,7 @@ fn p_unify(
 
         // If one side is a lambda, the other side just needs to unify to the same thing when we apply it to the same thing
         (Val::Lam(icit, _, cl), t) | (t, Val::Lam(icit, _, cl)) => p_unify(
-            inline,
+            mode,
             cl.vquote(l, mcxt, db),
             t.app(icit, Val::local(l), mcxt, db),
             l.inc(),
@@ -904,10 +1005,10 @@ fn p_unify(
         ),
 
         (Val::Pi(i, ty, cl), Val::Pi(i2, ty2, cl2)) if i == i2 => {
-            Ok(p_unify(inline, *ty, *ty2, l, span, db, mcxt)?
+            Ok(p_unify(mode, *ty, *ty2, l, span, db, mcxt)?
                 // Applying both to the same thing (Local(l))
                 & p_unify(
-                    inline,
+                    mode,
                     cl.vquote(l, mcxt, db),
                     cl2.vquote(l, mcxt, db),
                     l.inc(),
@@ -919,17 +1020,17 @@ fn p_unify(
         (Val::Pi(Icit::Expl, ty, cl), Val::Fun(from, to))
         | (Val::Fun(from, to), Val::Pi(Icit::Expl, ty, cl)) => {
             // TODO: I'm not 100% this is right
-            Ok(p_unify(inline, *ty, *from, l, span, db, mcxt)?
-                & p_unify(inline, cl.vquote(l, mcxt, db), *to, l.inc(), span, db, mcxt)?)
+            Ok(p_unify(mode, *ty, *from, l, span, db, mcxt)?
+                & p_unify(mode, cl.vquote(l, mcxt, db), *to, l.inc(), span, db, mcxt)?)
         }
-        (Val::Fun(a, b), Val::Fun(a2, b2)) => Ok(p_unify(inline, *a, *a2, l, span, db, mcxt)?
-            & p_unify(inline, *b, *b2, l, span, db, mcxt)?),
+        (Val::Fun(a, b), Val::Fun(a2, b2)) => Ok(p_unify(mode, *a, *a2, l, span, db, mcxt)?
+            & p_unify(mode, *b, *b2, l, span, db, mcxt)?),
 
         // Solve metas
 
         // Make sure order doesn't matter - switch sides if the second one is higher
         (Val::App(Var::Meta(m), s, g), Val::App(Var::Meta(m2), s2, g2)) if m2 > m => p_unify(
-            inline,
+            mode,
             Val::App(Var::Meta(m2), s2, g2),
             Val::App(Var::Meta(m), s, g),
             l,
@@ -942,7 +1043,7 @@ fn p_unify(
             match mcxt.get_meta(m) {
                 Some(v) => {
                     let v = sp.into_iter().fold(v, |f, (i, x)| f.app(i, x, mcxt, db));
-                    p_unify(inline, v, t, l, span, db, mcxt)
+                    p_unify(mode, v, t, l, span, db, mcxt)
                 }
                 None => {
                     mcxt.solve(span, m, &sp, t, db)?;
@@ -951,22 +1052,39 @@ fn p_unify(
             }
         }
 
-        // If the reason we can't unify is that one side is a top variable, then we can try again after inlining.
-        (Val::App(Var::Top(_), _, _), _) | (_, Val::App(Var::Top(_), _, _)) if !inline => Ok(Maybe),
+        // Solve local constraints
+        // We prioritize solving the innermost local - so the one with the highest level
+        (Val::App(Var::Local(m), s, g), Val::App(Var::Local(m2), s2, g2)) if mode.local && m2 > m => p_unify(
+            mode,
+            Val::App(Var::Local(m2), s2, g2),
+            Val::App(Var::Local(m), s, g),
+            l,
+            span,
+            db,
+            mcxt,
+        ),
+        // is_none() because if it's already solved, we'll do that with the normal inlining logic down below
+        (Val::App(Var::Local(l), sp, _), t) | (t, Val::App(Var::Local(l), sp, _)) if mode.local && mcxt.local_val(l).is_none() => {
+            mcxt.solve_local(span, l, &sp, t, db)?;
+            Ok(Yes)
+        }
 
-        (Val::App(h, sp, g), Val::App(h2, sp2, g2)) if inline => {
+        // If the reason we can't unify is that one side is a top variable, then we can try again after inlining.
+        (Val::App(Var::Top(_), _, _), _) | (_, Val::App(Var::Top(_), _, _)) if !mode.inline => Ok(Maybe),
+
+        (Val::App(h, sp, g), Val::App(h2, sp2, g2)) if mode.inline => {
             if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
-                p_unify(inline, Val::App(h2, sp2, g2), v, l, span, db, mcxt)
+                p_unify(mode, Val::App(h2, sp2, g2), v, l, span, db, mcxt)
             } else if let Some(v) = g2.resolve(h2, sp2, l, db, mcxt) {
-                p_unify(inline, Val::App(h, sp, g), v, l, span, db, mcxt)
+                p_unify(mode, Val::App(h, sp, g), v, l, span, db, mcxt)
             } else {
                 Ok(No)
             }
         }
 
-        (Val::App(h, sp, g), x) | (x, Val::App(h, sp, g)) if inline => {
+        (Val::App(h, sp, g), x) | (x, Val::App(h, sp, g)) if mode.inline => {
             if let Some(v) = g.resolve(h, sp, l, db, mcxt) {
-                p_unify(inline, x, v, l, span, db, mcxt)
+                p_unify(mode, x, v, l, span, db, mcxt)
             } else {
                 Ok(No)
             }
@@ -986,10 +1104,26 @@ pub fn unify(
     db: &dyn Compiler,
     mcxt: &mut MCxt,
 ) -> Result<bool, TypeError> {
-    match p_unify(false, a.clone(), b.clone(), l, span, db, mcxt)? {
+    match p_unify(UnifyMode::new(false, false), a.clone(), b.clone(), l, span, db, mcxt)? {
         Yes => Ok(true),
         No => Ok(false),
-        Maybe => Ok(p_unify(true, a, b, l, span, db, mcxt)?.not_maybe()),
+        Maybe => Ok(p_unify(UnifyMode::new(false, true), a, b, l, span, db, mcxt)?.not_maybe()),
+    }
+}
+
+/// Note that the order of `a` and `b` doesn't matter - Pika doesn't have subtyping.
+pub fn local_unify(
+    a: Val,
+    b: Val,
+    l: Lvl,
+    span: Span,
+    db: &dyn Compiler,
+    mcxt: &mut MCxt,
+) -> Result<bool, TypeError> {
+    match p_unify(UnifyMode::new(true, false), a.clone(), b.clone(), l, span, db, mcxt)? {
+        Yes => Ok(true),
+        No => Ok(false),
+        Maybe => Ok(p_unify(UnifyMode::new(true, true), a, b, l, span, db, mcxt)?.not_maybe()),
     }
 }
 

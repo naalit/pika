@@ -611,6 +611,30 @@ pub enum Var<Local> {
     Type(DefId, ScopeId),
     Cons(DefId),
 }
+impl Var<Ix> {
+    pub fn cvt(self, l: Lvl) -> Var<Lvl> {
+        match self {
+            Var::Local(i) => Var::Local(i.to_lvl(l)),
+            Var::Top(i) => Var::Top(i),
+            Var::Rec(i) => Var::Rec(i),
+            Var::Meta(m) => Var::Meta(m),
+            Var::Type(i, s) => Var::Type(i, s),
+            Var::Cons(i) => Var::Cons(i),
+        }
+    }
+}
+impl Var<Lvl> {
+    pub fn cvt(self, l: Lvl) -> Var<Ix> {
+        match self {
+            Var::Local(i) => Var::Local(i.to_ix(l)),
+            Var::Top(i) => Var::Top(i),
+            Var::Rec(i) => Var::Rec(i),
+            Var::Meta(m) => Var::Meta(m),
+            Var::Type(i, s) => Var::Type(i, s),
+            Var::Cons(i) => Var::Cons(i),
+        }
+    }
+}
 impl<T: PartialEq> Var<T> {
     /// Checks whether two heads can be considered equivalent.
     /// Either they're actually equal, or one is Rec and one is Top, etc.
@@ -669,7 +693,7 @@ impl Glued {
         Glued(Arc::new(RwLock::new(None)))
     }
 
-    /// Like `resolve()`, but only inlines metas, not definitions. So, it doesn't need a database or quote level.
+    /// Like `resolve()`, but only inlines metas, not definitions or local constraints. So, it doesn't need a quote level.
     pub fn resolve_meta(
         &self,
         h: Var<Lvl>,
@@ -723,8 +747,18 @@ impl Glued {
         } else {
             drop(guard);
             match h {
-                // We won't inline the local
-                Var::Local(_) => None,
+                // Check the mcxt's local constraints
+                Var::Local(lvl) => {
+                    let term = mcxt.local_val(lvl)?;
+                    let val = term.clone().evaluate(&Env::new(l), mcxt, db);
+                    let val = sp
+                        .into_owned()
+                        .into_iter()
+                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
+                    let val = Val::Arc(Arc::new(val));
+                    *self.0.write().unwrap() = Some(val.clone());
+                    Some(val)
+                },
                 // If we inlined the Rec, it would probably lead to infinite recursion
                 Var::Rec(_) => None,
                 // A datatype is already fully evaluated
