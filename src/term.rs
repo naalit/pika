@@ -755,10 +755,9 @@ impl Glued {
                         .into_owned()
                         .into_iter()
                         .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
-                    let val = Val::Arc(Arc::new(val));
-                    *self.0.write().unwrap() = Some(val.clone());
+                    // We don't cache this, because we might use this value outside of the local scope
                     Some(val)
-                },
+                }
                 // If we inlined the Rec, it would probably lead to infinite recursion
                 Var::Rec(_) => None,
                 // A datatype is already fully evaluated
@@ -821,6 +820,15 @@ impl Val {
     pub fn unarc(&self) -> &Val {
         match self {
             Val::Arc(x) => x.unarc(),
+            x => x,
+        }
+    }
+
+    pub fn ret_type(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+        match self {
+            Val::Fun(_, to) => to.ret_type(l.inc(), mcxt, db),
+            Val::Pi(_, _, cl) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).ret_type(l.inc(), mcxt, db),
             x => x,
         }
     }

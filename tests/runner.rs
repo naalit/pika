@@ -39,6 +39,15 @@ fn test_match() {
 }
 
 #[test]
+fn test_gadt() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/gadt.pk"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_inexhaustive() {
     Command::cargo_bin("pika")
         .unwrap()

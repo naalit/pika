@@ -12,13 +12,13 @@ fun f (x: GADT Type) = case x of
 end
 
 # Here it needs to figure out that in one branch a is Unit, and in the other it's Type
-fun g [a] (x: GADT a) = case x of
-  GADT.One _ => Unit.New
+fun g [a] (x: GADT a) : a = case x of
+  GADT.One => Unit.New
   GADT.Two t => t
 end
 
 # And finally, here it needs to figure out that the other argument has type Type in one branch
 fun h [a] (x: GADT a) (y: a) : Type = case x of
   GADT.Two t => (t -> t)
-  GADT.One _ => Type
+  GADT.One => Type
 end

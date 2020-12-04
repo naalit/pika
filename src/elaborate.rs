@@ -103,10 +103,11 @@ impl Term {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CxtState {
     pub cxt: Cxt,
     pub size: Lvl,
+    local_constraints: HashMap<Lvl, Term>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,12 +124,18 @@ impl MCxt {
         CxtState {
             cxt: self.cxt,
             size: self.size,
+            local_constraints: self.local_constraints.clone(),
         }
     }
     pub fn set_state(&mut self, state: CxtState) {
-        let CxtState { cxt, size } = state;
+        let CxtState {
+            cxt,
+            size,
+            local_constraints,
+        } = state;
         self.cxt = cxt;
         self.size = size;
+        self.local_constraints = local_constraints;
     }
 
     pub fn new(cxt: Cxt, def: DefId, db: &dyn Compiler) -> Self {
@@ -390,8 +397,9 @@ impl Var<Lvl> {
         match self {
             Var::Meta(m) => m.pretty(mcxt, db),
 
-            Var::Local(l) => Doc::start("constrained value of local ")
-                .chain(Val::local(l).pretty(db, mcxt)),
+            Var::Local(l) => {
+                Doc::start("constrained value of local ").chain(Val::local(l).pretty(db, mcxt))
+            }
 
             _ => unreachable!(),
         }
@@ -597,9 +605,9 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 // Either way, we need to reset it somewhat so we can't use arguments from other constructors
                 // But we want to use the same mcxt, so meta solutions get saved
                 if cty.is_some() {
-                    mcxt.set_state(cxt_before);
+                    mcxt.set_state(cxt_before.clone());
                 } else {
-                    mcxt.set_state(cxt_after);
+                    mcxt.set_state(cxt_after.clone());
                     // If they can use the type parameters, add them all as implicit arguments
                     // They go in the same order as the type parameters, so we don't need to change the mcxt
                     for (n, _i, t) in &targs {
@@ -948,10 +956,7 @@ struct UnifyMode {
 }
 impl UnifyMode {
     fn new(local: bool, inline: bool) -> UnifyMode {
-        UnifyMode {
-            inline,
-            local,
-        }
+        UnifyMode { inline, local }
     }
 }
 
@@ -1023,8 +1028,10 @@ fn p_unify(
             Ok(p_unify(mode, *ty, *from, l, span, db, mcxt)?
                 & p_unify(mode, cl.vquote(l, mcxt, db), *to, l.inc(), span, db, mcxt)?)
         }
-        (Val::Fun(a, b), Val::Fun(a2, b2)) => Ok(p_unify(mode, *a, *a2, l, span, db, mcxt)?
-            & p_unify(mode, *b, *b2, l, span, db, mcxt)?),
+        (Val::Fun(a, b), Val::Fun(a2, b2)) => {
+            Ok(p_unify(mode, *a, *a2, l, span, db, mcxt)?
+                & p_unify(mode, *b, *b2, l, span, db, mcxt)?)
+        }
 
         // Solve metas
 
@@ -1054,23 +1061,31 @@ fn p_unify(
 
         // Solve local constraints
         // We prioritize solving the innermost local - so the one with the highest level
-        (Val::App(Var::Local(m), s, g), Val::App(Var::Local(m2), s2, g2)) if mode.local && m2 > m => p_unify(
-            mode,
-            Val::App(Var::Local(m2), s2, g2),
-            Val::App(Var::Local(m), s, g),
-            l,
-            span,
-            db,
-            mcxt,
-        ),
+        (Val::App(Var::Local(m), s, g), Val::App(Var::Local(m2), s2, g2))
+            if mode.local && m2 > m =>
+        {
+            p_unify(
+                mode,
+                Val::App(Var::Local(m2), s2, g2),
+                Val::App(Var::Local(m), s, g),
+                l,
+                span,
+                db,
+                mcxt,
+            )
+        }
         // is_none() because if it's already solved, we'll do that with the normal inlining logic down below
-        (Val::App(Var::Local(l), sp, _), t) | (t, Val::App(Var::Local(l), sp, _)) if mode.local && mcxt.local_val(l).is_none() => {
+        (Val::App(Var::Local(l), sp, _), t) | (t, Val::App(Var::Local(l), sp, _))
+            if mode.local && mcxt.local_val(l).is_none() =>
+        {
             mcxt.solve_local(span, l, &sp, t, db)?;
             Ok(Yes)
         }
 
         // If the reason we can't unify is that one side is a top variable, then we can try again after inlining.
-        (Val::App(Var::Top(_), _, _), _) | (_, Val::App(Var::Top(_), _, _)) if !mode.inline => Ok(Maybe),
+        (Val::App(Var::Top(_), _, _), _) | (_, Val::App(Var::Top(_), _, _)) if !mode.inline => {
+            Ok(Maybe)
+        }
 
         (Val::App(h, sp, g), Val::App(h2, sp2, g2)) if mode.inline => {
             if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
@@ -1104,7 +1119,15 @@ pub fn unify(
     db: &dyn Compiler,
     mcxt: &mut MCxt,
 ) -> Result<bool, TypeError> {
-    match p_unify(UnifyMode::new(false, false), a.clone(), b.clone(), l, span, db, mcxt)? {
+    match p_unify(
+        UnifyMode::new(false, false),
+        a.clone(),
+        b.clone(),
+        l,
+        span,
+        db,
+        mcxt,
+    )? {
         Yes => Ok(true),
         No => Ok(false),
         Maybe => Ok(p_unify(UnifyMode::new(false, true), a, b, l, span, db, mcxt)?.not_maybe()),
@@ -1120,7 +1143,15 @@ pub fn local_unify(
     db: &dyn Compiler,
     mcxt: &mut MCxt,
 ) -> Result<bool, TypeError> {
-    match p_unify(UnifyMode::new(true, false), a.clone(), b.clone(), l, span, db, mcxt)? {
+    match p_unify(
+        UnifyMode::new(true, false),
+        a.clone(),
+        b.clone(),
+        l,
+        span,
+        db,
+        mcxt,
+    )? {
         Yes => Ok(true),
         No => Ok(false),
         Maybe => Ok(p_unify(UnifyMode::new(true, true), a, b, l, span, db, mcxt)?.not_maybe()),
@@ -1437,6 +1468,13 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             mcxt.undef(db);
             let ty = (**ty).clone().quote(mcxt.size, mcxt, db);
             Ok(Term::Lam(cl.2, Icit::Impl, Box::new(ty), Box::new(body)))
+        }
+
+        (Pre_::Case(value, cases), _) => {
+            let vspan = value.span();
+            let (value, val_ty) = infer(true, value, db, mcxt)?;
+            crate::pattern::elab_case(value, vspan, val_ty, cases, Some(ty.clone()), mcxt, db)
+                .map(|(x, _)| x)
         }
 
         _ => {

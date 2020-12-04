@@ -51,9 +51,29 @@ impl Cov {
                     let mut unmatched: Vec<DefId> = db
                         .lookup_intern_scope(*sid)
                         .iter()
-                        .filter_map(|&(_name, id)| match &*db.elaborate_def(id).ok()?.term {
-                            Term::Var(Var::Cons(cid)) if id == *cid => Some(id),
-                            _ => None,
+                        .filter_map(|&(_name, id)| {
+                            let info = db.elaborate_def(id).ok()?;
+                            match &*info.term {
+                                Term::Var(Var::Cons(cid)) if id == *cid => {
+                                    let cty = IntoOwned::<Val>::into_owned(info.typ)
+                                        .ret_type(mcxt.size, mcxt, db);
+                                    if crate::elaborate::local_unify(
+                                        cty,
+                                        ty.clone(),
+                                        mcxt.size,
+                                        Span::empty(),
+                                        db,
+                                        &mut mcxt.clone(),
+                                    )
+                                    .ok()?
+                                    {
+                                        Some(id)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            }
                         })
                         .collect();
 
@@ -139,9 +159,29 @@ impl Cov {
                     let mut unmatched: Vec<DefId> = db
                         .lookup_intern_scope(*sid)
                         .iter()
-                        .filter_map(|&(_name, id)| match &*db.elaborate_def(id).ok()?.term {
-                            Term::Var(Var::Cons(cid)) if id == *cid => Some(id),
-                            _ => None,
+                        .filter_map(|&(_name, id)| {
+                            let info = db.elaborate_def(id).ok()?;
+                            match &*info.term {
+                                Term::Var(Var::Cons(cid)) if id == *cid => {
+                                    let cty = IntoOwned::<Val>::into_owned(info.typ)
+                                        .ret_type(mcxt.size, mcxt, db);
+                                    if crate::elaborate::local_unify(
+                                        cty,
+                                        ty.clone(),
+                                        mcxt.size,
+                                        Span::empty(),
+                                        db,
+                                        &mut mcxt.clone(),
+                                    )
+                                    .ok()?
+                                    {
+                                        Some(id)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            }
                         })
                         .collect();
                     for (cons, args) in &mut covs {
@@ -320,7 +360,6 @@ pub fn elab_case(
     let mut last_cov = Cov::None;
 
     for (pat, body) in cases {
-        mcxt.set_state(state);
         let pat = elab_pat(pat, &val_ty, mcxt, db)?;
         let body = match &ret_ty {
             Some(ty) => check(body, &ty, db, mcxt)?,
@@ -331,6 +370,7 @@ pub fn elab_case(
             }
         };
 
+        mcxt.set_state(state.clone());
         let cov = last_cov.clone().or(pat.cov()).simplify(&val_ty, db, mcxt);
         if cov == last_cov {
             // TODO real warnings
@@ -461,16 +501,27 @@ fn elab_pat_app(
                 }
                 ty => {
                     // Unify with the expected type, for GADTs and constructors of different datatypes
-                    match crate::elaborate::local_unify(ty.clone(), expected_ty.clone(), l, span, db, mcxt) {
+                    match crate::elaborate::local_unify(
+                        ty.clone(),
+                        expected_ty.clone(),
+                        l,
+                        span,
+                        db,
+                        mcxt,
+                    ) {
                         Ok(true) => (),
-                        Ok(false) => return Err(TypeError::InvalidPatternBecause(Box::new(TypeError::Unify(
-                            mcxt.clone(),
-                            Spanned::new(ty.inline_metas(mcxt, db), span),
-                            expected_ty.clone().inline_metas(mcxt, db),
-                        )))),
+                        Ok(false) => {
+                            return Err(TypeError::InvalidPatternBecause(Box::new(
+                                TypeError::Unify(
+                                    mcxt.clone(),
+                                    Spanned::new(ty.inline_metas(mcxt, db), span),
+                                    expected_ty.clone().inline_metas(mcxt, db),
+                                ),
+                            )))
+                        }
                         Err(e) => return Err(TypeError::InvalidPatternBecause(Box::new(e))),
                     }
-                },
+                }
             }
 
             Ok(Pat::Cons(id, pspine))
