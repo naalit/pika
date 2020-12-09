@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 pub struct ModCxt<'m> {
     db: &'m dyn Compiler,
-    defs: HashMap<PreDefId, ir::Val>,
+    defs: HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
     module: ir::Module,
 }
 impl<'m> ModCxt<'m> {
@@ -28,25 +28,30 @@ impl<'m> ModCxt<'m> {
 
     pub fn local(&mut self, def: DefId, f: impl FnOnce(&mut LCxt) -> ir::Val) {
         let (pre, cxt) = self.db.lookup_intern_def(def);
+        let locals = match self.defs.get(&pre) {
+            Some((l, _)) => l.clone(),
+            None => IVec::new(),
+        };
         let mut lcxt = LCxt::new(
             self.db,
             MCxt::new(cxt, def, self.db),
             &mut self.module,
-            &self.defs,
+            &mut self.defs,
+            locals,
         );
         let val = f(&mut lcxt);
         lcxt.builder.finish();
-        let name = self.db.lookup_intern_predef(pre).name();
-        self.module
-            .set_name(val, name.map(|x| self.db.lookup_intern_name(x)));
-        self.defs.insert(pre, val);
+
+        let val2 = lcxt.get_or_reserve(pre);
+        let node = self.module.get(val).unwrap().clone();
+        self.module.replace(val2, node);
     }
 }
 
 pub struct LCxt<'db> {
     db: &'db dyn Compiler,
     locals: IVec<ir::Val>,
-    defs: &'db HashMap<PreDefId, ir::Val>,
+    defs: &'db mut HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
     builder: Builder<'db>,
     mcxt: MCxt,
 }
@@ -55,12 +60,13 @@ impl<'db> LCxt<'db> {
         db: &'db dyn Compiler,
         mcxt: MCxt,
         m: &'db mut ir::Module,
-        defs: &'db HashMap<PreDefId, ir::Val>,
+        defs: &'db mut HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
+        locals: IVec<ir::Val>,
     ) -> Self {
         let builder = Builder::new(m);
         LCxt {
             db,
-            locals: IVec::new(),
+            locals,
             defs,
             builder,
             mcxt,
@@ -76,6 +82,18 @@ impl<'db> LCxt<'db> {
         self.locals.remove();
         self.mcxt.undef(self.db);
     }
+
+    pub fn get_or_reserve(&mut self, def: PreDefId) -> ir::Val {
+        if let Some((_, x)) = self.defs.get(&def) {
+            *x
+        } else {
+            let pre = self.db.lookup_intern_predef(def);
+            let name = pre.name().map(|x| x.get(self.db));
+            let x = self.builder.reserve(name);
+            self.defs.insert(def, (self.locals.clone(), x));
+            x
+        }
+    }
 }
 
 impl Val {
@@ -86,9 +104,11 @@ impl Val {
 
 pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
     let mut mcxt = ModCxt::new(db);
-    for &def in &*db.top_level(file) {
+    let mut stack: Vec<_> = db.top_level(file).iter().copied().rev().collect();
+    while let Some(def) = stack.pop() {
         if let Ok(info) = db.elaborate_def(def) {
             mcxt.local(def, |lcxt| info.term.lower(lcxt));
+            stack.extend(info.children.iter().copied());
         }
     }
     mcxt.finish()
@@ -102,9 +122,9 @@ impl Term {
                 Var::Local(i) => *cxt.locals.get(*i),
                 Var::Top(i) => {
                     let (i, _) = cxt.db.lookup_intern_def(*i);
-                    *cxt.defs.get(&i).unwrap()
+                    cxt.get_or_reserve(i)
                 }
-                Var::Rec(i) => *cxt.defs.get(i).unwrap(),
+                Var::Rec(i) => cxt.get_or_reserve(*i),
                 Var::Meta(_) => panic!("unsolved meta passed to lower()"),
                 Var::Type(_, _) | Var::Cons(_) => todo!("lowering datatypes"),
             },

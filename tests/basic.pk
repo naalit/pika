@@ -30,7 +30,7 @@ x
 .
 x
 
-val local = do
+fun local (_:Type) = do
   fun f x = the Type x
   val t = Type -> Type
   f t

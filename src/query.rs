@@ -185,6 +185,7 @@ pub struct ElabInfo {
     pub term: Arc<Term>,
     pub typ: Arc<VTy>,
     pub solved_globals: Arc<Vec<RecSolution>>,
+    pub children: Arc<Vec<DefId>>,
 }
 
 #[salsa::query_group(InternerDatabase)]

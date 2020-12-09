@@ -118,6 +118,7 @@ pub struct MCxt {
     local_metas: Vec<MetaEntry>,
     local_constraints: HashMap<Lvl, Term>,
     solved_globals: Vec<RecSolution>,
+    children: Vec<DefId>,
 }
 impl MCxt {
     pub fn state(&self) -> CxtState {
@@ -146,6 +147,7 @@ impl MCxt {
             local_metas: Vec::new(),
             local_constraints: HashMap::new(),
             solved_globals: Vec::new(),
+            children: Vec::new(),
         }
     }
 
@@ -789,6 +791,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 term: Arc::new(term),
                 typ: Arc::new(ty),
                 solved_globals: Arc::new(mcxt.solved_globals),
+                children: Arc::new(mcxt.children),
             })
         }
         Err(()) => {
@@ -1268,7 +1271,7 @@ pub fn infer(
 
         Pre_::Do(v) => {
             // We store the whole block in Salsa, then query the last expression
-            let block = crate::query::intern_block(v.clone(), db, mcxt.cxt);
+            let mut block = crate::query::intern_block(v.clone(), db, mcxt.cxt);
             // Make sure any type errors get reported
             for &i in &block {
                 let _ = db.elaborate_def(i);
@@ -1279,6 +1282,8 @@ pub fn infer(
                 // If it's not an expression, don't return anything
                 if let PreDef::Expr(_) = &**db.lookup_intern_predef(pre) {
                     if let Ok(info) = db.elaborate_def(last) {
+                        block.pop();
+                        mcxt.children.append(&mut block);
                         return Ok(((*info.term).clone(), Val::Arc(info.typ)));
                     } else {
                         // If there was a type error inside the block, we'll leave it, we don't want a cascade of errors
@@ -1286,6 +1291,7 @@ pub fn infer(
                     }
                 }
             }
+            mcxt.children.append(&mut block);
             todo!("return ()")
         }
 

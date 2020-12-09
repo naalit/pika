@@ -300,19 +300,11 @@ impl Term {
                     )),
                 )
             }
-            Term::App(_, f, x) => match f.ty(mcxt, db) {
+            Term::App(_, f, x) => match f.ty(mcxt, db).inline(mcxt.size, db, mcxt) {
                 Val::Fun(_, to) => *to,
                 Val::Pi(_, _, cl) => {
                     cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt, db), mcxt, db)
                 }
-                // It might be a name that refers to a function type, so we need to inline it
-                Val::App(h, sp, g) => match g.resolve(h, sp, mcxt.size, db, mcxt) {
-                    Some(Val::Fun(_, to)) => *to,
-                    Some(Val::Pi(_, _, cl)) => {
-                        cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt, db), mcxt, db)
-                    }
-                    _ => unreachable!(),
-                },
                 _ => unreachable!(),
             },
             Term::Error => Val::Error,
