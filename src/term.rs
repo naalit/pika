@@ -281,7 +281,12 @@ impl Term {
                 Var::Top(i) | Var::Type(i, _) | Var::Cons(i) => {
                     (*db.elaborate_def(i).unwrap().typ).clone()
                 }
-                Var::Rec(_) => todo!("find meta solution"),
+                Var::Rec(i) => mcxt.get_meta(Meta::Type(i)).unwrap_or_else(|| {
+                    panic!(
+                        "No type found for Rec {}",
+                        db.lookup_intern_predef(i).name().unwrap().get(db)
+                    )
+                }),
                 Var::Meta(_) => todo!("find meta solution"),
             },
             Term::Lam(n, i, ty, body) => {

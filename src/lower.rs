@@ -1,8 +1,8 @@
 //! This module deals with translation to Durin.
 
+use crate::common::*;
 use crate::elaborate::MCxt;
 use crate::error::FileId;
-use crate::query::*;
 use crate::term::*;
 use durin::builder::*;
 use durin::ir;
@@ -126,7 +126,76 @@ impl Term {
                 }
                 Var::Rec(i) => cxt.get_or_reserve(*i),
                 Var::Meta(_) => panic!("unsolved meta passed to lower()"),
-                Var::Type(_, _) | Var::Cons(_) => todo!("lowering datatypes"),
+                Var::Type(_, sid) => {
+                    let conses: Vec<_> = cxt.db
+                        .lookup_intern_scope(*sid)
+                        .iter()
+                        .filter_map(|&(_name, id)| {
+                            let info = cxt.db.elaborate_def(id).ok()?;
+                            match &*info.term {
+                                Term::Var(Var::Cons(cid)) if id == *cid => {
+                                    let mut cty: Val = info.typ.into_owned();
+                                    let mut i = 0;
+                                    let mut args = Vec::new();
+                                    loop {
+                                        match cty {
+                                            Val::Pi(_, from, cl) => {
+                                                // TODO dependent product types and cxt.local()
+                                                cxt.mcxt.define(cl.2, NameInfo::Local((*from).clone()), cxt.db);
+                                                args.push(from.lower(cxt));
+                                                cty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                                i += 1;
+                                            }
+                                            Val::Fun(from, to) => {
+                                                args.push(from.lower(cxt));
+                                                cty = *to;
+                                            }
+                                            _ => break,
+                                        }
+                                    }
+                                    for _ in 0..i {
+                                        cxt.mcxt.undef(cxt.db);
+                                    }
+                                    if args.len() == 1 {
+                                        Some(args.pop().unwrap())
+                                    } else {
+                                        Some(cxt.builder.prod_type(args))
+                                    }
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                    let mut ty = self.ty(&cxt.mcxt, cxt.db);
+                    let mut funs = Vec::new();
+                    loop {
+                        match ty {
+                            Val::Pi(_, from, cl) => {
+                                let lty = (*from).clone().lower(cxt);
+                                let p = cxt.builder.push_fun(None, lty.clone());
+                                cxt.local(cl.2, p, *from);
+                                funs.push((lty, true));
+                                ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                            }
+                            Val::Fun(from, to) => {
+                                let from = from.lower(cxt);
+                                cxt.builder.push_fun(None, from);
+                                funs.push((from, false));
+                                ty = *to;
+                            }
+                            _ => break,
+                        }
+                    }
+                    let mut val = cxt.builder.sum_type(conses);
+                    for (ty, is_pi) in funs.into_iter().rev() {
+                        if is_pi {
+                            cxt.pop_local();
+                        }
+                        val = cxt.builder.pop_fun(val, ty);
+                    }
+                    val
+                }
+                Var::Cons(_) => todo!("lowering constructors"),
             },
             // \x.f x
             // -->
