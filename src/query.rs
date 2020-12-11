@@ -99,7 +99,7 @@ impl Cxt {
                 }
                 NameInfo::Rec(id) => {
                     if name == sym {
-                        return Ok((Var::Rec(id), Val::meta(Meta::Type(id))));
+                        return Ok((Var::Rec(id), Val::meta(Meta::Type(id), Val::Type)));
                     }
                 }
                 NameInfo::Other(v, ty) => {

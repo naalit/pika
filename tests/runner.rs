@@ -11,14 +11,16 @@ fn test_basic() {
         .success();
 }
 
-#[test]
-fn test_smalltt() {
-    Command::cargo_bin("pika")
-        .unwrap()
-        .args(&["tests/smalltt.pk"])
-        .assert()
-        .success();
-}
+// Currently, this test takes over a minute to run on debug builds, so it's disabled.
+// It's still worth running `cargo run tests/smalltt.pk` before committing anything, though, to make sure it's not broken.
+// #[test]
+// fn test_smalltt() {
+//     Command::cargo_bin("pika")
+//         .unwrap()
+//         .args(&["tests/smalltt.pk"])
+//         .assert()
+//         .success();
+// }
 
 #[test]
 fn test_data() {

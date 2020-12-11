@@ -46,7 +46,7 @@ impl Cov {
             Cov::All => Doc::start("<nothing>"),
             Cov::None => Doc::start("_"),
             Cov::Cons(covs) => match ty {
-                Val::App(Var::Type(_, sid), _, _) => {
+                Val::App(Var::Type(_, sid), _, _, _) => {
                     let mut v = Vec::new();
                     let mut unmatched: Vec<DefId> = db
                         .lookup_intern_scope(*sid)
@@ -54,7 +54,7 @@ impl Cov {
                         .filter_map(|&(_name, id)| {
                             let info = db.elaborate_def(id).ok()?;
                             match &*info.term {
-                                Term::Var(Var::Cons(cid)) if id == *cid => {
+                                Term::Var(Var::Cons(cid), _) if id == *cid => {
                                     let cty = IntoOwned::<Val>::into_owned(info.typ)
                                         .ret_type(mcxt.size, mcxt, db);
                                     if crate::elaborate::local_unify(
@@ -98,10 +98,11 @@ impl Cov {
                                         cons_ty = *to;
                                         *from
                                     }
-                                    Val::Pi(_, from, to) => {
-                                        cons_ty = to.vquote(l.inc(), mcxt, db);
+                                    Val::Pi(_, cl) => {
+                                        let from = cl.ty.clone();
+                                        cons_ty = cl.vquote(l.inc(), mcxt, db);
                                         l = l.inc();
-                                        *from
+                                        from
                                     }
                                     _ => unreachable!(),
                                 };
@@ -130,7 +131,7 @@ impl Cov {
                                 Val::Fun(_, to) => {
                                     cons_ty = *to;
                                 }
-                                Val::Pi(_, _, to) => {
+                                Val::Pi(_, to) => {
                                     cons_ty = to.vquote(l.inc(), mcxt, db);
                                     l = l.inc();
                                 }
@@ -154,7 +155,7 @@ impl Cov {
             Cov::All => Cov::All,
             Cov::None => Cov::None,
             Cov::Cons(mut covs) => match ty {
-                Val::App(Var::Type(_, sid), _, _) => {
+                Val::App(Var::Type(_, sid), _, _, _) => {
                     // TODO unification for GADTs
                     let mut unmatched: Vec<DefId> = db
                         .lookup_intern_scope(*sid)
@@ -162,7 +163,7 @@ impl Cov {
                         .filter_map(|&(_name, id)| {
                             let info = db.elaborate_def(id).ok()?;
                             match &*info.term {
-                                Term::Var(Var::Cons(cid)) if id == *cid => {
+                                Term::Var(Var::Cons(cid), _) if id == *cid => {
                                     let cty = IntoOwned::<Val>::into_owned(info.typ)
                                         .ret_type(mcxt.size, mcxt, db);
                                     if crate::elaborate::local_unify(
@@ -198,10 +199,11 @@ impl Cov {
                                     cons_ty = *to;
                                     *from
                                 }
-                                Val::Pi(_, from, to) => {
-                                    cons_ty = to.vquote(l.inc(), mcxt, db);
+                                Val::Pi(_, cl) => {
+                                    let from = cl.ty.clone();
+                                    cons_ty = cl.vquote(l.inc(), mcxt, db);
                                     l = l.inc();
-                                    *from
+                                    from
                                 }
                                 _ => unreachable!(),
                             };
@@ -327,7 +329,7 @@ impl Pat {
                 Some(env)
             }
             Pat::Cons(id, v) => match val.clone().inline(env.size, db, mcxt) {
-                Val::App(Var::Cons(id2), sp, _) => {
+                Val::App(Var::Cons(id2), _, sp, _) => {
                     if *id == id2 {
                         for (i, (_, val)) in v.iter().zip(&sp) {
                             env = i.match_with(val, env, mcxt, db)?;
@@ -393,7 +395,7 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
         Pre_::Var(n) => {
             if let Ok((Var::Top(id), _)) = mcxt.lookup(*n, db) {
                 if let Ok(info) = db.elaborate_def(id) {
-                    if let Term::Var(Var::Cons(id2)) = &*info.term {
+                    if let Term::Var(Var::Cons(id2), _) = &*info.term {
                         if id == *id2 {
                             // This is a constructor
                             return elab_pat_app(pre, VecDeque::new(), ty, mcxt, db);
@@ -460,7 +462,7 @@ fn elab_pat_app(
     let (term, mut ty) = infer(false, head, db, mcxt)?;
     let mut l = mcxt.size;
     match term.inline_top(db) {
-        Term::Var(Var::Cons(id)) => {
+        Term::Var(Var::Cons(id), _) => {
             let mut pspine = Vec::new();
 
             let arity = ty.arity(true);
@@ -468,20 +470,20 @@ fn elab_pat_app(
 
             while let Some((i, pat)) = spine.pop_front() {
                 match ty {
-                    Val::Pi(Icit::Impl, from, cl) if i == Icit::Expl => {
+                    Val::Pi(Icit::Impl, cl) if i == Icit::Expl => {
                         // Add an implicit argument to the pattern, and keep the explicit one on the stack
                         spine.push_front((i, pat));
                         mcxt.define(
                             db.intern_name("_".into()),
-                            NameInfo::Local((*from).clone()),
+                            NameInfo::Local(cl.ty.clone()),
                             db,
                         );
-                        pspine.push(Pat::Var(cl.2, from));
+                        pspine.push(Pat::Var(cl.name, Box::new(cl.ty.clone())));
                         ty = cl.vquote(l.inc(), mcxt, db);
                         l = l.inc();
                     }
-                    Val::Pi(i2, from, cl) if i == i2 => {
-                        let pat = elab_pat(pat, &from, mcxt, db)?;
+                    Val::Pi(i2, cl) if i == i2 => {
+                        let pat = elab_pat(pat, &cl.ty, mcxt, db)?;
                         pspine.push(pat);
                         ty = cl.vquote(l.inc(), mcxt, db);
                         l = l.inc();
@@ -496,7 +498,7 @@ fn elab_pat_app(
             }
 
             match ty {
-                Val::Fun(_, _) | Val::Pi(_, _, _) => {
+                Val::Fun(_, _) | Val::Pi(_, _) => {
                     return Err(TypeError::WrongNumConsArgs(span, arity, f_arity))
                 }
                 ty => {

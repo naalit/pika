@@ -97,8 +97,8 @@ impl<'db> LCxt<'db> {
 }
 
 impl Val {
-    pub fn lower(self, cxt: &mut LCxt) -> ir::Val {
-        self.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db).lower(cxt)
+    pub fn lower(self, ty: VTy, cxt: &mut LCxt) -> ir::Val {
+        self.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db).lower(ty, cxt)
     }
 }
 
@@ -107,7 +107,7 @@ pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
     let mut stack: Vec<_> = db.top_level(file).iter().copied().rev().collect();
     while let Some(def) = stack.pop() {
         if let Ok(info) = db.elaborate_def(def) {
-            mcxt.local(def, |lcxt| info.term.lower(lcxt));
+            mcxt.local(def, |lcxt| info.term.lower((*info.typ).clone(), lcxt));
             stack.extend(info.children.iter().copied());
         }
     }
@@ -115,10 +115,10 @@ pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
 }
 
 impl Term {
-    pub fn lower(&self, cxt: &mut LCxt) -> ir::Val {
+    pub fn lower(&self, ty: VTy, cxt: &mut LCxt) -> ir::Val {
         match self {
             Term::Type => cxt.builder.cons(ir::Constant::TypeType),
-            Term::Var(v) => match v {
+            Term::Var(v, _) => match v {
                 Var::Local(i) => *cxt.locals.get(*i),
                 Var::Top(i) => {
                     let (i, _) = cxt.db.lookup_intern_def(*i);
@@ -127,27 +127,33 @@ impl Term {
                 Var::Rec(i) => cxt.get_or_reserve(*i),
                 Var::Meta(_) => panic!("unsolved meta passed to lower()"),
                 Var::Type(_, sid) => {
-                    let conses: Vec<_> = cxt.db
+                    let conses: Vec<_> = cxt
+                        .db
                         .lookup_intern_scope(*sid)
                         .iter()
                         .filter_map(|&(_name, id)| {
                             let info = cxt.db.elaborate_def(id).ok()?;
                             match &*info.term {
-                                Term::Var(Var::Cons(cid)) if id == *cid => {
+                                Term::Var(Var::Cons(cid), _) if id == *cid => {
                                     let mut cty: Val = info.typ.into_owned();
                                     let mut i = 0;
                                     let mut args = Vec::new();
                                     loop {
                                         match cty {
-                                            Val::Pi(_, from, cl) => {
+                                            Val::Pi(_, cl) => {
+                                                let from = cl.ty.clone();
                                                 // TODO dependent product types and cxt.local()
-                                                cxt.mcxt.define(cl.2, NameInfo::Local((*from).clone()), cxt.db);
-                                                args.push(from.lower(cxt));
+                                                cxt.mcxt.define(
+                                                    cl.name,
+                                                    NameInfo::Local(from.clone()),
+                                                    cxt.db,
+                                                );
+                                                args.push(from.lower(Val::Type, cxt));
                                                 cty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                                                 i += 1;
                                             }
                                             Val::Fun(from, to) => {
-                                                args.push(from.lower(cxt));
+                                                args.push(from.lower(Val::Type, cxt));
                                                 cty = *to;
                                             }
                                             _ => break,
@@ -166,19 +172,20 @@ impl Term {
                             }
                         })
                         .collect();
-                    let mut ty = self.ty(&cxt.mcxt, cxt.db);
+                    let mut ty = ty;
                     let mut funs = Vec::new();
                     loop {
                         match ty {
-                            Val::Pi(_, from, cl) => {
-                                let lty = (*from).clone().lower(cxt);
+                            Val::Pi(_, cl) => {
+                                let from = cl.ty.clone();
+                                let lty = from.clone().lower(Val::Type, cxt);
                                 let p = cxt.builder.push_fun(None, lty.clone());
-                                cxt.local(cl.2, p, *from);
+                                cxt.local(cl.name, p, from);
                                 funs.push((lty, true));
                                 ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                             }
                             Val::Fun(from, to) => {
-                                let from = from.lower(cxt);
+                                let from = from.lower(Val::Type, cxt);
                                 cxt.builder.push_fun(None, from);
                                 funs.push((from, false));
                                 ty = *to;
@@ -202,36 +209,45 @@ impl Term {
             // fun a (x, r) = f x k
             // fun k y = r y
             Term::Lam(name, _icit, _arg_ty, body) => {
-                let (param_ty, ret_ty) = match self.ty(&cxt.mcxt, cxt.db) {
+                let (param_ty, ret_ty) = match ty.inline(cxt.mcxt.size, cxt.db, &cxt.mcxt) {
                     Val::Fun(from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)),
-                    Val::Pi(_, from, to) => (*from, to.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)),
+                    Val::Pi(_, cl) => (cl.ty.clone(), cl.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)),
                     _ => unreachable!(),
                 };
                 assert_eq!(cxt.mcxt.size, cxt.locals.size());
-                let param_ty_ = param_ty.clone().lower(cxt);
+                let param_ty_ = param_ty.clone().lower(Val::Type, cxt);
                 let arg = cxt
                     .builder
                     .push_fun(Some(cxt.db.lookup_intern_name(*name)), param_ty_);
                 cxt.local(*name, arg, param_ty);
-                let ret_ty = ret_ty.lower(cxt);
-                let ret = body.lower(cxt);
+                let ret = body.lower(
+                    ret_ty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
+                    cxt,
+                );
+                let ret_ty = ret_ty.lower(Val::Type, cxt);
                 cxt.pop_local();
                 cxt.builder.pop_fun(ret, ret_ty)
             }
-            Term::App(_icit, f, x) => {
-                let ret_ty = self.ty(&cxt.mcxt, cxt.db);
-                let ret_ty = ret_ty.lower(cxt);
-                let f = f.lower(cxt);
-                let x = x.lower(cxt);
+            Term::App(_icit, f, fty, x) => {
+                let ret_ty = ty;
+                let ret_ty = ret_ty.lower(Val::Type, cxt);
+                let fty = fty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
+                let xty = match fty.unarc() {
+                    Val::Pi(_, cl) => cl.ty.clone(),
+                    Val::Fun(x, _) => (**x).clone(),
+                    _ => unreachable!(),
+                };
+                let f = f.lower(fty, cxt);
+                let x = x.lower(xty, cxt);
                 cxt.builder.call(f, x, ret_ty)
             }
             Term::Fun(from, to) => {
-                let from = from.lower(cxt);
-                let to = to.lower(cxt);
+                let from = from.lower(Val::Type, cxt);
+                let to = to.lower(Val::Type, cxt);
                 cxt.builder.fun_type(from, to)
             }
             Term::Pi(name, _icit, from, to) => {
-                let from_ = from.lower(cxt);
+                let from_ = from.lower(Val::Type, cxt);
                 let pi = cxt
                     .builder
                     .start_pi(Some(cxt.db.lookup_intern_name(*name)), from_);
@@ -242,7 +258,7 @@ impl Term {
                         .clone()
                         .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
                 );
-                let to = to.lower(cxt);
+                let to = to.lower(Val::Type, cxt);
                 cxt.pop_local();
                 cxt.builder.end_pi(pi, to)
             }
@@ -273,7 +289,7 @@ mod tests {
         let mut mcxt = ModCxt::new(&db);
         for &def in &*db.top_level(id) {
             if let Ok(info) = db.elaborate_def(def) {
-                mcxt.local(def, |lcxt| info.term.lower(lcxt));
+                mcxt.local(def, |lcxt| info.term.lower((*info.typ).clone(), lcxt));
             }
         }
         println!("module: {}", mcxt.module.emit());

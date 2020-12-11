@@ -6,30 +6,41 @@ impl Term {
     pub fn evaluate(self, env: &Env, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
             Term::Type => Val::Type,
-            Term::Var(Var::Local(ix)) => env.val(ix),
-            Term::Var(Var::Type(id, scope)) => Val::datatype(id, scope),
-            Term::Var(Var::Top(def)) => Val::top(def),
-            Term::Var(Var::Rec(id)) => Val::rec(id),
-            Term::Var(Var::Cons(id)) => Val::cons(id),
-            Term::Var(Var::Meta(meta)) => match mcxt.get_meta(meta) {
-                Some(v) => v,
-                None => Val::meta(meta),
-            },
-            Term::Lam(n, icit, ty, body) => Val::Lam(
-                icit,
-                Box::new(ty.evaluate(env, mcxt, db)),
-                Box::new(Clos(env.clone(), *body, n)),
-            ),
-            Term::Pi(n, icit, ty, body) => {
-                let ty = ty.evaluate(env, mcxt, db);
-                Val::Pi(icit, Box::new(ty), Box::new(Clos(env.clone(), *body, n)))
+            Term::Var(Var::Local(ix), ty) => env.val(ix, *ty, mcxt, db),
+            Term::Var(Var::Type(id, scope), ty) => {
+                Val::datatype(id, scope, ty.evaluate(env, mcxt, db))
             }
+            Term::Var(Var::Top(def), ty) => Val::top(def, ty.evaluate(env, mcxt, db)),
+            Term::Var(Var::Rec(id), ty) => Val::rec(id, ty.evaluate(env, mcxt, db)),
+            Term::Var(Var::Cons(id), ty) => Val::cons(id, ty.evaluate(env, mcxt, db)),
+            Term::Var(Var::Meta(meta), ty) => match mcxt.get_meta(meta) {
+                Some(v) => v,
+                None => Val::meta(meta, ty.evaluate(env, mcxt, db)),
+            },
+            Term::Lam(name, icit, ty, body) => Val::Lam(
+                icit,
+                Box::new(Clos {
+                    env: env.clone(),
+                    term: *body,
+                    ty: ty.evaluate(env, mcxt, db),
+                    name,
+                }),
+            ),
+            Term::Pi(name, icit, ty, body) => Val::Pi(
+                icit,
+                Box::new(Clos {
+                    env: env.clone(),
+                    term: *body,
+                    ty: ty.evaluate(env, mcxt, db),
+                    name,
+                }),
+            ),
             Term::Fun(from, to) => {
                 let from = from.evaluate(env, mcxt, db);
                 let to = to.evaluate(env, mcxt, db);
                 Val::Fun(Box::new(from), Box::new(to))
             }
-            Term::App(icit, f, x) => {
+            Term::App(icit, f, _fty, x) => {
                 let f = f.evaluate(env, mcxt, db);
                 let x = x.evaluate(env, mcxt, db);
                 f.app(icit, x, mcxt, db)
@@ -52,15 +63,60 @@ impl Val {
     /// If self is an App, resolve it recursively; only on the top level.
     pub fn inline(self, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
         match self {
-            Val::App(h, sp, g) => {
+            Val::App(h, hty, sp, g) => {
                 if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
                     v.inline(l, db, mcxt)
                 } else {
-                    Val::App(h, sp, g)
+                    Val::App(h, hty, sp, g)
                 }
             }
             Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline(l, db, mcxt),
             x => x,
+        }
+    }
+
+    /// Inlines Apps to expose Pi or Fun nodes giving it at least `n` arguments.
+    /// Panics on failure.
+    pub fn inline_args(self, n: usize, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
+        if n == 0 {
+            self
+        } else {
+            match self {
+                Val::Fun(from, mut to) => {
+                    *to = to.inline_args(n - 1, l, db, mcxt);
+                    Val::Fun(from, to)
+                }
+                Val::Pi(i, cl) => {
+                    if n == 1 {
+                        Val::Pi(i, cl)
+                    } else {
+                        let name = cl.name;
+                        let ty = cl.ty.clone();
+                        let term = cl
+                            .vquote(l.inc(), mcxt, db)
+                            .inline_args(n - 1, l.inc(), db, mcxt)
+                            .quote(l.inc(), mcxt, db);
+                        Val::Pi(
+                            i,
+                            Box::new(Clos {
+                                env: Env::new(l),
+                                term,
+                                ty,
+                                name,
+                            }),
+                        )
+                    }
+                }
+                Val::App(h, hty, sp, g) => {
+                    if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
+                        v.inline_args(n, l, db, mcxt)
+                    } else {
+                        Val::App(h, hty, sp, g)
+                    }
+                }
+                Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline_args(n, l, db, mcxt),
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -70,11 +126,12 @@ impl Val {
         match self {
             Val::Type => Val::Type,
             Val::Arc(x) => (*x).clone().force(l, db, mcxt),
-            Val::App(h, sp, g) => {
+            Val::App(h, mut hty, sp, g) => {
+                *hty = hty.force(l, db, mcxt);
                 if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
                     v.force(l, db, mcxt)
                 } else {
-                    Val::App(h, sp, g)
+                    Val::App(h, hty, sp, g)
                 }
             }
             Val::Fun(mut a, mut b) => {
@@ -84,25 +141,25 @@ impl Val {
             }
             Val::Error => Val::Error,
 
-            Val::Lam(i, mut ty, mut cl) => {
-                *ty = ty.force(l, db, mcxt);
-                cl.1 =
+            Val::Lam(i, mut cl) => {
+                cl.ty = cl.ty.force(l, db, mcxt);
+                cl.term =
                     (*cl)
                         .clone()
                         .vquote(l, mcxt, db)
                         .force(l, db, mcxt)
                         .quote(l.inc(), mcxt, db);
-                Val::Lam(i, ty, cl)
+                Val::Lam(i, cl)
             }
-            Val::Pi(i, mut ty, mut cl) => {
-                *ty = ty.force(l, db, mcxt);
-                cl.1 =
+            Val::Pi(i, mut cl) => {
+                cl.ty = cl.ty.force(l, db, mcxt);
+                cl.term =
                     (*cl)
                         .clone()
                         .vquote(l, mcxt, db)
                         .force(l, db, mcxt)
                         .quote(l.inc(), mcxt, db);
-                Val::Pi(i, ty, cl)
+                Val::Pi(i, cl)
             }
         }
     }
@@ -110,12 +167,12 @@ impl Val {
     /// Returns the result of applying `x` to `self`, beta-reducing if necessary.
     pub fn app(self, icit: Icit, x: Val, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
-            Val::App(h, mut sp, _) => {
+            Val::App(h, hty, mut sp, _) => {
                 sp.push((icit, x));
                 // Throw away the old Glued, since that could have been resolved already
-                Val::App(h, sp, Glued::new())
+                Val::App(h, hty, sp, Glued::new())
             }
-            Val::Lam(_, _, cl) => cl.apply(x, mcxt, db),
+            Val::Lam(_, cl) => cl.apply(x, mcxt, db),
             Val::Error => Val::Error,
             Val::Arc(a) => IntoOwned::<Val>::into_owned(a).app(icit, x, mcxt, db),
             _ => unreachable!(),
@@ -125,29 +182,60 @@ impl Val {
     pub fn quote(self, enclosing: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         match self {
             Val::Type => Term::Type,
-            Val::App(h, sp, _) => {
+            Val::App(h, hty, sp, _) => {
+                // Inline the type to expose the Pi or Fun
+                let hty = hty
+                    .inline_args(sp.len(), enclosing, db, mcxt)
+                    .quote(enclosing, mcxt, db);
                 let h = match h {
-                    Var::Local(l) => Term::Var(Var::Local(l.to_ix(enclosing))),
-                    Var::Top(def) => Term::Var(Var::Top(def)),
-                    Var::Meta(meta) => Term::Var(Var::Meta(meta)),
-                    Var::Rec(id) => Term::Var(Var::Rec(id)),
-                    Var::Type(id, scope) => Term::Var(Var::Type(id, scope)),
-                    Var::Cons(id) => Term::Var(Var::Cons(id)),
+                    Var::Local(l) => {
+                        Term::Var(Var::Local(l.to_ix(enclosing)), Box::new(hty.clone()))
+                    }
+                    Var::Top(def) => Term::Var(Var::Top(def), Box::new(hty.clone())),
+                    Var::Meta(meta) => Term::Var(Var::Meta(meta), Box::new(hty.clone())),
+                    Var::Rec(id) => Term::Var(Var::Rec(id), Box::new(hty.clone())),
+                    Var::Type(id, scope) => Term::Var(Var::Type(id, scope), Box::new(hty.clone())),
+                    Var::Cons(id) => Term::Var(Var::Cons(id), Box::new(hty.clone())),
                 };
-                sp.into_iter().fold(h, |f, (icit, x)| {
-                    Term::App(icit, Box::new(f), Box::new(x.quote(enclosing, mcxt, db)))
-                })
+                sp.into_iter()
+                    .fold((h, hty), |(f, fty), (icit, x)| {
+                        let rty = match &fty {
+                            Term::Fun(_, to) => (**to).clone(),
+                            Term::Pi(_, _, _, to) => {
+                                // Peel off one Pi to get the type of the next `f`.
+                                // It's dependent, so we need to add `x` to the environment.
+                                let mut env = Env::new(enclosing);
+                                env.push(Some(x.clone()));
+                                // Then we evaluate-quote to so `rty` is in the context `enclosing`.
+                                (**to)
+                                    .clone()
+                                    .evaluate(&env, mcxt, db)
+                                    .quote(enclosing, mcxt, db)
+                            }
+                            _ => unreachable!(),
+                        };
+                        (
+                            Term::App(
+                                icit,
+                                Box::new(f),
+                                Box::new(fty),
+                                Box::new(x.quote(enclosing, mcxt, db)),
+                            ),
+                            rty,
+                        )
+                    })
+                    .0
             }
-            Val::Lam(icit, ty, cl) => Term::Lam(
-                cl.2,
+            Val::Lam(icit, cl) => Term::Lam(
+                cl.name,
                 icit,
-                Box::new(ty.quote(enclosing, mcxt, db)),
+                Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),
                 Box::new(cl.quote(enclosing, mcxt, db)),
             ),
-            Val::Pi(icit, ty, cl) => Term::Pi(
-                cl.2,
+            Val::Pi(icit, cl) => Term::Pi(
+                cl.name,
                 icit,
-                Box::new(ty.quote(enclosing, mcxt, db)),
+                Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),
                 Box::new(cl.quote(enclosing, mcxt, db)),
             ),
             Val::Fun(from, to) => Term::Fun(
@@ -164,7 +252,7 @@ impl Term {
     /// If self is a Var::Top, inline it (once).
     pub fn inline_top(self, db: &dyn Compiler) -> Term {
         match self {
-            Term::Var(Var::Top(id)) => {
+            Term::Var(Var::Top(id), _) => {
                 if let Ok(info) = db.elaborate_def(id) {
                     (*info.term).clone()
                 } else {
@@ -178,11 +266,17 @@ impl Term {
     pub fn inline_metas(self, mcxt: &MCxt, l: Lvl, db: &dyn Compiler) -> Self {
         match self {
             Term::Type => Term::Type,
-            Term::Var(Var::Meta(m)) => match mcxt.get_meta(m) {
+            Term::Var(Var::Meta(m), mut ty) => match mcxt.get_meta(m) {
                 Some(v) => v.inline_metas(mcxt, db).quote(l, mcxt, db),
-                None => Term::Var(Var::Meta(m)),
+                None => {
+                    *ty = ty.inline_metas(mcxt, l, db);
+                    Term::Var(Var::Meta(m), ty)
+                }
             },
-            Term::Var(v) => Term::Var(v),
+            Term::Var(v, mut ty) => {
+                *ty = ty.inline_metas(mcxt, l, db);
+                Term::Var(v, ty)
+            }
             Term::Lam(n, i, mut ty, mut t) => {
                 // Reuse Boxes
                 *ty = ty.inline_metas(mcxt, l, db);
@@ -199,9 +293,9 @@ impl Term {
                 *to = to.inline_metas(mcxt, l, db);
                 Term::Fun(from, to)
             }
-            Term::App(i, f, x) => {
+            Term::App(i, f, fty, x) => {
                 // We have to beta-reduce meta applications
-                Term::App(i, f, x)
+                Term::App(i, f, fty, x)
                     .evaluate(&Env::new(l), mcxt, db)
                     .inline_metas(mcxt, db)
                     .quote(l, mcxt, db)
@@ -223,7 +317,7 @@ impl Val {
     pub fn inline_metas(self, mcxt: &MCxt, db: &dyn Compiler) -> Self {
         match self {
             Val::Type => Val::Type,
-            Val::App(h, sp, g) => {
+            Val::App(h, mut ty, sp, g) => {
                 let h = match h {
                     Var::Meta(m) => match g.resolve_meta(h, &sp, mcxt, db) {
                         Some(v) => return v.inline_metas(mcxt, db),
@@ -235,22 +329,23 @@ impl Val {
                     .into_iter()
                     .map(|(i, x)| (i, x.inline_metas(mcxt, db)))
                     .collect();
+                *ty = ty.inline_metas(mcxt, db);
                 // Reset the Glued in case it has metas inside
-                Val::App(h, sp, Glued::new())
+                Val::App(h, ty, sp, Glued::new())
             }
-            Val::Lam(i, mut ty, mut cl) => {
-                *ty = ty.inline_metas(mcxt, db);
+            Val::Lam(i, mut cl) => {
                 let l = cl.env_size();
-                cl.0.inline_metas(mcxt, db);
-                cl.1 = cl.1.inline_metas(mcxt, l.inc(), db);
-                Val::Lam(i, ty, cl)
+                cl.env.inline_metas(mcxt, db);
+                cl.term = cl.term.inline_metas(mcxt, l.inc(), db);
+                cl.ty = cl.ty.inline_metas(mcxt, db);
+                Val::Lam(i, cl)
             }
-            Val::Pi(i, mut ty, mut cl) => {
-                *ty = ty.inline_metas(mcxt, db);
+            Val::Pi(i, mut cl) => {
                 let l = cl.env_size();
-                cl.0.inline_metas(mcxt, db);
-                cl.1 = cl.1.inline_metas(mcxt, l.inc(), db);
-                Val::Pi(i, ty, cl)
+                cl.env.inline_metas(mcxt, db);
+                cl.term = cl.term.inline_metas(mcxt, l.inc(), db);
+                cl.ty = cl.ty.inline_metas(mcxt, db);
+                Val::Pi(i, cl)
             }
             Val::Fun(mut from, mut to) => {
                 *from = from.inline_metas(mcxt, db);

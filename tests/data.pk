@@ -1,22 +1,29 @@
-type Term a of
-  # Type stated
-  TypeType : Term Type
-  # Normal ADT
-  Lit a
-  # Mixed before and after colon
-  Fun [a b] : Term (a -> b) -> Term (a -> b)
-where
-  # The constructors work without a dot here
-  fun also_lit [a] (x : a) : Term a = Lit x
+type Bool (a:Type) of
+  True Type               : Bool Type
+  False ((x: Type) -> x)  : Bool Type
 end
 
-val one : Term Type = Term.TypeType
-val two : Term (Term Type -> Term Type) = Term.Fun (Term.Lit (\x. x))
-# Make sure the associated namespace works
-val three : Term Type = Term.also_lit Type
+fun f x = Bool.True x
 
-# I'm not sure whether we actually want to allow this, but it works?
-fun pick_type (x : Type) : (Type -> Type) = Term
-val four : Term Type =
-  pick_type Type
-    .Lit Type
+# type Term a of
+#   # Type stated
+#   TypeType : Term Type
+#   # Normal ADT
+#   Lit a
+#   # Mixed before and after colon
+#   Fun [a b] : Term (a -> b) -> Term (a -> b)
+# where
+#   # The constructors work without a dot here
+#   fun also_lit [a] (x : a) : Term a = Lit x
+# end
+#
+# val one : Term Type = Term.TypeType
+# val two : Term (Term Type -> Term Type) = Term.Fun (Term.Lit (\x. x))
+# # Make sure the associated namespace works
+# val three : Term Type = Term.also_lit Type
+#
+# # I'm not sure whether we actually want to allow this, but it works?
+# fun pick_type (x : Type) : (Type -> Type) = Term
+# val four : Term Type =
+#   pick_type Type
+#     .Lit Type
