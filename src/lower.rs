@@ -6,11 +6,14 @@ use crate::error::FileId;
 use crate::term::*;
 use durin::builder::*;
 use durin::ir;
+
+use smallvec::SmallVec;
 use std::collections::HashMap;
 
 pub struct ModCxt<'m> {
     db: &'m dyn Compiler,
     defs: HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
+    scope_ids: HashMap<PreDefId, ScopeId>,
     module: ir::Module,
 }
 impl<'m> ModCxt<'m> {
@@ -22,6 +25,7 @@ impl<'m> ModCxt<'m> {
         ModCxt {
             db,
             defs: HashMap::new(),
+            scope_ids: HashMap::new(),
             module: ir::Module::default(),
         }
     }
@@ -37,14 +41,14 @@ impl<'m> ModCxt<'m> {
             MCxt::new(cxt, def, self.db),
             &mut self.module,
             &mut self.defs,
+            &mut self.scope_ids,
             locals,
         );
         let val = f(&mut lcxt);
         lcxt.builder.finish();
 
         let val2 = lcxt.get_or_reserve(pre);
-        let node = self.module.get(val).unwrap().clone();
-        self.module.replace(val2, node);
+        self.module.redirect(val2, val);
     }
 }
 
@@ -52,6 +56,7 @@ pub struct LCxt<'db> {
     db: &'db dyn Compiler,
     locals: IVec<ir::Val>,
     defs: &'db mut HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
+    scope_ids: &'db mut HashMap<PreDefId, ScopeId>,
     builder: Builder<'db>,
     mcxt: MCxt,
 }
@@ -61,6 +66,7 @@ impl<'db> LCxt<'db> {
         mcxt: MCxt,
         m: &'db mut ir::Module,
         defs: &'db mut HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
+        scope_ids: &'db mut HashMap<PreDefId, ScopeId>,
         locals: IVec<ir::Val>,
     ) -> Self {
         let builder = Builder::new(m);
@@ -68,6 +74,7 @@ impl<'db> LCxt<'db> {
             db,
             locals,
             defs,
+            scope_ids,
             builder,
             mcxt,
         }
@@ -114,6 +121,50 @@ pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
     mcxt.finish()
 }
 
+fn lower_datatype(sid: ScopeId, cxt: &mut LCxt) -> Vec<ir::Val> {
+    cxt.db
+        .lookup_intern_scope(sid)
+        .iter()
+        .filter_map(|&(_name, id)| {
+            let info = cxt.db.elaborate_def(id).ok()?;
+            match &*info.term {
+                Term::Var(Var::Cons(cid), _) if id == *cid => {
+                    let mut cty: Val = info.typ.into_owned();
+                    let mut i = 0;
+                    let mut args = Vec::new();
+                    loop {
+                        match cty {
+                            Val::Pi(_, cl) => {
+                                let from = cl.ty.clone();
+                                // TODO dependent product types and cxt.local()
+                                cxt.mcxt
+                                    .define(cl.name, NameInfo::Local(from.clone()), cxt.db);
+                                args.push(from.lower(Val::Type, cxt));
+                                cty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                i += 1;
+                            }
+                            Val::Fun(from, to) => {
+                                args.push(from.lower(Val::Type, cxt));
+                                cty = *to;
+                            }
+                            _ => break,
+                        }
+                    }
+                    for _ in 0..i {
+                        cxt.mcxt.undef(cxt.db);
+                    }
+                    // if args.len() == 1 {
+                    //     Some(args.pop().unwrap())
+                    // } else {
+                    Some(cxt.builder.prod_type(args))
+                    // }
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 impl Term {
     pub fn lower(&self, ty: VTy, cxt: &mut LCxt) -> ir::Val {
         match self {
@@ -126,52 +177,11 @@ impl Term {
                 }
                 Var::Rec(i) => cxt.get_or_reserve(*i),
                 Var::Meta(_) => panic!("unsolved meta passed to lower()"),
-                Var::Type(_, sid) => {
-                    let conses: Vec<_> = cxt
-                        .db
-                        .lookup_intern_scope(*sid)
-                        .iter()
-                        .filter_map(|&(_name, id)| {
-                            let info = cxt.db.elaborate_def(id).ok()?;
-                            match &*info.term {
-                                Term::Var(Var::Cons(cid), _) if id == *cid => {
-                                    let mut cty: Val = info.typ.into_owned();
-                                    let mut i = 0;
-                                    let mut args = Vec::new();
-                                    loop {
-                                        match cty {
-                                            Val::Pi(_, cl) => {
-                                                let from = cl.ty.clone();
-                                                // TODO dependent product types and cxt.local()
-                                                cxt.mcxt.define(
-                                                    cl.name,
-                                                    NameInfo::Local(from.clone()),
-                                                    cxt.db,
-                                                );
-                                                args.push(from.lower(Val::Type, cxt));
-                                                cty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
-                                                i += 1;
-                                            }
-                                            Val::Fun(from, to) => {
-                                                args.push(from.lower(Val::Type, cxt));
-                                                cty = *to;
-                                            }
-                                            _ => break,
-                                        }
-                                    }
-                                    for _ in 0..i {
-                                        cxt.mcxt.undef(cxt.db);
-                                    }
-                                    if args.len() == 1 {
-                                        Some(args.pop().unwrap())
-                                    } else {
-                                        Some(cxt.builder.prod_type(args))
-                                    }
-                                }
-                                _ => None,
-                            }
-                        })
-                        .collect();
+                Var::Type(tid, sid) => {
+                    let (pre, _) = cxt.db.lookup_intern_def(*tid);
+                    cxt.scope_ids.insert(pre, *sid);
+
+                    let conses = lower_datatype(*sid, cxt);
                     let mut ty = ty;
                     let mut funs = Vec::new();
                     loop {
@@ -202,7 +212,78 @@ impl Term {
                     }
                     val
                 }
-                Var::Cons(_) => todo!("lowering constructors"),
+                Var::Cons(id) => {
+                    let &sid = match ty
+                        .clone()
+                        .ret_type(cxt.mcxt.size, &cxt.mcxt, cxt.db)
+                        .unarc()
+                    {
+                        Val::App(Var::Type(_id, sid), _, _, _) => sid,
+                        Val::App(Var::Rec(id), _, _, _) => cxt
+                            .scope_ids
+                            .get(id)
+                            .expect("Datatypes should be lowered before their constructors!"),
+                        x => unreachable!("{:?}", x),
+                    };
+
+                    let idx = cxt
+                        .db
+                        .lookup_intern_scope(sid)
+                        .iter()
+                        .filter_map(|&(_name, id)| {
+                            let info = cxt.db.elaborate_def(id).ok()?;
+                            match &*info.term {
+                                Term::Var(Var::Cons(cid), _) if id == *cid => Some(id),
+                                _ => None,
+                            }
+                        })
+                        .enumerate()
+                        .find(|(_, x)| x == id)
+                        .unwrap()
+                        .0;
+                    let conses = lower_datatype(sid, cxt);
+
+                    let prod_ty = conses[idx];
+                    let sum_ty = cxt.builder.sum_type(conses);
+
+                    // TODO should this Durin-function-from-Pika-type be its own function?
+                    let mut ty = ty;
+                    let mut funs = Vec::new();
+                    loop {
+                        match ty {
+                            Val::Pi(_, cl) => {
+                                let from = cl.ty.clone();
+                                let lty = from.clone().lower(Val::Type, cxt);
+                                let p = cxt.builder.push_fun(None, lty.clone());
+                                cxt.local(cl.name, p, from);
+                                funs.push((p, lty, true));
+                                ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                            }
+                            Val::Fun(from, to) => {
+                                let from = from.lower(Val::Type, cxt);
+                                let p = cxt.builder.push_fun(None, from);
+                                funs.push((p, from, false));
+                                ty = *to;
+                            }
+                            _ => break,
+                        }
+                    }
+                    let val = cxt.builder.product(
+                        prod_ty,
+                        funs.iter()
+                            .map(|&(x, _, _)| x)
+                            .collect::<SmallVec<[ir::Val; 3]>>(),
+                    );
+                    let mut val = cxt.builder.inject_sum(sum_ty, idx, val);
+                    for (_p, ty, is_pi) in funs.into_iter().rev() {
+                        if is_pi {
+                            cxt.pop_local();
+                        }
+                        val = cxt.builder.pop_fun(val, ty);
+                    }
+
+                    val
+                }
             },
             // \x.f x
             // -->

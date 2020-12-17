@@ -814,6 +814,9 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     }),
             );
 
+            // Add the associated namespace, including constructors, to this term's children
+            mcxt.children.extend(scope.iter().map(|&(_, id)| id));
+
             let scope = db.intern_scope(Arc::new(scope));
 
             Ok((
