@@ -740,8 +740,7 @@ impl Glued {
             match h {
                 // Check the mcxt's local constraints
                 Var::Local(lvl) => {
-                    let term = mcxt.local_val(lvl)?;
-                    let val = term.clone().evaluate(&Env::new(l), mcxt, db);
+                    let val = mcxt.local_val(lvl)?.clone();
                     let val = sp
                         .into_owned()
                         .into_iter()

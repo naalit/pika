@@ -1,9 +1,10 @@
-type Bool (a:Type) of
-  True Type               : Bool Type
-  False ((x: Type) -> x)  : Bool Type
+type Option a of
+  Some a
+  None
 end
 
-fun f x = Bool.True x
+fun make_some [t] (x : t) = Option.Some x
+fun make_none [t] : Option t = Option.None
 
 # type Term a of
 #   # Type stated

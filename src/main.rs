@@ -34,7 +34,8 @@ fn main() {
             println!("Durin module:\n{}", durin.emit());
             let backend = durin::backend::Backend::native();
             let m = backend.codegen_module(&mut durin);
-            println!("LLVM module:\n{}", m.print_to_string().to_str().unwrap());
+            m.verify().unwrap();
+        // println!("LLVM module:\n{}", m.print_to_string().to_str().unwrap());
         } else {
             db.write_errors();
             std::process::exit(1);

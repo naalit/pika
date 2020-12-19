@@ -13,7 +13,7 @@ use std::collections::HashMap;
 pub struct ModCxt<'m> {
     db: &'m dyn Compiler,
     defs: HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
-    scope_ids: HashMap<PreDefId, ScopeId>,
+    scope_ids: HashMap<PreDefId, (DefId, ScopeId)>,
     module: ir::Module,
 }
 impl<'m> ModCxt<'m> {
@@ -56,7 +56,7 @@ pub struct LCxt<'db> {
     db: &'db dyn Compiler,
     locals: IVec<ir::Val>,
     defs: &'db mut HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
-    scope_ids: &'db mut HashMap<PreDefId, ScopeId>,
+    scope_ids: &'db mut HashMap<PreDefId, (DefId, ScopeId)>,
     builder: Builder<'db>,
     mcxt: MCxt,
 }
@@ -66,7 +66,7 @@ impl<'db> LCxt<'db> {
         mcxt: MCxt,
         m: &'db mut ir::Module,
         defs: &'db mut HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
-        scope_ids: &'db mut HashMap<PreDefId, ScopeId>,
+        scope_ids: &'db mut HashMap<PreDefId, (DefId, ScopeId)>,
         locals: IVec<ir::Val>,
     ) -> Self {
         let builder = Builder::new(m);
@@ -121,7 +121,13 @@ pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
     mcxt.finish()
 }
 
-fn lower_datatype(sid: ScopeId, cxt: &mut LCxt) -> Vec<ir::Val> {
+/// Returns (constructor return types, whether each parameter of the constructor should be kept)
+fn lower_datatype(
+    tid: DefId,
+    sid: ScopeId,
+    targs: Vec<Val>,
+    cxt: &mut LCxt,
+) -> (Vec<ir::Val>, Vec<Vec<bool>>) {
     cxt.db
         .lookup_intern_scope(sid)
         .iter()
@@ -130,39 +136,155 @@ fn lower_datatype(sid: ScopeId, cxt: &mut LCxt) -> Vec<ir::Val> {
             match &*info.term {
                 Term::Var(Var::Cons(cid), _) if id == *cid => {
                     let mut cty: Val = info.typ.into_owned();
+                    let solutions = {
+                        let start_state = cxt.mcxt.state();
+
+                        // First define the locals from the type
+                        let mut tty: Val = cxt.db.elaborate_def(tid).unwrap().typ.into_owned();
+                        let mut ty_args = Vec::new();
+                        loop {
+                            match tty {
+                                Val::Pi(i, cl) => {
+                                    let from = cl.ty.clone();
+                                    cxt.mcxt
+                                        .define(cl.name, NameInfo::Local(from.clone()), cxt.db);
+                                    ty_args.push((i, Val::local(cxt.mcxt.size, from)));
+                                    tty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                }
+                                Val::Fun(_, _) => unreachable!("Datatypes must have pi types"),
+                                _ => break,
+                            }
+                        }
+                        let tty = Val::App(
+                            Var::Type(tid, sid),
+                            Box::new(cxt.db.elaborate_def(tid).unwrap().typ.into_owned()),
+                            ty_args,
+                            Glued::new(),
+                        );
+
+                        // Then define the ones from the constructor type
+                        let lbefore = cxt.mcxt.size;
+                        // We need to move the constructor type inside of the abstractions from the datatype
+                        let mut cty = cty
+                            .clone()
+                            .quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)
+                            .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
+                        loop {
+                            match cty {
+                                Val::Pi(_, cl) => {
+                                    let from = cl.ty.clone();
+                                    cxt.mcxt
+                                        .define(cl.name, NameInfo::Local(from.clone()), cxt.db);
+                                    cty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                }
+                                Val::Fun(_from, to) => {
+                                    // This argument can't be used in the type, so we skip it
+                                    cty = *to;
+                                }
+                                _ => break,
+                            }
+                        }
+
+                        // Now unify
+                        if !crate::elaborate::local_unify(
+                            tty,
+                            cty,
+                            cxt.mcxt.size,
+                            Span::empty(),
+                            cxt.db,
+                            &mut cxt.mcxt,
+                        )
+                        .unwrap_or(false)
+                        {
+                            panic!("Unification of datatype with constructor return type failed!")
+                        }
+
+                        // Then add the arguments passed to the type this time
+                        let mut env = Env::new(start_state.size);
+                        for i in &targs {
+                            env.push(Some(i.clone()));
+                        }
+                        assert_eq!(env.size, lbefore);
+
+                        // And for each constructor pi-parameter, add the constraint to `solutions` if it exists
+                        let mut l = lbefore;
+                        let mut solutions: Vec<Option<Val>> = Vec::new();
+                        while l <= cxt.mcxt.size {
+                            l = l.inc();
+                            if let Some(v) = cxt.mcxt.local_val(l) {
+                                let v = v
+                                    .clone()
+                                    .quote(env.size, &cxt.mcxt, cxt.db)
+                                    .evaluate(&env, &cxt.mcxt, cxt.db);
+                                solutions.push(Some(v));
+                            } else {
+                                solutions.push(None);
+                            }
+                        }
+                        cxt.mcxt.set_state(start_state);
+                        solutions
+                    };
+
+                    // Now generate the sigma type representing the constructor
                     let mut i = 0;
-                    let mut args = Vec::new();
+                    let mut sigma = cxt.builder.sigma();
+                    let mut keep = Vec::new();
+                    let mut env = Env::new(cxt.mcxt.size);
                     loop {
+                        assert_eq!(env.size, cxt.mcxt.size);
                         match cty {
                             Val::Pi(_, cl) => {
-                                let from = cl.ty.clone();
-                                // TODO dependent product types and cxt.local()
-                                cxt.mcxt
-                                    .define(cl.name, NameInfo::Local(from.clone()), cxt.db);
-                                args.push(from.lower(Val::Type, cxt));
+                                // Quote-evaluate to apply substitutions from the environment
+                                let from = cl
+                                    .ty
+                                    .clone()
+                                    .quote(env.size, &cxt.mcxt, cxt.db)
+                                    .evaluate(&env, &cxt.mcxt, cxt.db);
+
+                                let val = if let Some(x) = &solutions[i] {
+                                    keep.push(false);
+                                    // Add the solution to the environment
+                                    env.push(Some(x.clone()));
+                                    // If we solved it, skip adding it to the sigma
+                                    // This shouldn't be used at all
+                                    cxt.builder.cons(ir::Constant::Stop)
+                                } else {
+                                    // It doesn't have a solution, so it remains in the product type
+                                    keep.push(true);
+                                    env.push(None);
+                                    sigma.add(from.clone().lower(Val::Type, cxt), &mut cxt.builder)
+                                };
+
+                                // Define the variable and go to the next level
+                                cxt.local(cl.name, val, from);
                                 cty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                                 i += 1;
                             }
                             Val::Fun(from, to) => {
-                                args.push(from.lower(Val::Type, cxt));
+                                // Quote-evaluate to apply substitutions from the environment
+                                let from = from
+                                    .quote(env.size, &cxt.mcxt, cxt.db)
+                                    .evaluate(&env, &cxt.mcxt, cxt.db);
+
+                                // We know we're keeping this one, since we can't solve a non-pi parameter
+                                keep.push(true);
+
+                                // Don't add the parameter to the context, since it's not a pi
+                                sigma.add(from.clone().lower(Val::Type, cxt), &mut cxt.builder);
                                 cty = *to;
                             }
                             _ => break,
                         }
                     }
                     for _ in 0..i {
-                        cxt.mcxt.undef(cxt.db);
+                        cxt.pop_local();
                     }
-                    // if args.len() == 1 {
-                    //     Some(args.pop().unwrap())
-                    // } else {
-                    Some(cxt.builder.prod_type(args))
-                    // }
+                    Some((sigma.finish(&mut cxt.builder), keep))
                 }
                 _ => None,
             }
         })
-        .collect()
+        .unzip()
 }
 
 impl Term {
@@ -179,30 +301,28 @@ impl Term {
                 Var::Meta(_) => panic!("unsolved meta passed to lower()"),
                 Var::Type(tid, sid) => {
                     let (pre, _) = cxt.db.lookup_intern_def(*tid);
-                    cxt.scope_ids.insert(pre, *sid);
+                    cxt.scope_ids.insert(pre, (*tid, *sid));
 
-                    let conses = lower_datatype(*sid, cxt);
                     let mut ty = ty;
                     let mut funs = Vec::new();
+                    let mut targs = Vec::new();
                     loop {
                         match ty {
                             Val::Pi(_, cl) => {
                                 let from = cl.ty.clone();
+                                targs.push(Val::local(cxt.mcxt.size.inc(), from.clone()));
+
                                 let lty = from.clone().lower(Val::Type, cxt);
                                 let p = cxt.builder.push_fun(None, lty.clone());
                                 cxt.local(cl.name, p, from);
                                 funs.push((lty, true));
                                 ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                             }
-                            Val::Fun(from, to) => {
-                                let from = from.lower(Val::Type, cxt);
-                                cxt.builder.push_fun(None, from);
-                                funs.push((from, false));
-                                ty = *to;
-                            }
+                            Val::Fun(_, _) => unreachable!("Datatypes must have pi types"),
                             _ => break,
                         }
                     }
+                    let (conses, _) = lower_datatype(*tid, *sid, targs, cxt);
                     let mut val = cxt.builder.sum_type(conses);
                     for (ty, is_pi) in funs.into_iter().rev() {
                         if is_pi {
@@ -213,19 +333,48 @@ impl Term {
                     val
                 }
                 Var::Cons(id) => {
-                    let &sid = match ty
+                    let (tid, sid) = match ty
                         .clone()
                         .ret_type(cxt.mcxt.size, &cxt.mcxt, cxt.db)
                         .unarc()
                     {
-                        Val::App(Var::Type(_id, sid), _, _, _) => sid,
+                        Val::App(Var::Type(tid, sid), _, _, _) => (*tid, *sid),
                         Val::App(Var::Rec(id), _, _, _) => cxt
                             .scope_ids
                             .get(id)
-                            .expect("Datatypes should be lowered before their constructors!"),
+                            .copied()
+                            .expect("Datatypes should be lowered before their constructors"),
                         x => unreachable!("{:?}", x),
                     };
 
+                    // TODO should this Durin-function-from-Pika-type be its own function?
+                    let mut ty = ty;
+                    let mut funs = Vec::new();
+                    loop {
+                        match ty {
+                            Val::Pi(_, cl) => {
+                                let from = cl.ty.clone();
+                                let lty = from.clone().lower(Val::Type, cxt);
+                                let p = cxt.builder.push_fun(None, lty);
+                                cxt.local(cl.name, p, from);
+                                ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                funs.push((p, ty.clone().lower(Val::Type, cxt), true));
+                            }
+                            Val::Fun(from, to) => {
+                                let from = from.lower(Val::Type, cxt);
+                                let p = cxt.builder.push_fun(None, from);
+                                ty = *to;
+                                funs.push((p, ty.clone().lower(Val::Type, cxt), false));
+                            }
+                            _ => break,
+                        }
+                    }
+
+                    let targs: Vec<_> = match ty {
+                        Val::App(_, _, sp, _) => sp.into_iter().map(|(_i, x)| x).collect(),
+                        _ => unreachable!(),
+                    };
+                    let (conses, keep) = lower_datatype(tid, sid, targs, cxt);
                     let idx = cxt
                         .db
                         .lookup_intern_scope(sid)
@@ -241,37 +390,16 @@ impl Term {
                         .find(|(_, x)| x == id)
                         .unwrap()
                         .0;
-                    let conses = lower_datatype(sid, cxt);
 
                     let prod_ty = conses[idx];
                     let sum_ty = cxt.builder.sum_type(conses);
 
-                    // TODO should this Durin-function-from-Pika-type be its own function?
-                    let mut ty = ty;
-                    let mut funs = Vec::new();
-                    loop {
-                        match ty {
-                            Val::Pi(_, cl) => {
-                                let from = cl.ty.clone();
-                                let lty = from.clone().lower(Val::Type, cxt);
-                                let p = cxt.builder.push_fun(None, lty.clone());
-                                cxt.local(cl.name, p, from);
-                                funs.push((p, lty, true));
-                                ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
-                            }
-                            Val::Fun(from, to) => {
-                                let from = from.lower(Val::Type, cxt);
-                                let p = cxt.builder.push_fun(None, from);
-                                funs.push((p, from, false));
-                                ty = *to;
-                            }
-                            _ => break,
-                        }
-                    }
                     let val = cxt.builder.product(
                         prod_ty,
                         funs.iter()
                             .map(|&(x, _, _)| x)
+                            .zip(&keep[idx])
+                            .filter_map(|(x, &b)| if b { Some(x) } else { None })
                             .collect::<SmallVec<[ir::Val; 3]>>(),
                     );
                     let mut val = cxt.builder.inject_sum(sum_ty, idx, val);

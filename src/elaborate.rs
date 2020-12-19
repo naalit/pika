@@ -113,7 +113,7 @@ impl Term {
 pub struct CxtState {
     pub cxt: Cxt,
     pub size: Lvl,
-    local_constraints: HashMap<Lvl, Term>,
+    pub local_constraints: HashMap<Lvl, Val>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,7 +122,7 @@ pub struct MCxt {
     pub size: Lvl,
     def: DefId,
     local_metas: Vec<MetaEntry>,
-    local_constraints: HashMap<Lvl, Term>,
+    local_constraints: HashMap<Lvl, Val>,
     solved_globals: Vec<RecSolution>,
     children: Vec<DefId>,
 }
@@ -157,7 +157,7 @@ impl MCxt {
         }
     }
 
-    pub fn local_val(&self, lvl: Lvl) -> Option<&Term> {
+    pub fn local_val(&self, lvl: Lvl) -> Option<&Val> {
         self.local_constraints.get(&lvl)
     }
 
@@ -253,64 +253,14 @@ impl MCxt {
         Env::new(self.size)
     }
 
-    /// The process for solving local constraints is basically the same as solving metas
-    pub fn solve_local(
-        &mut self,
-        span: Span,
-        local: Lvl,
-        spine: &Spine,
-        val: Val,
-        db: &dyn Compiler,
-    ) -> Result<(), TypeError> {
-        // The value can only use variables that we're passing to the meta
-        let mut meta_scope: Rename = spine
-            .iter()
-            // Each argument is another lambda we're going to wrap it in
-            .zip(std::iter::successors(Some(self.size.inc()), |lvl| {
-                Some(lvl.inc())
-            }))
-            .map(|((_, x), to_lvl)| match x.unarc() {
-                Val::App(Var::Local(from_lvl), _, sp, _) if sp.is_empty() => (*from_lvl, to_lvl),
-                _ => panic!("Compiler error: meta spine contains non-variable"),
-            })
-            .collect();
-        let term = val.quote(self.size, &self, db);
-        // The level it will be at after we wrap it in lambdas
-        let to_lvl = (0..spine.len()).fold(self.size, |x, _| x.inc());
+    pub fn solve_local(&mut self, local: Lvl, spine: &Spine, val: Val) -> Result<(), TypeError> {
+        assert!(
+            spine.is_empty(),
+            "We don't support solving locals to lambdas yet"
+        );
 
-        // Get the type of each argument
-        let tys: Vec<Ty> = spine
-            .iter()
-            .zip(std::iter::successors(Some(self.size), |lvl| {
-                Some(lvl.inc())
-            }))
-            .map(|((_, v), l)| match v.unarc() {
-                Val::App(Var::Local(from_lvl), _, sp, _) if sp.is_empty() => {
-                    let ty = self.local_ty(from_lvl.to_ix(self.size), db);
-                    ty.quote(l, self, db)
-                }
-                _ => panic!("Compiler error: meta spine contains non-variable"),
-            })
-            .collect();
-
-        let term = term.check_solution(
-            Spanned::new(Var::Local(local), span),
-            &mut meta_scope,
-            self.size,
-            to_lvl,
-            &mut Names::new(self.cxt, db),
-        )?;
-        // Actually wrap it in lambdas
-        // We could look up the local variables' names in the cxt, but it's probably not worth it
-        let empty_name = db.intern_name("_".to_string());
-        let term = tys.into_iter().rev().fold(term, |term, ty| {
-            Term::Lam(empty_name, Icit::Expl, Box::new(ty), Box::new(term))
-        });
-
-        // Unlike with metas, we don't reevaluate it, we leave it as a Term
-
-        // Now add it to the local constraints
-        self.local_constraints.insert(local, term);
+        // Just add it to the local constraints as is, it doesn't need lambdas or anything like a meta
+        self.local_constraints.insert(local, val);
 
         Ok(())
     }
@@ -620,13 +570,21 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         l.dec(),
                     )
                 });
-            mcxt.solved_globals.push(RecSolution::Defined(
-                predef_id,
-                predef.span(),
-                ty_ty.clone(),
-            ));
+            mcxt.define(
+                **name,
+                NameInfo::Other(Var::Rec(predef_id), ty_ty.clone()),
+                db,
+            );
 
             let cxt_after = mcxt.state();
+
+            mcxt.set_state(cxt_before);
+            mcxt.define(
+                **name,
+                NameInfo::Other(Var::Rec(predef_id), ty_ty.clone()),
+                db,
+            );
+            let cxt_before = mcxt.state();
 
             let mut scope = Vec::new();
 
@@ -774,16 +732,33 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                             )
                         });
 
-                let full_ty = full_ty
-                    .evaluate(&mcxt.env(), &mcxt, db)
-                    .inline_metas(&mcxt, db);
+                let full_ty = full_ty.evaluate(&mcxt.env(), &mcxt, db);
+                // .inline_metas(&mcxt, db);
 
-                let def_id = db.intern_def(
-                    db.intern_predef(Arc::new(PreDef::Cons(cname.clone(), full_ty).into())),
-                    cxt_before.cxt,
-                );
-                scope.push((**cname, def_id));
+                scope.push((cname.clone(), full_ty));
             }
+
+            mcxt.set_state(cxt_before.clone());
+
+            // Make sure to inline metas in constructor types
+            let ty_ty = ty_ty.inline_metas(&mcxt, db);
+            mcxt.undef(db);
+            mcxt.define(
+                **name,
+                NameInfo::Other(Var::Rec(predef_id), ty_ty.clone()),
+                db,
+            );
+            let mut scope: Vec<_> = scope
+                .into_iter()
+                .map(|(cname, ty)| {
+                    let ty = ty.inline_metas(&mcxt, db);
+                    let def_id = db.intern_def(
+                        db.intern_predef(Arc::new(PreDef::Cons(cname.clone(), ty).into())),
+                        cxt_before.cxt,
+                    );
+                    (*cname, def_id)
+                })
+                .collect();
 
             // Add definitions from the associated namespace
             // They need the type of the datatype we're defining
@@ -1172,7 +1147,7 @@ fn p_unify(
         (Val::App(Var::Local(l), _, sp, _), t) | (t, Val::App(Var::Local(l), _, sp, _))
             if mode.local && mcxt.local_val(l).is_none() =>
         {
-            mcxt.solve_local(span, l, &sp, t, db)?;
+            mcxt.solve_local(l, &sp, t)?;
             Ok(Yes)
         }
 
