@@ -275,7 +275,8 @@ pub enum Term {
     Fun(Box<Ty>, Box<Ty>),
     /// Stores the type of `f`
     App(Icit, Box<Term>, Box<Ty>, Box<Term>),
-    Case(Box<Term>, Vec<(Pat, Term)>),
+    /// Stores the type of the scrutinee as the second argument
+    Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
 }
@@ -467,7 +468,7 @@ impl Term {
                 })
                 .prec(Prec::App),
             Term::Error => Doc::start("<error>"),
-            Term::Case(x, cases) => Doc::keyword("case")
+            Term::Case(x, _, cases) => Doc::keyword("case")
                 .space()
                 .chain(x.pretty(db, names))
                 .space()

@@ -1,9 +1,9 @@
 //! This module deals with translation to Durin.
 
-use crate::common::*;
 use crate::elaborate::MCxt;
 use crate::error::FileId;
 use crate::term::*;
+use crate::{common::*, pattern::Pat};
 use durin::builder::*;
 use durin::ir;
 
@@ -472,7 +472,124 @@ impl Term {
                 cxt.builder.end_pi(pi, to)
             }
             Term::Error => panic!("type errors should have been caught by now!"),
-            Term::Case(_, _) => todo!("lowering case"),
+            Term::Case(x, xty, cases) => {
+                let xty = (**xty).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
+                let x = x.lower(xty, cxt);
+
+                let cont = cases
+                    .iter()
+                    .rfold(PatCont::Unreachable, |rest, (pat, term)| PatCont::Pat {
+                        x,
+                        pat,
+                        cont: Box::new(PatCont::Term(term)),
+                        rest: Box::new(rest),
+                    });
+                cont.lower(ty, cxt)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum PatCont<'a> {
+    Unreachable,
+    Term(&'a Term),
+    Pat {
+        x: ir::Val,
+        pat: &'a Pat,
+        cont: Box<PatCont<'a>>,
+        rest: Box<PatCont<'a>>,
+    },
+}
+impl<'a> PatCont<'a> {
+    fn lower(&'a self, ty: VTy, cxt: &mut LCxt) -> ir::Val {
+        match self {
+            PatCont::Unreachable => {
+                let ty = ty.lower(Val::Type, cxt);
+                cxt.builder.unreachable(ty)
+            }
+            PatCont::Term(x) => x.lower(ty, cxt),
+            PatCont::Pat { x, pat, cont, rest } => pat.lower(*x, &cont, &rest, ty, cxt),
+        }
+    }
+}
+
+impl Pat {
+    fn lower<'a>(
+        &'a self,
+        x: ir::Val,
+        cont: &'a PatCont<'a>,
+        rest: &'a PatCont<'a>,
+        ty: VTy,
+        cxt: &mut LCxt,
+    ) -> ir::Val {
+        match self {
+            Pat::Any => cont.lower(ty, cxt),
+            Pat::Var(n, vty) => {
+                cxt.local(*n, x, (**vty).clone());
+                cont.lower(ty, cxt)
+            }
+            Pat::Cons(id, xty, args) => {
+                let (_, sid) = match xty.unarc() {
+                    Val::App(Var::Type(tid, sid), _, _, _) => (*tid, *sid),
+                    Val::App(Var::Rec(id), _, _, _) => cxt
+                        .scope_ids
+                        .get(id)
+                        .copied()
+                        .expect("Datatypes should be lowered before their constructors"),
+                    x => unreachable!("{:?}", x),
+                };
+
+                let idx = cxt
+                    .db
+                    .lookup_intern_scope(sid)
+                    .iter()
+                    .filter_map(|&(_name, id)| {
+                        let info = cxt.db.elaborate_def(id).ok()?;
+                        match &*info.term {
+                            Term::Var(Var::Cons(cid), _) if id == *cid => Some(id),
+                            _ => None,
+                        }
+                    })
+                    .enumerate()
+                    .find(|(_, x)| x == id)
+                    .unwrap()
+                    .0;
+
+                let lty = xty.clone().lower(Val::Type, cxt);
+                let lty = cxt.builder.sum_idx(lty, idx).expect("Not a sum type");
+                let product = cxt.builder.ifcase(idx, x, lty);
+
+                let cont = args
+                    .iter()
+                    .enumerate()
+                    .fold(cont.clone(), |cont, (i, pat)| {
+                        let x = cxt.builder.project(product, i);
+                        PatCont::Pat {
+                            x,
+                            pat,
+                            cont: Box::new(cont),
+                            rest: Box::new(rest.clone()),
+                        }
+                    });
+                let yes = cont.lower(ty.clone(), cxt);
+
+                cxt.builder.otherwise(yes);
+
+                let lty = ty.clone().lower(Val::Type, cxt);
+                let no = rest.lower(ty, cxt);
+
+                cxt.builder.endif(no, lty)
+            }
+            Pat::Or(a, b) => {
+                let rest = PatCont::Pat {
+                    x,
+                    pat: b,
+                    cont: Box::new(cont.clone()),
+                    rest: Box::new(rest.clone()),
+                };
+                a.lower(x, cont, &rest, ty, cxt)
+            }
         }
     }
 }

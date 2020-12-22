@@ -45,7 +45,7 @@ impl Term {
                 let x = x.evaluate(env, mcxt, db);
                 f.app(icit, x, mcxt, db)
             }
-            Term::Case(x, cases) => {
+            Term::Case(x, _, cases) => {
                 let x = x.evaluate(env, mcxt, db);
                 for (pat, body) in cases {
                     if let Some(env) = pat.match_with(&x, env.clone(), mcxt, db) {
@@ -300,13 +300,14 @@ impl Term {
                     .inline_metas(mcxt, db)
                     .quote(l, mcxt, db)
             }
-            Term::Case(mut x, cases) => {
+            Term::Case(mut x, mut ty, cases) => {
                 *x = x.inline_metas(mcxt, l, db);
+                *ty = ty.inline_metas(mcxt, l, db);
                 let cases = cases
                     .into_iter()
                     .map(|(p, x)| (p.inline_metas(mcxt, db), x.inline_metas(mcxt, l, db)))
                     .collect();
-                Term::Case(x, cases)
+                Term::Case(x, ty, cases)
             }
             Term::Error => Term::Error,
         }

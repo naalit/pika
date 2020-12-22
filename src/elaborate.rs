@@ -83,7 +83,7 @@ impl Term {
             }
             Term::Error => Ok(Term::Error),
             Term::Type => Ok(Term::Type),
-            Term::Case(mut x, cases) => {
+            Term::Case(mut x, mut ty, cases) => {
                 let cases = cases
                     .into_iter()
                     .map(|(pat, body)| {
@@ -102,8 +102,9 @@ impl Term {
                         ))
                     })
                     .collect::<Result<_, _>>()?;
-                *x = x.check_solution(meta, ren, lfrom, lto, names)?;
-                Ok(Term::Case(x, cases))
+                *x = x.check_solution(meta.clone(), ren, lfrom, lto, names)?;
+                *ty = ty.check_solution(meta, ren, lfrom, lto, names)?;
+                Ok(Term::Case(x, ty, cases))
             }
         }
     }

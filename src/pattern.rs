@@ -6,7 +6,7 @@ use crate::term::*;
 pub enum Pat {
     Any,
     Var(Name, Box<VTy>),
-    Cons(DefId, Vec<Pat>),
+    Cons(DefId, Box<VTy>, Vec<Pat>),
     Or(Box<Pat>, Box<Pat>),
 }
 
@@ -156,7 +156,6 @@ impl Cov {
             Cov::None => Cov::None,
             Cov::Cons(mut covs) => match ty {
                 Val::App(Var::Type(_, sid), _, _, _) => {
-                    // TODO unification for GADTs
                     let mut unmatched: Vec<DefId> = db
                         .lookup_intern_scope(*sid)
                         .iter()
@@ -236,7 +235,7 @@ impl Pat {
         match self {
             Pat::Any => Cov::All,
             Pat::Var(_, _) => Cov::All,
-            Pat::Cons(id, v) => Cov::Cons(vec![(*id, v.into_iter().map(Pat::cov).collect())]),
+            Pat::Cons(id, _, v) => Cov::Cons(vec![(*id, v.into_iter().map(Pat::cov).collect())]),
             Pat::Or(x, y) => x.cov().or(y.cov()),
         }
     }
@@ -249,7 +248,7 @@ impl Pat {
                 names.add(n);
                 Doc::start(n.get(db))
             }
-            Pat::Cons(id, p) => Doc::start(
+            Pat::Cons(id, _, p) => Doc::start(
                 db.lookup_intern_predef(db.lookup_intern_def(*id).0)
                     .name()
                     .unwrap()
@@ -273,7 +272,7 @@ impl Pat {
         match self {
             Pat::Any => {}
             Pat::Var(n, ty) => mcxt.define(*n, NameInfo::Local((**ty).clone()), db),
-            Pat::Cons(_, v) => {
+            Pat::Cons(_, _, v) => {
                 for p in v {
                     p.add_locals(mcxt, db);
                 }
@@ -292,7 +291,7 @@ impl Pat {
                 names.add(*n);
                 l.inc()
             }
-            Pat::Cons(_, v) => v.iter().fold(l, |l, p| p.add_names(l, names)),
+            Pat::Cons(_, _, v) => v.iter().fold(l, |l, p| p.add_names(l, names)),
             Pat::Or(_, _) => l,
         }
     }
@@ -304,8 +303,13 @@ impl Pat {
                 *t = t.inline_metas(mcxt, db);
                 Pat::Var(n, t)
             }
-            Pat::Cons(x, y) => {
-                Pat::Cons(x, y.into_iter().map(|x| x.inline_metas(mcxt, db)).collect())
+            Pat::Cons(x, mut ty, y) => {
+                *ty = ty.inline_metas(mcxt, db);
+                Pat::Cons(
+                    x,
+                    ty,
+                    y.into_iter().map(|x| x.inline_metas(mcxt, db)).collect(),
+                )
             }
             Pat::Or(mut x, mut y) => {
                 *x = x.inline_metas(mcxt, db);
@@ -328,7 +332,7 @@ impl Pat {
                 env.push(Some(val.clone()));
                 Some(env)
             }
-            Pat::Cons(id, v) => match val.clone().inline(env.size, db, mcxt) {
+            Pat::Cons(id, _, v) => match val.clone().inline(env.size, db, mcxt) {
                 Val::App(Var::Cons(id2), _, sp, _) => {
                     if *id == id2 {
                         for (i, (_, val)) in v.iter().zip(&sp) {
@@ -384,7 +388,11 @@ pub fn elab_case(
     }
 
     if last_cov == Cov::All {
-        Ok((Term::Case(Box::new(value), rcases), ret_ty.unwrap()))
+        let vty = val_ty.quote(mcxt.size, mcxt, db);
+        Ok((
+            Term::Case(Box::new(value), Box::new(vty), rcases),
+            ret_ty.unwrap(),
+        ))
     } else {
         Err(TypeError::Inexhaustive(vspan, last_cov, val_ty))
     }
@@ -497,7 +505,7 @@ fn elab_pat_app(
                 }
             }
 
-            match ty {
+            match &ty {
                 Val::Fun(_, _) | Val::Pi(_, _) => {
                     return Err(TypeError::WrongNumConsArgs(span, arity, f_arity))
                 }
@@ -516,7 +524,7 @@ fn elab_pat_app(
                             return Err(TypeError::InvalidPatternBecause(Box::new(
                                 TypeError::Unify(
                                     mcxt.clone(),
-                                    Spanned::new(ty.inline_metas(mcxt, db), span),
+                                    Spanned::new(ty.clone().inline_metas(mcxt, db), span),
                                     expected_ty.clone().inline_metas(mcxt, db),
                                 ),
                             )))
@@ -526,7 +534,7 @@ fn elab_pat_app(
                 }
             }
 
-            Ok(Pat::Cons(id, pspine))
+            Ok(Pat::Cons(id, Box::new(ty), pspine))
         }
         _ => Err(TypeError::InvalidPattern(span)),
     }
