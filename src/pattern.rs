@@ -505,6 +505,27 @@ fn elab_pat_app(
                 }
             }
 
+            // Apply any remaining implicits
+            loop {
+                match ty {
+                    Val::Pi(Icit::Impl, cl) => {
+                        mcxt.define(
+                            db.intern_name("_".into()),
+                            NameInfo::Local(cl.ty.clone()),
+                            db,
+                        );
+                        pspine.push(Pat::Var(cl.name, Box::new(cl.ty.clone())));
+                        ty = cl.vquote(l.inc(), mcxt, db);
+                        l = l.inc();
+                    }
+                    ty2 => {
+                        // Put it back
+                        ty = ty2;
+                        break;
+                    }
+                }
+            }
+
             match &ty {
                 Val::Fun(_, _) | Val::Pi(_, _) => {
                     return Err(TypeError::WrongNumConsArgs(span, arity, f_arity))
@@ -534,7 +555,7 @@ fn elab_pat_app(
                 }
             }
 
-            Ok(Pat::Cons(id, Box::new(ty), pspine))
+            Ok(Pat::Cons(id, Box::new(expected_ty.clone()), pspine))
         }
         _ => Err(TypeError::InvalidPattern(span)),
     }

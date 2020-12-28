@@ -275,7 +275,7 @@ fn lower_datatype(
                                     env.push(Some(x.clone()));
                                     // If we solved it, skip adding it to the sigma
                                     // This shouldn't be used at all
-                                    cxt.builder.cons(ir::Constant::Stop)
+                                    cxt.builder.cons(ir::Constant::Unreachable)
                                 } else {
                                     // It doesn't have a solution, so it remains in the product type
                                     keep.push(true);
