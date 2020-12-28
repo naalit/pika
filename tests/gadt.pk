@@ -1,0 +1,24 @@
+type Unit of New end
+
+# This is a very simple GADT, but is actually a GADT and not just an ADT
+type GADT t of
+  One : GADT Unit
+  Two : Type -> GADT Type
+end
+
+# Here Pika needs to figure out that GADT.One is impossible for GADT Type, so this is exhaustive
+fun f (x: GADT Type) = case x of
+  GADT.Two t => t
+end
+
+# Here it needs to figure out that in one branch a is Unit, and in the other it's Type
+fun g [a] (x: GADT a) : a = case x of
+  GADT.One => Unit.New
+  GADT.Two t => t
+end
+
+# And finally, here it needs to figure out that the other argument has type Type in one branch
+fun h [a] (x: GADT a) (y: a) : Type = case x of
+  GADT.Two t => (y -> t)
+  GADT.One => Type
+end

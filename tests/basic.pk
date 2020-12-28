@@ -1,5 +1,10 @@
 # This is about everything that works so far!
 
+val AType = Type -> Type
+val M : Type -> AType = \x y.x
+val Z : M Type Type = Type
+val Q = Z
+
 val U : Type = Type
 
 fun the (x: Type) (y: x) : x = y
@@ -30,7 +35,7 @@ x
 .
 x
 
-val local = do
+fun local (_:Type) = do
   fun f x = the Type x
   val t = Type -> Type
   f t

@@ -8,6 +8,7 @@ pub mod error;
 pub mod evaluate;
 pub mod lexer;
 pub mod lower;
+pub mod pattern;
 pub mod pretty;
 pub mod query;
 pub mod term;
@@ -29,8 +30,12 @@ fn main() {
         db.check_all(id);
         if db.num_errors() == 0 {
             println!("File elaborated successfully!");
-        // let durin = db.durin(id);
-        // println!("Durin module:\n{}", durin.emit());
+            let mut durin = db.durin(id);
+            println!("Durin module:\n{}", durin.emit());
+            let backend = durin::backend::Backend::native();
+            let m = backend.codegen_module(&mut durin);
+            // println!("LLVM module:\n{}", m.print_to_string().to_str().unwrap());
+            m.verify().unwrap();
         } else {
             db.write_errors();
             std::process::exit(1);

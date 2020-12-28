@@ -1,7 +1,7 @@
 pub use crate::error::*;
 pub use crate::pretty::*;
 pub use crate::query::*;
-pub use std::collections::VecDeque;
+pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::sync::{Arc, RwLock};
 
 /// A helper trait for accepting either owned or borrowed data, and cloning when necessary

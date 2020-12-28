@@ -4,6 +4,7 @@
 //! - `Val` is a value, where beta reduction and associated substitution has been performed.
 use crate::common::*;
 use crate::elaborate::MCxt;
+use crate::pattern::Pat;
 
 /// Records the reason we introduced a meta, used when reporting an unsolved meta to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
@@ -40,6 +41,10 @@ pub enum Pre_ {
     Do(Vec<PreDefAn>),
     Struct(Vec<PreDefAn>),
     Hole(MetaSource),
+    /// Dot(a, b, [c, d]) = a.b c d
+    Dot(Pre, SName, Vec<(Icit, Pre)>),
+    OrPat(Pre, Pre),
+    Case(Pre, Vec<(Pre, Pre)>),
 }
 
 /// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.
@@ -64,6 +69,14 @@ pub struct PreDefAn {
     pub attributes: Vec<Attribute>,
     pub inner: PreDef,
 }
+impl From<PreDef> for PreDefAn {
+    fn from(inner: PreDef) -> PreDefAn {
+        PreDefAn {
+            inner,
+            attributes: Vec::new(),
+        }
+    }
+}
 impl std::ops::Deref for PreDefAn {
     type Target = PreDef;
     fn deref(&self) -> &Self::Target {
@@ -71,35 +84,41 @@ impl std::ops::Deref for PreDefAn {
     }
 }
 
+/// PreDefs all have spans, usually the span of the name
+pub type SName = Spanned<Name>;
 /// The return type of a constructor is optional even here, since the behaviour is different.
 /// When a constructor return type is missing, we don't unify it, we use the type declaration,
 /// and add the type parameters declared there as implicit parameters to the constructor.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct PreCons(pub Name, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
+pub struct PreCons(pub SName, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
 /// A definition, declaration, or statement - anything that can appear in a `do`, `struct`, or `sig` block.
 ///
 /// `PreDef` doesn't keep track of attributes; see `PreDefAn` for that.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PreDef {
-    Fun(Name, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
-    Val(Name, PreTy, Pre),
-    Type(Name, Vec<(Name, Icit, PreTy)>, Vec<PreCons>),
-    Impl(Option<Name>, PreTy, Pre),
+    Fun(SName, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
+    Val(SName, PreTy, Pre),
+    Type(SName, Vec<(Name, Icit, PreTy)>, Vec<PreCons>, Vec<PreDefAn>),
+    Impl(Option<SName>, PreTy, Pre),
     Expr(Pre),
 
     // Declarations
-    FunDec(Name, Vec<(Name, Icit, PreTy)>, PreTy),
-    ValDec(Name, PreTy),
+    FunDec(SName, Vec<(Name, Icit, PreTy)>, PreTy),
+    ValDec(SName, PreTy),
+
+    /// Pre-typed term, used for data constructors.
+    Cons(SName, VTy),
 }
 impl PreDef {
     pub fn name(&self) -> Option<Name> {
         match self {
             PreDef::Fun(n, _, _, _)
             | PreDef::Val(n, _, _)
-            | PreDef::Type(n, _, _)
+            | PreDef::Type(n, _, _, _)
             | PreDef::FunDec(n, _, _)
-            | PreDef::ValDec(n, _) => Some(*n),
-            PreDef::Impl(n, _, _) => *n,
+            | PreDef::Cons(n, _)
+            | PreDef::ValDec(n, _) => Some(**n),
+            PreDef::Impl(n, _, _) => n.as_ref().map(|x| **x),
             PreDef::Expr(_) => None,
         }
     }
@@ -107,14 +126,15 @@ impl PreDef {
     /// This picks the best span for refering to the definition
     pub fn span(&self) -> Span {
         match self {
-            // TODO spanned names
-            PreDef::Fun(_, _, _, t) => t.span(),
-            PreDef::Val(_, _, t) => t.span(),
-            PreDef::Type(_, _, _) => todo!("spanned names"),
-            PreDef::Impl(_, _, t) => t.span(),
+            PreDef::Fun(n, _, _, _) => n.span(),
+            PreDef::Val(n, _, _) => n.span(),
+            PreDef::Type(n, _, _, _) => n.span(),
+            PreDef::Impl(Some(n), _, _) => n.span(),
+            PreDef::Impl(None, _, t) => t.span(),
             PreDef::Expr(t) => t.span(),
-            PreDef::FunDec(_, _, t) => t.span(),
-            PreDef::ValDec(_, t) => t.span(),
+            PreDef::FunDec(n, _, _) => n.span(),
+            PreDef::ValDec(n, _) => n.span(),
+            PreDef::Cons(n, _) => n.span(),
         }
     }
 }
@@ -185,11 +205,53 @@ impl Lvl {
         Ix(enclosing.0 - self.0)
     }
 
-    pub fn apply_meta(self, t: Term) -> Term {
+    pub fn apply_meta(self, v: Var<Ix>, ret_ty: Ty, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+        let ty = (0..self.0)
+            .map(|i| (mcxt.local_ty(Ix(i), db), mcxt.local_name(Ix(i), db)))
+            .fold((ret_ty, self), |(to, l), (from, name)| {
+                (
+                    // `ret_ty` is at level `self`, so the innermost local type is one less than that
+                    Term::Pi(
+                        name,
+                        Icit::Expl,
+                        Box::new(from.quote(l.dec(), mcxt, db)),
+                        Box::new(to),
+                    ),
+                    // and then each one outwards is one less
+                    // The last one is at Lvl(0)
+                    l.dec(),
+                )
+            })
+            .0;
+        // Because Terms use indices, the type here refers to its own parameters instead of locals in the outer context
+        let t = Term::Var(v, Box::new(ty.clone()));
+        // Now visit them from outermost to innermost
         (0..self.0)
             .rev()
-            .map(|i| Term::Var(Var::Local(Ix(i))))
-            .fold(t, |f, x| Term::App(Icit::Expl, Box::new(f), Box::new(x)))
+            .map(|i| {
+                Term::Var(
+                    Var::Local(Ix(i)),
+                    Box::new(mcxt.local_ty(Ix(i), db).quote(self, mcxt, db)),
+                )
+            })
+            .fold((t, ty), |(f, fty), x| {
+                // Peel off one Pi to get the type of the next `f`.
+                // It's dependent, so we need to add `x` to the environment.
+                // Then we evaluate-quote to so `rty` is in the context `self`.
+                let mut env = Env::new(self);
+                env.push(Some(x.clone().evaluate(&env, mcxt, db)));
+                let rty = match &fty {
+                    Term::Pi(_, _, _, x) => {
+                        (**x).clone().evaluate(&env, mcxt, db).quote(self, mcxt, db)
+                    }
+                    _ => unreachable!(),
+                };
+                (
+                    Term::App(Icit::Expl, Box::new(f), Box::new(fty), Box::new(x)),
+                    rty,
+                )
+            })
+            .0
     }
 }
 
@@ -207,55 +269,51 @@ pub type Ty = Term;
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Term {
     Type,
-    Var(Var<Ix>),
+    Var(Var<Ix>, Box<Ty>),
     Lam(Name, Icit, Box<Ty>, Box<Term>),
     Pi(Name, Icit, Box<Ty>, Box<Ty>),
     Fun(Box<Ty>, Box<Ty>),
-    App(Icit, Box<Term>, Box<Term>),
+    /// Stores the type of `f`
+    App(Icit, Box<Term>, Box<Ty>, Box<Term>),
+    /// Stores the type of the scrutinee as the second argument
+    Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
 }
 
 impl Term {
-    pub fn ty(&self, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+    /// If this is an application, return its head. Otherwise, return itself unchanged.
+    pub fn head(&self) -> &Term {
         match self {
-            Term::Type | Term::Pi(_, _, _, _) | Term::Fun(_, _) => Val::Type,
-            Term::Var(v) => match *v {
-                Var::Local(i) => mcxt.local_ty(i, db).clone(),
-                Var::Top(i) => (*db.elaborate_def(i).unwrap().typ).clone(),
-                Var::Rec(_) => todo!("find meta solution"),
-                Var::Meta(_) => todo!("find meta solution"),
-            },
-            Term::Lam(n, i, ty, body) => {
-                let ty = (**ty).clone().evaluate(&mcxt.env(), mcxt);
-                Val::Pi(
-                    *i,
-                    Box::new(ty.clone()),
-                    Box::new(Clos(
-                        mcxt.env(),
-                        {
-                            let mut mcxt = mcxt.clone();
-                            mcxt.define(*n, NameInfo::Local(ty), db);
-                            body.ty(&mcxt, db).quote(mcxt.size, &mcxt)
-                        },
-                        *n,
-                    )),
-                )
-            }
-            Term::App(_, f, x) => match f.ty(mcxt, db) {
-                Val::Fun(_, to) => *to,
-                Val::Pi(_, _, cl) => cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt), mcxt),
-                // It might be a name that refers to a function type, so we need to inline it
-                Val::App(h, sp, g) => match g.resolve(h, sp, mcxt.size, db, mcxt) {
-                    Some(Val::Fun(_, to)) => *to,
-                    Some(Val::Pi(_, _, cl)) => {
-                        cl.apply((**x).clone().evaluate(&mcxt.env(), mcxt), mcxt)
-                    }
-                    _ => unreachable!(),
-                },
-                _ => unreachable!(),
-            },
-            Term::Error => Val::Error,
+            Term::App(_, f, _, _) => f.head(),
+            x => x,
+        }
+    }
+
+    /// If this is a function type, give the return type. It *might not be valid at the original level* since this could be a Pi.
+    /// Returns itself unchanged if it isn't a function type.
+    pub fn ret(&self) -> &Term {
+        match self {
+            Term::Fun(_, to) => to.ret(),
+            Term::Pi(_, _, _, to) => to.ret(),
+            x => x,
+        }
+    }
+
+    pub fn arity(&self, only_expl: bool) -> usize {
+        match self {
+            Term::Fun(_, to) => 1 + to.arity(only_expl),
+            Term::Pi(_, Icit::Impl, _, to) if only_expl => to.arity(only_expl),
+            Term::Pi(_, Icit::Impl, _, to) => 1 + to.arity(only_expl),
+            Term::Pi(_, Icit::Expl, _, to) => 1 + to.arity(only_expl),
+            _ => 0,
+        }
+    }
+
+    pub fn is_cons(&self) -> bool {
+        match self {
+            Term::Var(Var::Cons(_), _) => true,
+            _ => false,
         }
     }
 }
@@ -293,6 +351,7 @@ impl<T> IVec<T> {
 
 // -- pretty printing --
 
+#[derive(Clone, Debug)]
 pub struct Names(VecDeque<Name>);
 impl Names {
     pub fn new(mut cxt: Cxt, db: &dyn Compiler) -> Names {
@@ -334,9 +393,9 @@ impl Term {
     pub fn pretty(&self, db: &dyn Compiler, names: &mut Names) -> Doc {
         match self {
             Term::Type => Doc::start("Type"),
-            Term::Var(v) => match v {
+            Term::Var(v, _) => match v {
                 Var::Local(ix) => Doc::start(names.get(*ix).get(db)),
-                Var::Top(id) => Doc::start(
+                Var::Top(id) | Var::Type(id, _) | Var::Cons(id) => Doc::start(
                     db.lookup_intern_predef(db.lookup_intern_def(*id).0)
                         .name()
                         .unwrap()
@@ -347,7 +406,7 @@ impl Term {
                     Meta::Type(id) => Doc::start("<type of ")
                         .add(db.lookup_intern_predef(*id).name().unwrap().get(db))
                         .add(">"),
-                    Meta::Local(def, id) => Doc::none().debug(def).add("?").add(id),
+                    Meta::Local(def, id) => Doc::start("?").add(def.num()).add(".").add(id),
                 },
             },
             Term::Lam(n, i, _ty, t) => {
@@ -399,7 +458,7 @@ impl Term {
                 .space()
                 .chain(to.pretty(db, names))
                 .prec(Prec::Term),
-            Term::App(i, f, x) => f
+            Term::App(i, f, _fty, x) => f
                 .pretty(db, names)
                 .nest(Prec::App)
                 .space()
@@ -409,6 +468,25 @@ impl Term {
                 })
                 .prec(Prec::App),
             Term::Error => Doc::start("<error>"),
+            Term::Case(x, _, cases) => Doc::keyword("case")
+                .space()
+                .chain(x.pretty(db, names))
+                .space()
+                .chain(Doc::keyword("of"))
+                .line()
+                .chain(Doc::intersperse(
+                    cases.iter().map(|(pat, body)| {
+                        pat.pretty(db, &mut names.clone())
+                            .space()
+                            .add("=>")
+                            .space()
+                            .chain(body.pretty(db, names))
+                    }),
+                    Doc::none().line(),
+                ))
+                .indent()
+                .line()
+                .add("end"),
         }
     }
 }
@@ -424,10 +502,10 @@ pub struct Env {
     pub size: Lvl,
 }
 impl Env {
-    pub fn inline_metas(&mut self, mcxt: &MCxt) {
+    pub fn inline_metas(&mut self, mcxt: &MCxt, db: &dyn Compiler) {
         for i in &mut self.vals {
             if let Some(x) = i {
-                *x = Arc::new((**x).clone().inline_metas(mcxt));
+                *x = Arc::new((**x).clone().inline_metas(mcxt, db));
             }
         }
     }
@@ -450,13 +528,13 @@ impl Env {
     }
 
     /// If it's not present, returns a local variable value
-    pub fn val(&self, i: Ix) -> Val {
+    pub fn val(&self, i: Ix, ty: Ty, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         self.vals
             .get(i.0 as usize)
             .cloned()
             .flatten()
             .map(Val::Arc)
-            .unwrap_or(Val::local(i.to_lvl(self.size)))
+            .unwrap_or(Val::local(i.to_lvl(self.size), ty.evaluate(self, mcxt, db)))
     }
 
     pub fn push(&mut self, v: Option<Val>) {
@@ -472,39 +550,41 @@ impl Env {
 ///
 /// Note that a `Clos` is very big (contains an inline `Env` and `Term`), so storing it behind a Box is advised.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Clos(pub Env, pub Term, pub Name);
+pub struct Clos {
+    pub env: Env,
+    pub ty: VTy,
+    pub term: Term,
+    pub name: Name,
+}
 impl Clos {
     pub fn env_size(&self) -> Lvl {
-        self.0.size
+        self.env.size
     }
 
     /// Quotes the closure back into a `Term`, but leaves it behind the lambda.
     /// So `enclosing` is the number of abstractions enclosing the *lambda*, it doesn't include the lambda.
-    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt) -> Term {
-        // We only need to do eval-quote if we've captured variables, which isn't that often
-        // Otherwise, we just need to inline meta solutions
-        // TODO is this still true?
-        if self.0.vals.is_empty() {
-            // TODO should this return a box and reuse it?
-            self.1.inline_metas(mcxt, self.0.size)
-        } else {
-            let Clos(mut env, t, _) = self;
-            env.push(Some(Val::local(enclosing.inc())));
-            t.evaluate(&env, mcxt).quote(enclosing.inc(), mcxt)
-        }
+    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+        let Clos {
+            mut env, term, ty, ..
+        } = self;
+        env.push(Some(Val::local(enclosing.inc(), ty)));
+        term.evaluate(&env, mcxt, db)
+            .quote(enclosing.inc(), mcxt, db)
     }
 
-    /// Equivalent to `self.apply(Val::local(l), mcxt)`
-    pub fn vquote(self, l: Lvl, mcxt: &MCxt) -> Val {
-        let Clos(mut env, t, _) = self;
-        env.push(Some(Val::local(l)));
-        t.evaluate(&env, mcxt)
+    /// Equivalent to `self.apply(Val::local(l, cl.ty), mcxt)`
+    pub fn vquote(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+        let Clos {
+            mut env, term, ty, ..
+        } = self;
+        env.push(Some(Val::local(l, ty)));
+        term.evaluate(&env, mcxt, db)
     }
 
-    pub fn apply(self, arg: Val, mcxt: &MCxt) -> Val {
-        let Clos(mut env, t, _) = self;
+    pub fn apply(self, arg: Val, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+        let Clos { mut env, term, .. } = self;
         env.push(Some(arg));
-        t.evaluate(&env, mcxt)
+        term.evaluate(&env, mcxt, db)
     }
 }
 
@@ -517,6 +597,64 @@ pub enum Var<Local> {
     Top(DefId),
     Rec(PreDefId),
     Meta(Meta),
+    /// Datatypes are identified by their DefId as well, since they all have one and they're distinct.
+    /// A `Type(id)` is the same as a `Top(id)`, except that it can't be inlined.
+    /// You can still call `elaborate_def()` on it to get its type.
+    Type(DefId, ScopeId),
+    Cons(DefId),
+}
+impl Var<Ix> {
+    pub fn cvt(self, l: Lvl) -> Var<Lvl> {
+        match self {
+            Var::Local(i) => Var::Local(i.to_lvl(l)),
+            Var::Top(i) => Var::Top(i),
+            Var::Rec(i) => Var::Rec(i),
+            Var::Meta(m) => Var::Meta(m),
+            Var::Type(i, s) => Var::Type(i, s),
+            Var::Cons(i) => Var::Cons(i),
+        }
+    }
+}
+impl Var<Lvl> {
+    pub fn cvt(self, l: Lvl) -> Var<Ix> {
+        match self {
+            Var::Local(i) => Var::Local(i.to_ix(l)),
+            Var::Top(i) => Var::Top(i),
+            Var::Rec(i) => Var::Rec(i),
+            Var::Meta(m) => Var::Meta(m),
+            Var::Type(i, s) => Var::Type(i, s),
+            Var::Cons(i) => Var::Cons(i),
+        }
+    }
+}
+impl<T: PartialEq> Var<T> {
+    /// Checks whether two heads can be considered equivalent.
+    /// Either they're actually equal, or one is Rec and one is Top, etc.
+    pub fn unify(self, other: Var<T>, db: &dyn Compiler) -> bool {
+        match (self, other) {
+            (x, y) if x == y => true,
+
+            // Ignore the scope id's, just make sure they're the same datatype
+            (Var::Type(a, _), Var::Type(b, _)) => a == b,
+
+            (Var::Rec(a), Var::Type(b, _))
+            | (Var::Type(b, _), Var::Rec(a))
+            | (Var::Rec(a), Var::Top(b))
+            | (Var::Top(b), Var::Rec(a))
+            | (Var::Cons(b), Var::Rec(a))
+            | (Var::Rec(a), Var::Cons(b)) => {
+                let (b, _) = db.lookup_intern_def(b);
+                a == b
+            }
+
+            (Var::Top(a), Var::Type(b, _))
+            | (Var::Type(b, _), Var::Top(a))
+            | (Var::Top(a), Var::Cons(b))
+            | (Var::Cons(b), Var::Top(a)) => a == b,
+
+            _ => false,
+        }
+    }
 }
 
 pub type Spine = Vec<(Icit, Val)>;
@@ -547,8 +685,14 @@ impl Glued {
         Glued(Arc::new(RwLock::new(None)))
     }
 
-    /// Like `resolve()`, but only inlines metas, not definitions. So, it doesn't need a database or quote level.
-    pub fn resolve_meta(&self, h: Var<Lvl>, sp: impl IntoOwned<Spine>, mcxt: &MCxt) -> Option<Val> {
+    /// Like `resolve()`, but only inlines metas, not definitions or local constraints. So, it doesn't need a quote level.
+    pub fn resolve_meta(
+        &self,
+        h: Var<Lvl>,
+        sp: impl IntoOwned<Spine>,
+        mcxt: &MCxt,
+        db: &dyn Compiler,
+    ) -> Option<Val> {
         let guard = self.0.read().unwrap();
         if let Some(v) = &*guard {
             Some(v.clone())
@@ -559,13 +703,15 @@ impl Glued {
                 Var::Local(_) => None,
                 // If we inlined the Rec, it would probably lead to infinite recursion
                 Var::Rec(_) => None,
+                Var::Type(_, _) => None,
+                Var::Cons(_) => None,
                 Var::Top(_) => None,
                 Var::Meta(m) => {
                     if let Some(val) = mcxt.get_meta(m) {
                         let val = sp
                             .into_owned()
                             .into_iter()
-                            .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                            .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                         let val = Val::Arc(Arc::new(val));
                         *self.0.write().unwrap() = Some(val.clone());
                         Some(val)
@@ -593,18 +739,29 @@ impl Glued {
         } else {
             drop(guard);
             match h {
-                // We won't inline the local
-                Var::Local(_) => None,
-                // If we inlined the Rec, it would probably lead to infinite recursion
-                Var::Rec(_) => None,
-                Var::Top(def) => {
-                    let val = db.elaborate_def(def).ok()?.term;
-                    let val = (*val).clone();
-                    let val = val.evaluate(&Env::new(l), mcxt);
+                // Check the mcxt's local constraints
+                Var::Local(lvl) => {
+                    let val = mcxt.local_val(lvl)?.clone();
                     let val = sp
                         .into_owned()
                         .into_iter()
-                        .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
+                    // We don't cache this, because we might use this value outside of the local scope
+                    Some(val)
+                }
+                // If we inlined the Rec, it would probably lead to infinite recursion
+                Var::Rec(_) => None,
+                // A datatype is already fully evaluated
+                Var::Type(_, _) => None,
+                Var::Cons(_) => None,
+                Var::Top(def) => {
+                    let val = db.elaborate_def(def).ok()?.term;
+                    let val = (*val).clone();
+                    let val = val.evaluate(&Env::new(l), mcxt, db);
+                    let val = sp
+                        .into_owned()
+                        .into_iter()
+                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                     let val = Val::Arc(Arc::new(val));
                     *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
@@ -614,7 +771,7 @@ impl Glued {
                         let val = sp
                             .into_owned()
                             .into_iter()
-                            .fold(val, |f, (i, x)| f.app(i, x, mcxt));
+                            .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                         let val = Val::Arc(Arc::new(val));
                         *self.0.write().unwrap() = Some(val.clone());
                         Some(val)
@@ -636,17 +793,18 @@ pub enum Val {
     Type,
     Arc(Arc<Val>),
     /// The spine are arguments applied in order. It can be empty.
-    App(Var<Lvl>, Spine, Glued),
-    Lam(Icit, Box<VTy>, Box<Clos>),
-    Pi(Icit, Box<VTy>, Box<Clos>),
+    /// Stores the type of the head.
+    App(Var<Lvl>, Box<VTy>, Spine, Glued),
+    Lam(Icit, Box<Clos>),
+    Pi(Icit, Box<Clos>),
     Fun(Box<VTy>, Box<VTy>),
     Error,
 }
 impl Val {
     pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
         self.clone()
-            .inline_metas(mcxt)
-            .quote(mcxt.size, mcxt)
+            .inline_metas(mcxt, db)
+            .quote(mcxt.size, mcxt, db)
             .pretty(db, &mut Names::new(mcxt.cxt, db))
     }
 
@@ -658,19 +816,51 @@ impl Val {
         }
     }
 
-    pub fn local(lvl: Lvl) -> Val {
-        Val::App(Var::Local(lvl), Vec::new(), Glued::new())
+    pub fn ret_type(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+        match self {
+            Val::Fun(_, to) => to.ret_type(l.inc(), mcxt, db),
+            Val::Pi(_, cl) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).ret_type(l.inc(), mcxt, db),
+            x => x,
+        }
     }
 
-    pub fn top(def: DefId) -> Val {
-        Val::App(Var::Top(def), Vec::new(), Glued::new())
+    pub fn arity(&self, only_expl: bool) -> usize {
+        match self {
+            Val::Fun(_, to) => 1 + to.arity(only_expl),
+            Val::Pi(Icit::Impl, cl) if only_expl => cl.term.arity(only_expl),
+            Val::Pi(Icit::Impl, cl) => 1 + cl.term.arity(only_expl),
+            Val::Pi(Icit::Expl, cl) => 1 + cl.term.arity(only_expl),
+            _ => 0,
+        }
     }
 
-    pub fn rec(id: PreDefId) -> Val {
-        Val::App(Var::Rec(id), Vec::new(), Glued::new())
+    pub fn local(lvl: Lvl, ty: VTy) -> Val {
+        Val::App(Var::Local(lvl), Box::new(ty), Vec::new(), Glued::new())
     }
 
-    pub fn meta(meta: Meta) -> Val {
-        Val::App(Var::Meta(meta), Vec::new(), Glued::new())
+    pub fn datatype(def: DefId, scope: ScopeId, ty: VTy) -> Val {
+        Val::App(
+            Var::Type(def, scope),
+            Box::new(ty),
+            Vec::new(),
+            Glued::new(),
+        )
+    }
+
+    pub fn top(def: DefId, ty: VTy) -> Val {
+        Val::App(Var::Top(def), Box::new(ty), Vec::new(), Glued::new())
+    }
+
+    pub fn rec(id: PreDefId, ty: VTy) -> Val {
+        Val::App(Var::Rec(id), Box::new(ty), Vec::new(), Glued::new())
+    }
+
+    pub fn cons(id: DefId, ty: VTy) -> Val {
+        Val::App(Var::Cons(id), Box::new(ty), Vec::new(), Glued::new())
+    }
+
+    pub fn meta(meta: Meta, ty: VTy) -> Val {
+        Val::App(Var::Meta(meta), Box::new(ty), Vec::new(), Glued::new())
     }
 }

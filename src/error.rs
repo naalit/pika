@@ -154,6 +154,10 @@ pub trait ToError {
 
 impl Eq for Error {}
 impl Error {
+    pub fn message(&mut self) -> &mut String {
+        &mut self.0.message
+    }
+
     pub fn no_label(message: impl Into<String>) -> Self {
         Error(Diagnostic::error().with_message(message))
     }
