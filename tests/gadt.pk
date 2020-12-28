@@ -19,6 +19,6 @@ end
 
 # And finally, here it needs to figure out that the other argument has type Type in one branch
 fun h [a] (x: GADT a) (y: a) : Type = case x of
-  GADT.Two t => (t -> t)
+  GADT.Two t => (y -> t)
   GADT.One => Type
 end

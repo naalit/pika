@@ -105,7 +105,35 @@ impl<'db> LCxt<'db> {
 
 impl Val {
     pub fn lower(self, ty: VTy, cxt: &mut LCxt) -> ir::Val {
-        self.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db).lower(ty, cxt)
+        // If this is a datatype applied to all its arguments, inline the sum type
+        // That way Durin knows the type when calling ifcase
+        let (tid, sid, targs) = match self {
+            Val::App(Var::Type(tid, sid), _, sp, _) => {
+                (tid, sid, sp.into_iter().map(|(_, v)| v).collect())
+            }
+            Val::App(Var::Top(tid), hty, sp, g) => {
+                if let Some(&(x, y)) = cxt.scope_ids.get(&cxt.db.lookup_intern_def(tid).0) {
+                    (x, y, sp.into_iter().map(|(_, v)| v).collect())
+                } else {
+                    return Val::App(Var::Top(tid), hty, sp, g)
+                        .quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)
+                        .lower(ty, cxt);
+                }
+            }
+            Val::App(Var::Rec(id), hty, sp, g) => {
+                if let Some(&(x, y)) = cxt.scope_ids.get(&id) {
+                    (x, y, sp.into_iter().map(|(_, v)| v).collect())
+                } else {
+                    return Val::App(Var::Rec(id), hty, sp, g)
+                        .quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)
+                        .lower(ty, cxt);
+                }
+            }
+            Val::Arc(x) => return IntoOwned::<Val>::into_owned(x).lower(ty, cxt),
+            x => return x.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db).lower(ty, cxt),
+        };
+        let (tys, _) = lower_datatype(tid, sid, targs, cxt);
+        cxt.builder.sum_type(tys)
     }
 }
 
@@ -527,15 +555,19 @@ impl Pat {
             Pat::Any => cont.lower(ty, cxt),
             Pat::Var(n, vty) => {
                 cxt.local(*n, x, (**vty).clone());
-                cont.lower(ty, cxt)
+                let ret = cont.lower(ty, cxt);
+                cxt.pop_local();
+                ret
             }
             Pat::Cons(id, xty, args) => {
-                let (_, sid) = match xty.unarc() {
-                    Val::App(Var::Type(tid, sid), _, _, _) => (*tid, *sid),
-                    Val::App(Var::Rec(id), _, _, _) => cxt
+                let (tid, sid, targs) = match xty.unarc() {
+                    Val::App(Var::Type(tid, sid), _, sp, _) => {
+                        (*tid, *sid, sp.iter().map(|(_, v)| v.clone()).collect())
+                    }
+                    Val::App(Var::Rec(id), _, sp, _) => cxt
                         .scope_ids
                         .get(id)
-                        .copied()
+                        .map(|&(x, y)| (x, y, sp.iter().map(|(_, v)| v.clone()).collect()))
                         .expect("Datatypes should be lowered before their constructors"),
                     x => unreachable!("{:?}", x),
                 };
@@ -556,8 +588,8 @@ impl Pat {
                     .unwrap()
                     .0;
 
-                let lty = xty.clone().lower(Val::Type, cxt);
-                let lty = cxt.builder.sum_idx(lty, idx).expect("Not a sum type");
+                let (ltys, _) = lower_datatype(tid, sid, targs, cxt);
+                let lty = ltys[idx];
                 let product = cxt.builder.ifcase(idx, x, lty);
 
                 let cont = args
