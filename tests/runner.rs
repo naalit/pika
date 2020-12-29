@@ -50,6 +50,27 @@ fn test_gadt() {
 }
 
 #[test]
+fn test_numbers() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/numbers.pk"])
+        .assert()
+        .success();
+}
+
+// Tests for type errors
+
+#[test]
+fn test_untyped_literal() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/untyped_literal.pk"])
+        .assert()
+        .stderr(contains("Could not infer type"))
+        .failure();
+}
+
+#[test]
 fn test_inexhaustive() {
     Command::cargo_bin("pika")
         .unwrap()

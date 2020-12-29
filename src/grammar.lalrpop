@@ -222,7 +222,7 @@ App: Pre_ = {
 Atom: Pre_ = {
   "Type" => Pre_::Type,
   Name => if &<>.get(db) == "_" { Pre_::Hole(MetaSource::Hole) } else { Pre_::Var(<>) },
-  Lit => todo!("numbers"),
+  Lit => Pre_::Lit(<>),
   "(" <Term> ")" => <>,
   "(" ")" => todo!("()"),
 }
@@ -244,42 +244,72 @@ RHS: Pre_ = {
 // Standard precedence for arithmetic operators
 Arith<S>: Pre_ = {
   Factor<S>,
-  Arith<S> "+" Factor<RHS> => todo!("+"),
-  Arith<S> "-" Factor<RHS> => todo!("-"),
+  <a:Sp<Arith<S>>> "+" <b:Sp<Factor<RHS>>> => Pre_::BinOp(BinOp::Add, a, b),
+  <a:Sp<Arith<S>>> "-" <b:Sp<Factor<RHS>>> => Pre_::BinOp(BinOp::Sub, a, b),
 }
 Factor<S>: Pre_ = {
   Exp<S>,
-  Factor<S> "*" Exp<RHS> => todo!("*"),
-  Factor<S> "/" Exp<RHS> => todo!("/"),
+  <a:Sp<Factor<S>>> "*" <b:Sp<Exp<RHS>>> => Pre_::BinOp(BinOp::Mul, a, b),
+  <a:Sp<Factor<S>>> "/" <b:Sp<Exp<RHS>>> => Pre_::BinOp(BinOp::Div, a, b),
 }
 Exp<S>: Pre_ = {
   S,
-  Exp<S> "**" RHS => todo!("**"),
+  <a:Sp<Exp<S>>> "**" <b:Sp<RHS>> => Pre_::BinOp(BinOp::Exp, a, b),
 }
 
 // No precedence for bitwise operators, but all are left-associative.
 Bitwise<S>: Pre_ = {
   // You can't use arithmetic with bitwise operators without parens, but we need a single chain.
   Arith<S>,
-  S ("&" RHS)+ => todo!("&"),
-  S ("|" RHS)+ => todo!("|"),
+  Sp<S> ("&" <Sp<RHS>>)+ => {
+    let (s, v) = (<>);
+    v.into_iter().fold(s, |s, x| {
+      let span = Span(s.span().0, x.span().1);
+      Spanned::new(Pre_::BinOp(BinOp::BitAnd, s, x), span)
+    }).unwrap()
+  },
+  Sp<S> ("|" <Sp<RHS>>)+ => {
+    let (s, v) = (<>);
+    v.into_iter().fold(s, |s, x| {
+      let span = Span(s.span().0, x.span().1);
+      Spanned::new(Pre_::BinOp(BinOp::BitOr, s, x), span)
+    }).unwrap()
+  },
   // Single "^" is ambiguous: exponentiation or xor?
-  S ("^^" RHS)+ => todo!("^^"),
+  Sp<S> ("^^" <Sp<RHS>>)+ => {
+    let (s, v) = (<>);
+    v.into_iter().fold(s, |s, x| {
+      let span = Span(s.span().0, x.span().1);
+      Spanned::new(Pre_::BinOp(BinOp::BitXor, s, x), span)
+    }).unwrap()
+  },
   // I'd like << and >> for function composition, too - maybe the same operator, e.g. `impl [T P Q] ShiftRight (x: T -> P x) (y: [x] P x -> Q y) = ...`?
   // The alternative would be <<< and >>>.
-  S ("<<" RHS)+ => todo!(">>"),
-  S (">>" RHS)+ => todo!("<<"),
+  Sp<S> ("<<" <Sp<RHS>>)+ => {
+    let (s, v) = (<>);
+    v.into_iter().fold(s, |s, x| {
+      let span = Span(s.span().0, x.span().1);
+      Spanned::new(Pre_::BinOp(BinOp::BitShl, s, x), span)
+    }).unwrap()
+  },
+  Sp<S> (">>" <Sp<RHS>>)+ => {
+    let (s, v) = (<>);
+    v.into_iter().fold(s, |s, x| {
+      let span = Span(s.span().0, x.span().1);
+      Spanned::new(Pre_::BinOp(BinOp::BitShr, s, x), span)
+    }).unwrap()
+  },
 }
 
 // No precedence or associativity within comparison operators.
 // But, they're lower precedence than arithmetic or bitwise - `x + 2 == z * 3` works fine.
 Comparison<S>: Pre_ = {
   Bitwise<S>,
-  Bitwise<S> "==" Bitwise<RHS> => todo!("=="),
-  Bitwise<S> ">"  Bitwise<RHS> => todo!(">"),
-  Bitwise<S> "<"  Bitwise<RHS> => todo!("<"),
-  Bitwise<S> "<=" Bitwise<RHS> => todo!("<="),
-  Bitwise<S> ">=" Bitwise<RHS> => todo!(">="),
+  <a:Sp<Bitwise<S>>> "==" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Eq, a, b),
+  <a:Sp<Bitwise<S>>> "<" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Lt, a, b),
+  <a:Sp<Bitwise<S>>> ">" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Gt, a, b),
+  <a:Sp<Bitwise<S>>> "<=" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Leq, a, b),
+  <a:Sp<Bitwise<S>>> ">=" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Geq, a, b),
 }
 
 // No precedence between `and` and `or`, but one can be repeated: `x and y and z` works but not `x and y or z`.
@@ -293,8 +323,8 @@ Logical<S>: Pre_ = {
 // <| and |> have no precedence, but are left-associative: `x |> y |> z` = `z(y(x))`, `x <| y <| z` = `x y z`.
 Op: Pre_ = {
   Logical<LHS>,
-  LHS "<|" RHS => todo!("<|"),
-  LHS "|>" RHS => todo!("|>"),
+  <a:Sp<LHS>> "<|" <b:Sp<RHS>> => Pre_::BinOp(BinOp::PipeL, a, b),
+  <a:Sp<LHS>> "|>" <b:Sp<RHS>> => Pre_::BinOp(BinOp::PipeR, a, b),
   // `a . b c d` = `b c d a`, where `b` is looked up in the context of `a`'s type.
   // Unless `a.b` is a field, in which case it's `(a.b) c d`.
   // `a b . c d` isn't allowed.
@@ -355,7 +385,6 @@ ArgGroup: (Vec<Name>, Icit, PreTy) = {
 }
 
 ImpArg: (Vec<Name>, PreTy) = {
-  // TODO let these arguments have different types
   <l:@L> "[" <n:Name+> "]" <r:@R> => { let name = n[0]; (n, Spanned::new(Pre_::Hole(MetaSource::LocalType(name)), Span(l, r))) },
   "[" <n:Name+> ":" <ty:Sp<Expr>> "]" => (n, ty),
   "[" ":" <ty:Sp<Expr>> "]" => (vec![db.intern_name("_".to_string())], ty),

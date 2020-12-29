@@ -315,11 +315,56 @@ fn lower_datatype(
         .unzip()
 }
 
+impl BinOp {
+    fn lower(self) -> ir::BinOp {
+        match self {
+            BinOp::Add => ir::BinOp::IAdd,
+            BinOp::Sub => ir::BinOp::ISub,
+            BinOp::Mul => ir::BinOp::IMul,
+            BinOp::Div => ir::BinOp::IDiv,
+            BinOp::Exp => ir::BinOp::IExp,
+            BinOp::BitAnd => ir::BinOp::IAnd,
+            BinOp::BitOr => ir::BinOp::IOr,
+            BinOp::BitXor => ir::BinOp::IXor,
+            BinOp::BitShl => ir::BinOp::IShl,
+            BinOp::BitShr => ir::BinOp::IShr,
+            _ => todo!("lower comp ops and pipes"),
+        }
+    }
+}
+
+impl Builtin {
+    fn lower(self, cxt: &mut LCxt) -> ir::Val {
+        match self {
+            Builtin::I32 => cxt.builder.cons(ir::Constant::IntType(ir::Width::W32)),
+            Builtin::I64 => cxt.builder.cons(ir::Constant::IntType(ir::Width::W64)),
+            Builtin::BinOp(op) => {
+                let i32_ty = cxt.builder.cons(ir::Constant::IntType(ir::Width::W32));
+                let a = cxt.builder.push_fun(None, i32_ty);
+                let b = cxt.builder.push_fun(None, i32_ty);
+                let val = cxt.builder.binop(op.lower(), a, b);
+                let f = cxt.builder.pop_fun(val, i32_ty);
+                let fty = cxt.builder.fun_type(i32_ty, i32_ty);
+                cxt.builder.pop_fun(f, fty)
+            }
+        }
+    }
+}
+
 impl Term {
     pub fn lower(&self, ty: VTy, cxt: &mut LCxt) -> ir::Val {
         match self {
             Term::Type => cxt.builder.cons(ir::Constant::TypeType),
+            Term::Lit(x, t) => x.lower(
+                match t {
+                    Builtin::I32 => ir::Width::W32,
+                    Builtin::I64 => ir::Width::W64,
+                    _ => unreachable!(),
+                },
+                cxt,
+            ),
             Term::Var(v, _) => match v {
+                Var::Builtin(b) => b.lower(cxt),
                 Var::Local(i) => *cxt.locals.get(*i),
                 Var::Top(i) => {
                     let (i, _) = cxt.db.lookup_intern_def(*i);
@@ -542,6 +587,15 @@ impl<'a> PatCont<'a> {
     }
 }
 
+impl Literal {
+    fn lower(self, w: ir::Width, cxt: &mut LCxt) -> ir::Val {
+        match self {
+            Literal::Positive(i) => cxt.builder.cons(ir::Constant::Int(w, i as i64)),
+            Literal::Negative(i) => cxt.builder.cons(ir::Constant::Int(w, i)),
+        }
+    }
+}
+
 impl Pat {
     fn lower<'a>(
         &'a self,
@@ -558,6 +612,20 @@ impl Pat {
                 let ret = cont.lower(ty, cxt);
                 cxt.pop_local();
                 ret
+            }
+            Pat::Lit(l, w) => {
+                let l = l.lower(*w, cxt);
+                let eq = cxt.builder.binop(ir::BinOp::IEq, l, x);
+                cxt.builder.if_expr(eq);
+
+                let yes = cont.lower(ty.clone(), cxt);
+
+                cxt.builder.otherwise(yes);
+
+                let lty = ty.clone().lower(Val::Type, cxt);
+                let no = rest.lower(ty, cxt);
+
+                cxt.builder.endif(no, lty)
             }
             Pat::Cons(id, xty, args) => {
                 let (tid, sid, targs) = match xty.unarc() {

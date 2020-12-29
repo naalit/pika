@@ -1,6 +1,8 @@
 use crate::common::*;
 use crate::elaborate::*;
 use crate::term::*;
+use bit_set::BitSet;
+use durin::ir::Width;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Pat {
@@ -8,6 +10,7 @@ pub enum Pat {
     Var(Name, Box<VTy>),
     Cons(DefId, Box<VTy>, Vec<Pat>),
     Or(Box<Pat>, Box<Pat>),
+    Lit(Literal, Width),
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
@@ -18,12 +21,18 @@ pub enum Cov {
     None,
     /// We *did* cover these constructors
     Cons(Vec<(DefId, Vec<Cov>)>),
+    /// We *did* cover these literals
+    Lit(BitSet),
 }
 impl Cov {
     pub fn or(self, other: Self) -> Self {
         match (self, other) {
             (Cov::All, _) | (_, Cov::All) => Cov::All,
             (Cov::None, x) | (x, Cov::None) => x,
+            (Cov::Lit(mut a), Cov::Lit(b)) => {
+                a.union_with(&b);
+                Cov::Lit(a)
+            }
             (Cov::Cons(mut v), Cov::Cons(v2)) => {
                 for (cons, cov) in v2 {
                     if let Some((_, cov2)) = v.iter_mut().find(|(c, _)| *c == cons) {
@@ -38,6 +47,7 @@ impl Cov {
                 }
                 Cov::Cons(v)
             }
+            _ => unreachable!(),
         }
     }
 
@@ -45,6 +55,9 @@ impl Cov {
         match self {
             Cov::All => Doc::start("<nothing>"),
             Cov::None => Doc::start("_"),
+            // We don't show what literals we've covered.
+            // In the future, we may switch to ranges like Rust uses.
+            Cov::Lit(_) => Doc::start("_"),
             Cov::Cons(covs) => match ty {
                 Val::App(Var::Type(_, sid), _, _, _) => {
                     let mut v = Vec::new();
@@ -154,6 +167,7 @@ impl Cov {
         match self {
             Cov::All => Cov::All,
             Cov::None => Cov::None,
+            Cov::Lit(s) => Cov::Lit(s),
             Cov::Cons(mut covs) => match ty {
                 Val::App(Var::Type(_, sid), _, _, _) => {
                     let mut unmatched: Vec<DefId> = db
@@ -237,6 +251,7 @@ impl Pat {
             Pat::Var(_, _) => Cov::All,
             Pat::Cons(id, _, v) => Cov::Cons(vec![(*id, v.into_iter().map(Pat::cov).collect())]),
             Pat::Or(x, y) => x.cov().or(y.cov()),
+            Pat::Lit(l, _) => Cov::Lit(std::iter::once(l.to_usize()).collect()),
         }
     }
 
@@ -265,12 +280,13 @@ impl Pat {
                 .add('|')
                 .space()
                 .chain(y.pretty(db, names)),
+            Pat::Lit(x, _) => x.pretty(),
         }
     }
 
     pub fn add_locals(&self, mcxt: &mut MCxt, db: &dyn Compiler) {
         match self {
-            Pat::Any => {}
+            Pat::Any | Pat::Lit(_, _) => {}
             Pat::Var(n, ty) => mcxt.define(*n, NameInfo::Local((**ty).clone()), db),
             Pat::Cons(_, _, v) => {
                 for p in v {
@@ -286,7 +302,7 @@ impl Pat {
 
     pub fn add_names(&self, l: Lvl, names: &mut Names) -> Lvl {
         match self {
-            Pat::Any => l,
+            Pat::Any | Pat::Lit(_, _) => l,
             Pat::Var(n, _) => {
                 names.add(*n);
                 l.inc()
@@ -316,6 +332,7 @@ impl Pat {
                 *y = y.inline_metas(mcxt, db);
                 Pat::Or(x, y)
             }
+            Pat::Lit(x, w) => Pat::Lit(x, w),
         }
     }
 
@@ -338,6 +355,16 @@ impl Pat {
                         for (i, (_, val)) in v.iter().zip(&sp) {
                             env = i.match_with(val, env, mcxt, db)?;
                         }
+                        Some(env)
+                    } else {
+                        None
+                    }
+                }
+                _ => unreachable!(),
+            },
+            Pat::Lit(x, _) => match val.unarc() {
+                Val::Lit(l, _) => {
+                    if l == x {
                         Some(env)
                     } else {
                         None
@@ -400,6 +427,18 @@ pub fn elab_case(
 
 pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Result<Pat, TypeError> {
     match &**pre {
+        Pre_::Lit(l) => match ty {
+            Val::App(Var::Builtin(b), _, _, _) => match b {
+                Builtin::I32 => Ok(Pat::Lit(*l, Width::W32)),
+                Builtin::I64 => Ok(Pat::Lit(*l, Width::W64)),
+                _ => Err(TypeError::InvalidPatternBecause(Box::new(
+                    TypeError::NotIntType(pre.span(), ty.clone().inline_metas(mcxt, db)),
+                ))),
+            },
+            _ => Err(TypeError::InvalidPatternBecause(Box::new(
+                TypeError::NotIntType(pre.span(), ty.clone().inline_metas(mcxt, db)),
+            ))),
+        },
         Pre_::Var(n) => {
             if let Ok((Var::Top(id), _)) = mcxt.lookup(*n, db) {
                 if let Ok(info) = db.elaborate_def(id) {

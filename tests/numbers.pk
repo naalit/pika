@@ -1,0 +1,4 @@
+fun f (x : I32) : I32 = case x of
+  0 => 1
+  y => y + 2
+end

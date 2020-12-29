@@ -13,10 +13,11 @@ salsa = "*"
 codespan-reporting = "*"
 lazy_static = "*"
 pretty = { version = "*", features = ["termcolor"] }
-durin = { git = "https://github.com/tolziplohu/durin", rev = "71f584925a97d216473baf4861ce2d1e96cd1692" }
+durin = { git = "https://github.com/tolziplohu/durin", rev = "264dfb613e4ab98c0ba19526b0bade813db29fbf" }
 smallvec = "*"
 assert_cmd = "*"
 predicates = "*"
+bit-set = "*"
 
 [build-dependencies]
 lalrpop = { version = "*", features = ["lexer"] }

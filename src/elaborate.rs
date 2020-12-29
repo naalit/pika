@@ -83,6 +83,7 @@ impl Term {
             }
             Term::Error => Ok(Term::Error),
             Term::Type => Ok(Term::Type),
+            Term::Lit(x, t) => Ok(Term::Lit(x, t)),
             Term::Case(mut x, mut ty, cases) => {
                 let cases = cases
                     .into_iter()
@@ -901,6 +902,8 @@ pub enum TypeError {
     NotFound(Spanned<Name>),
     NotFunction(MCxt, Spanned<VTy>),
     Unify(MCxt, Spanned<VTy>, VTy),
+    NotIntType(Span, VTy),
+    UntypedLiteral(Span),
     MetaScope(Span, Var<Lvl>, Name),
     MetaOccurs(Span, Var<Lvl>),
     NotStruct(Spanned<VTy>),
@@ -1009,6 +1012,20 @@ impl TypeError {
                 *e.message() = message;
                 e
             }
+            TypeError::NotIntType(span, ty) => Error::new(
+                file,
+                Doc::start("Expected value of type ")
+                    .chain(ty.pretty(db, mcxt).style(Style::None))
+                    .add(", got integer"),
+                span,
+                format!("this is an integer"),
+            ),
+            TypeError::UntypedLiteral(span) => Error::new(
+                file,
+                Doc::start("Could not infer type of ambiguous literal"),
+                span,
+                format!("try adding a type, like I32 or I64"),
+            ),
         }
     }
 }
@@ -1284,6 +1301,17 @@ pub fn infer(
 ) -> Result<(Term, VTy), TypeError> {
     match &**pre {
         Pre_::Type => Ok((Term::Type, Val::Type)),
+
+        Pre_::Lit(_) => Err(TypeError::UntypedLiteral(pre.span())),
+
+        Pre_::BinOp(op, a, b) => {
+            let f = Term::Var(
+                Var::Builtin(Builtin::BinOp(*op)),
+                Box::new(op.ty().quote(mcxt.size, mcxt, db)),
+            );
+            let (f, fty) = infer_app(f, op.ty(), pre.span(), Icit::Expl, a, db, mcxt)?;
+            infer_app(f, fty, pre.span(), Icit::Expl, b, db, mcxt)
+        }
 
         Pre_::Var(name) => {
             let (term, ty) = match mcxt.lookup(*name, db) {
@@ -1574,6 +1602,17 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             let ty = cl.ty.clone().quote(mcxt.size, mcxt, db);
             Ok(Term::Lam(cl.name, Icit::Impl, Box::new(ty), Box::new(body)))
         }
+
+        (Pre_::Lit(l), _) => match ty.unarc() {
+            Val::App(Var::Builtin(b), _, _, _) if matches!(b, Builtin::I32 | Builtin::I64) => {
+                Ok(Term::Lit(*l, *b))
+            }
+            Val::App(Var::Meta(_), _, _, _) => Err(TypeError::UntypedLiteral(pre.span())),
+            _ => Err(TypeError::NotIntType(
+                pre.span(),
+                ty.clone().inline_metas(mcxt, db),
+            )),
+        },
 
         (Pre_::Case(value, cases), _) => {
             let vspan = value.span();

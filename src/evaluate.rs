@@ -6,6 +6,7 @@ impl Term {
     pub fn evaluate(self, env: &Env, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
             Term::Type => Val::Type,
+            Term::Lit(x, t) => Val::Lit(x, t),
             Term::Var(Var::Local(ix), ty) => env.val(ix, *ty, mcxt, db),
             Term::Var(Var::Type(id, scope), ty) => {
                 Val::datatype(id, scope, ty.evaluate(env, mcxt, db))
@@ -13,6 +14,7 @@ impl Term {
             Term::Var(Var::Top(def), ty) => Val::top(def, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Rec(id), ty) => Val::rec(id, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Cons(id), ty) => Val::cons(id, ty.evaluate(env, mcxt, db)),
+            Term::Var(Var::Builtin(b), ty) => Val::builtin(b, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Meta(meta), ty) => match mcxt.get_meta(meta) {
                 Some(v) => v,
                 None => Val::meta(meta, ty.evaluate(env, mcxt, db)),
@@ -125,6 +127,7 @@ impl Val {
     pub fn force(self, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
         match self {
             Val::Type => Val::Type,
+            Val::Lit(x, t) => Val::Lit(x, t),
             Val::Arc(x) => (*x).clone().force(l, db, mcxt),
             Val::App(h, mut hty, sp, g) => {
                 *hty = hty.force(l, db, mcxt);
@@ -182,6 +185,7 @@ impl Val {
     pub fn quote(self, enclosing: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         match self {
             Val::Type => Term::Type,
+            Val::Lit(x, t) => Term::Lit(x, t),
             Val::App(h, hty, sp, _) => {
                 // Inline the type to expose the Pi or Fun
                 let hty = hty
@@ -196,6 +200,7 @@ impl Val {
                     Var::Rec(id) => Term::Var(Var::Rec(id), Box::new(hty.clone())),
                     Var::Type(id, scope) => Term::Var(Var::Type(id, scope), Box::new(hty.clone())),
                     Var::Cons(id) => Term::Var(Var::Cons(id), Box::new(hty.clone())),
+                    Var::Builtin(b) => Term::Var(Var::Builtin(b), Box::new(hty.clone())),
                 };
                 sp.into_iter()
                     .fold((h, hty), |(f, fty), (icit, x)| {
@@ -266,6 +271,7 @@ impl Term {
     pub fn inline_metas(self, mcxt: &MCxt, l: Lvl, db: &dyn Compiler) -> Self {
         match self {
             Term::Type => Term::Type,
+            Term::Lit(x, t) => Term::Lit(x, t),
             Term::Var(Var::Meta(m), mut ty) => match mcxt.get_meta(m) {
                 Some(v) => v.inline_metas(mcxt, db).quote(l, mcxt, db),
                 None => {
@@ -318,6 +324,7 @@ impl Val {
     pub fn inline_metas(self, mcxt: &MCxt, db: &dyn Compiler) -> Self {
         match self {
             Val::Type => Val::Type,
+            Val::Lit(x, t) => Val::Lit(x, t),
             Val::App(h, mut ty, sp, g) => {
                 let h = match h {
                     Var::Meta(m) => match g.resolve_meta(h, &sp, mcxt, db) {

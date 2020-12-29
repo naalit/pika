@@ -2,6 +2,7 @@ use lalrpop_util::lalrpop_mod;
 use std::fs::File;
 use std::io::Read;
 
+pub mod builtins;
 pub mod common;
 pub mod elaborate;
 pub mod error;

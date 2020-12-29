@@ -1,6 +1,9 @@
+pub use crate::builtins::Builtin;
 pub use crate::error::*;
+pub use crate::lexer::Literal;
 pub use crate::pretty::*;
 pub use crate::query::*;
+pub use crate::term::{BinOp, Term, Val, Var};
 pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::sync::{Arc, RwLock};
 

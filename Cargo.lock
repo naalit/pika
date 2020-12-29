@@ -232,7 +232,7 @@ dependencies = [
 [[package]]
 name = "durin"
 version = "0.1.0"
-source = "git+https://github.com/tolziplohu/durin?rev=71f584925a97d216473baf4861ce2d1e96cd1692#71f584925a97d216473baf4861ce2d1e96cd1692"
+source = "git+https://github.com/tolziplohu/durin?rev=264dfb613e4ab98c0ba19526b0bade813db29fbf#264dfb613e4ab98c0ba19526b0bade813db29fbf"
 dependencies = [
  "either",
  "inkwell",
@@ -543,6 +543,7 @@ name = "pika"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "bit-set",
  "codespan-reporting",
  "durin",
  "lalrpop",

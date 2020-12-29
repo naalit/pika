@@ -133,7 +133,8 @@ impl Cxt {
     }
 
     pub fn new<T: ?Sized + Interner>(file: FileId, db: &T) -> Cxt {
-        db.cxt_entry(MaybeEntry::No(file))
+        let cxt = db.cxt_entry(MaybeEntry::No(file));
+        crate::builtins::define_builtins(cxt, db)
     }
 }
 

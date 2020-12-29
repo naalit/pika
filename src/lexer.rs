@@ -22,7 +22,7 @@ pub enum LexError {
     Other(String),
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Literal {
     Positive(u64),
     /// This should always be negative.

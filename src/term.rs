@@ -6,6 +6,23 @@ use crate::common::*;
 use crate::elaborate::MCxt;
 use crate::pattern::Pat;
 
+impl Literal {
+    pub fn pretty(self) -> Doc {
+        match self {
+            Literal::Positive(i) => Doc::start(i),
+            Literal::Negative(i) => Doc::start(i),
+        }
+    }
+
+    pub fn to_usize(self) -> usize {
+        // TODO: BitSet stores literals as usize, so this only works on 64-bit, TODO 32-bit support
+        match self {
+            Literal::Positive(i) => i as usize,
+            Literal::Negative(i) => i as usize,
+        }
+    }
+}
+
 /// Records the reason we introduced a meta, used when reporting an unsolved meta to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum MetaSource {
@@ -19,6 +36,68 @@ pub enum MetaSource {
 pub enum Icit {
     Impl,
     Expl,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum BinOp {
+    Add,    // +
+    Sub,    // -
+    Mul,    // *
+    Div,    // /
+    Exp,    // **
+    BitAnd, // &
+    BitOr,  // |
+    BitXor, // ^^
+    BitShl, // <<
+    BitShr, // >>
+    Eq,     // ==
+    Lt,     // <
+    Gt,     // >
+    Leq,    // <=
+    Geq,    // >=
+    PipeL,  // <|
+    PipeR,  // |>
+}
+impl BinOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Exp => "**",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^^",
+            BinOp::BitShl => "<<",
+            BinOp::BitShr => ">>",
+            BinOp::Eq => "==",
+            BinOp::Lt => "<",
+            BinOp::Gt => ">",
+            BinOp::Leq => "<=",
+            BinOp::Geq => ">=",
+            BinOp::PipeL => "<|",
+            BinOp::PipeR => "|>",
+        }
+    }
+
+    pub fn ty(self) -> Val {
+        use BinOp::*;
+        match self {
+            // Right now they only work on I32's, not I64's.
+            // TODO add traits and make these work on all numbers
+            Add | Sub | Mul | Div | Exp | BitAnd | BitOr | BitXor | BitShl | BitShr => Val::Fun(
+                Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                Box::new(Val::Fun(
+                    Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                    Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                )),
+            ),
+            Eq | Lt | Gt | Leq | Geq => todo!("comparison ops"),
+            // TODO: `(<<): [t] [P: t -> Type] (f : (x : t) -> P x) (x : t) -> P x`
+            PipeL | PipeR => todo!("pipes"),
+        }
+    }
 }
 
 /// Presyntax should always come with a span, for error reporting.
@@ -45,6 +124,8 @@ pub enum Pre_ {
     Dot(Pre, SName, Vec<(Icit, Pre)>),
     OrPat(Pre, Pre),
     Case(Pre, Vec<(Pre, Pre)>),
+    Lit(Literal),
+    BinOp(BinOp, Pre, Pre),
 }
 
 /// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.
@@ -277,6 +358,8 @@ pub enum Term {
     App(Icit, Box<Term>, Box<Ty>, Box<Term>),
     /// Stores the type of the scrutinee as the second argument
     Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>),
+    /// The Builtin is the type - it can only be a builtin integer type
+    Lit(Literal, Builtin),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
 }
@@ -408,7 +491,9 @@ impl Term {
                         .add(">"),
                     Meta::Local(def, id) => Doc::start("?").add(def.num()).add(".").add(id),
                 },
+                Var::Builtin(b) => b.pretty(),
             },
+            Term::Lit(l, _) => l.pretty(),
             Term::Lam(n, i, _ty, t) => {
                 let n = names.disamb(*n, db);
                 {
@@ -602,6 +687,7 @@ pub enum Var<Local> {
     /// You can still call `elaborate_def()` on it to get its type.
     Type(DefId, ScopeId),
     Cons(DefId),
+    Builtin(Builtin),
 }
 impl Var<Ix> {
     pub fn cvt(self, l: Lvl) -> Var<Lvl> {
@@ -612,6 +698,7 @@ impl Var<Ix> {
             Var::Meta(m) => Var::Meta(m),
             Var::Type(i, s) => Var::Type(i, s),
             Var::Cons(i) => Var::Cons(i),
+            Var::Builtin(b) => Var::Builtin(b),
         }
     }
 }
@@ -624,6 +711,7 @@ impl Var<Lvl> {
             Var::Meta(m) => Var::Meta(m),
             Var::Type(i, s) => Var::Type(i, s),
             Var::Cons(i) => Var::Cons(i),
+            Var::Builtin(b) => Var::Builtin(b),
         }
     }
 }
@@ -706,6 +794,7 @@ impl Glued {
                 Var::Type(_, _) => None,
                 Var::Cons(_) => None,
                 Var::Top(_) => None,
+                Var::Builtin(_) => None,
                 Var::Meta(m) => {
                     if let Some(val) = mcxt.get_meta(m) {
                         let val = sp
@@ -754,6 +843,7 @@ impl Glued {
                 // A datatype is already fully evaluated
                 Var::Type(_, _) => None,
                 Var::Cons(_) => None,
+                Var::Builtin(_) => None,
                 Var::Top(def) => {
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
@@ -798,6 +888,8 @@ pub enum Val {
     Lam(Icit, Box<Clos>),
     Pi(Icit, Box<Clos>),
     Fun(Box<VTy>, Box<VTy>),
+    /// The Builtin is the type - it can only be a builtin integer type
+    Lit(Literal, Builtin),
     Error,
 }
 impl Val {
@@ -854,6 +946,10 @@ impl Val {
 
     pub fn rec(id: PreDefId, ty: VTy) -> Val {
         Val::App(Var::Rec(id), Box::new(ty), Vec::new(), Glued::new())
+    }
+
+    pub fn builtin(b: Builtin, ty: VTy) -> Val {
+        Val::App(Var::Builtin(b), Box::new(ty), Vec::new(), Glued::new())
     }
 
     pub fn cons(id: DefId, ty: VTy) -> Val {
