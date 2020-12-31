@@ -52,6 +52,9 @@ pub enum Tok<'i> {
     Catch,
     And,
     Or,
+    If,
+    Then,
+    Else,
 
     // Symbols the lexer recognizes as a "binary operator"
     Colon,     // :
@@ -75,6 +78,7 @@ pub enum Tok<'i> {
     Lt,        // <
     LtE,       // <=
     Eq,        // ==
+    NEq,       // !=
     LPipe,     // <|
     RPipe,     // |>
 
@@ -250,6 +254,9 @@ impl<'i> Lexer<'i> {
             "catch" => Tok::Catch,
             "and" => Tok::And,
             "or" => Tok::Or,
+            "if" => Tok::If,
+            "then" => Tok::Then,
+            "else" => Tok::Else,
             // Where technically ends one block and starts another one, but we ignore that.
             "where" => Tok::Where,
             "do" => {
@@ -339,6 +346,14 @@ impl<'i> Lexer<'i> {
                 }
             }
 
+            '!' => {
+                self.next();
+                if self.peek() == Some('=') {
+                    Some(self.tok(Tok::NEq))
+                } else {
+                    None
+                }
+            }
             '=' => {
                 self.next();
                 Some(match self.peek() {
@@ -521,6 +536,9 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::Catch => "'catch'",
             Tok::And => "'and'",
             Tok::Or => "'or'",
+            Tok::If => "'if'",
+            Tok::Then => "'then'",
+            Tok::Else => "'else'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",
@@ -542,6 +560,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::Lt => "'<'",
             Tok::LtE => "'<='",
             Tok::Eq => "'=='",
+            Tok::NEq => "'!='",
             Tok::LPipe => "'<|'",
             Tok::RPipe => "'|>'",
             Tok::Lit(_) => "literal",

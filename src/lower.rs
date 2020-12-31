@@ -328,7 +328,15 @@ impl BinOp {
             BinOp::BitXor => ir::BinOp::IXor,
             BinOp::BitShl => ir::BinOp::IShl,
             BinOp::BitShr => ir::BinOp::IShr,
-            _ => todo!("lower comp ops and pipes"),
+
+            BinOp::Eq => ir::BinOp::IEq,
+            BinOp::NEq => ir::BinOp::INEq,
+            BinOp::Lt => ir::BinOp::ILt,
+            BinOp::Gt => ir::BinOp::IGt,
+            BinOp::Leq => ir::BinOp::ILeq,
+            BinOp::Geq => ir::BinOp::IGeq,
+
+            _ => todo!("lower pipes"),
         }
     }
 }
@@ -338,6 +346,8 @@ impl Builtin {
         match self {
             Builtin::I32 => cxt.builder.cons(ir::Constant::IntType(ir::Width::W32)),
             Builtin::I64 => cxt.builder.cons(ir::Constant::IntType(ir::Width::W64)),
+            // Bool translates to i1
+            Builtin::Bool => cxt.builder.cons(ir::Constant::IntType(ir::Width::W1)),
             Builtin::BinOp(op) => {
                 let i32_ty = cxt.builder.cons(ir::Constant::IntType(ir::Width::W32));
                 let a = cxt.builder.push_fun(None, i32_ty);
@@ -347,6 +357,8 @@ impl Builtin {
                 let fty = cxt.builder.fun_type(i32_ty, i32_ty);
                 cxt.builder.pop_fun(f, fty)
             }
+            Builtin::True => cxt.builder.cons(ir::Constant::Int(ir::Width::W1, 1)),
+            Builtin::False => cxt.builder.cons(ir::Constant::Int(ir::Width::W1, 0)),
         }
     }
 }
@@ -559,6 +571,17 @@ impl Term {
                     });
                 cont.lower(ty, cxt)
             }
+            Term::If(cond, yes, no) => {
+                let cond = cond.lower(Val::builtin(Builtin::Bool, Val::Type), cxt);
+                cxt.builder.if_expr(cond);
+
+                let yes = yes.lower(ty.clone(), cxt);
+                cxt.builder.otherwise(yes);
+
+                let no = no.lower(ty.clone(), cxt);
+                let lty = ty.lower(Val::Type, cxt);
+                cxt.builder.endif(no, lty)
+            }
         }
     }
 }
@@ -615,6 +638,22 @@ impl Pat {
             }
             Pat::Lit(l, w) => {
                 let l = l.lower(*w, cxt);
+                let eq = cxt.builder.binop(ir::BinOp::IEq, l, x);
+                cxt.builder.if_expr(eq);
+
+                let yes = cont.lower(ty.clone(), cxt);
+
+                cxt.builder.otherwise(yes);
+
+                let lty = ty.clone().lower(Val::Type, cxt);
+                let no = rest.lower(ty, cxt);
+
+                cxt.builder.endif(no, lty)
+            }
+            Pat::Bool(b) => {
+                let l = cxt
+                    .builder
+                    .cons(ir::Constant::Int(ir::Width::W1, *b as i64));
                 let eq = cxt.builder.binop(ir::BinOp::IEq, l, x);
                 cxt.builder.if_expr(eq);
 

@@ -58,7 +58,26 @@ fn test_numbers() {
         .success();
 }
 
+#[test]
+fn test_bools() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/bools.pk"])
+        .assert()
+        .success();
+}
+
 // Tests for type errors
+
+#[test]
+fn test_wrong_if_type() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/wrong_if_type.pk"])
+        .assert()
+        .stderr(is_match("Expected value of type.*Bool").unwrap())
+        .failure();
+}
 
 #[test]
 fn test_untyped_literal() {

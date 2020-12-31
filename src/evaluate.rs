@@ -48,6 +48,7 @@ impl Term {
                 f.app(icit, x, mcxt, db)
             }
             Term::Case(x, _, cases) => {
+                todo!("Evaluating case isn't always possible");
                 let x = x.evaluate(env, mcxt, db);
                 for (pat, body) in cases {
                     if let Some(env) = pat.match_with(&x, env.clone(), mcxt, db) {
@@ -57,6 +58,11 @@ impl Term {
                 unreachable!()
             }
             Term::Error => Val::Error,
+            Term::If(cond, yes, no) => match cond.evaluate(env, mcxt, db) {
+                Val::App(Var::Builtin(Builtin::True), _, _, _) => yes.evaluate(env, mcxt, db),
+                Val::App(Var::Builtin(Builtin::False), _, _, _) => no.evaluate(env, mcxt, db),
+                _ => todo!("Evaluating if isn't always possible"),
+            },
         }
     }
 }
@@ -316,6 +322,12 @@ impl Term {
                 Term::Case(x, ty, cases)
             }
             Term::Error => Term::Error,
+            Term::If(mut cond, mut yes, mut no) => {
+                *cond = cond.inline_metas(mcxt, l, db);
+                *yes = yes.inline_metas(mcxt, l, db);
+                *no = no.inline_metas(mcxt, l, db);
+                Term::If(cond, yes, no)
+            }
         }
     }
 }

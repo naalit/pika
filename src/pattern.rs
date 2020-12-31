@@ -11,6 +11,7 @@ pub enum Pat {
     Cons(DefId, Box<VTy>, Vec<Pat>),
     Or(Box<Pat>, Box<Pat>),
     Lit(Literal, Width),
+    Bool(bool),
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
@@ -23,12 +24,16 @@ pub enum Cov {
     Cons(Vec<(DefId, Vec<Cov>)>),
     /// We *did* cover these literals
     Lit(BitSet),
+    /// we *did* cover this Bool
+    Bool(bool),
 }
 impl Cov {
     pub fn or(self, other: Self) -> Self {
         match (self, other) {
             (Cov::All, _) | (_, Cov::All) => Cov::All,
             (Cov::None, x) | (x, Cov::None) => x,
+            (Cov::Bool(x), Cov::Bool(y)) if x != y => Cov::All,
+            (Cov::Bool(x), Cov::Bool(_)) => Cov::Bool(x),
             (Cov::Lit(mut a), Cov::Lit(b)) => {
                 a.union_with(&b);
                 Cov::Lit(a)
@@ -58,6 +63,11 @@ impl Cov {
             // We don't show what literals we've covered.
             // In the future, we may switch to ranges like Rust uses.
             Cov::Lit(_) => Doc::start("_"),
+            Cov::Bool(b) => Doc::start(match b {
+                // What's *uncovered*?
+                false => "True",
+                true => "False",
+            }),
             Cov::Cons(covs) => match ty {
                 Val::App(Var::Type(_, sid), _, _, _) => {
                     let mut v = Vec::new();
@@ -168,6 +178,7 @@ impl Cov {
             Cov::All => Cov::All,
             Cov::None => Cov::None,
             Cov::Lit(s) => Cov::Lit(s),
+            Cov::Bool(x) => Cov::Bool(x),
             Cov::Cons(mut covs) => match ty {
                 Val::App(Var::Type(_, sid), _, _, _) => {
                     let mut unmatched: Vec<DefId> = db
@@ -252,6 +263,7 @@ impl Pat {
             Pat::Cons(id, _, v) => Cov::Cons(vec![(*id, v.into_iter().map(Pat::cov).collect())]),
             Pat::Or(x, y) => x.cov().or(y.cov()),
             Pat::Lit(l, _) => Cov::Lit(std::iter::once(l.to_usize()).collect()),
+            Pat::Bool(b) => Cov::Bool(*b),
         }
     }
 
@@ -281,12 +293,16 @@ impl Pat {
                 .space()
                 .chain(y.pretty(db, names)),
             Pat::Lit(x, _) => x.pretty(),
+            Pat::Bool(b) => Doc::start(match b {
+                true => "True",
+                false => "False",
+            }),
         }
     }
 
     pub fn add_locals(&self, mcxt: &mut MCxt, db: &dyn Compiler) {
         match self {
-            Pat::Any | Pat::Lit(_, _) => {}
+            Pat::Any | Pat::Lit(_, _) | Pat::Bool(_) => {}
             Pat::Var(n, ty) => mcxt.define(*n, NameInfo::Local((**ty).clone()), db),
             Pat::Cons(_, _, v) => {
                 for p in v {
@@ -302,7 +318,7 @@ impl Pat {
 
     pub fn add_names(&self, l: Lvl, names: &mut Names) -> Lvl {
         match self {
-            Pat::Any | Pat::Lit(_, _) => l,
+            Pat::Any | Pat::Lit(_, _) | Pat::Bool(_) => l,
             Pat::Var(n, _) => {
                 names.add(*n);
                 l.inc()
@@ -333,6 +349,7 @@ impl Pat {
                 Pat::Or(x, y)
             }
             Pat::Lit(x, w) => Pat::Lit(x, w),
+            Pat::Bool(x) => Pat::Bool(x),
         }
     }
 
@@ -365,6 +382,23 @@ impl Pat {
             Pat::Lit(x, _) => match val.unarc() {
                 Val::Lit(l, _) => {
                     if l == x {
+                        Some(env)
+                    } else {
+                        None
+                    }
+                }
+                _ => unreachable!(),
+            },
+            Pat::Bool(x) => match val.unarc() {
+                Val::App(Var::Builtin(Builtin::True), _, _, _) => {
+                    if *x {
+                        Some(env)
+                    } else {
+                        None
+                    }
+                }
+                Val::App(Var::Builtin(Builtin::False), _, _, _) => {
+                    if !x {
                         Some(env)
                     } else {
                         None
@@ -448,6 +482,53 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
                             return elab_pat_app(pre, VecDeque::new(), ty, mcxt, db);
                         }
                     }
+                }
+            }
+            if let Ok((Var::Builtin(b), _)) = mcxt.lookup(*n, db) {
+                match b {
+                    Builtin::True => {
+                        if !unify(
+                            ty.clone(),
+                            Val::builtin(Builtin::Bool, Val::Type),
+                            mcxt.size,
+                            pre.span(),
+                            db,
+                            mcxt,
+                        )
+                        .map_err(|x| TypeError::InvalidPatternBecause(Box::new(x)))?
+                        {
+                            return Err(TypeError::InvalidPatternBecause(Box::new(
+                                TypeError::Unify(
+                                    mcxt.clone(),
+                                    pre.copy_span(Val::builtin(Builtin::Bool, Val::Type)),
+                                    ty.clone().inline_metas(mcxt, db),
+                                ),
+                            )));
+                        }
+                        return Ok(Pat::Bool(true));
+                    }
+                    Builtin::False => {
+                        if !unify(
+                            ty.clone(),
+                            Val::builtin(Builtin::Bool, Val::Type),
+                            mcxt.size,
+                            pre.span(),
+                            db,
+                            mcxt,
+                        )
+                        .map_err(|x| TypeError::InvalidPatternBecause(Box::new(x)))?
+                        {
+                            return Err(TypeError::InvalidPatternBecause(Box::new(
+                                TypeError::Unify(
+                                    mcxt.clone(),
+                                    pre.copy_span(Val::builtin(Builtin::Bool, Val::Type)),
+                                    ty.clone().inline_metas(mcxt, db),
+                                ),
+                            )));
+                        }
+                        return Ok(Pat::Bool(false));
+                    }
+                    _ => (),
                 }
             }
             mcxt.define(*n, NameInfo::Local(ty.clone()), db);

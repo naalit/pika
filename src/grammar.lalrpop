@@ -32,6 +32,9 @@ extern {
     "catch" => Tok::Catch,
     "and" => Tok::And,
     "or" => Tok::Or,
+    "if" => Tok::If,
+    "then" => Tok::Then,
+    "else" => Tok::Else,
 
     // Symbols the lexer recognizes as a "binary operator"
     ":" => Tok::Colon,
@@ -55,6 +58,7 @@ extern {
     "<" => Tok::Lt,
     "<=" => Tok::LtE,
     "==" => Tok::Eq,
+    "!=" => Tok::NEq,
     "<|" => Tok::LPipe,
     "|>" => Tok::RPipe,
 
@@ -173,6 +177,7 @@ RStart: Pre_ = {
   "struct" <Block<Def>> => Pre_::Struct(<>),
   "do" <Block<Def>> => Pre_::Do(<>),
   "case" <x:Sp<Expr>> "of" <v:Block<Branch>> => Pre_::Case(x, v),
+  "if" <cond:Sp<Term>> "then" <yes:Sp<Term>> "else" <no:Sp<Expr>> => Pre_::If(cond, yes, no),
   // TODO: Is Expr okay here?
   // Basically we can't do multiline inside lambdas, we need
   // \x.(x
@@ -306,6 +311,7 @@ Bitwise<S>: Pre_ = {
 Comparison<S>: Pre_ = {
   Bitwise<S>,
   <a:Sp<Bitwise<S>>> "==" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Eq, a, b),
+  <a:Sp<Bitwise<S>>> "!=" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::NEq, a, b),
   <a:Sp<Bitwise<S>>> "<" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Lt, a, b),
   <a:Sp<Bitwise<S>>> ">" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Gt, a, b),
   <a:Sp<Bitwise<S>>> "<=" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Leq, a, b),

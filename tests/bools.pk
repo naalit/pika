@@ -1,0 +1,11 @@
+fun test b (i: I32) = if b then True else i != 12
+
+fun true (_: I32) = test True 12
+fun false (x: I32) = test False 13
+
+fun match_on_bool (b: Bool) : I32 = case b of
+  True => 1
+  False => 0
+end
+
+val with_dot = Bool.True

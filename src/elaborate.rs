@@ -107,6 +107,12 @@ impl Term {
                 *ty = ty.check_solution(meta, ren, lfrom, lto, names)?;
                 Ok(Term::Case(x, ty, cases))
             }
+            Term::If(mut cond, mut yes, mut no) => {
+                *cond = cond.check_solution(meta.clone(), ren, lfrom, lto, names)?;
+                *yes = yes.check_solution(meta.clone(), ren, lfrom, lto, names)?;
+                *no = no.check_solution(meta, ren, lfrom, lto, names)?;
+                Ok(Term::If(cond, yes, no))
+            }
         }
     }
 }
@@ -1313,6 +1319,13 @@ pub fn infer(
             infer_app(f, fty, pre.span(), Icit::Expl, b, db, mcxt)
         }
 
+        Pre_::If(cond, yes, no) => {
+            let cond = check(cond, &Val::builtin(Builtin::Bool, Val::Type), db, mcxt)?;
+            let (yes, ty) = infer(insert, yes, db, mcxt)?;
+            let no = check(no, &ty, db, mcxt)?;
+            Ok((Term::If(Box::new(cond), Box::new(yes), Box::new(no)), ty))
+        }
+
         Pre_::Var(name) => {
             let (term, ty) = match mcxt.lookup(*name, db) {
                 Ok((v, ty)) => Ok((
@@ -1423,6 +1436,25 @@ pub fn infer(
                 )
             })? {
                 (_, Val::Error) => return Ok((Term::Error, Val::Error)),
+                (Val::App(Var::Builtin(Builtin::Bool), _, _, _), _) => {
+                    let tbool = Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type));
+                    let vbool = Val::builtin(Builtin::Bool, Val::Type);
+                    match &*db.lookup_intern_name(**m) {
+                        "True" => Ok((
+                            Term::Var(Var::Builtin(Builtin::True), Box::new(tbool)),
+                            vbool,
+                        )),
+                        "False" => Ok((
+                            Term::Var(Var::Builtin(Builtin::False), Box::new(tbool)),
+                            vbool,
+                        )),
+                        _ => Err(TypeError::MemberNotFound(
+                            Span(head.span().0, m.span().1),
+                            ScopeType::Type,
+                            **m,
+                        )),
+                    }
+                }
                 (Val::App(Var::Type(_id, scope), _, sp, _), _) if sp.is_empty() => {
                     let scope = db.lookup_intern_scope(scope);
                     for &(n, v) in scope.iter().rev() {

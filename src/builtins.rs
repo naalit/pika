@@ -5,13 +5,19 @@ pub enum Builtin {
     I32,
     I64,
     BinOp(BinOp),
+    Bool,
+    True,
+    False,
 }
 impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
             Builtin::I32 => "I32",
             Builtin::I64 => "I64",
+            Builtin::Bool => "Bool",
             Builtin::BinOp(b) => b.name(),
+            Builtin::True => "True",
+            Builtin::False => "False",
         }
     }
 
@@ -21,7 +27,8 @@ impl Builtin {
 
     pub fn ty(self) -> Val {
         match self {
-            Builtin::I32 | Builtin::I64 => Val::Type,
+            Builtin::I32 | Builtin::I64 | Builtin::Bool => Val::Type,
+            Builtin::True | Builtin::False => Val::builtin(Builtin::Bool, Val::Type),
             Builtin::BinOp(b) => b.ty(),
         }
     }
@@ -29,7 +36,7 @@ impl Builtin {
 
 pub fn define_builtins<T: ?Sized + Interner>(cxt: Cxt, db: &T) -> Cxt {
     use Builtin::*;
-    let list = vec![I32, I64];
+    let list = vec![I32, I64, Bool, True, False];
 
     let mut cxt = cxt;
     for b in list {

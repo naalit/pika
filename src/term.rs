@@ -51,6 +51,7 @@ pub enum BinOp {
     BitShl, // <<
     BitShr, // >>
     Eq,     // ==
+    NEq,    // !=
     Lt,     // <
     Gt,     // >
     Leq,    // <=
@@ -72,6 +73,7 @@ impl BinOp {
             BinOp::BitShl => "<<",
             BinOp::BitShr => ">>",
             BinOp::Eq => "==",
+            BinOp::NEq => "!=",
             BinOp::Lt => "<",
             BinOp::Gt => ">",
             BinOp::Leq => "<=",
@@ -93,7 +95,13 @@ impl BinOp {
                     Box::new(Val::builtin(Builtin::I32, Val::Type)),
                 )),
             ),
-            Eq | Lt | Gt | Leq | Geq => todo!("comparison ops"),
+            Eq | NEq | Lt | Gt | Leq | Geq => Val::Fun(
+                Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                Box::new(Val::Fun(
+                    Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                    Box::new(Val::builtin(Builtin::Bool, Val::Type)),
+                )),
+            ),
             // TODO: `(<<): [t] [P: t -> Type] (f : (x : t) -> P x) (x : t) -> P x`
             PipeL | PipeR => todo!("pipes"),
         }
@@ -126,6 +134,8 @@ pub enum Pre_ {
     Case(Pre, Vec<(Pre, Pre)>),
     Lit(Literal),
     BinOp(BinOp, Pre, Pre),
+    /// If(cond, then, else)
+    If(Pre, Pre, Pre),
 }
 
 /// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.
@@ -360,6 +370,8 @@ pub enum Term {
     Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
+    /// If(cond, then, else)
+    If(Box<Term>, Box<Term>, Box<Term>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
 }
@@ -571,7 +583,20 @@ impl Term {
                 ))
                 .indent()
                 .line()
-                .add("end"),
+                .chain(Doc::keyword("end"))
+                .prec(Prec::Term),
+            Term::If(cond, yes, no) => Doc::keyword("if")
+                .space()
+                .chain(cond.pretty(db, names))
+                .line()
+                .chain(Doc::keyword("then"))
+                .space()
+                .chain(yes.pretty(db, names))
+                .line()
+                .chain(Doc::keyword("else"))
+                .space()
+                .chain(no.pretty(db, names))
+                .prec(Prec::Term),
         }
     }
 }
