@@ -377,9 +377,10 @@ impl MCxt {
                     db.report_error(Error::new(
                         self.cxt.file(db),
                         Doc::start("Could not find solution for ")
-                            .chain(Meta::Local(self.def, i as u16).pretty(self, db)),
+                            .chain(Meta::Local(self.def, i as u16).pretty(self, db))
+                            .style(Style::Bold),
                         *span,
-                        "introduced here",
+                        "search started here",
                     ));
                     ret = Err(());
                 }
@@ -404,25 +405,29 @@ impl Meta {
     fn pretty(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
         match self {
             Meta::Type(id) => match &**db.lookup_intern_predef(id) {
-                PreDef::Fun(n, _, _, _) => Doc::start("type of function ").add(n.get(db)),
-                PreDef::Val(n, _, _) => Doc::start("type of definition ").add(n.get(db)),
-                PreDef::Type(n, _, _, _) => Doc::start("type of data type ").add(n.get(db)),
-                PreDef::Impl(Some(n), _, _) => Doc::start("type of implicit ").add(n.get(db)),
+                PreDef::Fun(n, _, _, _) => Doc::start("type of function '").add(n.get(db)).add("'"),
+                PreDef::Val(n, _, _) => Doc::start("type of definition '").add(n.get(db)).add("'"),
+                PreDef::Type(n, _, _, _) => {
+                    Doc::start("type of data type '").add(n.get(db)).add("'")
+                }
+                PreDef::Impl(Some(n), _, _) => {
+                    Doc::start("type of implicit '").add(n.get(db)).add("'")
+                }
                 PreDef::Impl(None, _, _) => Doc::start("type of implicit"),
                 PreDef::Expr(_) => Doc::start("type of expression"),
-                PreDef::FunDec(n, _, _) => {
-                    Doc::start("type of function declaration ").add(n.get(db))
-                }
-                PreDef::ValDec(n, _) => Doc::start("type of declaration ").add(n.get(db)),
+                PreDef::FunDec(n, _, _) => Doc::start("type of function declaration '")
+                    .add(n.get(db))
+                    .add("'"),
+                PreDef::ValDec(n, _) => Doc::start("type of declaration '").add(n.get(db)).add("'"),
                 PreDef::Cons(_, _) => unreachable!("Constructor types should already be solved!"),
             },
             Meta::Local(_, n) => match &mcxt.local_metas[n as usize] {
                 MetaEntry::Solved(_, _) => panic!("meta already solved"),
                 MetaEntry::Unsolved(_, _, source) => match source {
                     MetaSource::ImplicitParam(n) => {
-                        Doc::start("implicit parameter ").add(n.get(db))
+                        Doc::start("implicit parameter '").add(n.get(db)).add("'")
                     }
-                    MetaSource::LocalType(n) => Doc::start("type of ").add(n.get(db)),
+                    MetaSource::LocalType(n) => Doc::start("type of '").add(n.get(db)).add("'"),
                     MetaSource::Hole => Doc::start("hole"),
                     MetaSource::HoleType => Doc::start("type of hole"),
                 },
@@ -440,10 +445,11 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
     let mut mcxt = MCxt::new(cxt, def, db);
     let (term, ty): (Term, VTy) = match &**predef {
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
-            match check(ty, &Val::Type, db, &mut mcxt) {
+            let tyspan = ty.span();
+            match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                 Ok(ty) => {
                     let ty = ty.evaluate(&mcxt.env(), &mcxt, db);
-                    match check(val, &ty, db, &mut mcxt) {
+                    match check(val, &ty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
                         Ok(val) => Ok((val, ty)),
                         Err(e) => {
                             db.report_error(e.to_error(file, db, &mcxt));
@@ -467,7 +473,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         PreDef::Fun(_, args, body_ty, body) => {
             let mut targs = Vec::new();
             for (name, icit, ty) in args {
-                let ty = match check(ty, &Val::Type, db, &mut mcxt) {
+                let ty = match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                     Ok(x) => x,
                     Err(e) => {
                         db.report_error(e.to_error(file, db, &mcxt));
@@ -479,7 +485,14 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 targs.push((*name, *icit, vty.clone()));
                 mcxt.define(*name, NameInfo::Local(vty), db);
             }
-            let body_ty = match check(body_ty, &Val::Type, db, &mut mcxt) {
+            let tyspan = body_ty.span();
+            let body_ty = match check(
+                body_ty,
+                &Val::Type,
+                ReasonExpected::UsedAsType,
+                db,
+                &mut mcxt,
+            ) {
                 Ok(x) => x,
                 Err(e) => {
                     db.report_error(e.to_error(file, db, &mcxt));
@@ -488,7 +501,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 }
             };
             let vty = body_ty.evaluate(&mcxt.env(), &mcxt, db);
-            let body = match check(body, &vty, db, &mut mcxt) {
+            let body = match check(body, &vty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
                 Ok(x) => x,
                 Err(e) => {
                     db.report_error(e.to_error(file, db, &mcxt));
@@ -548,7 +561,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             // Evaluate the argument types and collect them up
             let mut targs = Vec::new();
             for (name, icit, ty) in args {
-                let ty = match check(ty, &Val::Type, db, &mut mcxt) {
+                let ty = match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                     Ok(x) => x,
                     Err(e) => {
                         db.report_error(e.to_error(file, db, &mcxt));
@@ -634,7 +647,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
                 // TODO this should be a function
                 for (name, icit, ty) in args {
-                    let ty = match check(ty, &Val::Type, db, &mut mcxt) {
+                    let ty = match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt)
+                    {
                         Ok(x) => x,
                         Err(e) => {
                             db.report_error(e.to_error(file, db, &mcxt));
@@ -648,7 +662,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
                 // If the user provided a type for the constructor, typecheck it
                 let cty = if let Some(cty) = cty {
-                    match check(cty, &Val::Type, db, &mut mcxt) {
+                    match check(cty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                         Ok(x) => match x.ret().head() {
                             Term::Var(Var::Rec(id), _) if *id == predef_id => x,
                             _ => {
@@ -662,7 +676,9 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                                     file,
                                     "Constructor return type must be the type it's a part of",
                                     cty.span(),
-                                    format!("expected return type '{}'", type_string),
+                                    Doc::start("expected return type ")
+                                        .chain(Doc::start(type_string).style(Style::None))
+                                        .style(Style::Error),
                                 );
                                 db.report_error(e);
                                 Term::Error
@@ -819,17 +835,17 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         },
         PreDef::FunDec(_, from, to) => {
             for (_, _, from) in from {
-                if let Err(e) = check(from, &Val::Type, db, &mut mcxt) {
+                if let Err(e) = check(from, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                     db.report_error(e.to_error(file, db, &mcxt));
                 }
             }
-            if let Err(e) = check(to, &Val::Type, db, &mut mcxt) {
+            if let Err(e) = check(to, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                 db.report_error(e.to_error(file, db, &mcxt));
             }
             Err(DefError::NoValue)
         }
         PreDef::ValDec(_, ty) => {
-            if let Err(e) = check(ty, &Val::Type, db, &mut mcxt) {
+            if let Err(e) = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                 db.report_error(e.to_error(file, db, &mcxt));
             }
             Err(DefError::NoValue)
@@ -899,16 +915,51 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ScopeType {
-    Type,
+    Type(Name),
     Struct,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum ReasonExpected {
+    UsedAsType,
+    IfCond,
+    MustMatch(Span),
+    Given(Span),
+    ArgOf(Span, VTy),
+}
+impl ReasonExpected {
+    fn add(self, err: Error, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
+        match self {
+            ReasonExpected::UsedAsType => err
+                .with_note(Doc::start("expected because it was used as a type").style(Style::Note)),
+            ReasonExpected::IfCond => err.with_note(
+                Doc::start("expected because if conditions must have type Bool").style(Style::Note),
+            ),
+            ReasonExpected::MustMatch(span) => err.with_label(
+                file,
+                span,
+                "expected because it must match the type of this",
+            ),
+            ReasonExpected::Given(span) => {
+                err.with_label(file, span, "expected because it was given here")
+            }
+            ReasonExpected::ArgOf(span, ty) => err.with_label(
+                file,
+                span,
+                Doc::start("expected because it was passed to this, of type ")
+                    .chain(ty.pretty(db, mcxt).style(Style::None))
+                    .style(Style::Note),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeError {
     NotFound(Spanned<Name>),
     NotFunction(MCxt, Spanned<VTy>),
-    Unify(MCxt, Spanned<VTy>, VTy),
-    NotIntType(Span, VTy),
+    Unify(MCxt, Spanned<VTy>, VTy, ReasonExpected),
+    NotIntType(Span, VTy, ReasonExpected),
     UntypedLiteral(Span),
     MetaScope(Span, Var<Lvl>, Name),
     MetaOccurs(Span, Var<Lvl>),
@@ -924,7 +975,7 @@ impl TypeError {
         match self {
             TypeError::NotFound(n) => Error::new(
                 file,
-                format!("Name not found in scope: {}", n.get(db)),
+                format!("Name not found in scope: '{}'", n.get(db)),
                 n.span(),
                 "not found",
             ),
@@ -936,17 +987,23 @@ impl TypeError {
                 t.span(),
                 "not a function",
             ),
-            TypeError::Unify(mcxt, a, b) => Error::new(
+            TypeError::Unify(mcxt, a, b, r) => r.add(
+                Error::new(
+                    file,
+                    Doc::start("Could not match types, expected ")
+                        .chain(b.pretty(db, &mcxt).style(Style::None))
+                        .add(", got ")
+                        .chain(a.pretty(db, &mcxt).style(Style::None))
+                        .style(Style::Bold),
+                    a.span(),
+                    Doc::start("expected ")
+                        .chain(b.pretty(db, &mcxt).style(Style::None))
+                        .add(" here")
+                        .style(Style::Error),
+                ),
                 file,
-                Doc::start("Could not match types, expected ")
-                    .chain(b.pretty(db, &mcxt).style(Style::None))
-                    .add(", got ")
-                    .chain(a.pretty(db, &mcxt).style(Style::None))
-                    .style(Style::Bold),
-                a.span(),
-                Doc::start("expected ")
-                    .chain(b.pretty(db, &mcxt))
-                    .add(" here"),
+                db,
+                &mcxt,
             ),
             // TODO show metas nicer
             TypeError::MetaScope(s, m, n) => Error::new(
@@ -955,7 +1012,8 @@ impl TypeError {
                     .chain(m.pretty_meta(mcxt, db))
                     .add(" requires variable ")
                     .add(n.get(db))
-                    .add(", which is not in its scope"),
+                    .add(", which is not in its scope")
+                    .style(Style::Bold),
                 s,
                 format!("solution found here"),
             ),
@@ -963,7 +1021,8 @@ impl TypeError {
                 file,
                 Doc::start("Solution for ")
                     .chain(m.pretty_meta(mcxt, db))
-                    .add(" would be recursive"),
+                    .add(" would be recursive")
+                    .style(Style::Bold),
                 s,
                 format!("solution found here"),
             ),
@@ -971,7 +1030,8 @@ impl TypeError {
                 file,
                 Doc::start("Value of type ")
                     .chain(ty.pretty(db, mcxt).style(Style::None))
-                    .add(" does not have members"),
+                    .add(" does not have members")
+                    .style(Style::Bold),
                 ty.span(),
                 format!("tried to access member here"),
             ),
@@ -981,17 +1041,19 @@ impl TypeError {
                     .add(db.lookup_intern_name(m))
                     .add(" in ")
                     .add(match sctype {
-                        ScopeType::Type => "type namespace",
-                        ScopeType::Struct => "struct",
-                    }),
+                        ScopeType::Type(name) => {
+                            format!("namespace of type {}", db.lookup_intern_name(name))
+                        }
+                        ScopeType::Struct => format!("struct"),
+                    })
+                    .style(Style::Bold),
                 span,
                 format!("not found: {}", db.lookup_intern_name(m)),
             ),
             TypeError::InvalidPattern(span) => Error::new(
                 file,
-                Doc::start(
-                    "Invalid pattern: expected _, variable, literal, or constructor application",
-                ),
+                Doc::start("Invalid pattern: expected '_', variable, literal, or constructor")
+                    .style(Style::Bold),
                 span,
                 format!("invalid pattern"),
             ),
@@ -1000,17 +1062,21 @@ impl TypeError {
                 Doc::start("Expected ")
                     .add(expected)
                     .add(" arguments to constructor in pattern, got ")
-                    .add(got),
+                    .add(got)
+                    .style(Style::Bold),
                 span,
                 format!("expected {} arguments", expected),
             ),
             TypeError::Inexhaustive(span, cov, ty) => Error::new(
                 file,
-                Doc::start("Inexhaustive match: patterns '")
-                    .chain(cov.pretty_rest(&ty, db, mcxt))
-                    .add("' not covered"),
+                Doc::start("Inexhaustive match: patterns ")
+                    .chain(cov.pretty_rest(&ty, db, mcxt).style(Style::None))
+                    .add(" not covered")
+                    .style(Style::Bold),
                 span,
-                Doc::start("help: this has type ").chain(ty.pretty(db, mcxt).style(Style::None)),
+                Doc::start("this has type ")
+                    .chain(ty.pretty(db, mcxt).style(Style::None))
+                    .style(Style::Error),
             ),
             TypeError::InvalidPatternBecause(e) => {
                 let mut e = e.to_error(file, db, mcxt);
@@ -1018,19 +1084,29 @@ impl TypeError {
                 *e.message() = message;
                 e
             }
-            TypeError::NotIntType(span, ty) => Error::new(
+            TypeError::NotIntType(span, ty, r) => r.add(
+                Error::new(
+                    file,
+                    Doc::start("Expected value of type ")
+                        .chain(ty.pretty(db, mcxt).style(Style::None))
+                        .add(", got integer")
+                        .style(Style::Bold),
+                    span,
+                    format!("this is an integer"),
+                ),
                 file,
-                Doc::start("Expected value of type ")
-                    .chain(ty.pretty(db, mcxt).style(Style::None))
-                    .add(", got integer"),
-                span,
-                format!("this is an integer"),
+                db,
+                mcxt,
             ),
             TypeError::UntypedLiteral(span) => Error::new(
                 file,
-                Doc::start("Could not infer type of ambiguous literal"),
+                Doc::start("Could not infer type of ambiguous literal").style(Style::Bold),
                 span,
-                format!("try adding a type, like I32 or I64"),
+                Doc::start("try adding a type, like ")
+                    .chain(Doc::start("I32").style(Style::None))
+                    .add(" or ")
+                    .chain(Doc::start("I64").style(Style::None))
+                    .style(Style::Error),
             ),
         }
     }
@@ -1312,17 +1388,25 @@ pub fn infer(
 
         Pre_::BinOp(op, a, b) => {
             let f = Term::Var(
-                Var::Builtin(Builtin::BinOp(*op)),
+                Var::Builtin(Builtin::BinOp(**op)),
                 Box::new(op.ty().quote(mcxt.size, mcxt, db)),
             );
-            let (f, fty) = infer_app(f, op.ty(), pre.span(), Icit::Expl, a, db, mcxt)?;
-            infer_app(f, fty, pre.span(), Icit::Expl, b, db, mcxt)
+            let (f, fty) = infer_app(f, op.ty(), op.span(), Icit::Expl, a, db, mcxt)?;
+            let fspan = Span(a.span().0, op.span().1);
+            infer_app(f, fty, fspan, Icit::Expl, b, db, mcxt)
         }
 
         Pre_::If(cond, yes, no) => {
-            let cond = check(cond, &Val::builtin(Builtin::Bool, Val::Type), db, mcxt)?;
+            let cond = check(
+                cond,
+                &Val::builtin(Builtin::Bool, Val::Type),
+                ReasonExpected::IfCond,
+                db,
+                mcxt,
+            )?;
+            let yspan = yes.span();
             let (yes, ty) = infer(insert, yes, db, mcxt)?;
-            let no = check(no, &ty, db, mcxt)?;
+            let no = check(no, &ty, ReasonExpected::MustMatch(yspan), db, mcxt)?;
             Ok((Term::If(Box::new(cond), Box::new(yes), Box::new(no)), ty))
         }
 
@@ -1343,7 +1427,7 @@ pub fn infer(
         }
 
         Pre_::Lam(name, icit, ty, body) => {
-            let ty = check(ty, &Val::Type, db, mcxt)?;
+            let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let vty = ty.clone().evaluate(&mcxt.env(), mcxt, db);
             // TODO Rc to get rid of the clone()?
             mcxt.define(*name, NameInfo::Local(vty.clone()), db);
@@ -1366,11 +1450,11 @@ pub fn infer(
         }
 
         Pre_::Pi(name, icit, ty, ret) => {
-            let ty = check(ty, &Val::Type, db, mcxt)?;
+            let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             // TODO Rc to get rid of the clone()?
             let vty = ty.clone().evaluate(&mcxt.env(), mcxt, db);
             mcxt.define(*name, NameInfo::Local(vty), db);
-            let ret = check(ret, &Val::Type, db, mcxt)?;
+            let ret = check(ret, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             mcxt.undef(db);
             Ok((
                 Term::Pi(*name, *icit, Box::new(ty), Box::new(ret)),
@@ -1379,8 +1463,8 @@ pub fn infer(
         }
 
         Pre_::Fun(from, to) => {
-            let from = check(from, &Val::Type, db, mcxt)?;
-            let to = check(to, &Val::Type, db, mcxt)?;
+            let from = check(from, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
+            let to = check(to, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             Ok((Term::Fun(Box::new(from), Box::new(to)), Val::Type))
         }
 
@@ -1450,12 +1534,12 @@ pub fn infer(
                         )),
                         _ => Err(TypeError::MemberNotFound(
                             Span(head.span().0, m.span().1),
-                            ScopeType::Type,
+                            ScopeType::Type(db.intern_name("Bool".into())),
                             **m,
                         )),
                     }
                 }
-                (Val::App(Var::Type(_id, scope), _, sp, _), _) if sp.is_empty() => {
+                (Val::App(Var::Type(id, scope), _, sp, _), _) if sp.is_empty() => {
                     let scope = db.lookup_intern_scope(scope);
                     for &(n, v) in scope.iter().rev() {
                         if n == **m {
@@ -1494,7 +1578,11 @@ pub fn infer(
                     }
                     Err(TypeError::MemberNotFound(
                         Span(head.span().0, m.span().1),
-                        ScopeType::Type,
+                        ScopeType::Type(
+                            db.lookup_intern_predef(db.lookup_intern_def(id).0)
+                                .name()
+                                .unwrap(),
+                        ),
                         **m,
                     ))
                 }
@@ -1508,7 +1596,16 @@ pub fn infer(
         Pre_::Case(x, cases) => {
             let xspan = x.span();
             let (x, x_ty) = infer(true, x, db, mcxt)?;
-            crate::pattern::elab_case(x, xspan, x_ty, cases, None, mcxt, db)
+            crate::pattern::elab_case(
+                x,
+                xspan,
+                x_ty,
+                ReasonExpected::MustMatch(xspan),
+                cases,
+                None,
+                mcxt,
+                db,
+            )
         }
 
         Pre_::OrPat(_, _) => unreachable!("| is only allowed in patterns"),
@@ -1530,7 +1627,13 @@ fn infer_app(
         Val::Pi(icit2, cl) => {
             assert_eq!(icit, *icit2);
 
-            let x = check(x, &cl.ty, db, mcxt)?;
+            let x = check(
+                x,
+                &cl.ty,
+                ReasonExpected::ArgOf(fspan, fty.clone()),
+                db,
+                mcxt,
+            )?;
             // TODO Rc to get rid of the clone()?
             let to = (**cl)
                 .clone()
@@ -1546,7 +1649,13 @@ fn infer_app(
             ))
         }
         Val::Fun(from, to) => {
-            let x = check(x, &from, db, mcxt)?;
+            let x = check(
+                x,
+                &from,
+                ReasonExpected::ArgOf(fspan, fty.clone()),
+                db,
+                mcxt,
+            )?;
             let to = (**to).clone();
             Ok((
                 Term::App(
@@ -1570,19 +1679,26 @@ fn infer_app(
     Ok((term, ty))
 }
 
-pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<Term, TypeError> {
+pub fn check(
+    pre: &Pre,
+    ty: &VTy,
+    reason: ReasonExpected,
+    db: &dyn Compiler,
+    mcxt: &mut MCxt,
+) -> Result<Term, TypeError> {
     match (&**pre, ty) {
-        (_, Val::Arc(x)) => check(pre, x, db, mcxt),
+        (_, Val::Arc(x)) => check(pre, x, reason, db, mcxt),
 
         (Pre_::Lam(n, i, ty, body), Val::Pi(i2, cl)) if i == i2 => {
             let ty2 = &cl.ty;
-            let ety = check(ty, &Val::Type, db, mcxt)?;
+            let ety = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let vty = ety.clone().evaluate(&mcxt.env(), mcxt, db);
             if !unify(vty.clone(), ty2.clone(), mcxt.size, pre.span(), db, mcxt)? {
                 return Err(TypeError::Unify(
                     mcxt.clone(),
                     ty.copy_span(vty),
                     ty2.clone(),
+                    reason,
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty.clone()), db);
@@ -1590,6 +1706,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                 body,
                 // TODO not clone ??
                 &(**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db),
+                reason,
                 db,
                 mcxt,
             )?;
@@ -1598,7 +1715,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
         }
 
         (Pre_::Lam(n, Icit::Expl, ty, body), Val::Fun(ty2, body_ty)) => {
-            let ety = check(ty, &Val::Type, db, mcxt)?;
+            let ety = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let vty = ety.clone().evaluate(&mcxt.env(), mcxt, db);
             if !unify(
                 vty.clone(),
@@ -1612,10 +1729,11 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                     mcxt.clone(),
                     ty.copy_span(vty),
                     (**ty2).clone(),
+                    reason,
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty), db);
-            let body = check(body, &*body_ty, db, mcxt)?;
+            let body = check(body, &*body_ty, reason, db, mcxt)?;
             mcxt.undef(db);
             Ok(Term::Lam(*n, Icit::Expl, Box::new(ety), Box::new(body)))
         }
@@ -1629,7 +1747,13 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                 db.intern_name(s)
             };
             mcxt.define(name, NameInfo::Local(cl.ty.clone()), db);
-            let body = check(pre, &(**cl).clone().vquote(mcxt.size, mcxt, db), db, mcxt)?;
+            let body = check(
+                pre,
+                &(**cl).clone().vquote(mcxt.size, mcxt, db),
+                reason,
+                db,
+                mcxt,
+            )?;
             mcxt.undef(db);
             let ty = cl.ty.clone().quote(mcxt.size, mcxt, db);
             Ok(Term::Lam(cl.name, Icit::Impl, Box::new(ty), Box::new(body)))
@@ -1643,20 +1767,30 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
             _ => Err(TypeError::NotIntType(
                 pre.span(),
                 ty.clone().inline_metas(mcxt, db),
+                reason,
             )),
         },
 
         (Pre_::Case(value, cases), _) => {
             let vspan = value.span();
             let (value, val_ty) = infer(true, value, db, mcxt)?;
-            crate::pattern::elab_case(value, vspan, val_ty, cases, Some(ty.clone()), mcxt, db)
-                .map(|(x, _)| x)
+            crate::pattern::elab_case(
+                value,
+                vspan,
+                val_ty,
+                ReasonExpected::MustMatch(vspan),
+                cases,
+                Some((ty.clone(), reason.clone())),
+                mcxt,
+                db,
+            )
+            .map(|(x, _)| x)
         }
 
         _ => {
             if let Val::App(h, _, sp, g) = ty {
                 if let Some(v) = g.resolve(*h, sp, mcxt.size, db, mcxt) {
-                    return check(pre, &v, db, mcxt);
+                    return check(pre, &v, reason, db, mcxt);
                 }
             }
 
@@ -1667,6 +1801,7 @@ pub fn check(pre: &Pre, ty: &VTy, db: &dyn Compiler, mcxt: &mut MCxt) -> Result<
                     mcxt.clone(),
                     pre.copy_span(i_ty.inline_metas(mcxt, db)),
                     ty.clone().inline_metas(mcxt, db),
+                    reason,
                 ));
             }
             Ok(term)

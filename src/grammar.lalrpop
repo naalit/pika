@@ -249,59 +249,59 @@ RHS: Pre_ = {
 // Standard precedence for arithmetic operators
 Arith<S>: Pre_ = {
   Factor<S>,
-  <a:Sp<Arith<S>>> "+" <b:Sp<Factor<RHS>>> => Pre_::BinOp(BinOp::Add, a, b),
-  <a:Sp<Arith<S>>> "-" <b:Sp<Factor<RHS>>> => Pre_::BinOp(BinOp::Sub, a, b),
+  <a:Sp<Arith<S>>> <s:Sp<"+">> <b:Sp<Factor<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Add), a, b),
+  <a:Sp<Arith<S>>> <s:Sp<"-">> <b:Sp<Factor<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Sub), a, b),
 }
 Factor<S>: Pre_ = {
   Exp<S>,
-  <a:Sp<Factor<S>>> "*" <b:Sp<Exp<RHS>>> => Pre_::BinOp(BinOp::Mul, a, b),
-  <a:Sp<Factor<S>>> "/" <b:Sp<Exp<RHS>>> => Pre_::BinOp(BinOp::Div, a, b),
+  <a:Sp<Factor<S>>> <s:Sp<"*">> <b:Sp<Exp<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Mul), a, b),
+  <a:Sp<Factor<S>>> <s:Sp<"/">> <b:Sp<Exp<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Div), a, b),
 }
 Exp<S>: Pre_ = {
   S,
-  <a:Sp<Exp<S>>> "**" <b:Sp<RHS>> => Pre_::BinOp(BinOp::Exp, a, b),
+  <a:Sp<Exp<S>>> <s:Sp<"**">> <b:Sp<RHS>> => Pre_::BinOp(s.copy_span(BinOp::Exp), a, b),
 }
 
 // No precedence for bitwise operators, but all are left-associative.
 Bitwise<S>: Pre_ = {
   // You can't use arithmetic with bitwise operators without parens, but we need a single chain.
   Arith<S>,
-  Sp<S> ("&" <Sp<RHS>>)+ => {
+  Sp<S> (Sp<"&"> Sp<RHS>)+ => {
     let (s, v) = (<>);
-    v.into_iter().fold(s, |s, x| {
+    v.into_iter().fold(s, |s, (op, x)| {
       let span = Span(s.span().0, x.span().1);
-      Spanned::new(Pre_::BinOp(BinOp::BitAnd, s, x), span)
+      Spanned::new(Pre_::BinOp(op.copy_span(BinOp::BitAnd), s, x), span)
     }).unwrap()
   },
-  Sp<S> ("|" <Sp<RHS>>)+ => {
+  Sp<S> (Sp<"|"> Sp<RHS>)+ => {
     let (s, v) = (<>);
-    v.into_iter().fold(s, |s, x| {
+    v.into_iter().fold(s, |s, (op, x)| {
       let span = Span(s.span().0, x.span().1);
-      Spanned::new(Pre_::BinOp(BinOp::BitOr, s, x), span)
+      Spanned::new(Pre_::BinOp(op.copy_span(BinOp::BitOr), s, x), span)
     }).unwrap()
   },
   // Single "^" is ambiguous: exponentiation or xor?
-  Sp<S> ("^^" <Sp<RHS>>)+ => {
+  Sp<S> (Sp<"^^"> Sp<RHS>)+ => {
     let (s, v) = (<>);
-    v.into_iter().fold(s, |s, x| {
+    v.into_iter().fold(s, |s, (op, x)| {
       let span = Span(s.span().0, x.span().1);
-      Spanned::new(Pre_::BinOp(BinOp::BitXor, s, x), span)
+      Spanned::new(Pre_::BinOp(op.copy_span(BinOp::BitXor), s, x), span)
     }).unwrap()
   },
   // I'd like << and >> for function composition, too - maybe the same operator, e.g. `impl [T P Q] ShiftRight (x: T -> P x) (y: [x] P x -> Q y) = ...`?
   // The alternative would be <<< and >>>.
-  Sp<S> ("<<" <Sp<RHS>>)+ => {
+  Sp<S> (Sp<"<<"> Sp<RHS>)+ => {
     let (s, v) = (<>);
-    v.into_iter().fold(s, |s, x| {
+    v.into_iter().fold(s, |s, (op, x)| {
       let span = Span(s.span().0, x.span().1);
-      Spanned::new(Pre_::BinOp(BinOp::BitShl, s, x), span)
+      Spanned::new(Pre_::BinOp(op.copy_span(BinOp::BitShl), s, x), span)
     }).unwrap()
   },
-  Sp<S> (">>" <Sp<RHS>>)+ => {
+  Sp<S> (Sp<">>"> Sp<RHS>)+ => {
     let (s, v) = (<>);
-    v.into_iter().fold(s, |s, x| {
+    v.into_iter().fold(s, |s, (op, x)| {
       let span = Span(s.span().0, x.span().1);
-      Spanned::new(Pre_::BinOp(BinOp::BitShr, s, x), span)
+      Spanned::new(Pre_::BinOp(op.copy_span(BinOp::BitShr), s, x), span)
     }).unwrap()
   },
 }
@@ -310,12 +310,12 @@ Bitwise<S>: Pre_ = {
 // But, they're lower precedence than arithmetic or bitwise - `x + 2 == z * 3` works fine.
 Comparison<S>: Pre_ = {
   Bitwise<S>,
-  <a:Sp<Bitwise<S>>> "==" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Eq, a, b),
-  <a:Sp<Bitwise<S>>> "!=" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::NEq, a, b),
-  <a:Sp<Bitwise<S>>> "<" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Lt, a, b),
-  <a:Sp<Bitwise<S>>> ">" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Gt, a, b),
-  <a:Sp<Bitwise<S>>> "<=" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Leq, a, b),
-  <a:Sp<Bitwise<S>>> ">=" <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(BinOp::Geq, a, b),
+  <a:Sp<Bitwise<S>>> <s:Sp<"==">> <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Eq), a, b),
+  <a:Sp<Bitwise<S>>> <s:Sp<"!=">> <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::NEq), a, b),
+  <a:Sp<Bitwise<S>>> <s:Sp<"<">> <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Lt), a, b),
+  <a:Sp<Bitwise<S>>> <s:Sp<">">> <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Gt), a, b),
+  <a:Sp<Bitwise<S>>> <s:Sp<"<=">> <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Leq), a, b),
+  <a:Sp<Bitwise<S>>> <s:Sp<">=">> <b:Sp<Bitwise<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Geq), a, b),
 }
 
 // No precedence between `and` and `or`, but one can be repeated: `x and y and z` works but not `x and y or z`.
@@ -329,8 +329,8 @@ Logical<S>: Pre_ = {
 // <| and |> have no precedence, but are left-associative: `x |> y |> z` = `z(y(x))`, `x <| y <| z` = `x y z`.
 Op: Pre_ = {
   Logical<LHS>,
-  <a:Sp<LHS>> "<|" <b:Sp<RHS>> => Pre_::BinOp(BinOp::PipeL, a, b),
-  <a:Sp<LHS>> "|>" <b:Sp<RHS>> => Pre_::BinOp(BinOp::PipeR, a, b),
+  <a:Sp<LHS>> <s:Sp<"<|">> <b:Sp<RHS>> => Pre_::BinOp(s.copy_span(BinOp::PipeL), a, b),
+  <a:Sp<LHS>> <s:Sp<"|>">> <b:Sp<RHS>> => Pre_::BinOp(s.copy_span(BinOp::PipeR), a, b),
   // `a . b c d` = `b c d a`, where `b` is looked up in the context of `a`'s type.
   // Unless `a.b` is a field, in which case it's `(a.b) c d`.
   // `a b . c d` isn't allowed.

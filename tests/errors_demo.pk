@@ -1,0 +1,35 @@
+# This file is for testing and refining how type errors look.
+
+type MyType has_no_type of
+  WrongReturnType : Bool
+end
+
+fun inexhaustive (x : Bool) = case x of
+  True => False
+end
+
+fun invalid_pat (x : Bool) = case x of
+  12 => False
+end
+
+fun invalid_pat_again (x : I32) = case x of
+  (y + 2) => False
+end
+
+fun mismatched_case (x : Bool) = case x of
+  True => False
+  False => Type
+end
+
+val mismatched_if = if True then False else Type
+val wrong_if_type = if 3 then 4 else 5
+val ambiguous_literal = 12
+val not_found = nonexistent
+val solution_for_type_not_found = \x.x
+val solution_for_arg_not_found = do
+  fun f [x: Type] (_: I32) = x
+  f 12
+end
+fun not_type (x : True) = x
+val not_function = True False
+val wrong_arg_type = True > False

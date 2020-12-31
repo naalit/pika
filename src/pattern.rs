@@ -417,8 +417,9 @@ pub fn elab_case(
     value: Term,
     vspan: Span,
     val_ty: VTy,
+    reason: ReasonExpected,
     cases: &[(Pre, Pre)],
-    mut ret_ty: Option<VTy>,
+    mut ret_ty: Option<(VTy, ReasonExpected)>,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
 ) -> Result<(Term, VTy), TypeError> {
@@ -426,16 +427,27 @@ pub fn elab_case(
     let mut rcases = Vec::new();
     let mut last_cov = Cov::None;
 
+    let mut first = true;
     for (pat, body) in cases {
-        let pat = elab_pat(pat, &val_ty, mcxt, db)?;
-        let body = match &ret_ty {
-            Some(ty) => check(body, &ty, db, mcxt)?,
+        let pat = elab_pat(pat, &val_ty, reason.clone(), mcxt, db)?;
+        let body = match &mut ret_ty {
+            Some((ty, reason)) => {
+                let term = check(body, &ty, reason.clone(), db, mcxt)?;
+                // If the type we were given is a meta, the actual reason for future type errors is the type of the first branch
+                if first {
+                    if let Val::App(Var::Meta(_), _, _, _) = &ty {
+                        *reason = ReasonExpected::MustMatch(body.span());
+                    }
+                }
+                term
+            }
             None => {
                 let (term, ty) = infer(true, body, db, mcxt)?;
-                ret_ty = Some(ty);
+                ret_ty = Some((ty, ReasonExpected::MustMatch(body.span())));
                 term
             }
         };
+        first = false;
 
         mcxt.set_state(state.clone());
         let cov = last_cov.clone().or(pat.cov()).simplify(&val_ty, db, mcxt);
@@ -452,25 +464,31 @@ pub fn elab_case(
         let vty = val_ty.quote(mcxt.size, mcxt, db);
         Ok((
             Term::Case(Box::new(value), Box::new(vty), rcases),
-            ret_ty.unwrap(),
+            ret_ty.unwrap().0,
         ))
     } else {
         Err(TypeError::Inexhaustive(vspan, last_cov, val_ty))
     }
 }
 
-pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Result<Pat, TypeError> {
+pub fn elab_pat(
+    pre: &Pre,
+    ty: &VTy,
+    reason: ReasonExpected,
+    mcxt: &mut MCxt,
+    db: &dyn Compiler,
+) -> Result<Pat, TypeError> {
     match &**pre {
         Pre_::Lit(l) => match ty {
             Val::App(Var::Builtin(b), _, _, _) => match b {
                 Builtin::I32 => Ok(Pat::Lit(*l, Width::W32)),
                 Builtin::I64 => Ok(Pat::Lit(*l, Width::W64)),
                 _ => Err(TypeError::InvalidPatternBecause(Box::new(
-                    TypeError::NotIntType(pre.span(), ty.clone().inline_metas(mcxt, db)),
+                    TypeError::NotIntType(pre.span(), ty.clone().inline_metas(mcxt, db), reason),
                 ))),
             },
             _ => Err(TypeError::InvalidPatternBecause(Box::new(
-                TypeError::NotIntType(pre.span(), ty.clone().inline_metas(mcxt, db)),
+                TypeError::NotIntType(pre.span(), ty.clone().inline_metas(mcxt, db), reason),
             ))),
         },
         Pre_::Var(n) => {
@@ -479,7 +497,7 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
                     if let Term::Var(Var::Cons(id2), _) = &*info.term {
                         if id == *id2 {
                             // This is a constructor
-                            return elab_pat_app(pre, VecDeque::new(), ty, mcxt, db);
+                            return elab_pat_app(pre, VecDeque::new(), ty, reason, mcxt, db);
                         }
                     }
                 }
@@ -502,6 +520,7 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
                                     mcxt.clone(),
                                     pre.copy_span(Val::builtin(Builtin::Bool, Val::Type)),
                                     ty.clone().inline_metas(mcxt, db),
+                                    reason,
                                 ),
                             )));
                         }
@@ -523,6 +542,7 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
                                     mcxt.clone(),
                                     pre.copy_span(Val::builtin(Builtin::Bool, Val::Type)),
                                     ty.clone().inline_metas(mcxt, db),
+                                    reason,
                                 ),
                             )));
                         }
@@ -549,22 +569,23 @@ pub fn elab_pat(pre: &Pre, ty: &VTy, mcxt: &mut MCxt, db: &dyn Compiler) -> Resu
             }
             let (head, spine) = sep(pre);
 
-            elab_pat_app(head, spine, ty, mcxt, db)
+            elab_pat_app(head, spine, ty, reason, mcxt, db)
         }
         Pre_::Dot(head, member, spine) => elab_pat_app(
             &pre.copy_span(Pre_::Dot(head.clone(), member.clone(), Vec::new())),
             spine.iter().map(|(i, x)| (*i, x)).collect(),
             ty,
+            reason,
             mcxt,
             db,
         ),
         Pre_::OrPat(x, y) => {
             let size_before = mcxt.size;
-            let x = elab_pat(x, ty, mcxt, db)?;
+            let x = elab_pat(x, ty, reason.clone(), mcxt, db)?;
             if mcxt.size != size_before {
                 todo!("error: for now we don't support capturing inside or-patterns")
             }
-            let y = elab_pat(y, ty, mcxt, db)?;
+            let y = elab_pat(y, ty, reason, mcxt, db)?;
             if mcxt.size != size_before {
                 todo!("error: for now we don't support capturing inside or-patterns")
             }
@@ -579,6 +600,7 @@ fn elab_pat_app(
     head: &Pre,
     mut spine: VecDeque<(Icit, &Pre)>,
     expected_ty: &VTy,
+    reason: ReasonExpected,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
 ) -> Result<Pat, TypeError> {
@@ -611,13 +633,13 @@ fn elab_pat_app(
                         l = l.inc();
                     }
                     Val::Pi(i2, cl) if i == i2 => {
-                        let pat = elab_pat(pat, &cl.ty, mcxt, db)?;
+                        let pat = elab_pat(pat, &cl.ty, reason.clone(), mcxt, db)?;
                         pspine.push(pat);
                         ty = cl.vquote(l.inc(), mcxt, db);
                         l = l.inc();
                     }
                     Val::Fun(from, to) if i == Icit::Expl => {
-                        let pat = elab_pat(pat, &from, mcxt, db)?;
+                        let pat = elab_pat(pat, &from, reason.clone(), mcxt, db)?;
                         pspine.push(pat);
                         ty = *to;
                     }
@@ -667,6 +689,7 @@ fn elab_pat_app(
                                     mcxt.clone(),
                                     Spanned::new(ty.clone().inline_metas(mcxt, db), span),
                                     expected_ty.clone().inline_metas(mcxt, db),
+                                    reason,
                                 ),
                             )))
                         }
