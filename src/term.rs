@@ -395,6 +395,20 @@ impl Term {
         }
     }
 
+    pub fn head_ty<'a>(&'a self, or: &'a Term) -> &'a Term {
+        match self {
+            Term::App(_, f, fty, _) => f.head_ty(fty),
+            _ => or,
+        }
+    }
+
+    pub fn spine_len(&self) -> usize {
+        match self {
+            Term::App(_, f, _, _) => f.spine_len() + 1,
+            _ => 0,
+        }
+    }
+
     pub fn arity(&self, only_expl: bool) -> usize {
         match self {
             Term::Fun(_, to) => 1 + to.arity(only_expl),

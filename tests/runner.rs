@@ -1,5 +1,4 @@
 use assert_cmd::*;
-use predicates::prelude::*;
 use predicates::str::*;
 
 #[test]
@@ -70,6 +69,20 @@ fn test_bools() {
 // Tests for type errors
 
 #[test]
+fn test_curry_errors() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/curry_errors.pk"])
+        .assert()
+        .stderr(contains("Too few arguments 1"))
+        .stderr(contains("Too many arguments 3"))
+        .stderr(contains("expects 2 arguments"))
+        .stderr(contains("Could not match types"))
+        .stderr(is_match("expects 1 argument[^s]").unwrap())
+        .failure();
+}
+
+#[test]
 fn test_wrong_if_type() {
     Command::cargo_bin("pika")
         .unwrap()
@@ -96,7 +109,7 @@ fn test_inexhaustive() {
         .args(&["tests/inexhaustive.pk"])
         .assert()
         .stderr(contains("Inexhaustive"))
-        .stderr(contains("'False' not covered"))
+        .stderr(predicates::str::is_match("False.* not covered").unwrap())
         .failure();
 }
 
