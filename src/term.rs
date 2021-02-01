@@ -9,8 +9,8 @@ use crate::pattern::Pat;
 impl Literal {
     pub fn pretty(self) -> Doc {
         match self {
-            Literal::Positive(i) => Doc::start(i),
-            Literal::Negative(i) => Doc::start(i),
+            Literal::Positive(i) => Doc::start(i).style(Style::Literal),
+            Literal::Negative(i) => Doc::start(i).style(Style::Literal),
         }
     }
 

@@ -1,7 +1,7 @@
 //! The diagnostic reporting infrastructure.
 
 use codespan_reporting::diagnostic::{Diagnostic, Label};
-use codespan_reporting::files::{Files as FilesT, SimpleFile, Error as FError};
+use codespan_reporting::files::{Error as FError, Files as FilesT, SimpleFile};
 use codespan_reporting::term::termcolor;
 use codespan_reporting::term::{emit, Config};
 use lalrpop_util::ParseError;
@@ -44,19 +44,31 @@ impl<'a> FilesT<'a> for Files {
     type Source = &'a str;
 
     fn name(&self, file_id: usize) -> Result<&str, FError> {
-        Ok(self.get(file_id).ok_or(FError::FileMissing)?.name().as_ref())
+        Ok(self
+            .get(file_id)
+            .ok_or(FError::FileMissing)?
+            .name()
+            .as_ref())
     }
 
     fn source(&self, file_id: usize) -> Result<&str, FError> {
-        Ok(self.get(file_id).ok_or(FError::FileMissing)?.source().as_ref())
+        Ok(self
+            .get(file_id)
+            .ok_or(FError::FileMissing)?
+            .source()
+            .as_ref())
     }
 
     fn line_index(&self, file_id: usize, byte_index: usize) -> Result<usize, FError> {
-        self.get(file_id).ok_or(FError::FileMissing)?.line_index((), byte_index)
+        self.get(file_id)
+            .ok_or(FError::FileMissing)?
+            .line_index((), byte_index)
     }
 
     fn line_range(&self, file_id: usize, line_index: usize) -> Result<Range<usize>, FError> {
-        self.get(file_id).ok_or(FError::FileMissing)?.line_range((), line_index)
+        self.get(file_id)
+            .ok_or(FError::FileMissing)?
+            .line_range((), line_index)
     }
 }
 

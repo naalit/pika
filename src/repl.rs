@@ -192,18 +192,27 @@ pub fn run_repl() {
                                 .clone()
                                 .evaluate(&mcxt.env(), &mcxt, &db)
                                 .force(mcxt.size, &db, &mcxt);
-                            let d = crate::pretty::Doc::keyword("val")
-                                .space()
-                                .add(predef.name().map_or("_".to_string(), |x| x.get(&db)))
-                                .space()
-                                .add(":")
-                                .space()
-                                .chain(info.typ.pretty(&db, &mcxt))
-                                .space()
-                                .add("=")
-                                .space()
-                                .chain(val.pretty(&db, &mcxt))
-                                .line();
+                            let d = match predef.name() {
+                                Some(name) => crate::pretty::Doc::keyword("val")
+                                    .space()
+                                    .add(name.get(&db))
+                                    .space()
+                                    .add(":")
+                                    .space()
+                                    .chain(info.typ.pretty(&db, &mcxt))
+                                    .space()
+                                    .add("=")
+                                    .space()
+                                    .chain(val.pretty(&db, &mcxt))
+                                    .line(),
+                                None => val
+                                    .pretty(&db, &mcxt)
+                                    .space()
+                                    .add(":")
+                                    .space()
+                                    .chain(info.typ.pretty(&db, &mcxt))
+                                    .line(),
+                            };
                             printer.print(d).unwrap();
                             last_seen = Some(i);
                         } else if last_seen.map_or(true, |x| x == i) {
