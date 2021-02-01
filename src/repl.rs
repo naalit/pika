@@ -35,7 +35,9 @@ impl Completer for ReplHelper {
     type Candidate = String;
 }
 
-impl Hinter for ReplHelper {}
+impl Hinter for ReplHelper {
+    type Hint = String;
+}
 
 fn match_regex<'l>(
     slices: Vec<(&'l str, Style)>,
