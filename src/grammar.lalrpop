@@ -49,6 +49,7 @@ extern {
     "." => Tok::Dot,
     "," => Tok::Comma,
     "**" => Tok::Exp,
+    "%" => Tok::Mod,
     "^^" => Tok::Xor,
     "<<" => Tok::LShift,
     ">>" => Tok::RShift,
@@ -86,13 +87,14 @@ Sp<T>: Spanned<T> = {
 }
 
 pub Defs: Vec<PreDefAn> = {
+  "\n"* => Vec::new(),
   "\n"* <first:Def> <mut v:("\n"+ <Def>)*> "\n"* => {
     v.insert(0, first);
     v
   }
 }
 
-pub Def: PreDefAn = {
+Def: PreDefAn = {
   <a:("@" "[" <Attr> "]" "\n"*)*> <d:Def_> => PreDefAn {
     attributes: a,
     inner: d,
@@ -132,7 +134,7 @@ Def_: PreDef = {
 
 // Top-level expression groups
 
-pub Pre: Pre = Sp<Term>;
+Pre: Pre = Sp<Term>;
 
 Term: Pre_ = {
   Expr,
@@ -256,6 +258,7 @@ Factor<S>: Pre_ = {
   Exp<S>,
   <a:Sp<Factor<S>>> <s:Sp<"*">> <b:Sp<Exp<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Mul), a, b),
   <a:Sp<Factor<S>>> <s:Sp<"/">> <b:Sp<Exp<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Div), a, b),
+  <a:Sp<Factor<S>>> <s:Sp<"%">> <b:Sp<Exp<RHS>>> => Pre_::BinOp(s.copy_span(BinOp::Mod), a, b),
 }
 Exp<S>: Pre_ = {
   S,

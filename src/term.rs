@@ -45,6 +45,7 @@ pub enum BinOp {
     Mul,    // *
     Div,    // /
     Exp,    // **
+    Mod,    // %
     BitAnd, // &
     BitOr,  // |
     BitXor, // ^^
@@ -67,6 +68,7 @@ impl BinOp {
             BinOp::Mul => "*",
             BinOp::Div => "/",
             BinOp::Exp => "**",
+            BinOp::Mod => "%",
             BinOp::BitAnd => "&",
             BinOp::BitOr => "|",
             BinOp::BitXor => "^^",
@@ -88,13 +90,15 @@ impl BinOp {
         match self {
             // Right now they only work on I32's, not I64's.
             // TODO add traits and make these work on all numbers
-            Add | Sub | Mul | Div | Exp | BitAnd | BitOr | BitXor | BitShl | BitShr => Val::Fun(
-                Box::new(Val::builtin(Builtin::I32, Val::Type)),
-                Box::new(Val::Fun(
+            Add | Sub | Mul | Div | Exp | Mod | BitAnd | BitOr | BitXor | BitShl | BitShr => {
+                Val::Fun(
                     Box::new(Val::builtin(Builtin::I32, Val::Type)),
-                    Box::new(Val::builtin(Builtin::I32, Val::Type)),
-                )),
-            ),
+                    Box::new(Val::Fun(
+                        Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                        Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                    )),
+                )
+            }
             Eq | NEq | Lt | Gt | Leq | Geq => Val::Fun(
                 Box::new(Val::builtin(Builtin::I32, Val::Type)),
                 Box::new(Val::Fun(
@@ -882,6 +886,20 @@ impl Glued {
                 // A datatype is already fully evaluated
                 Var::Type(_, _) => None,
                 Var::Cons(_) => None,
+                Var::Builtin(Builtin::BinOp(op)) => {
+                    let sp = sp.into_owned();
+                    if sp.len() != 2 {
+                        None
+                    } else {
+                        let a = sp[0].1.clone().inline(l, db, mcxt);
+                        let b = sp[1].1.clone().inline(l, db, mcxt);
+                        if let Some(v) = op.eval(&a, &b) {
+                            Some(v)
+                        } else {
+                            None
+                        }
+                    }
+                }
                 Var::Builtin(_) => None,
                 Var::Top(def) => {
                     let val = db.elaborate_def(def).ok()?.term;
@@ -977,6 +995,13 @@ impl Val {
             Vec::new(),
             Glued::new(),
         )
+    }
+
+    pub fn boolean(b: bool) -> Val {
+        match b {
+            true => Val::builtin(Builtin::True, Val::builtin(Builtin::Bool, Val::Type)),
+            false => Val::builtin(Builtin::False, Val::builtin(Builtin::Bool, Val::Type)),
+        }
     }
 
     pub fn top(def: DefId, ty: VTy) -> Val {

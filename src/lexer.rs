@@ -69,6 +69,7 @@ pub enum Tok<'i> {
     Dot,       // .
     Comma,     // ,
     Exp,       // **
+    Mod,       // %
     Xor,       // ^^
     LShift,    // <<
     RShift,    // >>
@@ -308,6 +309,7 @@ impl<'i> Lexer<'i> {
                 }
             }
             '/' => Some(self.tok(Tok::Div)),
+            '%' => Some(self.tok(Tok::Mod)),
 
             '^' => {
                 self.next();
@@ -547,6 +549,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::Minus => "'-'",
             Tok::Times => "'*'",
             Tok::Div => "'/'",
+            Tok::Mod => "'%'",
             Tok::Bar => "'|'",
             Tok::Dot => "'.'",
             Tok::Comma => "','",

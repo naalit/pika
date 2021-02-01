@@ -152,22 +152,20 @@ impl Val {
 
             Val::Lam(i, mut cl) => {
                 cl.ty = cl.ty.force(l, db, mcxt);
-                cl.term =
-                    (*cl)
-                        .clone()
-                        .vquote(l, mcxt, db)
-                        .force(l, db, mcxt)
-                        .quote(l.inc(), mcxt, db);
+                cl.term = (*cl)
+                    .clone()
+                    .vquote(l.inc(), mcxt, db)
+                    .force(l.inc(), db, mcxt)
+                    .quote(l.inc(), mcxt, db);
                 Val::Lam(i, cl)
             }
             Val::Pi(i, mut cl) => {
                 cl.ty = cl.ty.force(l, db, mcxt);
-                cl.term =
-                    (*cl)
-                        .clone()
-                        .vquote(l, mcxt, db)
-                        .force(l, db, mcxt)
-                        .quote(l.inc(), mcxt, db);
+                cl.term = (*cl)
+                    .clone()
+                    .vquote(l.inc(), mcxt, db)
+                    .force(l.inc(), db, mcxt)
+                    .quote(l.inc(), mcxt, db);
                 Val::Pi(i, cl)
             }
         }
@@ -176,6 +174,20 @@ impl Val {
     /// Returns the result of applying `x` to `self`, beta-reducing if necessary.
     pub fn app(self, icit: Icit, x: Val, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
+            Val::App(Var::Builtin(b), hty, mut sp, _) if sp.len() == 1 => {
+                match b {
+                    Builtin::BinOp(op) => {
+                        if let Some(v) = op.eval(&sp[0].1, &x) {
+                            v
+                        } else {
+                            sp.push((icit, x));
+                            // Throw away the old Glued, since that could have been resolved already
+                            Val::App(Var::Builtin(b), hty, sp, Glued::new())
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
             Val::App(h, hty, mut sp, _) => {
                 sp.push((icit, x));
                 // Throw away the old Glued, since that could have been resolved already
@@ -256,6 +268,40 @@ impl Val {
             Val::Error => Term::Error,
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).quote(enclosing, mcxt, db),
         }
+    }
+}
+
+impl BinOp {
+    pub fn eval(self, a: &Val, b: &Val) -> Option<Val> {
+        let (a, t) = match a {
+            Val::Lit(Literal::Positive(u), t) => (*u, *t),
+            _ => return None,
+        };
+        let b = match b {
+            Val::Lit(Literal::Positive(u), _) => *u,
+            _ => return None,
+        };
+        Some(match self {
+            BinOp::Add => Val::Lit(Literal::Positive(a + b), t),
+            BinOp::Sub => Val::Lit(Literal::Positive(a - b), t),
+            BinOp::Mul => Val::Lit(Literal::Positive(a * b), t),
+            BinOp::Div => Val::Lit(Literal::Positive(a / b), t),
+            BinOp::Exp => Val::Lit(Literal::Positive(a.pow(b as u32)), t),
+            BinOp::Mod => Val::Lit(Literal::Positive(a % b), t),
+            BinOp::BitAnd => Val::Lit(Literal::Positive(a & b), t),
+            BinOp::BitOr => Val::Lit(Literal::Positive(a | b), t),
+            BinOp::BitXor => Val::Lit(Literal::Positive(a ^ b), t),
+            BinOp::BitShl => Val::Lit(Literal::Positive(a << b), t),
+            BinOp::BitShr => Val::Lit(Literal::Positive(a >> b), t),
+            BinOp::Eq => Val::boolean(a == b),
+            BinOp::NEq => Val::boolean(a != b),
+            BinOp::Lt => Val::boolean(a < b),
+            BinOp::Gt => Val::boolean(a > b),
+            BinOp::Leq => Val::boolean(a <= b),
+            BinOp::Geq => Val::boolean(a >= b),
+            BinOp::PipeL => return None,
+            BinOp::PipeR => return None,
+        })
     }
 }
 

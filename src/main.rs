@@ -12,6 +12,7 @@ pub mod lower;
 pub mod pattern;
 pub mod pretty;
 pub mod query;
+pub mod repl;
 pub mod term;
 use query::*;
 
@@ -42,17 +43,6 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        // let mut buf = String::new();
-        // loop {
-        //     std::io::stdin().read_line(&mut buf).unwrap();
-        //     if !buf.ends_with("\n\n") {
-        //         continue;
-        //     }
-        //     match grammar::DefsParser::new().parse(buf.trim()) {
-        //         Ok(_) => println!("Good!"),
-        //         Err(e) => println!("Bad!\n\t{}", e),
-        //     }
-        //     buf = String::new();
-        // }
+        repl::run_repl();
     }
 }

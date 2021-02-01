@@ -18,6 +18,7 @@ smallvec = "*"
 assert_cmd = "*"
 predicates = "*"
 bit-set = "*"
+rustyline = "*"
 
 [build-dependencies]
 lalrpop = { version = "*", features = ["lexer"] }
