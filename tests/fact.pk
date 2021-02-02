@@ -1,0 +1,4 @@
+# A simple test to make sure recursion works
+fun fact i : I32 =
+  if i <= 1 then 1
+  else i * fact (i - 1)

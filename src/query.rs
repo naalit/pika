@@ -97,9 +97,9 @@ impl Cxt {
                         ix = ix.inc()
                     }
                 }
-                NameInfo::Rec(id) => {
+                NameInfo::Rec(id, ty) => {
                     if name == sym {
-                        return Ok((Var::Rec(id), Val::meta(Meta::Type(id), Val::Type)));
+                        return Ok((Var::Rec(id), ty));
                     }
                 }
                 NameInfo::Other(v, ty) => {
@@ -140,19 +140,25 @@ impl Cxt {
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum RecSolution {
-    Defined(PreDefId, Span, Val),
-    Infered(PreDefId, Span, Val),
+    Defined(PreDefId, u16, Span, Val),
+    Inferred(PreDefId, u16, Span, Val),
 }
 impl RecSolution {
     pub fn id(&self) -> PreDefId {
         match self {
-            RecSolution::Defined(id, _, _) | RecSolution::Infered(id, _, _) => *id,
+            RecSolution::Defined(id, _, _, _) | RecSolution::Inferred(id, _, _, _) => *id,
+        }
+    }
+
+    pub fn num(&self) -> u16 {
+        match self {
+            RecSolution::Defined(_, n, _, _) | RecSolution::Inferred(_, n, _, _) => *n,
         }
     }
 
     pub fn val(&self) -> &Val {
         match self {
-            RecSolution::Defined(_, _, v) | RecSolution::Infered(_, _, v) => v,
+            RecSolution::Defined(_, _, _, v) | RecSolution::Inferred(_, _, _, v) => v,
         }
     }
 }
@@ -161,7 +167,7 @@ impl RecSolution {
 pub enum NameInfo {
     Def(DefId),
     Local(VTy),
-    Rec(PreDefId),
+    Rec(PreDefId, VTy),
     Other(Var<Ix>, VTy),
 }
 
@@ -274,9 +280,14 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
             | PreDef::FunDec(_, _, _)
             | PreDef::ValDec(_, _) => {
                 let name = def.name();
-                let id = db.intern_predef(Arc::new(def));
+                let def = Arc::new(def);
+                let id = db.intern_predef(def.clone());
                 if let Some(name) = name {
-                    cxt = cxt.define(name, NameInfo::Rec(id), db);
+                    if let Some(ty) = def.given_type(id, cxt, db) {
+                        cxt = cxt.define(name, NameInfo::Rec(id, ty), db);
+                    } else {
+                        cxt = cxt.define(name, NameInfo::Rec(id, Val::Error), db);
+                    }
                 }
                 temp.push((name, id));
             }

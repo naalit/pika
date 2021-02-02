@@ -352,8 +352,9 @@ impl Lvl {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Ord, PartialOrd)]
 pub enum Meta {
-    /// A meta representing the type of a definition that doesn't have one yet, used for (mutual) recursion.
-    Type(PreDefId),
+    /// A meta representing part of the type of a definition that doesn't have one yet, used for (mutual) recursion.
+    /// It can be solved and used by any definition.
+    Global(PreDefId, u16),
     /// The local meta index is a u16 so that this type fits in a word.
     /// So no more than 65535 metas are allowed per definition, which is probably fine.
     Local(DefId, u16),
@@ -516,9 +517,11 @@ impl Term {
                 ),
                 Var::Rec(id) => Doc::start(db.lookup_intern_predef(*id).name().unwrap().get(db)),
                 Var::Meta(m) => match m {
-                    Meta::Type(id) => Doc::start("<type of ")
+                    Meta::Global(id, i) => Doc::start("?:")
                         .add(db.lookup_intern_predef(*id).name().unwrap().get(db))
-                        .add(">"),
+                        .add(":")
+                        .add(i)
+                        .add(""),
                     Meta::Local(def, id) => Doc::start("?").add(def.num()).add(".").add(id),
                 },
                 Var::Builtin(b) => b.pretty(),

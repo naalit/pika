@@ -66,6 +66,15 @@ fn test_bools() {
         .success();
 }
 
+#[test]
+fn test_fact() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/fact.pk"])
+        .assert()
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

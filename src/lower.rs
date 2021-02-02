@@ -1,6 +1,6 @@
 //! This module deals with translation to Durin.
 
-use crate::elaborate::MCxt;
+use crate::elaborate::{MCxt, MCxtType};
 use crate::error::FileId;
 use crate::term::*;
 use crate::{common::*, pattern::Pat};
@@ -38,7 +38,7 @@ impl<'m> ModCxt<'m> {
         };
         let mut lcxt = LCxt::new(
             self.db,
-            MCxt::new(cxt, def, self.db),
+            MCxt::new(cxt, MCxtType::Local(def), self.db),
             &mut self.module,
             &mut self.defs,
             &mut self.scope_ids,

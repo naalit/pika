@@ -42,7 +42,9 @@ impl Term {
                     },
                     // The type of something can't depend on its own value
                     // TODO a different error for this case? Is this even possible?
-                    Var::Rec(id) if matches!(*meta, Var::Meta(Meta::Type(id2)) if id2 == id) => {
+                    Var::Rec(id) if matches!(*meta, Var::Meta(Meta::Global(id2, _)) if id2 == id) =>
+                    {
+                        println!("type depends on value: {:?}", meta);
                         Err(TypeError::MetaOccurs(meta.span(), *meta))
                     }
                     v => Ok(Term::Var(v, ty)),
@@ -123,6 +125,12 @@ pub struct CxtState {
     pub local_constraints: HashMap<Lvl, Val>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MCxtType {
+    Local(DefId),
+    Global(PreDefId),
+}
+
 /// The context used for typechecking a term.
 /// Besides storing a `Cxt` for name resolution, stores meta solutions and local constraints.
 /// Most operations also require a database to interact with the `Cxt`.
@@ -130,7 +138,7 @@ pub struct CxtState {
 pub struct MCxt {
     pub cxt: Cxt,
     pub size: Lvl,
-    def: DefId,
+    ty: MCxtType,
     local_metas: Vec<MetaEntry>,
     local_constraints: HashMap<Lvl, Val>,
     solved_globals: Vec<RecSolution>,
@@ -155,11 +163,11 @@ impl MCxt {
         self.local_constraints = local_constraints;
     }
 
-    pub fn new(cxt: Cxt, def: DefId, db: &dyn Compiler) -> Self {
+    pub fn new(cxt: Cxt, ty: MCxtType, db: &dyn Compiler) -> Self {
         MCxt {
             cxt,
             size: cxt.size(db),
-            def,
+            ty,
             local_metas: Vec::new(),
             local_constraints: HashMap::new(),
             solved_globals: Vec::new(),
@@ -241,13 +249,15 @@ impl MCxt {
     /// Looks up the solution to the given meta, if one exists.
     pub fn get_meta(&self, meta: Meta) -> Option<Val> {
         match meta {
-            Meta::Type(id) => self
+            Meta::Global(id, n) => self
                 .solved_globals
                 .iter()
-                .find(|s| s.id() == id)
+                .find(|s| s.id() == id && s.num() == n)
                 .map(|s| s.val().clone()),
             Meta::Local(def, num) => {
-                assert_eq!(def, self.def, "local meta escaped its definition!");
+                if let MCxtType::Local(d) = self.ty {
+                    assert_eq!(def, d, "local meta escaped its definition!");
+                }
                 match &self.local_metas[num as usize] {
                     MetaEntry::Solved(v, _) => Some(Val::Arc(v.clone())), //.map(|x| x.inline_metas(self)),
                     MetaEntry::Unsolved(_, _, _) => None,
@@ -345,12 +355,14 @@ impl MCxt {
         let val = term.evaluate(&Env::new(self.size), &self, db);
         // Now add it to the solved metas
         match meta {
-            Meta::Type(id) => {
+            Meta::Global(id, n) => {
                 self.solved_globals
-                    .push(RecSolution::Infered(id, span, val));
+                    .push(RecSolution::Inferred(id, n, span, val));
             }
             Meta::Local(def, idx) => {
-                assert_eq!(def, self.def, "local meta escaped its definition!");
+                if let MCxtType::Local(d) = self.ty {
+                    assert_eq!(def, d, "local meta escaped its definition!");
+                }
                 // TODO should we do anything with the span we already have in `local_metas`, where it was introduced?
                 self.local_metas[idx as usize] = MetaEntry::Solved(Arc::new(val), span);
             }
@@ -369,13 +381,22 @@ impl MCxt {
     ) -> Term {
         use std::convert::TryInto;
 
-        let meta = Meta::Local(
-            self.def,
-            self.local_metas
-                .len()
-                .try_into()
-                .expect("Only 65535 metas allowed per definition"),
-        );
+        let meta = match self.ty {
+            MCxtType::Local(def) => Meta::Local(
+                def,
+                self.local_metas
+                    .len()
+                    .try_into()
+                    .expect("Only 65535 metas allowed per definition"),
+            ),
+            MCxtType::Global(def) => Meta::Global(
+                def,
+                self.local_metas
+                    .len()
+                    .try_into()
+                    .expect("Only 65535 metas allowed per definition"),
+            ),
+        };
         self.local_metas
             .push(MetaEntry::Unsolved(name, span, source));
 
@@ -386,24 +407,28 @@ impl MCxt {
     /// Makes sure all local metas are solved.
     /// If some aren't, it reports errors to `db` and returns Err(()).
     pub fn check_locals(&mut self, db: &dyn Compiler) -> Result<(), ()> {
-        let mut ret = Ok(());
-        for (i, entry) in self.local_metas.iter().enumerate() {
-            match entry {
-                MetaEntry::Solved(_, _) => (),
-                MetaEntry::Unsolved(_, span, _) => {
-                    db.report_error(Error::new(
-                        self.cxt.file(db),
-                        Doc::start("Could not find solution for ")
-                            .chain(Meta::Local(self.def, i as u16).pretty(self, db))
-                            .style(Style::Bold),
-                        *span,
-                        "search started here",
-                    ));
-                    ret = Err(());
+        if let MCxtType::Local(def) = self.ty {
+            let mut ret = Ok(());
+            for (i, entry) in self.local_metas.iter().enumerate() {
+                match entry {
+                    MetaEntry::Solved(_, _) => (),
+                    MetaEntry::Unsolved(_, span, _) => {
+                        db.report_error(Error::new(
+                            self.cxt.file(db),
+                            Doc::start("Could not find solution for ")
+                                .chain(Meta::Local(def, i as u16).pretty(self, db))
+                                .style(Style::Bold),
+                            *span,
+                            "search started here",
+                        ));
+                        ret = Err(());
+                    }
                 }
             }
+            ret
+        } else {
+            panic!("Don't call check_locals() on a global MCxt!")
         }
-        ret
     }
 }
 impl Var<Lvl> {
@@ -421,7 +446,7 @@ impl Var<Lvl> {
 impl Meta {
     fn pretty(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
         match self {
-            Meta::Type(id) => match &**db.lookup_intern_predef(id) {
+            Meta::Global(id, _) => match &**db.lookup_intern_predef(id) {
                 PreDef::Fun(n, _, _, _) => Doc::start("type of function '").add(n.get(db)).add("'"),
                 PreDef::Val(n, _, _) => Doc::start("type of definition '").add(n.get(db)).add("'"),
                 PreDef::Type(n, _, _, _) => {
@@ -453,13 +478,87 @@ impl Meta {
     }
 }
 
+impl PreDef {
+    /// Extracts the type given. If no type is given, returns a meta; if it doesn't typecheck, reports errors to the database and returns None.
+    pub fn given_type(&self, id: PreDefId, cxt: Cxt, db: &dyn Compiler) -> Option<VTy> {
+        let mut mcxt = MCxt::new(cxt, MCxtType::Global(id), db);
+        match self {
+            PreDef::Fun(_, args, rty, _) | PreDef::FunDec(_, args, rty) => {
+                let mut rargs = Vec::new();
+                elab_args(args, &mut rargs, cxt.file(db), &mut mcxt, db);
+                match check(rty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+                    Ok(rty) => {
+                        let rty = rty.evaluate(&mcxt.env(), &mcxt, db);
+                        let mut l = mcxt.size;
+                        Some(rargs.into_iter().rfold(rty, |rty, (name, i, xty)| {
+                            let rty = rty.quote(l, &mcxt, db);
+                            l = l.dec();
+                            Val::Pi(
+                                i,
+                                Box::new(Clos {
+                                    name,
+                                    ty: xty,
+                                    env: Env::new(l),
+                                    term: rty,
+                                }),
+                            )
+                        }))
+                    }
+                    Err(e) => {
+                        db.report_error(e.to_error(cxt.file(db), db, &mcxt));
+                        None
+                    }
+                }
+            }
+            PreDef::Type(_, args, _, _) => {
+                let mut rargs = Vec::new();
+                elab_args(args, &mut rargs, cxt.file(db), &mut mcxt, db);
+                let mut l = mcxt.size;
+                Some(rargs.into_iter().rfold(Val::Type, |rty, (name, i, xty)| {
+                    let rty = rty.quote(l, &mcxt, db);
+                    l = l.dec();
+                    Val::Pi(
+                        i,
+                        Box::new(Clos {
+                            name,
+                            ty: xty,
+                            env: Env::new(l),
+                            term: rty,
+                        }),
+                    )
+                }))
+            }
+            PreDef::Expr(x) => Some(
+                mcxt.new_meta(
+                    None,
+                    x.span(),
+                    MetaSource::LocalType(db.intern_name("_".to_string())),
+                    Term::Type,
+                    db,
+                )
+                .evaluate(&mcxt.env(), &mcxt, db),
+            ),
+            PreDef::ValDec(_, ty) | PreDef::Val(_, ty, _) | PreDef::Impl(_, ty, _) => {
+                match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+                    Ok(ty) => Some(ty.evaluate(&mcxt.env(), &mcxt, db)),
+                    Err(e) => {
+                        db.report_error(e.to_error(cxt.file(db), db, &mcxt));
+                        None
+                    }
+                }
+            }
+            PreDef::Cons(_, ty) => Some(ty.clone()),
+        }
+    }
+}
+
 pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError> {
     let start_time = Instant::now();
 
     let (predef_id, cxt) = db.lookup_intern_def(def);
     let predef = db.lookup_intern_predef(predef_id);
     let file = cxt.file(db);
-    let mut mcxt = MCxt::new(cxt, def, db);
+    let mut mcxt = MCxt::new(cxt, MCxtType::Local(def), db);
     let (term, ty): (Term, VTy) = match &**predef {
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
             let tyspan = ty.span();
@@ -847,8 +946,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             Err(DefError::NoValue)
         }
     }?;
-    mcxt.solved_globals
-        .push(RecSolution::Defined(predef_id, predef.span(), ty.clone()));
+    // mcxt.solved_globals
+    //     .push(RecSolution::Defined(predef_id, 0, predef.span(), ty.clone()));
     let ret = match mcxt.check_locals(db) {
         Ok(()) => {
             let term = term.inline_metas(&mcxt, mcxt.size, db);
@@ -891,7 +990,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             println!("Elaborate time for {}: {:?}", name, end_time - start_time);
         }
         if predef.attributes.contains(&Attribute::Normalize) {
-            let mcxt = MCxt::new(cxt, def, db);
+            let mcxt = MCxt::new(cxt, MCxtType::Local(def), db);
             let term = (*ret.term).clone();
 
             let n_start = Instant::now();
@@ -911,6 +1010,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 }
 
 /// Elaborates and evaluates the argument types, adding the arguments to the context and storing them in `rargs`.
+/// Any type errors will be reported to the database.
 fn elab_args(
     args: &[(Name, Icit, Pre)],
     rargs: &mut Vec<(Name, Icit, VTy)>,
@@ -1474,7 +1574,8 @@ pub fn infer(
                 // If something else had a type error, try to keep going anyway and maybe catch more
                 Err(DefError::ElabError(def)) => Ok((
                     Term::Error,
-                    Val::meta(Meta::Type(db.lookup_intern_def(def).0), Val::Type),
+                    // TODO pros/cons of using a meta here?
+                    Val::Error, //Val::meta(Meta::Type(db.lookup_intern_def(def).0), Val::Type),
                 )),
                 Err(DefError::NoValue) => Err(TypeError::NotFound(pre.copy_span(*name))),
             }?;
@@ -1849,6 +1950,19 @@ pub fn check(
                 db,
             )
             .map(|(x, _)| x)
+        }
+
+        (Pre_::If(cond, yes, no), _) => {
+            let cond = check(
+                cond,
+                &Val::builtin(Builtin::Bool, Val::Type),
+                ReasonExpected::IfCond,
+                db,
+                mcxt,
+            )?;
+            let yes = check(yes, &ty, reason.clone(), db, mcxt)?;
+            let no = check(no, &ty, reason, db, mcxt)?;
+            Ok(Term::If(Box::new(cond), Box::new(yes), Box::new(no)))
         }
 
         _ => {
