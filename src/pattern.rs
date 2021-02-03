@@ -255,6 +255,12 @@ impl Cov {
     }
 }
 
+pub enum MatchResult {
+    Yes(Env),
+    No,
+    Maybe,
+}
+
 impl Pat {
     pub fn cov(&self) -> Cov {
         match self {
@@ -359,56 +365,68 @@ impl Pat {
         mut env: Env,
         mcxt: &MCxt,
         db: &dyn Compiler,
-    ) -> Option<Env> {
+    ) -> MatchResult {
+        use MatchResult::*;
         match self {
-            Pat::Any => Some(env),
+            Pat::Any => Yes(env),
             Pat::Var(_, _) => {
                 env.push(Some(val.clone()));
-                Some(env)
+                Yes(env)
             }
             Pat::Cons(id, _, v) => match val.clone().inline(env.size, db, mcxt) {
                 Val::App(Var::Cons(id2), _, sp, _) => {
                     if *id == id2 {
+                        let mut any_maybe = false;
                         for (i, (_, val)) in v.iter().zip(&sp) {
-                            env = i.match_with(val, env, mcxt, db)?;
+                            match i.match_with(val, env.clone(), mcxt, db) {
+                                Yes(e2) => env = e2,
+                                No => return No,
+                                Maybe => any_maybe = true,
+                            }
                         }
-                        Some(env)
+                        if any_maybe {
+                            Maybe
+                        } else {
+                            Yes(env)
+                        }
                     } else {
-                        None
+                        No
                     }
                 }
-                _ => unreachable!(),
+                _ => Maybe,
             },
             Pat::Lit(x, _) => match val.unarc() {
                 Val::Lit(l, _) => {
                     if l == x {
-                        Some(env)
+                        Yes(env)
                     } else {
-                        None
+                        No
                     }
                 }
-                _ => unreachable!(),
+                _ => Maybe,
             },
             Pat::Bool(x) => match val.unarc() {
                 Val::App(Var::Builtin(Builtin::True), _, _, _) => {
                     if *x {
-                        Some(env)
+                        Yes(env)
                     } else {
-                        None
+                        No
                     }
                 }
                 Val::App(Var::Builtin(Builtin::False), _, _, _) => {
                     if !x {
-                        Some(env)
+                        Yes(env)
                     } else {
-                        None
+                        No
                     }
                 }
-                _ => unreachable!(),
+                _ => Maybe,
             },
-            Pat::Or(x, y) => x
-                .match_with(val, env.clone(), mcxt, db)
-                .or_else(|| y.match_with(val, env, mcxt, db)),
+            Pat::Or(x, y) => match x.match_with(val, env.clone(), mcxt, db) {
+                Yes(env) => Yes(env),
+                No => y.match_with(val, env, mcxt, db),
+                Maybe => Maybe,
+            },
         }
     }
 }

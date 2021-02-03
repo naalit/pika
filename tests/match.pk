@@ -1,19 +1,19 @@
-# type Bool of
-#   True
-#   False
-# where
-#   fun not (b: Bool) = case b of
-#     True => False
-#     False => True
-#   end
-# end
-#
-# type Test of
-#   Thing Type Type
-# end
-# fun test (t: Test) = case t of
-#   Test.Thing a b => a -> b
-# end
+type Bool of
+  True
+  False
+where
+  fun not (b: Bool) = case b of
+    True => False
+    False => True
+  end
+end
+
+type Test of
+  Thing Type Type
+end
+fun test (t: Test) = case t of
+  Test.Thing a b => a -> b
+end
 
 type Option a of
   None
@@ -25,4 +25,4 @@ where
   end
 end
 
-# fun my_fun (x : Option Type) = Option.unwrap_or x (Type -> Type)
+fun my_fun (x : Option Type) = Option.unwrap_or x (Type -> Type)

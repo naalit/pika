@@ -113,6 +113,27 @@ impl Cxt {
         Err(DefError::NoValue)
     }
 
+    pub fn lookup_rec(self, rec: PreDefId, db: &dyn Compiler) -> Option<DefId> {
+        let mut cxt = self;
+        while let MaybeEntry::Yes(CxtEntry { info, rest, .. }) = db.lookup_cxt_entry(cxt) {
+            match info {
+                NameInfo::Def(id) => {
+                    if db.lookup_intern_def(id).0 == rec {
+                        return Some(id);
+                    }
+                }
+                NameInfo::Rec(id, _) => {
+                    if id == rec {
+                        return None;
+                    }
+                }
+                NameInfo::Local(_) | NameInfo::Other(_, _) => (),
+            }
+            cxt = rest;
+        }
+        None
+    }
+
     #[must_use]
     pub fn define<T: ?Sized + Interner>(self, name: Name, info: NameInfo, db: &T) -> Cxt {
         let (file, size) = match db.lookup_cxt_entry(self) {

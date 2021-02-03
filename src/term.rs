@@ -336,9 +336,7 @@ impl Lvl {
                 let mut env = Env::new(self);
                 env.push(Some(x.clone().evaluate(&env, mcxt, db)));
                 let rty = match &fty {
-                    Term::Pi(_, _, _, x) => {
-                        (**x).clone().evaluate(&env, mcxt, db).quote(self, mcxt, db)
-                    }
+                    Term::Pi(_, _, _, x) => (**x).clone().eval_quote(&mut env, self, mcxt, db),
                     _ => unreachable!(),
                 };
                 (
@@ -674,6 +672,11 @@ impl Env {
             self.vals.push_front(v.map(Arc::new));
         }
     }
+
+    pub fn pop(&mut self) {
+        self.size = self.size.dec();
+        self.vals.pop_front();
+    }
 }
 
 /// A closure, representing a term that's waiting for an argument to be evaluated.
@@ -699,8 +702,7 @@ impl Clos {
             mut env, term, ty, ..
         } = self;
         env.push(Some(Val::local(enclosing.inc(), ty)));
-        term.evaluate(&env, mcxt, db)
-            .quote(enclosing.inc(), mcxt, db)
+        term.eval_quote(&mut env, enclosing.inc(), mcxt, db)
     }
 
     /// Equivalent to `self.apply(Val::local(l, cl.ty), mcxt)`
@@ -715,6 +717,33 @@ impl Clos {
     pub fn apply(self, arg: Val, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         let Clos { mut env, term, .. } = self;
         env.push(Some(arg));
+        term.evaluate(&env, mcxt, db)
+    }
+}
+
+/// A term that hasn't been evaluated yet, because it's either an `if` or `case` and the scrutinee is a neutral term.
+/// It's similar to a closure, but isn't waiting on an argument, but rather variables in the environment.
+///
+/// Note that a `Lazy` is very big (contains an inline `Env` and `Term`), so storing it behind a Box is advised.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Lazy {
+    pub env: Env,
+    pub term: Term,
+}
+impl Lazy {
+    pub fn env_size(&self) -> Lvl {
+        self.env.size
+    }
+
+    /// Quotes the closure back into a `Term`.
+    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+        let Lazy { mut env, term } = self;
+        term.eval_quote(&mut env, enclosing, mcxt, db)
+    }
+
+    /// Tries to evaluate the `Lazy` again; if it can't be evaluated, this will just return another `Lazy`.
+    pub fn evaluate(self, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+        let Lazy { env, term } = self;
         term.evaluate(&env, mcxt, db)
     }
 }
@@ -884,8 +913,6 @@ impl Glued {
                     // We don't cache this, because we might use this value outside of the local scope
                     Some(val)
                 }
-                // If we inlined the Rec, it would probably lead to infinite recursion
-                Var::Rec(_) => None,
                 // A datatype is already fully evaluated
                 Var::Type(_, _) => None,
                 Var::Cons(_) => None,
@@ -904,6 +931,19 @@ impl Glued {
                     }
                 }
                 Var::Builtin(_) => None,
+                Var::Rec(rec) => {
+                    let def = mcxt.cxt.lookup_rec(rec, db)?;
+                    let val = db.elaborate_def(def).ok()?.term;
+                    let val = (*val).clone();
+                    let val = val.evaluate(&Env::new(l), mcxt, db);
+                    let val = sp
+                        .into_owned()
+                        .into_iter()
+                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
+                    let val = Val::Arc(Arc::new(val));
+                    *self.0.write().unwrap() = Some(val.clone());
+                    Some(val)
+                }
                 Var::Top(def) => {
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
@@ -950,12 +990,12 @@ pub enum Val {
     Fun(Box<VTy>, Box<VTy>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
+    Lazy(Box<Lazy>),
     Error,
 }
 impl Val {
     pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
         self.clone()
-            .inline_metas(mcxt, db)
             .quote(mcxt.size, mcxt, db)
             .pretty(db, &mut Names::new(mcxt.cxt, db))
     }

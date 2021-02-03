@@ -47,22 +47,128 @@ impl Term {
                 let x = x.evaluate(env, mcxt, db);
                 f.app(icit, x, mcxt, db)
             }
-            Term::Case(x, _, cases) => {
-                todo!("Evaluating case isn't always possible");
+            Term::Case(x, ty, cases) => {
                 let x = x.evaluate(env, mcxt, db);
-                for (pat, body) in cases {
-                    if let Some(env) = pat.match_with(&x, env.clone(), mcxt, db) {
-                        return body.evaluate(&env, mcxt, db);
+                for (pat, body) in &cases {
+                    use crate::pattern::MatchResult::*;
+                    match pat.match_with(&x, env.clone(), mcxt, db) {
+                        Yes(env) => return body.clone().evaluate(&env, mcxt, db),
+                        No => continue,
+                        Maybe => {
+                            return Val::Lazy(Box::new(Lazy {
+                                env: env.clone(),
+                                term: Term::Case(Box::new(x.quote(env.size, mcxt, db)), ty, cases),
+                            }))
+                        }
                     }
                 }
                 unreachable!()
             }
             Term::Error => Val::Error,
-            Term::If(cond, yes, no) => match cond.evaluate(env, mcxt, db) {
-                Val::App(Var::Builtin(Builtin::True), _, _, _) => yes.evaluate(env, mcxt, db),
-                Val::App(Var::Builtin(Builtin::False), _, _, _) => no.evaluate(env, mcxt, db),
-                _ => todo!("Evaluating if isn't always possible"),
+            Term::If(cond, yes, no) => {
+                match cond.evaluate(env, mcxt, db).inline(env.size, db, mcxt) {
+                    Val::App(Var::Builtin(Builtin::True), _, _, _) => yes.evaluate(env, mcxt, db),
+                    Val::App(Var::Builtin(Builtin::False), _, _, _) => no.evaluate(env, mcxt, db),
+                    cond => Val::Lazy(Box::new(Lazy {
+                        env: env.clone(),
+                        term: Term::If(
+                            Box::new(cond.quote(env.size, mcxt, db)),
+                            // TODO do we evaluate yes and no? we need to apply anything in the env
+                            yes,
+                            no,
+                        ),
+                    })),
+                }
+            }
+        }
+    }
+
+    /// Transfers this term from one context to another; equivalent to calling `term.evaluate(env, ...).quote(l, ...)`
+    /// but faster and doesn't cause infinite recursion with `Lazy` values.
+    pub fn eval_quote(self, env: &mut Env, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+        match self {
+            Term::Type => Term::Type,
+            Term::Lit(l, b) => Term::Lit(l, b),
+            Term::Var(Var::Local(ix), ty) => env.val(ix, *ty, mcxt, db).quote(l, mcxt, db),
+            Term::Var(Var::Meta(m), mut ty) => match mcxt.get_meta(m) {
+                Some(v) => v.quote(l, mcxt, db),
+                None => {
+                    *ty = ty.eval_quote(env, l, mcxt, db);
+                    Term::Var(Var::Meta(m), ty)
+                }
             },
+            Term::Var(v, mut ty) => {
+                *ty = ty.eval_quote(env, l, mcxt, db);
+                Term::Var(v, ty)
+            }
+            Term::Lam(name, icit, mut ty, mut body) => {
+                *ty = ty.eval_quote(env, l, mcxt, db);
+                env.push(Some(Val::local(
+                    l.inc(),
+                    ty.clone().evaluate(env, mcxt, db),
+                )));
+                *body = body.eval_quote(env, l.inc(), mcxt, db);
+                env.pop();
+                Term::Lam(name, icit, ty, body)
+            }
+            Term::Pi(name, icit, mut ty, mut body) => {
+                *ty = ty.eval_quote(env, l, mcxt, db);
+                env.push(Some(Val::local(
+                    l.inc(),
+                    ty.clone().evaluate(env, mcxt, db),
+                )));
+                *body = body.eval_quote(env, l.inc(), mcxt, db);
+                env.pop();
+                Term::Pi(name, icit, ty, body)
+            }
+            Term::Fun(mut a, mut b) => {
+                *a = a.eval_quote(env, l, mcxt, db);
+                *b = b.eval_quote(env, l, mcxt, db);
+                Term::Fun(a, b)
+            }
+            // We have to perform beta-reduction, so we manually evaluate and then quote again
+            Term::App(icit, f, _fty, x) => {
+                let f = f.evaluate(env, mcxt, db);
+                let x = x.evaluate(env, mcxt, db);
+                f.app(icit, x, mcxt, db).quote(l, mcxt, db)
+            }
+            Term::Case(mut x, mut ty, cases) => {
+                let vx = x.evaluate(env, mcxt, db);
+                for (pat, body) in &cases {
+                    use crate::pattern::MatchResult::*;
+                    match pat.match_with(&vx, env.clone(), mcxt, db) {
+                        Yes(mut env) => return body.clone().eval_quote(&mut env, l, mcxt, db),
+                        No => continue,
+                        Maybe => break,
+                    }
+                }
+                *x = vx.quote(l, mcxt, db);
+                *ty = ty.eval_quote(env, l, mcxt, db);
+                let cases = cases
+                    .into_iter()
+                    .map(|(pat, body)| {
+                        (
+                            pat.inline_metas(mcxt, db),
+                            body.eval_quote(env, l, mcxt, db),
+                        )
+                    })
+                    .collect();
+                Term::Case(x, ty, cases)
+            }
+            Term::If(mut cond, mut yes, mut no) => match cond
+                .evaluate(env, mcxt, db)
+                .inline(env.size, db, mcxt)
+            {
+                Val::App(Var::Builtin(Builtin::True), _, _, _) => yes.eval_quote(env, l, mcxt, db),
+                Val::App(Var::Builtin(Builtin::False), _, _, _) => no.eval_quote(env, l, mcxt, db),
+                vcond => {
+                    *cond = vcond.quote(l, mcxt, db);
+                    *yes = yes.eval_quote(env, l, mcxt, db);
+                    *no = no.eval_quote(env, l, mcxt, db);
+                    Term::If(cond, yes, no)
+                }
+            },
+            Term::Error => Term::Error,
         }
     }
 }
@@ -78,6 +184,7 @@ impl Val {
                     Val::App(h, hty, sp, g)
                 }
             }
+            Val::Lazy(cl) => cl.evaluate(mcxt, db).inline(l, db, mcxt),
             Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline(l, db, mcxt),
             x => x,
         }
@@ -150,6 +257,13 @@ impl Val {
             }
             Val::Error => Val::Error,
 
+            Val::Lazy(mut cl) => match (*cl).clone().evaluate(mcxt, db) {
+                v @ Val::Lazy(_) => v,
+                v => {
+                    cl.term = v.force(l, db, mcxt).quote(l, mcxt, db);
+                    Val::Lazy(cl)
+                }
+            },
             Val::Lam(i, mut cl) => {
                 cl.ty = cl.ty.force(l, db, mcxt);
                 cl.term = (*cl)
@@ -204,7 +318,7 @@ impl Val {
         match self {
             Val::Type => Term::Type,
             Val::Lit(x, t) => Term::Lit(x, t),
-            Val::App(h, hty, sp, _) => {
+            Val::App(h, hty, sp, g) => {
                 // Inline the type to expose the Pi or Fun
                 let hty = hty
                     .inline_args(sp.len(), enclosing, db, mcxt)
@@ -214,7 +328,10 @@ impl Val {
                         Term::Var(Var::Local(l.to_ix(enclosing)), Box::new(hty.clone()))
                     }
                     Var::Top(def) => Term::Var(Var::Top(def), Box::new(hty.clone())),
-                    Var::Meta(meta) => Term::Var(Var::Meta(meta), Box::new(hty.clone())),
+                    Var::Meta(meta) => match g.resolve_meta(h, &sp, mcxt, db) {
+                        Some(v) => return v.quote(enclosing, mcxt, db),
+                        None => Term::Var(Var::Meta(meta), Box::new(hty.clone())),
+                    },
                     Var::Rec(id) => Term::Var(Var::Rec(id), Box::new(hty.clone())),
                     Var::Type(id, scope) => Term::Var(Var::Type(id, scope), Box::new(hty.clone())),
                     Var::Cons(id) => Term::Var(Var::Cons(id), Box::new(hty.clone())),
@@ -230,10 +347,7 @@ impl Val {
                                 let mut env = Env::new(enclosing);
                                 env.push(Some(x.clone()));
                                 // Then we evaluate-quote to so `rty` is in the context `enclosing`.
-                                (**to)
-                                    .clone()
-                                    .evaluate(&env, mcxt, db)
-                                    .quote(enclosing, mcxt, db)
+                                (**to).clone().eval_quote(&mut env, enclosing, mcxt, db)
                             }
                             _ => unreachable!(),
                         };
@@ -249,6 +363,7 @@ impl Val {
                     })
                     .0
             }
+            Val::Lazy(cl) => cl.quote(enclosing, mcxt, db),
             Val::Lam(icit, cl) => Term::Lam(
                 cl.name,
                 icit,
@@ -320,61 +435,9 @@ impl Term {
         }
     }
 
+    /// Shorthand for `eval_quote()` without changing levels
     pub fn inline_metas(self, mcxt: &MCxt, l: Lvl, db: &dyn Compiler) -> Self {
-        match self {
-            Term::Type => Term::Type,
-            Term::Lit(x, t) => Term::Lit(x, t),
-            Term::Var(Var::Meta(m), mut ty) => match mcxt.get_meta(m) {
-                Some(v) => v.inline_metas(mcxt, db).quote(l, mcxt, db),
-                None => {
-                    *ty = ty.inline_metas(mcxt, l, db);
-                    Term::Var(Var::Meta(m), ty)
-                }
-            },
-            Term::Var(v, mut ty) => {
-                *ty = ty.inline_metas(mcxt, l, db);
-                Term::Var(v, ty)
-            }
-            Term::Lam(n, i, mut ty, mut t) => {
-                // Reuse Boxes
-                *ty = ty.inline_metas(mcxt, l, db);
-                *t = t.inline_metas(mcxt, l.inc(), db);
-                Term::Lam(n, i, ty, t)
-            }
-            Term::Pi(n, i, mut from, mut to) => {
-                *from = from.inline_metas(mcxt, l, db);
-                *to = to.inline_metas(mcxt, l.inc(), db);
-                Term::Pi(n, i, from, to)
-            }
-            Term::Fun(mut from, mut to) => {
-                *from = from.inline_metas(mcxt, l, db);
-                *to = to.inline_metas(mcxt, l, db);
-                Term::Fun(from, to)
-            }
-            Term::App(i, f, fty, x) => {
-                // We have to beta-reduce meta applications
-                Term::App(i, f, fty, x)
-                    .evaluate(&Env::new(l), mcxt, db)
-                    .inline_metas(mcxt, db)
-                    .quote(l, mcxt, db)
-            }
-            Term::Case(mut x, mut ty, cases) => {
-                *x = x.inline_metas(mcxt, l, db);
-                *ty = ty.inline_metas(mcxt, l, db);
-                let cases = cases
-                    .into_iter()
-                    .map(|(p, x)| (p.inline_metas(mcxt, db), x.inline_metas(mcxt, l, db)))
-                    .collect();
-                Term::Case(x, ty, cases)
-            }
-            Term::Error => Term::Error,
-            Term::If(mut cond, mut yes, mut no) => {
-                *cond = cond.inline_metas(mcxt, l, db);
-                *yes = yes.inline_metas(mcxt, l, db);
-                *no = no.inline_metas(mcxt, l, db);
-                Term::If(cond, yes, no)
-            }
-        }
+        return self.eval_quote(&mut Env::new(l), l, mcxt, db);
     }
 }
 
@@ -398,6 +461,12 @@ impl Val {
                 *ty = ty.inline_metas(mcxt, db);
                 // Reset the Glued in case it has metas inside
                 Val::App(h, ty, sp, Glued::new())
+            }
+            Val::Lazy(mut cl) => {
+                let l = cl.env_size();
+                cl.env.inline_metas(mcxt, db);
+                cl.term = cl.term.inline_metas(mcxt, l, db);
+                Val::Lazy(cl)
             }
             Val::Lam(i, mut cl) => {
                 let l = cl.env_size();

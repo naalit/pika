@@ -749,6 +749,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         cargs.push((*n, Icit::Impl, t.clone()));
                     }
                 }
+                let start_size = mcxt.size;
 
                 // Elaborate the constructor argument types
                 elab_args(args, &mut cargs, file, &mut mcxt, db);
@@ -849,7 +850,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                             )
                         });
 
-                let full_ty = full_ty.evaluate(&mcxt.env(), &mcxt, db);
+                let full_ty = full_ty.evaluate(&Env::new(start_size), &mcxt, db);
                 // .inline_metas(&mcxt, db);
 
                 scope.push((cname.clone(), full_ty));
