@@ -230,7 +230,7 @@ impl Val {
                     }
                 }
                 Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline_args(n, l, db, mcxt),
-                _ => unreachable!(),
+                v => unreachable!("{:?}", v),
             }
         }
     }

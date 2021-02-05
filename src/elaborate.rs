@@ -308,17 +308,17 @@ impl MCxt {
         db: &dyn Compiler,
     ) -> Result<(), TypeError> {
         // The value can only use variables that we're passing to the meta
-        let mut meta_scope: Rename = spine
+        let mut meta_scope = spine
             .iter()
             // Each argument is another lambda we're going to wrap it in
             .zip(std::iter::successors(Some(self.size.inc()), |lvl| {
                 Some(lvl.inc())
             }))
             .map(|((_, x), to_lvl)| match x.unarc() {
-                Val::App(Var::Local(from_lvl), _, sp, _) if sp.is_empty() => (*from_lvl, to_lvl),
-                _ => panic!("Compiler error: meta spine contains non-variable"),
+                Val::App(Var::Local(from_lvl), _, sp, _) if sp.is_empty() => Ok((*from_lvl, to_lvl)),
+                x => Err(TypeError::MetaSpine(span, Var::Meta(meta), x.clone())),
             })
-            .collect();
+            .collect::<Result<Rename, _>>()?;
         let term = val.quote(self.size, &self, db);
         // The level it will be at after we wrap it in lambdas
         let to_lvl = (0..spine.len()).fold(self.size, |x, _| x.inc());
@@ -1086,6 +1086,7 @@ pub enum TypeError {
     UntypedLiteral(Span),
     MetaScope(Span, Var<Lvl>, Name),
     MetaOccurs(Span, Var<Lvl>),
+    MetaSpine(Span, Var<Lvl>, Val),
     NotStruct(Spanned<VTy>),
     MemberNotFound(Span, ScopeType, Name),
     InvalidPattern(Span),
@@ -1150,6 +1151,18 @@ impl TypeError {
                 s,
                 format!("solution found here"),
             ),
+            // TODO: this is complicated to explain, so make and link to a wiki page in the error message
+            TypeError::MetaSpine(s, m, v) => Error::new(
+                file,
+                Doc::start("Solution for ")
+                    .chain(m.pretty_meta(mcxt, db))
+                    .add(" is ambiguous: cannot depend on value ")
+                    .chain(v.pretty(db, mcxt).style(Style::None))
+                    .style(Style::Bold),
+                s,
+                format!("solution depends on a non-variable"),
+            )
+            .with_note("because here it depends on a specific value, the compiler doesn't know what the solution should be for other values"),
             TypeError::NotStruct(ty) => Error::new(
                 file,
                 Doc::start("Value of type ")
@@ -1540,6 +1553,18 @@ pub fn infer(
     match &**pre {
         Pre_::Type => Ok((Term::Type, Val::Type)),
 
+        // By default, () refers to the unit *value*
+        Pre_::Unit => Ok((
+            Term::Var(
+                Var::Builtin(Builtin::Unit),
+                Box::new(Term::Var(
+                    Var::Builtin(Builtin::UnitType),
+                    Box::new(Term::Type),
+                )),
+            ),
+            Val::builtin(Builtin::UnitType, Val::Type),
+        )),
+
         Pre_::Lit(_) => Err(TypeError::UntypedLiteral(pre.span())),
 
         Pre_::BinOp(op, a, b) => {
@@ -1657,7 +1682,16 @@ pub fn infer(
                 }
             }
             mcxt.children.append(&mut block);
-            todo!("return ()")
+            Ok((
+                Term::Var(
+                    Var::Builtin(Builtin::Unit),
+                    Box::new(Term::Var(
+                        Var::Builtin(Builtin::UnitType),
+                        Box::new(Term::Type),
+                    )),
+                ),
+                Val::builtin(Builtin::UnitType, Val::Type),
+            ))
         }
 
         Pre_::Struct(_) => todo!("elaborate struct"),
@@ -1854,6 +1888,12 @@ pub fn check(
 ) -> Result<Term, TypeError> {
     match (&**pre, ty) {
         (_, Val::Arc(x)) => check(pre, x, reason, db, mcxt),
+
+        // When checking () against Type, we know it's refering to the unit type
+        (Pre_::Unit, Val::Type) => Ok(Term::Var(
+            Var::Builtin(Builtin::UnitType),
+            Box::new(Term::Type),
+        )),
 
         (Pre_::Lam(n, i, ty, body), Val::Pi(i2, cl)) if i == i2 => {
             let ty2 = &cl.ty;

@@ -509,6 +509,18 @@ pub fn elab_pat(
                 TypeError::NotIntType(pre.span(), ty.clone().inline_metas(mcxt, db), reason),
             ))),
         },
+        Pre_::Unit => match ty {
+            // We just translate () into Pat::Any, since it's guaranteed to match anything of type ()
+            Val::App(Var::Builtin(Builtin::UnitType), _, _, _) => Ok(Pat::Any),
+            _ => Err(TypeError::InvalidPatternBecause(Box::new(
+                TypeError::Unify(
+                    mcxt.clone(),
+                    pre.copy_span(Val::builtin(Builtin::UnitType, Val::Type)),
+                    ty.clone(),
+                    reason,
+                ),
+            )))
+        }
         Pre_::Var(n) => {
             if let Ok((Var::Top(id), _)) = mcxt.lookup(*n, db) {
                 if let Ok(info) = db.elaborate_def(id) {

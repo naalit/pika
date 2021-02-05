@@ -116,7 +116,7 @@ Def_: PreDef = {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Val(name, ty, val)
   },
-  "type" "\n"* <name:Sp<Name>> <args:Args?> "\n"* "of" <cons:ConsBlock> => {
+  "type" "\n"* <name:Sp<Name>> <args:Args?> "of" <cons:ConsBlock> => {
     PreDef::Type(name, args.unwrap_or_else(Vec::new), cons.0, cons.1)
   },
   "impl" <name:("\n"* <Sp<Name>> ":")?> <ty:Sp<Term>> "=" <val:Sp<Term>> => {
@@ -231,7 +231,7 @@ Atom: Pre_ = {
   Name => if &<>.get(db) == "_" { Pre_::Hole(MetaSource::Hole) } else { Pre_::Var(<>) },
   Lit => Pre_::Lit(<>),
   "(" <Term> ")" => <>,
-  "(" ")" => todo!("()"),
+  "(" ")" => Pre_::Unit,
 }
 
 

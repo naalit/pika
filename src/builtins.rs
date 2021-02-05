@@ -8,6 +8,8 @@ pub enum Builtin {
     Bool,
     True,
     False,
+    Unit,
+    UnitType,
 }
 impl Builtin {
     pub fn name(self) -> &'static str {
@@ -18,6 +20,8 @@ impl Builtin {
             Builtin::BinOp(b) => b.name(),
             Builtin::True => "True",
             Builtin::False => "False",
+            Builtin::Unit => "()",
+            Builtin::UnitType => "()",
         }
     }
 
@@ -27,8 +31,9 @@ impl Builtin {
 
     pub fn ty(self) -> Val {
         match self {
-            Builtin::I32 | Builtin::I64 | Builtin::Bool => Val::Type,
+            Builtin::I32 | Builtin::I64 | Builtin::Bool | Builtin::UnitType => Val::Type,
             Builtin::True | Builtin::False => Val::builtin(Builtin::Bool, Val::Type),
+            Builtin::Unit => Val::builtin(Builtin::UnitType, Val::Type),
             Builtin::BinOp(b) => b.ty(),
         }
     }

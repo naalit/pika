@@ -137,6 +137,7 @@ pub enum Pre_ {
     OrPat(Pre, Pre),
     Case(Pre, Vec<(Pre, Pre)>),
     Lit(Literal),
+    Unit,
     BinOp(Spanned<BinOp>, Pre, Pre),
     /// If(cond, then, else)
     If(Pre, Pre, Pre),

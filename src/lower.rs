@@ -359,6 +359,11 @@ impl Builtin {
             }
             Builtin::True => cxt.builder.cons(ir::Constant::Int(ir::Width::W1, 1)),
             Builtin::False => cxt.builder.cons(ir::Constant::Int(ir::Width::W1, 0)),
+            Builtin::UnitType => cxt.builder.prod_type(vec![]),
+            Builtin::Unit => {
+                let ty = cxt.builder.prod_type(vec![]);
+                cxt.builder.product(ty, vec![])
+            }
         }
     }
 }
