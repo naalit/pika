@@ -196,7 +196,8 @@ pub struct PreCons(pub SName, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
 pub enum PreDef {
     Fun(SName, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
     Val(SName, PreTy, Pre),
-    Type(SName, Vec<(Name, Icit, PreTy)>, Vec<PreCons>, Vec<PreDefAn>),
+    // The bool keeps track of whether this is an effect
+    Type(SName, bool, Vec<(Name, Icit, PreTy)>, Vec<PreCons>, Vec<PreDefAn>),
     Impl(Option<SName>, PreTy, Pre),
     Expr(Pre),
 
@@ -212,7 +213,7 @@ impl PreDef {
         match self {
             PreDef::Fun(n, _, _, _)
             | PreDef::Val(n, _, _)
-            | PreDef::Type(n, _, _, _)
+            | PreDef::Type(n, _, _, _, _)
             | PreDef::FunDec(n, _, _)
             | PreDef::Cons(n, _)
             | PreDef::ValDec(n, _) => Some(**n),
@@ -226,7 +227,7 @@ impl PreDef {
         match self {
             PreDef::Fun(n, _, _, _) => n.span(),
             PreDef::Val(n, _, _) => n.span(),
-            PreDef::Type(n, _, _, _) => n.span(),
+            PreDef::Type(n, _, _, _, _) => n.span(),
             PreDef::Impl(Some(n), _, _) => n.span(),
             PreDef::Impl(None, _, t) => t.span(),
             PreDef::Expr(t) => t.span(),
@@ -380,6 +381,7 @@ pub enum Term {
     If(Box<Term>, Box<Term>, Box<Term>),
     /// do A; B; () end
     Do(Vec<(DefId, Term)>),
+    With(Box<Term>, Vec<Term>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
 }
@@ -578,6 +580,14 @@ impl Term {
                 .add("->")
                 .space()
                 .chain(to.pretty(db, names))
+                .prec(Prec::Term),
+            Term::With(a, b) => a
+                .pretty(db, names)
+                .nest(Prec::App)
+                .space()
+                .chain(Doc::keyword("with"))
+                .space()
+                .chain(Doc::intersperse(b.iter().map(|x| x.pretty(db, names)), Doc::start(",").space()))
                 .prec(Prec::Term),
             Term::App(i, f, _fty, x) => f
                 .pretty(db, names)
@@ -1028,6 +1038,7 @@ pub enum Val {
     Fun(Box<VTy>, Box<VTy>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
+    With(Box<VTy>, Vec<Val>),
     Lazy(Box<Lazy>),
     Error,
 }

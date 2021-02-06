@@ -119,6 +119,13 @@ impl Term {
                 })
                 .collect::<Result<_, _>>()
                 .map(Term::Do),
+            Term::With(mut a, v) => {
+                *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
+                v.into_iter()
+                    .map(|x| x.check_solution(meta.clone(), ren, lfrom, lto, names))
+                    .collect::<Result<_, _>>()
+                    .map(|v| Term::With(a, v))
+            }
         }
     }
 }
@@ -459,8 +466,11 @@ impl Meta {
             Meta::Global(id, _) => match &**db.lookup_intern_predef(id) {
                 PreDef::Fun(n, _, _, _) => Doc::start("type of function '").add(n.get(db)).add("'"),
                 PreDef::Val(n, _, _) => Doc::start("type of definition '").add(n.get(db)).add("'"),
-                PreDef::Type(n, _, _, _) => {
+                PreDef::Type(n, false, _, _, _) => {
                     Doc::start("type of data type '").add(n.get(db)).add("'")
+                }
+                PreDef::Type(n, true, _, _, _) => {
+                    Doc::start("type of effect type '").add(n.get(db)).add("'")
                 }
                 PreDef::Impl(Some(n), _, _) => {
                     Doc::start("type of implicit '").add(n.get(db)).add("'")
@@ -520,11 +530,16 @@ impl PreDef {
                     }
                 }
             }
-            PreDef::Type(_, args, _, _) => {
+            PreDef::Type(_, eff, args, _, _) => {
                 let mut rargs = Vec::new();
                 elab_args(args, &mut rargs, cxt.file(db), &mut mcxt, db);
                 let mut l = mcxt.size;
-                Some(rargs.into_iter().rfold(Val::Type, |rty, (name, i, xty)| {
+                let ty_rty = if *eff {
+                    Val::builtin(Builtin::Eff, Val::Type)
+                } else {
+                    Val::Type
+                };
+                Some(rargs.into_iter().rfold(ty_rty, |rty, (name, i, xty)| {
                     let rty = rty.quote(l, &mcxt, db);
                     l = l.dec();
                     Val::Pi(
@@ -677,7 +692,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 ty.clone(),
             ))
         }
-        PreDef::Type(name, args, cons, assoc) => {
+        PreDef::Type(name, eff, args, cons, assoc) => {
             // A copy of the context before we added the type arguments
             let cxt_before = mcxt.state();
 
@@ -687,9 +702,14 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
             // Create the type of the datatype we're defining (e.g. `Option : Type -> Type`)
             // We have to do this now, so that the constructors can use the type
+            let ty_rty = if *eff {
+                Val::builtin(Builtin::Eff, Val::Type)
+            } else {
+                Val::Type
+            };
             let (ty_ty, _) = targs
                 .iter()
-                .rfold((Val::Type, mcxt.size), |(to, l), (n, i, from)| {
+                .rfold((ty_rty, mcxt.size), |(to, l), (n, i, from)| {
                     (
                         Val::Pi(
                             *i,
@@ -749,7 +769,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 // If the user provided a type for the constructor, they can't use the type arguments
                 // Either way, we need to reset it somewhat so we can't use arguments from other constructors
                 // But we use the same mcxt, so meta solutions get saved, we just reset the `CxtState`
-                if cty.is_some() {
+                // Also, effect constructors can always use the type arguments
+                if cty.is_some() && !eff {
                     mcxt.set_state(cxt_before.clone());
                 } else {
                     mcxt.set_state(cxt_after.clone());
@@ -767,6 +788,58 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 // If the user provided a return type for the constructor, typecheck it
                 let cty = if let Some(cty) = cty {
                     match check(cty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+                        Ok(x) if *eff => {
+                            // TODO make this a function or something
+
+                            // predef_id is for the type being declared
+                            // Ty a b of C [a] [b] ... : Ty a b
+                            // so Ix's decrease from left to right, and start at the first implicit argument
+                            // which is right after the state cxt_before stores
+                            let ty_ty = ty_ty.clone().quote(mcxt.size, &mcxt, db);
+                            let (f, _, fty, _) = targs.iter().fold(
+                                (
+                                    Term::Var(Var::Rec(predef_id), Box::new(ty_ty.clone())),
+                                    cxt_before.size.to_ix(mcxt.size),
+                                    ty_ty.clone(),
+                                    mcxt.size,
+                                ),
+                                |(f, ix, ty, l), (_n, i, t)| {
+                                    let (rty, xty, l) = match &ty {
+                                        Term::Pi(_, _, xty, x) => {
+                                            // It might use the value, so give it that
+                                            let mut env = Env::new(l);
+                                            env.push(Some(Val::local(ix.to_lvl(l), t.clone())));
+                                            (
+                                                (**x)
+                                                    .clone()
+                                                    .evaluate(&env, &mcxt, db)
+                                                    .quote(mcxt.size, &mcxt, db),
+                                                xty.clone(),
+                                                l.inc(),
+                                            )
+                                        }
+                                        Term::Fun(xty, x) => ((**x).clone(), xty.clone(), l),
+                                        _ => unreachable!(),
+                                    };
+                                    let ix = ix.dec();
+                                    (
+                                        Term::App(
+                                            *i,
+                                            Box::new(f),
+                                            Box::new(ty),
+                                            Box::new(Term::Var(Var::Local(ix), xty)),
+                                        ),
+                                        ix,
+                                        rty,
+                                        l,
+                                    )
+                                },
+                            );
+                            Term::With(
+                                Box::new(x),
+                                vec![f],
+                            )
+                        }
                         Ok(x) => match x.ret().head() {
                             Term::Var(Var::Rec(id), _) if *id == predef_id => x,
                             _ => {
@@ -796,6 +869,21 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     }
                 // If they didn't provide a return type, use the type constructor applied to all args
                 } else {
+                    if *eff {
+                        let e = Error::new(
+                            file,
+                            format!(
+                                "Effect constructor '{}' must declare return type",
+                                db.lookup_intern_name(**cname)
+                            ),
+                            cname.span(),
+                            "this requires a return type",
+                        )
+                        .with_note("use the unit type `()` if it returns nothing");
+                        db.report_error(e);
+                        continue;
+                    }
+
                     // predef_id is for the type being declared
                     // Ty a b of C [a] [b] ... : Ty a b
                     // so Ix's decrease from left to right, and start at the first implicit argument

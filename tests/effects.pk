@@ -1,0 +1,20 @@
+eff Console of
+  Print I32 : ()
+  Read : I32
+end
+
+# fun greet () : () with Console = do
+#   Console.Print 1
+#   val name = Console.Read!
+#   Console.Print name
+# end
+#
+# fun main () : () = do
+#   fun handle (x : () with Console) : () = case x of
+#     () => ()
+#     eff (Console.Print _) k => handle (k ()?)
+#     eff Console.Read k => handle (k 12?)
+#   end
+#
+#   handle (greet ()?)
+# end

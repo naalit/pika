@@ -55,6 +55,7 @@ pub enum Tok<'i> {
     If,
     Then,
     Else,
+    Eff,
 
     // Symbols the lexer recognizes as a "binary operator"
     Colon,     // :
@@ -260,6 +261,7 @@ impl<'i> Lexer<'i> {
             "else" => Tok::Else,
             // Where technically ends one block and starts another one, but we ignore that.
             "where" => Tok::Where,
+            "eff" => Tok::Eff,
             "do" => {
                 self.nesting.push(NestType::Block);
                 Tok::Do
@@ -541,6 +543,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::If => "'if'",
             Tok::Then => "'then'",
             Tok::Else => "'else'",
+            Tok::Eff => "'eff'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",

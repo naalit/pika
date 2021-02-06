@@ -85,6 +85,10 @@ impl Term {
                 env: env.clone(),
                 term,
             })),
+            Term::With(a, v) => Val::With(
+                Box::new(a.evaluate(env, mcxt, db)),
+                v.into_iter().map(|x| x.evaluate(env, mcxt, db)).collect(),
+            ),
         }
     }
 
@@ -179,6 +183,15 @@ impl Term {
                     .map(|(id, term)| (id, term.eval_quote(env, l, mcxt, db)))
                     .collect(),
             ),
+            Term::With(mut a, v) => {
+                *a = a.eval_quote(env, l, mcxt, db);
+                Term::With(
+                    a,
+                    v.into_iter()
+                        .map(|x| x.eval_quote(env, l, mcxt, db))
+                        .collect(),
+                )
+            }
         }
     }
 }
@@ -296,6 +309,10 @@ impl Val {
                     .quote(l.inc(), mcxt, db);
                 Val::Pi(i, cl)
             }
+            Val::With(mut a, v) => {
+                *a = a.force(l, db, mcxt);
+                Val::With(a, v)
+            }
         }
     }
 
@@ -396,6 +413,10 @@ impl Val {
             ),
             Val::Error => Term::Error,
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).quote(enclosing, mcxt, db),
+            Val::With(a, v) => Term::With(
+                Box::new(a.quote(enclosing, mcxt, db)),
+                v.into_iter().map(|x| x.quote(enclosing, mcxt, db)).collect(),
+            ),
         }
     }
 }
@@ -503,6 +524,11 @@ impl Val {
             }
             Val::Error => Val::Error,
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).inline_metas(mcxt, db),
+            Val::With(mut a, v) => {
+                *a = a.inline_metas(mcxt, db);
+                let v = v.into_iter().map(|x| x.inline_metas(mcxt, db)).collect();
+                Val::With(a, v)
+            }
         }
     }
 }

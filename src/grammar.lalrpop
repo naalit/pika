@@ -35,6 +35,7 @@ extern {
     "if" => Tok::If,
     "then" => Tok::Then,
     "else" => Tok::Else,
+    "eff" => Tok::Eff,
 
     // Symbols the lexer recognizes as a "binary operator"
     ":" => Tok::Colon,
@@ -117,7 +118,10 @@ Def_: PreDef = {
     PreDef::Val(name, ty, val)
   },
   "type" "\n"* <name:Sp<Name>> <args:Args?> "of" <cons:ConsBlock> => {
-    PreDef::Type(name, args.unwrap_or_else(Vec::new), cons.0, cons.1)
+    PreDef::Type(name, false, args.unwrap_or_else(Vec::new), cons.0, cons.1)
+  },
+  "eff" "\n"* <name:Sp<Name>> <args:Args?> "of" <cons:ConsBlock> => {
+    PreDef::Type(name, true, args.unwrap_or_else(Vec::new), cons.0, cons.1)
   },
   "impl" <name:("\n"* <Sp<Name>> ":")?> <ty:Sp<Term>> "=" <val:Sp<Term>> => {
     PreDef::Impl(name, ty, val)

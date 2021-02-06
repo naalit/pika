@@ -380,6 +380,7 @@ impl Builtin {
                 let ty = cxt.builder.prod_type(vec![]);
                 cxt.builder.product(ty, vec![])
             }
+            _ => todo!("lowering Eff"),
         }
     }
 }
@@ -641,6 +642,7 @@ impl Term {
                 let lty = ty.lower(Val::Type, cxt);
                 cxt.builder.endif(no, lty)
             }
+            _ => todo!("lowering effects"),
         }
     }
 }
