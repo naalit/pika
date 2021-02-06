@@ -138,6 +138,8 @@ pub enum Pre_ {
     Case(Pre, Vec<(Pre, Pre)>),
     Lit(Literal),
     Unit,
+    And(Pre, Pre),
+    Or(Pre, Pre),
     BinOp(Spanned<BinOp>, Pre, Pre),
     /// If(cond, then, else)
     If(Pre, Pre, Pre),

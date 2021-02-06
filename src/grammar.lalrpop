@@ -325,8 +325,18 @@ Comparison<S>: Pre_ = {
 // These are lower precedence than Comparison, and are keywords since they don't actually behave like operators (lazy evaluation of the rhs).
 Logical<S>: Pre_ = {
   Comparison<S>,
-  Comparison<S> ("and" Comparison<RHS>)+ => todo!("and"),
-  Comparison<S> ("or"  Comparison<RHS>)+ => todo!("or"),
+  <a:Sp<Comparison<S>>> <v:("and" <Sp<Comparison<RHS>>>)+> => {
+    v.into_iter().fold(a, |a, b| {
+      let span = Span(a.span().0, b.span().1);
+      Spanned::new(Pre_::And(a, b), span)
+    }).unwrap()
+  },
+  <a:Sp<Comparison<S>>> <v:("or" <Sp<Comparison<RHS>>>)+> => {
+    v.into_iter().fold(a, |a, b| {
+      let span = Span(a.span().0, b.span().1);
+      Spanned::new(Pre_::Or(a, b), span)
+    }).unwrap()
+  },
 }
 
 // <| and |> have no precedence, but are left-associative: `x |> y |> z` = `z(y(x))`, `x <| y <| z` = `x y z`.

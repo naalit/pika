@@ -194,7 +194,11 @@ impl Val {
                     Val::App(h, hty, sp, g)
                 }
             }
-            Val::Lazy(cl) => cl.evaluate(mcxt, db).inline(l, db, mcxt),
+            // Avoid infinite recursion
+            Val::Lazy(cl) => match cl.evaluate(mcxt, db) {
+                Val::Lazy(cl) => Val::Lazy(cl),
+                v => v.inline(l, db, mcxt),
+            },
             Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline(l, db, mcxt),
             x => x,
         }

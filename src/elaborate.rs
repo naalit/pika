@@ -1054,6 +1054,7 @@ pub enum ScopeType {
 pub enum ReasonExpected {
     UsedAsType,
     IfCond,
+    LogicOp,
     MustMatch(Span),
     Given(Span),
     ArgOf(Span, VTy),
@@ -1067,6 +1068,10 @@ impl ReasonExpected {
                 .with_note(Doc::start("expected because it was used as a type").style(Style::Note)),
             ReasonExpected::IfCond => err.with_note(
                 Doc::start("expected because if conditions must have type Bool").style(Style::Note),
+            ),
+            ReasonExpected::LogicOp => err.with_note(
+                Doc::start("expected because operands of `and` and `or` must have type Bool")
+                    .style(Style::Note),
             ),
             ReasonExpected::MustMatch(span) => err.with_label(
                 file,
@@ -1585,6 +1590,58 @@ pub fn infer(
             let (f, fty) = infer_app(f, op.ty(), op.span(), Icit::Expl, a, db, mcxt)?;
             let fspan = Span(a.span().0, op.span().1);
             infer_app(f, fty, fspan, Icit::Expl, b, db, mcxt)
+        }
+
+        // a and b ==> if a then b else False
+        Pre_::And(a, b) => {
+            let a = check(
+                a,
+                &Val::builtin(Builtin::Bool, Val::Type),
+                ReasonExpected::LogicOp,
+                db,
+                mcxt,
+            )?;
+            let b = check(
+                b,
+                &Val::builtin(Builtin::Bool, Val::Type),
+                ReasonExpected::LogicOp,
+                db,
+                mcxt,
+            )?;
+            let false_t = Term::Var(
+                Var::Builtin(Builtin::False),
+                Box::new(Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type))),
+            );
+            Ok((
+                Term::If(Box::new(a), Box::new(b), Box::new(false_t)),
+                Val::builtin(Builtin::Bool, Val::Type),
+            ))
+        }
+
+        // a or b ==> if a then True else b
+        Pre_::Or(a, b) => {
+            let a = check(
+                a,
+                &Val::builtin(Builtin::Bool, Val::Type),
+                ReasonExpected::LogicOp,
+                db,
+                mcxt,
+            )?;
+            let b = check(
+                b,
+                &Val::builtin(Builtin::Bool, Val::Type),
+                ReasonExpected::LogicOp,
+                db,
+                mcxt,
+            )?;
+            let true_t = Term::Var(
+                Var::Builtin(Builtin::True),
+                Box::new(Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type))),
+            );
+            Ok((
+                Term::If(Box::new(a), Box::new(true_t), Box::new(b)),
+                Val::builtin(Builtin::Bool, Val::Type),
+            ))
         }
 
         Pre_::If(cond, yes, no) => {
