@@ -75,6 +75,33 @@ fn test_fact() {
         .success();
 }
 
+#[test]
+fn test_unit() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/unit.pk"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_mutual() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/mutual.pk"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_type_in_do() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/type_in_do.pk"])
+        .assert()
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

@@ -7,13 +7,3 @@ end
 val q = case main () of
   () => ()
 end
-
-fun even (i : I32) : Bool = case i of
-  0 => True
-  i => odd (i - 1)
-end
-
-fun odd (i : I32) : Bool = case i of
-  1 => False
-  i => even (i - 1)
-end

@@ -376,6 +376,8 @@ pub enum Term {
     Lit(Literal, Builtin),
     /// If(cond, then, else)
     If(Box<Term>, Box<Term>, Box<Term>),
+    /// do A; B; () end
+    Do(Vec<(DefId, Term)>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
 }
@@ -617,6 +619,39 @@ impl Term {
                 .space()
                 .chain(no.pretty(db, names))
                 .prec(Prec::Term),
+            Term::Do(sc) => {
+                let mut doc = Doc::keyword("do").line();
+                let mut i = 0;
+                for (id, term) in sc {
+                    let (pre_id, _cxt) = db.lookup_intern_def(*id);
+                    let predef = db.lookup_intern_predef(pre_id);
+                    match predef.name() {
+                        Some(n) => {
+                            let n = names.disamb(n, db);
+                            doc = doc.chain(
+                                Doc::keyword("val")
+                                    .space()
+                                    .add(n.get(db))
+                                    .space()
+                                    .space()
+                                    .add("=")
+                                    .space()
+                                    .chain(term.pretty(db, names))
+                                    .hardline(),
+                            );
+                            names.add(n);
+                            i += 1;
+                        }
+                        None => {
+                            doc = doc.chain(term.pretty(db, names));
+                        }
+                    };
+                }
+                for _ in 0..i {
+                    names.remove();
+                }
+                doc.chain(Doc::keyword("end")).prec(Prec::Atom)
+            }
         }
     }
 }

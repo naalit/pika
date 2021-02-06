@@ -111,6 +111,14 @@ impl Term {
                 *no = no.check_solution(meta, ren, lfrom, lto, names)?;
                 Ok(Term::If(cond, yes, no))
             }
+            Term::Do(v) => v
+                .into_iter()
+                .map(|(id, term)| {
+                    term.check_solution(meta.clone(), ren, lfrom, lto, names)
+                        .map(|term| (id, term))
+                })
+                .collect::<Result<_, _>>()
+                .map(Term::Do),
         }
     }
 }
@@ -315,7 +323,9 @@ impl MCxt {
                 Some(lvl.inc())
             }))
             .map(|((_, x), to_lvl)| match x.unarc() {
-                Val::App(Var::Local(from_lvl), _, sp, _) if sp.is_empty() => Ok((*from_lvl, to_lvl)),
+                Val::App(Var::Local(from_lvl), _, sp, _) if sp.is_empty() => {
+                    Ok((*from_lvl, to_lvl))
+                }
                 x => Err(TypeError::MetaSpine(span, Var::Meta(meta), x.clone())),
             })
             .collect::<Result<Rename, _>>()?;
@@ -1667,31 +1677,37 @@ pub fn infer(
                 let _ = db.elaborate_def(i);
             }
             // Now query the last expression again
+            let mut ret_ty = None;
+            let mut cxt = mcxt.cxt;
             if let Some(&last) = block.last() {
-                let (pre, _) = db.lookup_intern_def(last);
+                let (pre, cxt2) = db.lookup_intern_def(last);
+                cxt = cxt2;
                 // If it's not an expression, don't return anything
                 if let PreDef::Expr(_) = &**db.lookup_intern_predef(pre) {
                     if let Ok(info) = db.elaborate_def(last) {
-                        block.pop();
-                        mcxt.children.append(&mut block);
-                        return Ok(((*info.term).clone(), Val::Arc(info.typ)));
+                        ret_ty = Some((*info.typ).clone());
                     } else {
                         // If there was a type error inside the block, we'll leave it, we don't want a cascade of errors
-                        return Ok((Term::Error, Val::Error));
+                        ret_ty = Some(Val::Error);
                     }
                 }
             }
-            mcxt.children.append(&mut block);
-            Ok((
-                Term::Var(
-                    Var::Builtin(Builtin::Unit),
-                    Box::new(Term::Var(
-                        Var::Builtin(Builtin::UnitType),
-                        Box::new(Term::Type),
-                    )),
-                ),
-                Val::builtin(Builtin::UnitType, Val::Type),
-            ))
+            let ret_ty = match ret_ty {
+                Some(ty) => ty,
+                None => {
+                    let predef = db.intern_predef(Arc::new(PreDefAn::from(PreDef::Expr(
+                        pre.copy_span(Pre_::Unit),
+                    ))));
+                    let unit_def = db.intern_def(predef, cxt);
+                    block.push(unit_def);
+                    Val::builtin(Builtin::UnitType, Val::Type)
+                }
+            };
+            let block = block
+                .into_iter()
+                .filter_map(|id| Some((id, (*db.elaborate_def(id).ok()?.term).clone())))
+                .collect();
+            Ok((Term::Do(block), ret_ty))
         }
 
         Pre_::Struct(_) => todo!("elaborate struct"),

@@ -213,6 +213,7 @@ pub struct ElabInfo {
     pub term: Arc<Term>,
     pub typ: Arc<VTy>,
     pub solved_globals: Arc<Vec<RecSolution>>,
+    /// Only used for definitions in the associated namespace of a datatype
     pub children: Arc<Vec<DefId>>,
 }
 

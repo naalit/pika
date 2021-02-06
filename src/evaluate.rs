@@ -80,6 +80,11 @@ impl Term {
                     })),
                 }
             }
+            // TODO: eventually we'll want to actually evaluate do blocks when necessary
+            term @ Term::Do(_) => Val::Lazy(Box::new(Lazy {
+                env: env.clone(),
+                term,
+            })),
         }
     }
 
@@ -169,6 +174,11 @@ impl Term {
                 }
             },
             Term::Error => Term::Error,
+            Term::Do(v) => Term::Do(
+                v.into_iter()
+                    .map(|(id, term)| (id, term.eval_quote(env, l, mcxt, db)))
+                    .collect(),
+            ),
         }
     }
 }

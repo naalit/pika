@@ -1,0 +1,10 @@
+# A test case for a bug where a type's associated namespace doesn't get lowered if it's not at the top level
+# It should now be fixed
+fun f (_ : ()) = do
+  type MyType of
+    New
+  where
+    val X : I32 = 3
+  end
+  MyType.X
+end

@@ -519,8 +519,8 @@ pub fn elab_pat(
                     ty.clone(),
                     reason,
                 ),
-            )))
-        }
+            ))),
+        },
         Pre_::Var(n) => {
             if let Ok((Var::Top(id), _)) = mcxt.lookup(*n, db) {
                 if let Ok(info) = db.elaborate_def(id) {

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 pub struct ModCxt<'m> {
     db: &'m dyn Compiler,
-    defs: HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
+    defs: HashMap<PreDefId, ir::Val>,
     scope_ids: HashMap<PreDefId, (DefId, ScopeId)>,
     module: ir::Module,
 }
@@ -32,10 +32,7 @@ impl<'m> ModCxt<'m> {
 
     pub fn local(&mut self, def: DefId, f: impl FnOnce(&mut LCxt) -> ir::Val) {
         let (pre, cxt) = self.db.lookup_intern_def(def);
-        let locals = match self.defs.get(&pre) {
-            Some((l, _)) => l.clone(),
-            None => IVec::new(),
-        };
+        let locals = IVec::new();
         let mut lcxt = LCxt::new(
             self.db,
             MCxt::new(cxt, MCxtType::Local(def), self.db),
@@ -55,7 +52,7 @@ impl<'m> ModCxt<'m> {
 pub struct LCxt<'db> {
     db: &'db dyn Compiler,
     locals: IVec<ir::Val>,
-    defs: &'db mut HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
+    defs: &'db mut HashMap<PreDefId, ir::Val>,
     scope_ids: &'db mut HashMap<PreDefId, (DefId, ScopeId)>,
     builder: Builder<'db>,
     mcxt: MCxt,
@@ -65,7 +62,7 @@ impl<'db> LCxt<'db> {
         db: &'db dyn Compiler,
         mcxt: MCxt,
         m: &'db mut ir::Module,
-        defs: &'db mut HashMap<PreDefId, (IVec<ir::Val>, ir::Val)>,
+        defs: &'db mut HashMap<PreDefId, ir::Val>,
         scope_ids: &'db mut HashMap<PreDefId, (DefId, ScopeId)>,
         locals: IVec<ir::Val>,
     ) -> Self {
@@ -91,13 +88,13 @@ impl<'db> LCxt<'db> {
     }
 
     pub fn get_or_reserve(&mut self, def: PreDefId) -> ir::Val {
-        if let Some((_, x)) = self.defs.get(&def) {
+        if let Some(x) = self.defs.get(&def) {
             *x
         } else {
             let pre = self.db.lookup_intern_predef(def);
             let name = pre.name().map(|x| x.get(self.db));
             let x = self.builder.reserve(name);
-            self.defs.insert(def, (self.locals.clone(), x));
+            self.defs.insert(def, x);
             x
         }
     }
@@ -139,14 +136,33 @@ impl Val {
 
 pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
     let mut mcxt = ModCxt::new(db);
-    let mut stack: Vec<_> = db.top_level(file).iter().copied().rev().collect();
-    while let Some(def) = stack.pop() {
+    for &def in &*db.top_level(file) {
         if let Ok(info) = db.elaborate_def(def) {
-            mcxt.local(def, |lcxt| info.term.lower((*info.typ).clone(), lcxt));
-            stack.extend(info.children.iter().copied());
+            mcxt.local(def, |lcxt| {
+                let val = info.term.lower((*info.typ).clone(), lcxt);
+                lower_children(def, lcxt);
+                val
+            });
         }
     }
     mcxt.finish()
+}
+
+fn lower_children(def: DefId, cxt: &mut LCxt) {
+    let mut stack = match cxt.db.elaborate_def(def) {
+        Ok(info) => (*info.children).clone(),
+        _ => return,
+    };
+    while let Some(def) = stack.pop() {
+        if let Ok(info) = cxt.db.elaborate_def(def) {
+            let (pre_id, _cxt) = cxt.db.lookup_intern_def(def);
+            let val = info.term.lower((*info.typ).clone(), cxt);
+            let val2 = cxt.get_or_reserve(pre_id);
+            cxt.builder.redirect(val2, val);
+
+            stack.extend(info.children.iter().copied());
+        }
+    }
 }
 
 /// Returns (constructor return types, whether each parameter of the constructor should be kept)
@@ -503,6 +519,44 @@ impl Term {
                     val
                 }
             },
+            Term::Do(sc) => {
+                // Declare all the terms first
+                for (id, _term) in sc {
+                    let (pre_id, _cxt) = cxt.db.lookup_intern_def(*id);
+                    let predef = cxt.db.lookup_intern_predef(pre_id);
+                    let v = cxt
+                        .builder
+                        .reserve(predef.name().map(|n| cxt.db.lookup_intern_name(n)));
+                    cxt.defs.insert(pre_id, v);
+                }
+                // Now lower them all
+                for (id, term) in &sc[0..sc.len() - 1] {
+                    let (pre_id, _cxt) = cxt.db.lookup_intern_def(*id);
+
+                    let ty = cxt.db.def_type(*id).unwrap();
+
+                    let val = term.lower((*ty).clone(), cxt);
+
+                    let val2 = cxt.get_or_reserve(pre_id);
+                    cxt.builder.redirect(val2, val);
+
+                    lower_children(*id, cxt);
+                }
+                // And return the last one
+                if let Some((id, term)) = sc.last() {
+                    let (pre_id, _cxt) = cxt.db.lookup_intern_def(*id);
+
+                    let ty = cxt.db.def_type(*id).unwrap();
+
+                    let val = term.lower((*ty).clone(), cxt);
+
+                    let val2 = cxt.get_or_reserve(pre_id);
+                    cxt.builder.redirect(val2, val);
+                    val2
+                } else {
+                    unreachable!("Empty do block in lower()!")
+                }
+            }
             // \x.f x
             // -->
             // fun a (x, r) = f x k
