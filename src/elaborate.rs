@@ -146,6 +146,71 @@ pub enum MCxtType {
     Global(PreDefId),
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+struct EffStack {
+    effs: Vec<Val>,
+    scopes: Vec<(bool, usize)>,
+}
+impl EffStack {
+    fn push_eff(&mut self, eff: Val) {
+        self.effs.push(eff);
+    }
+    fn pop_eff(&mut self) -> Option<Val> {
+        self.effs.pop()
+    }
+    /// `open` is whether this scope is open to new effects - i.e., we're inferring the type instead of checking it
+    fn push_scope(&mut self, open: bool) {
+        self.scopes.push((open, self.effs.len()))
+    }
+    fn pop_scope(&mut self) -> Vec<Val> {
+        if let Some((_, len)) = self.scopes.pop() {
+            self.effs.split_off(len)
+        } else {
+            panic!("pop_scope() without push_scope()")
+        }
+    }
+    fn find_eff(&self, eff: &Val, db: &dyn Compiler, mcxt: &mut MCxt) -> bool {
+        let start = self.scopes.last().map_or(0, |(_, l)| *l);
+        for e in &self.effs[start..] {
+            if unify(eff.clone(), e.clone(), mcxt.size, Span::empty(), db, mcxt).unwrap_or(false) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn try_eff(&mut self, eff: Val, db: &dyn Compiler, mcxt: &mut MCxt) -> bool {
+        if self.find_eff(&eff, db, mcxt) {
+            return true;
+        }
+        if self.scopes.last().map_or(false, |(open, _)| *open) {
+            self.push_eff(eff);
+            return true;
+        }
+        false
+    }
+
+    fn fun(&mut self, rty: VTy) -> VTy {
+        match rty {
+            Val::With(ty, effs) => {
+                self.push_scope(false);
+                for e in effs {
+                    self.push_eff(e);
+                }
+                *ty
+            }
+            vty@Val::App(Var::Meta(_), _, _, _) => {
+                self.push_scope(true);
+                vty
+            }
+            vty => {
+                self.push_scope(false);
+                vty
+            }
+        }
+    }
+}
+
 /// The context used for typechecking a term.
 /// Besides storing a `Cxt` for name resolution, stores meta solutions and local constraints.
 /// Most operations also require a database to interact with the `Cxt`.
@@ -153,6 +218,7 @@ pub enum MCxtType {
 pub struct MCxt {
     pub cxt: Cxt,
     pub size: Lvl,
+    eff_stack: EffStack,
     ty: MCxtType,
     local_metas: Vec<MetaEntry>,
     local_constraints: HashMap<Lvl, Val>,
@@ -182,6 +248,7 @@ impl MCxt {
         MCxt {
             cxt,
             size: cxt.size(db),
+            eff_stack: Default::default(),
             ty,
             local_metas: Vec::new(),
             local_constraints: HashMap::new(),
@@ -633,6 +700,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 }
             };
             let vty = body_ty.evaluate(&mcxt.env(), &mcxt, db);
+            let vty = mcxt.eff_stack.fun(vty);
 
             // And last, check the function body against the return type
             let body = match check(body, &vty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
@@ -1619,6 +1687,7 @@ fn insert_metas(
                 cl.ty.clone().quote(mcxt.size, mcxt, db),
                 db,
             );
+            // TODO effects when applying implicits
             let vmeta = meta.clone().evaluate(&mcxt.env(), mcxt, db);
             let ret = (*cl).clone().apply(vmeta, mcxt, db);
             insert_metas(
@@ -1667,6 +1736,14 @@ pub fn infer(
             ),
             Val::builtin(Builtin::UnitType, Val::Type),
         )),
+
+        Pre_::With(a, v) => {
+            let a = check(a, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
+            // TODO better reason expected
+            let v = v.into_iter().map(|x| check(x, &Val::builtin(Builtin::Eff, Val::Type), ReasonExpected::UsedAsType, db, mcxt))
+                .collect::<Result<_, _>>()?;
+            Ok((Term::With(Box::new(a), v), Val::Type))
+        }
 
         Pre_::Lit(_) => Err(TypeError::UntypedLiteral(pre.span())),
 
@@ -1768,9 +1845,19 @@ pub fn infer(
             let vty = ty.clone().evaluate(&mcxt.env(), mcxt, db);
             // TODO Rc to get rid of the clone()?
             mcxt.define(*name, NameInfo::Local(vty.clone()), db);
+            mcxt.eff_stack.push_scope(true);
+
             let (body, bty) = infer(true, body, db, mcxt)?;
+            // Add the effects to the return type
+            let effs = mcxt.eff_stack.pop_scope();
+            let bty = if effs.is_empty() {
+                bty
+            } else {
+                Val::With(Box::new(bty), effs)
+            };
+
             mcxt.undef(db);
-            // TODO do we insert metas here?
+
             Ok((
                 Term::Lam(*name, *icit, Box::new(ty), Box::new(body)),
                 Val::Pi(
@@ -1990,6 +2077,17 @@ fn infer_app(
             let to = (**cl)
                 .clone()
                 .apply(x.clone().evaluate(&mcxt.env(), mcxt, db), mcxt, db);
+            let to = match to {
+                Val::With(to, effs) => {
+                    for eff in effs {
+                        if !mcxt.eff_stack.try_eff(eff, db, &mut mcxt.clone()) {
+                            todo!("Type error: effect not allowed in this context");
+                        }
+                    }
+                    *to
+                }
+                to => to,
+            };
             Ok((
                 Term::App(
                     icit,
@@ -2009,6 +2107,17 @@ fn infer_app(
                 mcxt,
             )?;
             let to = (**to).clone();
+            let to = match to {
+                Val::With(to, effs) => {
+                    for eff in effs {
+                        if !mcxt.eff_stack.try_eff(eff, db, &mut mcxt.clone()) {
+                            todo!("Type error: effect not allowed in this context");
+                        }
+                    }
+                    *to
+                }
+                to => to,
+            };
             Ok((
                 Term::App(
                     icit,
@@ -2069,14 +2178,18 @@ pub fn check(
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty.clone()), db);
+            // TODO not clone ??
+            let bty = (**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db);
+            let bty = mcxt.eff_stack.fun(bty);
             let body = check(
                 body,
-                // TODO not clone ??
-                &(**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db),
+                &bty,
                 reason,
                 db,
                 mcxt,
             )?;
+            // TODO what if the return type was a meta?
+            mcxt.eff_stack.pop_scope();
             mcxt.undef(db);
             Ok(Term::Lam(*n, *i, Box::new(ety), Box::new(body)))
         }
@@ -2100,7 +2213,10 @@ pub fn check(
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty), db);
-            let body = check(body, &*body_ty, reason, db, mcxt)?;
+            let body_ty = mcxt.eff_stack.fun((**body_ty).clone());
+            let body = check(body, &body_ty, reason, db, mcxt)?;
+            // TODO what if the return type was a meta?
+            mcxt.eff_stack.pop_scope();
             mcxt.undef(db);
             Ok(Term::Lam(*n, Icit::Expl, Box::new(ety), Box::new(body)))
         }
@@ -2114,13 +2230,17 @@ pub fn check(
                 db.intern_name(s)
             };
             mcxt.define(name, NameInfo::Local(cl.ty.clone()), db);
+            let bty = (**cl).clone().vquote(mcxt.size, mcxt, db);
+            let bty = mcxt.eff_stack.fun(bty);
             let body = check(
                 pre,
-                &(**cl).clone().vquote(mcxt.size, mcxt, db),
+                &bty,
                 reason,
                 db,
                 mcxt,
             )?;
+            // TODO what if the return type was a meta?
+            mcxt.eff_stack.pop_scope();
             mcxt.undef(db);
             let ty = cl.ty.clone().quote(mcxt.size, mcxt, db);
             Ok(Term::Lam(cl.name, Icit::Impl, Box::new(ty), Box::new(body)))

@@ -143,6 +143,7 @@ pub enum Pre_ {
     BinOp(Spanned<BinOp>, Pre, Pre),
     /// If(cond, then, else)
     If(Pre, Pre, Pre),
+    With(Pre, Vec<Pre>),
 }
 
 /// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.

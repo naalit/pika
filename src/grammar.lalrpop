@@ -111,8 +111,8 @@ Def_: PreDef = {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Fun(name, args, ty, val)
   },
-  // You can have a function with an effect type but not a return type
-  "fun" "\n"* Sp<Name> Args (":" App)? ("with" Term) "=" Term => todo!("effects"),
+  // // You can have a function with an effect type but not a return type
+  // "fun" "\n"* Sp<Name> Args (":" App)? ("with" Term) "=" Term => todo!("effects"),
   "val" "\n"* <name:Sp<Name>> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Val(name, ty, val)
@@ -154,6 +154,11 @@ Term: Pre_ = {
 
 Expr: Pre_ = {
   Op,
+  <a:Sp<App>> "with" <b:Sp<App>> <mut rest:("," <Sp<App>>)*> => {
+    let mut v = vec![b];
+    v.append(&mut rest);
+    Pre_::With(a, v)
+  },
   <from:Sp<App>> "->" <to:Sp<Expr>> => Pre_::Fun(from, to),
   // For now `(a : Type) a -> a` is allowed, but we might eventually want to only allow `[a] a -> a`
   <args:PiArgs> <from:Sp<App>> "->" <to:Sp<Expr>> => {
@@ -172,7 +177,6 @@ Expr: Pre_ = {
       Spanned::new(Pre_::Pi(name, icit, ty, to), span)
     }).unwrap()
   },
-  PiArgs "->" App "with" Expr => todo!("effects"),
   RStart,
 }
 
