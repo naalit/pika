@@ -31,7 +31,7 @@ impl<'m> ModCxt<'m> {
     }
 
     pub fn local(&mut self, def: DefId, f: impl FnOnce(&mut LCxt) -> ir::Val) {
-        let (pre, cxt) = self.db.lookup_intern_def(def);
+        let (pre, cxt, _) = self.db.lookup_intern_def(def);
         let locals = IVec::new();
         let mut lcxt = LCxt::new(
             self.db,
@@ -155,7 +155,7 @@ fn lower_children(def: DefId, cxt: &mut LCxt) {
     };
     while let Some(def) = stack.pop() {
         if let Ok(info) = cxt.db.elaborate_def(def) {
-            let (pre_id, _cxt) = cxt.db.lookup_intern_def(def);
+            let (pre_id, _cxt, _) = cxt.db.lookup_intern_def(def);
             let val = info.term.lower((*info.typ).clone(), cxt);
             let val2 = cxt.get_or_reserve(pre_id);
             cxt.builder.redirect(val2, val);
@@ -406,13 +406,13 @@ impl Term {
                 Var::Builtin(b) => b.lower(cxt),
                 Var::Local(i) => *cxt.locals.get(*i),
                 Var::Top(i) => {
-                    let (i, _) = cxt.db.lookup_intern_def(*i);
+                    let (i, _, _) = cxt.db.lookup_intern_def(*i);
                     cxt.get_or_reserve(i)
                 }
                 Var::Rec(i) => cxt.get_or_reserve(*i),
                 Var::Meta(_) => panic!("unsolved meta passed to lower()"),
                 Var::Type(tid, sid) => {
-                    let (pre, _) = cxt.db.lookup_intern_def(*tid);
+                    let (pre, _, _) = cxt.db.lookup_intern_def(*tid);
                     cxt.scope_ids.insert(pre, (*tid, *sid));
 
                     let mut ty = ty;
@@ -551,7 +551,7 @@ impl Term {
             Term::Do(sc) => {
                 // Declare all the terms first
                 for (id, _term) in sc {
-                    let (pre_id, _cxt) = cxt.db.lookup_intern_def(*id);
+                    let (pre_id, _cxt, _) = cxt.db.lookup_intern_def(*id);
                     let predef = cxt.db.lookup_intern_predef(pre_id);
                     let v = cxt
                         .builder
@@ -560,7 +560,7 @@ impl Term {
                 }
                 // Now lower them all
                 for (id, term) in &sc[0..sc.len() - 1] {
-                    let (pre_id, _cxt) = cxt.db.lookup_intern_def(*id);
+                    let (pre_id, _cxt, _) = cxt.db.lookup_intern_def(*id);
 
                     let ty = cxt.db.def_type(*id).unwrap();
 
@@ -573,7 +573,7 @@ impl Term {
                 }
                 // And return the last one
                 if let Some((id, term)) = sc.last() {
-                    let (pre_id, _cxt) = cxt.db.lookup_intern_def(*id);
+                    let (pre_id, _cxt, _) = cxt.db.lookup_intern_def(*id);
 
                     let ty = cxt.db.def_type(*id).unwrap();
 

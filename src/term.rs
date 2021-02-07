@@ -636,7 +636,7 @@ impl Term {
                 let mut doc = Doc::keyword("do").line();
                 let mut i = 0;
                 for (id, term) in sc {
-                    let (pre_id, _cxt) = db.lookup_intern_def(*id);
+                    let (pre_id, _cxt, _) = db.lookup_intern_def(*id);
                     let predef = db.lookup_intern_predef(pre_id);
                     match predef.name() {
                         Some(n) => {
@@ -855,7 +855,7 @@ impl<T: PartialEq> Var<T> {
             | (Var::Top(b), Var::Rec(a))
             | (Var::Cons(b), Var::Rec(a))
             | (Var::Rec(a), Var::Cons(b)) => {
-                let (b, _) = db.lookup_intern_def(b);
+                let (b, _, _) = db.lookup_intern_def(b);
                 a == b
             }
 

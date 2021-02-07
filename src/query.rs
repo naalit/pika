@@ -226,7 +226,7 @@ pub trait Interner: salsa::Database {
     fn intern_predef(&self, def: Arc<PreDefAn>) -> PreDefId;
 
     #[salsa::interned]
-    fn intern_def(&self, def: PreDefId, cxt: Cxt) -> DefId;
+    fn intern_def(&self, def: PreDefId, cxt: Cxt, eff_stack: Option<EffStack>) -> DefId;
 
     #[salsa::interned]
     fn intern_scope(&self, scope: Arc<Vec<(Name, DefId)>>) -> ScopeId;
@@ -282,7 +282,7 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
     let parser = DefsParser::new();
     let cxt = Cxt::new(file, db);
     match parser.parse(db, crate::lexer::Lexer::new(&source)) {
-        Ok(v) => Arc::new(intern_block(v, db, cxt)),
+        Ok(v) => Arc::new(intern_block(v, db, cxt, None)),
         Err(e) => {
             db.report_error(e.to_error(file));
             Arc::new(Vec::new())
@@ -290,7 +290,7 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
     }
 }
 
-pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<DefId> {
+pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt, eff_stack: Option<EffStack>) -> Vec<DefId> {
     let mut rv = Vec::new();
     // This stores unordered definitions (types and functions) between local variables
     let mut temp = Vec::new();
@@ -317,7 +317,7 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
             PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) | PreDef::Cons(_, _) => {
                 // Process `temp` first
                 for (name, pre) in temp.drain(0..) {
-                    let id = db.intern_def(pre, cxt);
+                    let id = db.intern_def(pre, cxt, eff_stack.clone());
                     if let Some(name) = name {
                         // Define it for real now
                         cxt = cxt.define(name, NameInfo::Def(id), db);
@@ -328,7 +328,7 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
                 // Then add this one
                 let name = def.name();
                 let pre = db.intern_predef(Arc::new(def));
-                let id = db.intern_def(pre, cxt);
+                let id = db.intern_def(pre, cxt, eff_stack.clone());
                 if let Some(name) = name {
                     cxt = cxt.define(name, NameInfo::Def(id), db);
                 }
@@ -338,7 +338,7 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
     }
     // If anything is left in `temp`, clear it out
     for (name, pre) in temp {
-        let id = db.intern_def(pre, cxt);
+        let id = db.intern_def(pre, cxt, eff_stack.clone());
         if let Some(name) = name {
             // Define it for real now
             cxt = cxt.define(name, NameInfo::Def(id), db);

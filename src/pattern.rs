@@ -103,7 +103,7 @@ impl Cov {
                     for (cons, args) in covs {
                         unmatched.retain(|id| id != cons);
                         if args.iter().any(|x| *x != Cov::All) {
-                            let (pre, _) = db.lookup_intern_def(*cons);
+                            let (pre, _, _) = db.lookup_intern_def(*cons);
                             let pre = db.lookup_intern_predef(pre);
                             let name = pre.name().unwrap();
 
@@ -137,7 +137,7 @@ impl Cov {
                     }
 
                     for cons in unmatched {
-                        let (pre, _) = db.lookup_intern_def(cons);
+                        let (pre, _, _) = db.lookup_intern_def(cons);
                         let pre = db.lookup_intern_predef(pre);
                         let name = pre.name().unwrap();
 

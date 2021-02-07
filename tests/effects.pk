@@ -5,11 +5,11 @@ end
 
 fun f (_:()) : () with Console = Console.Print (Console.Read ())
 
-# fun greet (_: ()) : () with Console = do
-#   Console.Print 1
-#   val name = Console.Read ()
-#   Console.Print name
-# end
+fun greet (_: ()) : () with Console = do
+  Console.Print 1
+  val name = Console.Read ()
+  Console.Print name
+end
 
 # fun main () : () = do
 #   fun handle (x : () with Console) : () = case x of

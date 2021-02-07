@@ -146,8 +146,8 @@ pub enum MCxtType {
     Global(PreDefId),
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-struct EffStack {
+#[derive(Debug, Clone, PartialEq, Default, Eq, Hash)]
+pub struct EffStack {
     effs: Vec<Val>,
     scopes: Vec<(bool, usize)>,
 }
@@ -647,10 +647,13 @@ impl PreDef {
 pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError> {
     let start_time = Instant::now();
 
-    let (predef_id, cxt) = db.lookup_intern_def(def);
+    let (predef_id, cxt, eff_stack) = db.lookup_intern_def(def);
     let predef = db.lookup_intern_predef(predef_id);
     let file = cxt.file(db);
     let mut mcxt = MCxt::new(cxt, MCxtType::Local(def), db);
+    if let Some(eff_stack) = eff_stack {
+        mcxt.eff_stack = eff_stack;
+    }
     let (term, ty): (Term, VTy) = match &**predef {
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
             let tyspan = ty.span();
@@ -1039,6 +1042,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     let def_id = db.intern_def(
                         db.intern_predef(Arc::new(PreDef::Cons(cname.clone(), ty).into())),
                         cxt_before.cxt,
+                        None,
                     );
                     (*cname, def_id)
                 })
@@ -1059,10 +1063,11 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 cxt.define(n, NameInfo::Def(v), db)
             });
             scope.extend(
-                intern_block(assoc.clone(), db, assoc_cxt)
+                // The associated namespace can't directly use effects
+                intern_block(assoc.clone(), db, assoc_cxt, None)
                     .into_iter()
                     .filter_map(|id| {
-                        let (pre, _) = db.lookup_intern_def(id);
+                        let (pre, _, _) = db.lookup_intern_def(id);
                         let pre = db.lookup_intern_predef(pre);
                         // If it doesn't have a name, we don't include it in the Vec
                         // TODO: but then we don't elaborate it and check for errors. Does this ever happen?
@@ -1903,7 +1908,7 @@ pub fn infer(
 
         Pre_::Do(v) => {
             // We store the whole block in Salsa, then query the last expression
-            let mut block = crate::query::intern_block(v.clone(), db, mcxt.cxt);
+            let mut block = crate::query::intern_block(v.clone(), db, mcxt.cxt, Some(mcxt.eff_stack.clone()));
             // Make sure any type errors get reported
             for &i in &block {
                 let _ = db.elaborate_def(i);
@@ -1912,7 +1917,7 @@ pub fn infer(
             let mut ret_ty = None;
             let mut cxt = mcxt.cxt;
             if let Some(&last) = block.last() {
-                let (pre, cxt2) = db.lookup_intern_def(last);
+                let (pre, cxt2, _) = db.lookup_intern_def(last);
                 cxt = cxt2;
                 // If it's not an expression, don't return anything
                 if let PreDef::Expr(_) = &**db.lookup_intern_predef(pre) {
@@ -1930,7 +1935,7 @@ pub fn infer(
                     let predef = db.intern_predef(Arc::new(PreDefAn::from(PreDef::Expr(
                         pre.copy_span(Pre_::Unit),
                     ))));
-                    let unit_def = db.intern_def(predef, cxt);
+                    let unit_def = db.intern_def(predef, cxt, Some(mcxt.eff_stack.clone()));
                     block.push(unit_def);
                     Val::builtin(Builtin::UnitType, Val::Type)
                 }
