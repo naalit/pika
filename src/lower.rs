@@ -225,6 +225,10 @@ fn lower_datatype(
                                     // This argument can't be used in the type, so we skip it
                                     cty = *to;
                                 }
+                                Val::With(_, mut v) => {
+                                    assert_eq!(v.len(), 1);
+                                    cty = v.pop().unwrap();
+                                }
                                 _ => break,
                             }
                         }
@@ -380,7 +384,8 @@ impl Builtin {
                 let ty = cxt.builder.prod_type(vec![]);
                 cxt.builder.product(ty, vec![])
             }
-            _ => todo!("lowering Eff"),
+            // An Eff at runtime is just the type of the effect payload
+            Builtin::Eff => cxt.builder.cons(ir::Constant::TypeType),
         }
     }
 }
@@ -440,17 +445,26 @@ impl Term {
                     val
                 }
                 Var::Cons(id) => {
-                    let (tid, sid) = match ty
+                    let (tid, sid, base_ty) = match ty
                         .clone()
                         .ret_type(cxt.mcxt.size, &cxt.mcxt, cxt.db)
                         .unarc()
                     {
-                        Val::App(Var::Type(tid, sid), _, _, _) => (*tid, *sid),
+                        Val::App(Var::Type(tid, sid), _, _, _) => (*tid, *sid, None),
                         Val::App(Var::Rec(id), _, _, _) => cxt
                             .scope_ids
                             .get(id)
-                            .copied()
+                            .map(|&(a, b)| (a, b, None))
                             .expect("Datatypes should be lowered before their constructors"),
+                        Val::With(base, t) => match &t[0] {
+                                Val::App(Var::Type(tid, sid), _, _, _) => (*tid, *sid, Some(base.clone())),
+                                Val::App(Var::Rec(id), _, _, _) => cxt
+                                    .scope_ids
+                                    .get(id)
+                                    .map(|&(a, b)| (a, b, Some(base.clone())))
+                                    .expect("Datatypes should be lowered before their constructors"),
+                                x => unreachable!("{:?}", x),
+                        },
                         x => unreachable!("{:?}", x),
                     };
 
@@ -479,6 +493,12 @@ impl Term {
 
                     let targs: Vec<_> = match ty {
                         Val::App(_, _, sp, _) => sp.into_iter().map(|(_i, x)| x).collect(),
+
+                        Val::With(_, mut t) => match t.pop().unwrap() {
+                            Val::App(_, _, sp, _) => sp.into_iter().map(|(_i, x)| x).collect(),
+                            _ => unreachable!(),
+                        }
+
                         _ => unreachable!(),
                     };
                     let (conses, keep) = lower_datatype(tid, sid, targs, cxt);
@@ -510,6 +530,14 @@ impl Term {
                             .collect::<SmallVec<[ir::Val; 3]>>(),
                     );
                     let mut val = cxt.builder.inject_sum(sum_ty, idx, val);
+
+                    if let Some(base_ty) = base_ty {
+                        let base_ty = base_ty.lower(Val::Type, cxt);
+                        // TODO include continuation
+                        let sum_ty = cxt.builder.sum_type(&[base_ty, sum_ty] as &[_]);
+                        val = cxt.builder.inject_sum(sum_ty, 1, val);
+                    }
+
                     for (_p, ty, is_pi) in funs.into_iter().rev() {
                         if is_pi {
                             cxt.pop_local();
@@ -642,7 +670,17 @@ impl Term {
                 let lty = ty.lower(Val::Type, cxt);
                 cxt.builder.endif(no, lty)
             }
-            _ => todo!("lowering effects"),
+            Term::With(base, effs) => {
+                let base = base.lower(Val::Type, cxt);
+
+                let mut v = vec![base];
+                for e in effs {
+                    // TODO include continuation
+                    let e = e.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                    v.push(e);
+                }
+                cxt.builder.sum_type(v)
+            }
         }
     }
 }

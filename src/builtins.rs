@@ -43,7 +43,7 @@ impl Builtin {
 
 pub fn define_builtins<T: ?Sized + Interner>(cxt: Cxt, db: &T) -> Cxt {
     use Builtin::*;
-    let list = vec![I32, I64, Bool, True, False];
+    let list = vec![I32, I64, Bool, True, False, Eff];
 
     let mut cxt = cxt;
     for b in list {
