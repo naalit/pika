@@ -399,6 +399,23 @@ impl Builtin {
     }
 }
 
+impl<'db> LCxt<'db> {
+    pub fn eff_cont_ty(&mut self, eff_ty: ir::Val, name: &str) -> ir::Val {
+        // We don't actually know the return type of either continuation at the call site
+        // TODO real Any type in Durin or just existential
+        let any_ty = self.builder.cons(ir::Constant::TypeType);
+
+        let rcont_ty = self.builder.fun_type_raw(&[any_ty] as &_);
+        let cont_ty = self.builder.reserve(Some(format!("$ContTy.{}", name)));
+        let cont_cont_ty = self
+            .builder
+            .fun_type_raw(&[any_ty, cont_ty, rcont_ty] as &_);
+        let cont_ty2 = self.builder.fun_type_raw(&[eff_ty, cont_cont_ty] as &_);
+        self.builder.redirect(cont_ty, cont_ty2);
+        cont_ty2
+    }
+}
+
 impl Term {
     pub fn lower(&self, ty: VTy, cxt: &mut LCxt) -> ir::Val {
         match self {
@@ -466,13 +483,15 @@ impl Term {
                             .map(|&(a, b)| (a, b, None))
                             .expect("Datatypes should be lowered before their constructors"),
                         Val::With(base, t) => match &t[0] {
-                                Val::App(Var::Type(tid, sid), _, _, _) => (*tid, *sid, Some(base.clone())),
-                                Val::App(Var::Rec(id), _, _, _) => cxt
-                                    .scope_ids
-                                    .get(id)
-                                    .map(|&(a, b)| (a, b, Some(base.clone())))
-                                    .expect("Datatypes should be lowered before their constructors"),
-                                x => unreachable!("{:?}", x),
+                            Val::App(Var::Type(tid, sid), _, _, _) => {
+                                (*tid, *sid, Some(base.clone()))
+                            }
+                            Val::App(Var::Rec(id), _, _, _) => cxt
+                                .scope_ids
+                                .get(id)
+                                .map(|&(a, b)| (a, b, Some(base.clone())))
+                                .expect("Datatypes should be lowered before their constructors"),
+                            x => unreachable!("{:?}", x),
                         },
                         x => unreachable!("{:?}", x),
                     };
@@ -487,20 +506,22 @@ impl Term {
                                 let lty = from.clone().lower(Val::Type, cxt);
 
                                 let name = cl.name;
-                                let to = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                let to = cl.vquote(cxt.mcxt.size.inc(), &cxt.mcxt, cxt.db);
                                 match to {
                                     Val::With(to, mut effs) => {
                                         assert_eq!(effs.len(), 1);
                                         let eff = effs.pop().unwrap();
 
                                         let ename = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
-                                        let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
-                                        // TODO actual Any type in Durin or just existential
-                                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
-                                        let cont_ty = cxt.builder.fun_type(leff, any_ty);
+                                        let leff =
+                                            eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                                        let cont_ty = cxt.eff_cont_ty(leff, &ename);
 
                                         ty = *to;
-                                        let p = cxt.builder.push_fun([(None, lty), (Some(format!("$cont.{}", ename)), cont_ty)]);
+                                        let p = cxt.builder.push_fun([
+                                            (None, lty),
+                                            (Some(format!("$cont.{}", ename)), cont_ty),
+                                        ]);
                                         cxt.local(name, p[0], from);
                                         funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
                                         break Some(p[1]);
@@ -521,13 +542,15 @@ impl Term {
                                         let eff = effs.pop().unwrap();
 
                                         let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
-                                        let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
-                                        // TODO actual Any type in Durin or just existential
-                                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
-                                        let cont_ty = cxt.builder.fun_type(leff, any_ty);
+                                        let leff =
+                                            eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                                        let cont_ty = cxt.eff_cont_ty(leff, &name);
 
                                         ty = *to;
-                                        let p = cxt.builder.push_fun([(None, from), (Some(format!("$cont.{}", name)), cont_ty)]);
+                                        let p = cxt.builder.push_fun([
+                                            (None, from),
+                                            (Some(format!("$cont.{}", name)), cont_ty),
+                                        ]);
                                         funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
                                         break Some(p[1]);
                                     }
@@ -548,7 +571,7 @@ impl Term {
                         Val::With(_, mut t) => match t.pop().unwrap() {
                             Val::App(_, _, sp, _) => sp.into_iter().map(|(_i, x)| x).collect(),
                             _ => unreachable!(),
-                        }
+                        },
 
                         _ => unreachable!(),
                     };
@@ -585,8 +608,6 @@ impl Term {
                     if let Some(base_ty) = base_ty {
                         // Pack it into a free monad and pass it to the effect continuation
                         let base_ty = base_ty.lower(Val::Type, cxt);
-                        let sum_ty = cxt.builder.sum_type(&[base_ty, sum_ty] as &[_]);
-                        val = cxt.builder.inject_sum(sum_ty, 1, val);
 
                         let eff_cont = eff_cont.unwrap();
                         val = cxt.builder.call(eff_cont, vec![val], base_ty);
@@ -651,7 +672,10 @@ impl Term {
                     _ => unreachable!(),
                 };
                 assert_eq!(cxt.mcxt.size, cxt.locals.size());
-                let mut params = vec![(Some(cxt.db.lookup_intern_name(*name)), param_ty.clone().lower(Val::Type, cxt))];
+                let mut params = vec![(
+                    Some(cxt.db.lookup_intern_name(*name)),
+                    param_ty.clone().lower(Val::Type, cxt),
+                )];
                 cxt.mcxt.eff_stack.push_scope(false);
                 let mut effs = Vec::new();
 
@@ -661,11 +685,9 @@ impl Term {
                         env.push(None);
                         for eff in effs_ {
                             let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
-                            // TODO actual Any type in Durin or just existential
-                            let any_ty = cxt.builder.cons(ir::Constant::TypeType);
-                            let cont_ty = cxt.builder.fun_type(leff, any_ty);
                             let eff = eff.evaluate(&env, &cxt.mcxt, cxt.db);
                             let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
+                            let cont_ty = cxt.eff_cont_ty(leff, &name);
                             effs.push(eff);
                             params.push((Some(format!("$cont.{}", name)), cont_ty))
                         }
@@ -673,9 +695,7 @@ impl Term {
                     }
                     ty => ty,
                 };
-                let args = cxt
-                    .builder
-                    .push_fun(params);
+                let args = cxt.builder.push_fun(params);
                 cxt.local(*name, args[0], param_ty);
                 for (k, e) in args.into_iter().skip(1).zip(effs) {
                     cxt.eff(e, k);
@@ -694,7 +714,10 @@ impl Term {
                 let ret_ty = ret_ty.lower(Val::Type, cxt);
                 let fty = fty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
                 let (xty, rty) = match fty.unarc() {
-                    Val::Pi(_, cl) => (cl.ty.clone(), cl.clone().vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db)),
+                    Val::Pi(_, cl) => (
+                        cl.ty.clone(),
+                        cl.clone().vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db),
+                    ),
                     Val::Fun(x, y) => ((**x).clone(), (**y).unarc().clone()),
                     _ => unreachable!(),
                 };
@@ -705,7 +728,16 @@ impl Term {
                     Val::With(_, effs) => {
                         let mut tcxt = cxt.mcxt.clone();
                         for eff in effs {
-                            let i = cxt.mcxt.eff_stack.find_eff(&eff, cxt.db, &mut tcxt).unwrap_or_else(|| panic!("Could not find effect {:?} in context {:?}", eff, cxt.mcxt.eff_stack));
+                            let i = cxt
+                                .mcxt
+                                .eff_stack
+                                .find_eff(&eff, cxt.db, &mut tcxt)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "Could not find effect {:?} in context {:?}",
+                                        eff, cxt.mcxt.eff_stack
+                                    )
+                                });
                             args.push(cxt.eff_conts[i]);
                         }
                     }
