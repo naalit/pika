@@ -152,35 +152,38 @@ pub struct EffStack {
     scopes: Vec<(bool, usize)>,
 }
 impl EffStack {
-    fn push_eff(&mut self, eff: Val) {
+    pub fn len(&self) -> usize {
+        self.effs.len()
+    }
+    pub fn push_eff(&mut self, eff: Val) {
         self.effs.push(eff);
     }
-    fn pop_eff(&mut self) -> Option<Val> {
+    pub fn pop_eff(&mut self) -> Option<Val> {
         self.effs.pop()
     }
     /// `open` is whether this scope is open to new effects - i.e., we're inferring the type instead of checking it
-    fn push_scope(&mut self, open: bool) {
+    pub fn push_scope(&mut self, open: bool) {
         self.scopes.push((open, self.effs.len()))
     }
-    fn pop_scope(&mut self) -> Vec<Val> {
+    pub fn pop_scope(&mut self) -> Vec<Val> {
         if let Some((_, len)) = self.scopes.pop() {
             self.effs.split_off(len)
         } else {
             panic!("pop_scope() without push_scope()")
         }
     }
-    fn find_eff(&self, eff: &Val, db: &dyn Compiler, mcxt: &mut MCxt) -> bool {
+    pub fn find_eff(&self, eff: &Val, db: &dyn Compiler, mcxt: &mut MCxt) -> Option<usize> {
         let start = self.scopes.last().map_or(0, |(_, l)| *l);
-        for e in &self.effs[start..] {
+        for (i, e) in self.effs[start..].iter().enumerate() {
             if unify(eff.clone(), e.clone(), mcxt.size, Span::empty(), db, mcxt).unwrap_or(false) {
-                return true;
+                return Some(i);
             }
         }
-        false
+        None
     }
 
     fn try_eff(&mut self, eff: Val, db: &dyn Compiler, mcxt: &mut MCxt) -> bool {
-        if self.find_eff(&eff, db, mcxt) {
+        if self.find_eff(&eff, db, mcxt).is_some() {
             return true;
         }
         if self.scopes.last().map_or(false, |(open, _)| *open) {
@@ -218,7 +221,7 @@ impl EffStack {
 pub struct MCxt {
     pub cxt: Cxt,
     pub size: Lvl,
-    eff_stack: EffStack,
+    pub eff_stack: EffStack,
     ty: MCxtType,
     local_metas: Vec<MetaEntry>,
     local_constraints: HashMap<Lvl, Val>,
@@ -713,6 +716,9 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     return Err(DefError::ElabError(def));
                 }
             };
+
+            let effs = mcxt.eff_stack.pop_scope();
+            let vty = if effs.is_empty() { vty } else { Val::With(Box::new(vty), effs) };
 
             // Then construct the function term and type
             Ok((

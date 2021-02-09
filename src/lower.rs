@@ -56,6 +56,7 @@ pub struct LCxt<'db> {
     scope_ids: &'db mut HashMap<PreDefId, (DefId, ScopeId)>,
     builder: Builder<'db>,
     mcxt: MCxt,
+    eff_conts: Vec<ir::Val>,
 }
 impl<'db> LCxt<'db> {
     fn new(
@@ -74,6 +75,7 @@ impl<'db> LCxt<'db> {
             scope_ids,
             builder,
             mcxt,
+            eff_conts: Vec::new(),
         }
     }
 
@@ -85,6 +87,13 @@ impl<'db> LCxt<'db> {
     pub fn pop_local(&mut self) {
         self.locals.remove();
         self.mcxt.undef(self.db);
+    }
+
+    pub fn eff(&mut self, ty: Val, cont: ir::Val) {
+        // Make sure they're in sync, so you can just use pop_eff() and pop_scope() normally
+        self.eff_conts.truncate(self.mcxt.eff_stack.len());
+        self.mcxt.eff_stack.push_eff(ty);
+        self.eff_conts.push(cont);
     }
 
     pub fn get_or_reserve(&mut self, def: PreDefId) -> ir::Val {
@@ -370,9 +379,9 @@ impl Builtin {
             Builtin::Bool => cxt.builder.cons(ir::Constant::IntType(ir::Width::W1)),
             Builtin::BinOp(op) => {
                 let i32_ty = cxt.builder.cons(ir::Constant::IntType(ir::Width::W32));
-                let a = cxt.builder.push_fun(None, i32_ty);
-                let b = cxt.builder.push_fun(None, i32_ty);
-                let val = cxt.builder.binop(op.lower(), a, b);
+                let a = cxt.builder.push_fun([(None, i32_ty)]);
+                let b = cxt.builder.push_fun([(None, i32_ty)]);
+                let val = cxt.builder.binop(op.lower(), a[0], b[0]);
                 let f = cxt.builder.pop_fun(val, i32_ty);
                 let fty = cxt.builder.fun_type(i32_ty, i32_ty);
                 cxt.builder.pop_fun(f, fty)
@@ -425,8 +434,8 @@ impl Term {
                                 targs.push(Val::local(cxt.mcxt.size.inc(), from.clone()));
 
                                 let lty = from.clone().lower(Val::Type, cxt);
-                                let p = cxt.builder.push_fun(None, lty.clone());
-                                cxt.local(cl.name, p, from);
+                                let p = cxt.builder.push_fun([(None, lty.clone())]);
+                                cxt.local(cl.name, p[0], from);
                                 funs.push((lty, true));
                                 ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                             }
@@ -471,25 +480,67 @@ impl Term {
                     // TODO should this Durin-function-from-Pika-type be its own function?
                     let mut ty = ty;
                     let mut funs = Vec::new();
-                    loop {
+                    let eff_cont = loop {
                         match ty {
                             Val::Pi(_, cl) => {
                                 let from = cl.ty.clone();
                                 let lty = from.clone().lower(Val::Type, cxt);
-                                let p = cxt.builder.push_fun(None, lty);
-                                cxt.local(cl.name, p, from);
-                                ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
-                                funs.push((p, ty.clone().lower(Val::Type, cxt), true));
+
+                                let name = cl.name;
+                                let to = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                match to {
+                                    Val::With(to, mut effs) => {
+                                        assert_eq!(effs.len(), 1);
+                                        let eff = effs.pop().unwrap();
+
+                                        let ename = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
+                                        let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                                        // TODO actual Any type in Durin or just existential
+                                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                                        let cont_ty = cxt.builder.fun_type(leff, any_ty);
+
+                                        ty = *to;
+                                        let p = cxt.builder.push_fun([(None, lty), (Some(format!("$cont.{}", ename)), cont_ty)]);
+                                        cxt.local(name, p[0], from);
+                                        funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
+                                        break Some(p[1]);
+                                    }
+                                    to => {
+                                        ty = to;
+                                        let p = cxt.builder.push_fun([(None, lty)]);
+                                        cxt.local(name, p[0], from);
+                                        funs.push((p[0], ty.clone().lower(Val::Type, cxt), true));
+                                    }
+                                }
                             }
                             Val::Fun(from, to) => {
                                 let from = from.lower(Val::Type, cxt);
-                                let p = cxt.builder.push_fun(None, from);
-                                ty = *to;
-                                funs.push((p, ty.clone().lower(Val::Type, cxt), false));
+                                match *to {
+                                    Val::With(to, mut effs) => {
+                                        assert_eq!(effs.len(), 1);
+                                        let eff = effs.pop().unwrap();
+
+                                        let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
+                                        let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                                        // TODO actual Any type in Durin or just existential
+                                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                                        let cont_ty = cxt.builder.fun_type(leff, any_ty);
+
+                                        ty = *to;
+                                        let p = cxt.builder.push_fun([(None, from), (Some(format!("$cont.{}", name)), cont_ty)]);
+                                        funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
+                                        break Some(p[1]);
+                                    }
+                                    to => {
+                                        ty = to;
+                                        let p = cxt.builder.push_fun([(None, from)]);
+                                        funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
+                                    }
+                                }
                             }
-                            _ => break,
+                            _ => break None,
                         }
-                    }
+                    };
 
                     let targs: Vec<_> = match ty {
                         Val::App(_, _, sp, _) => sp.into_iter().map(|(_i, x)| x).collect(),
@@ -532,10 +583,13 @@ impl Term {
                     let mut val = cxt.builder.inject_sum(sum_ty, idx, val);
 
                     if let Some(base_ty) = base_ty {
+                        // Pack it into a free monad and pass it to the effect continuation
                         let base_ty = base_ty.lower(Val::Type, cxt);
-                        // TODO include continuation
                         let sum_ty = cxt.builder.sum_type(&[base_ty, sum_ty] as &[_]);
                         val = cxt.builder.inject_sum(sum_ty, 1, val);
+
+                        let eff_cont = eff_cont.unwrap();
+                        val = cxt.builder.call(eff_cont, vec![val], base_ty);
                     }
 
                     for (_p, ty, is_pi) in funs.into_iter().rev() {
@@ -597,16 +651,41 @@ impl Term {
                     _ => unreachable!(),
                 };
                 assert_eq!(cxt.mcxt.size, cxt.locals.size());
-                let param_ty_ = param_ty.clone().lower(Val::Type, cxt);
-                let arg = cxt
+                let mut params = vec![(Some(cxt.db.lookup_intern_name(*name)), param_ty.clone().lower(Val::Type, cxt))];
+                cxt.mcxt.eff_stack.push_scope(false);
+                let mut effs = Vec::new();
+
+                let ret_ty = match ret_ty {
+                    Term::With(ty, effs_) => {
+                        let mut env = cxt.mcxt.env();
+                        env.push(None);
+                        for eff in effs_ {
+                            let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                            // TODO actual Any type in Durin or just existential
+                            let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                            let cont_ty = cxt.builder.fun_type(leff, any_ty);
+                            let eff = eff.evaluate(&env, &cxt.mcxt, cxt.db);
+                            let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
+                            effs.push(eff);
+                            params.push((Some(format!("$cont.{}", name)), cont_ty))
+                        }
+                        *ty
+                    }
+                    ty => ty,
+                };
+                let args = cxt
                     .builder
-                    .push_fun(Some(cxt.db.lookup_intern_name(*name)), param_ty_);
-                cxt.local(*name, arg, param_ty);
+                    .push_fun(params);
+                cxt.local(*name, args[0], param_ty);
+                for (k, e) in args.into_iter().skip(1).zip(effs) {
+                    cxt.eff(e, k);
+                }
                 let ret = body.lower(
                     ret_ty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
                     cxt,
                 );
                 let ret_ty = ret_ty.lower(Val::Type, cxt);
+                cxt.mcxt.eff_stack.pop_scope();
                 cxt.pop_local();
                 cxt.builder.pop_fun(ret, ret_ty)
             }
@@ -614,14 +693,25 @@ impl Term {
                 let ret_ty = ty;
                 let ret_ty = ret_ty.lower(Val::Type, cxt);
                 let fty = fty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
-                let xty = match fty.unarc() {
-                    Val::Pi(_, cl) => cl.ty.clone(),
-                    Val::Fun(x, _) => (**x).clone(),
+                let (xty, rty) = match fty.unarc() {
+                    Val::Pi(_, cl) => (cl.ty.clone(), cl.clone().vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db)),
+                    Val::Fun(x, y) => ((**x).clone(), (**y).unarc().clone()),
                     _ => unreachable!(),
                 };
                 let f = f.lower(fty, cxt);
                 let x = x.lower(xty, cxt);
-                cxt.builder.call(f, x, ret_ty)
+                let mut args = vec![x];
+                match rty {
+                    Val::With(_, effs) => {
+                        let mut tcxt = cxt.mcxt.clone();
+                        for eff in effs {
+                            let i = cxt.mcxt.eff_stack.find_eff(&eff, cxt.db, &mut tcxt).unwrap_or_else(|| panic!("Could not find effect {:?} in context {:?}", eff, cxt.mcxt.eff_stack));
+                            args.push(cxt.eff_conts[i]);
+                        }
+                    }
+                    _ => (),
+                };
+                cxt.builder.call(f, args, ret_ty)
             }
             Term::Fun(from, to) => {
                 let from = from.lower(Val::Type, cxt);
