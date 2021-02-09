@@ -5,11 +5,15 @@ end
 
 fun f (_:()) : () with Console = Console.Print (Console.Read ())
 
-fun greet (_: ()) : () with Console = do
+fun greet (b: Bool) : () with Console = do
   Console.Print 1
-  val name = Console.Read ()
+  val name : I32 = if b then Console.Read () else 12
   Console.Print name
 end
+
+fun other (_:()) = greet True
+
+fun maybe_raise (b: Bool) : () with Console = if b then Console.Print 3 else ()
 
 # fun main () : () = do
 #   fun handle (x : () with Console) : () = case x of

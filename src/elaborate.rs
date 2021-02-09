@@ -182,6 +182,10 @@ impl EffStack {
         None
     }
 
+    pub fn scope_start(&self) -> Option<usize> {
+        self.scopes.last().map(|(_, len)| *len)
+    }
+
     fn try_eff(&mut self, eff: Val, db: &dyn Compiler, mcxt: &mut MCxt) -> bool {
         if self.find_eff(&eff, db, mcxt).is_some() {
             return true;

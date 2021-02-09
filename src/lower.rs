@@ -54,6 +54,8 @@ pub struct LCxt<'db> {
     locals: IVec<ir::Val>,
     defs: &'db mut HashMap<PreDefId, ir::Val>,
     scope_ids: &'db mut HashMap<PreDefId, (DefId, ScopeId)>,
+    if_state: Vec<ir::Val>,
+    rcont: Option<ir::Val>,
     builder: Builder<'db>,
     mcxt: MCxt,
     eff_conts: Vec<ir::Val>,
@@ -73,6 +75,8 @@ impl<'db> LCxt<'db> {
             locals,
             defs,
             scope_ids,
+            if_state: Vec::new(),
+            rcont: None,
             builder,
             mcxt,
             eff_conts: Vec::new(),
@@ -106,6 +110,80 @@ impl<'db> LCxt<'db> {
             self.defs.insert(def, x);
             x
         }
+    }
+
+    pub fn ifcase(&mut self, case: usize, scrutinee: ir::Val, case_ty: ir::Val) -> ir::Val {
+        // Stored in opposite order to the arguments to the if cont
+        if let Some(k) = self.rcont {
+            self.if_state.push(k);
+        }
+        for &k in self.eff_conts
+            [self.mcxt.eff_stack.scope_start().unwrap_or(0)..self.mcxt.eff_stack.len()]
+            .iter()
+            .rev()
+        {
+            self.if_state.push(k);
+        }
+        self.builder.ifcase(case, scrutinee, case_ty)
+    }
+
+    pub fn if_expr(&mut self, cond: ir::Val) {
+        self.builder.if_expr(cond);
+        // Stored in opposite order to the arguments to the if cont
+        if let Some(k) = self.rcont {
+            self.if_state.push(k);
+        }
+        for &k in self.eff_conts
+            [self.mcxt.eff_stack.scope_start().unwrap_or(0)..self.mcxt.eff_stack.len()]
+            .iter()
+            .rev()
+        {
+            self.if_state.push(k);
+        }
+    }
+
+    /// Switches from the `then` block, which returns the given expression, to the `else` block.
+    pub fn otherwise(&mut self, ret: ir::Val) {
+        let mut rets = vec![ret];
+        for k in &mut self.eff_conts
+            [self.mcxt.eff_stack.scope_start().unwrap_or(0)..self.mcxt.eff_stack.len()]
+        {
+            rets.push(*k);
+            *k = self.if_state.pop().unwrap();
+        }
+        if let Some(k) = &mut self.rcont {
+            rets.push(*k);
+            *k = self.if_state.pop().unwrap();
+        }
+        self.builder.otherwise(rets);
+    }
+
+    /// Ends an `else` block, returning the expression.
+    pub fn endif(&mut self, ret: ir::Val, ret_ty: ir::Val) -> ir::Val {
+        let mut rets = vec![(ret, ret_ty)];
+        for &k in &self.eff_conts
+            [self.mcxt.eff_stack.scope_start().unwrap_or(0)..self.mcxt.eff_stack.len()]
+        {
+            rets.push((k, self.builder.type_of(k)));
+        }
+        if let Some(k) = self.rcont {
+            let any_ty = self.builder.cons(ir::Constant::TypeType);
+            rets.push((k, self.builder.fun_type_raw(&[any_ty] as &_)));
+        }
+        let vals = self.builder.endif(&rets);
+
+        let mut vals = vals.into_iter();
+        let ret = vals.next().unwrap();
+        for k in &mut self.eff_conts
+            [self.mcxt.eff_stack.scope_start().unwrap_or(0)..self.mcxt.eff_stack.len()]
+        {
+            *k = vals.next().unwrap();
+        }
+        if let Some(k) = &mut self.rcont {
+            *k = vals.next().unwrap();
+        }
+
+        ret
     }
 }
 
@@ -412,7 +490,7 @@ impl<'db> LCxt<'db> {
             .fun_type_raw(&[any_ty, cont_ty, rcont_ty] as &_);
         let cont_ty2 = self.builder.fun_type_raw(&[eff_ty, cont_cont_ty] as &_);
         self.builder.redirect(cont_ty, cont_ty2);
-        cont_ty2
+        cont_ty
     }
 }
 
@@ -524,7 +602,7 @@ impl Term {
                                         ]);
                                         cxt.local(name, p[0], from);
                                         funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
-                                        break Some(p[1]);
+                                        break Some((p[1], cont_ty));
                                     }
                                     to => {
                                         ty = to;
@@ -552,7 +630,7 @@ impl Term {
                                             (Some(format!("$cont.{}", name)), cont_ty),
                                         ]);
                                         funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
-                                        break Some(p[1]);
+                                        break Some((p[1], cont_ty));
                                     }
                                     to => {
                                         ty = to;
@@ -609,8 +687,27 @@ impl Term {
                         // Pack it into a free monad and pass it to the effect continuation
                         let base_ty = base_ty.lower(Val::Type, cxt);
 
-                        let eff_cont = eff_cont.unwrap();
-                        val = cxt.builder.call(eff_cont, vec![val], base_ty);
+                        let (eff_cont, eff_cont_ty) = eff_cont.unwrap();
+                        // TODO real Any type in Durin or just existential
+                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                        let rcont_ty = cxt.builder.fun_type_raw(&[any_ty] as &_);
+                        let rets = cxt.builder.call_multi(
+                            eff_cont,
+                            &[val] as &_,
+                            &[base_ty, eff_cont_ty, rcont_ty],
+                        );
+
+                        let (_p, _ty, is_pi) = funs.pop().expect(
+                            "Effect constructors with no parameters not supported right now!",
+                        );
+                        if is_pi {
+                            cxt.pop_local();
+                        }
+                        val = cxt.builder.pop_fun_multi(
+                            rets.into_iter()
+                                .zip(vec![base_ty, eff_cont_ty, rcont_ty])
+                                .collect(),
+                        );
                     }
 
                     for (_p, ty, is_pi) in funs.into_iter().rev() {
@@ -678,9 +775,12 @@ impl Term {
                 )];
                 cxt.mcxt.eff_stack.push_scope(false);
                 let mut effs = Vec::new();
+                let mut rcont_was_none = false;
+                let mut has_eff = false;
 
                 let ret_ty = match ret_ty {
                     Term::With(ty, effs_) => {
+                        has_eff = true;
                         let mut env = cxt.mcxt.env();
                         env.push(None);
                         for eff in effs_ {
@@ -696,6 +796,10 @@ impl Term {
                     ty => ty,
                 };
                 let args = cxt.builder.push_fun(params);
+                if has_eff && cxt.rcont.is_none() {
+                    cxt.rcont = cxt.builder.cont();
+                    rcont_was_none = true;
+                }
                 cxt.local(*name, args[0], param_ty);
                 for (k, e) in args.into_iter().skip(1).zip(effs) {
                     cxt.eff(e, k);
@@ -705,9 +809,27 @@ impl Term {
                     cxt,
                 );
                 let ret_ty = ret_ty.lower(Val::Type, cxt);
+
+                let val = if has_eff {
+                    let mut rets = vec![(ret, ret_ty)];
+                    let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                    for &k in &cxt.eff_conts[cxt.mcxt.eff_stack.scope_start().unwrap()..] {
+                        rets.push((k, cxt.builder.fun_type_raw(&[any_ty, any_ty, any_ty] as &_)));
+                    }
+                    rets.push((
+                        cxt.rcont.unwrap(),
+                        cxt.builder.fun_type_raw(&[any_ty] as &_),
+                    ));
+                    cxt.builder.pop_fun_multi(rets)
+                } else {
+                    cxt.builder.pop_fun(ret, ret_ty)
+                };
+                if rcont_was_none {
+                    cxt.rcont = None;
+                }
                 cxt.mcxt.eff_stack.pop_scope();
                 cxt.pop_local();
-                cxt.builder.pop_fun(ret, ret_ty)
+                val
             }
             Term::App(_icit, f, fty, x) => {
                 let ret_ty = ty;
@@ -723,9 +845,11 @@ impl Term {
                 };
                 let f = f.lower(fty, cxt);
                 let x = x.lower(xty, cxt);
-                let mut args = vec![x];
                 match rty {
-                    Val::With(_, effs) => {
+                    Val::With(rty, effs) => {
+                        let mut args = vec![x];
+                        let mut rets = vec![rty.lower(Val::Type, cxt)];
+                        let mut is = Vec::new();
                         let mut tcxt = cxt.mcxt.clone();
                         for eff in effs {
                             let i = cxt
@@ -739,11 +863,22 @@ impl Term {
                                     )
                                 });
                             args.push(cxt.eff_conts[i]);
+                            let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
+                            let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                            rets.push(cxt.eff_cont_ty(leff, &name));
+                            is.push(i);
                         }
+                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                        rets.push(cxt.builder.fun_type_raw(&[any_ty] as &_));
+                        let rets = cxt.builder.call_multi(f, args, &rets);
+                        for (k, i) in rets.iter().skip(1).zip(is) {
+                            cxt.eff_conts[i] = *k;
+                        }
+                        cxt.rcont = Some(*rets.last().unwrap());
+                        rets[0]
                     }
-                    _ => (),
-                };
-                cxt.builder.call(f, args, ret_ty)
+                    _ => cxt.builder.call(f, vec![x], ret_ty),
+                }
             }
             Term::Fun(from, to) => {
                 let from = from.lower(Val::Type, cxt);
@@ -783,14 +918,14 @@ impl Term {
             }
             Term::If(cond, yes, no) => {
                 let cond = cond.lower(Val::builtin(Builtin::Bool, Val::Type), cxt);
-                cxt.builder.if_expr(cond);
+                cxt.if_expr(cond);
 
                 let yes = yes.lower(ty.clone(), cxt);
-                cxt.builder.otherwise(yes);
+                cxt.otherwise(yes);
 
                 let no = no.lower(ty.clone(), cxt);
                 let lty = ty.lower(Val::Type, cxt);
-                cxt.builder.endif(no, lty)
+                cxt.endif(no, lty)
             }
             Term::With(base, effs) => {
                 let base = base.lower(Val::Type, cxt);
@@ -860,32 +995,32 @@ impl Pat {
             Pat::Lit(l, w) => {
                 let l = l.lower(*w, cxt);
                 let eq = cxt.builder.binop(ir::BinOp::IEq, l, x);
-                cxt.builder.if_expr(eq);
+                cxt.if_expr(eq);
 
                 let yes = cont.lower(ty.clone(), cxt);
 
-                cxt.builder.otherwise(yes);
+                cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
                 let no = rest.lower(ty, cxt);
 
-                cxt.builder.endif(no, lty)
+                cxt.endif(no, lty)
             }
             Pat::Bool(b) => {
                 let l = cxt
                     .builder
                     .cons(ir::Constant::Int(ir::Width::W1, *b as i64));
                 let eq = cxt.builder.binop(ir::BinOp::IEq, l, x);
-                cxt.builder.if_expr(eq);
+                cxt.if_expr(eq);
 
                 let yes = cont.lower(ty.clone(), cxt);
 
-                cxt.builder.otherwise(yes);
+                cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
                 let no = rest.lower(ty, cxt);
 
-                cxt.builder.endif(no, lty)
+                cxt.endif(no, lty)
             }
             Pat::Cons(id, xty, args) => {
                 let (tid, sid, targs) = match xty.unarc() {
@@ -918,7 +1053,7 @@ impl Pat {
 
                 let (ltys, _) = lower_datatype(tid, sid, targs, cxt);
                 let lty = ltys[idx];
-                let product = cxt.builder.ifcase(idx, x, lty);
+                let product = cxt.ifcase(idx, x, lty);
 
                 let cont = args
                     .iter()
@@ -934,12 +1069,12 @@ impl Pat {
                     });
                 let yes = cont.lower(ty.clone(), cxt);
 
-                cxt.builder.otherwise(yes);
+                cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
                 let no = rest.lower(ty, cxt);
 
-                cxt.builder.endif(no, lty)
+                cxt.endif(no, lty)
             }
             Pat::Or(a, b) => {
                 let rest = PatCont::Pat {
