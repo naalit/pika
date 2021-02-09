@@ -415,7 +415,9 @@ impl Val {
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).quote(enclosing, mcxt, db),
             Val::With(a, v) => Term::With(
                 Box::new(a.quote(enclosing, mcxt, db)),
-                v.into_iter().map(|x| x.quote(enclosing, mcxt, db)).collect(),
+                v.into_iter()
+                    .map(|x| x.quote(enclosing, mcxt, db))
+                    .collect(),
             ),
         }
     }

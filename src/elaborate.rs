@@ -202,7 +202,7 @@ impl EffStack {
                 }
                 *ty
             }
-            vty@Val::App(Var::Meta(_), _, _, _) => {
+            vty @ Val::App(Var::Meta(_), _, _, _) => {
                 self.push_scope(true);
                 vty
             }
@@ -718,7 +718,11 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             };
 
             let effs = mcxt.eff_stack.pop_scope();
-            let vty = if effs.is_empty() { vty } else { Val::With(Box::new(vty), effs) };
+            let vty = if effs.is_empty() {
+                vty
+            } else {
+                Val::With(Box::new(vty), effs)
+            };
 
             // Then construct the function term and type
             Ok((
@@ -912,10 +916,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                                     )
                                 },
                             );
-                            Term::With(
-                                Box::new(x),
-                                vec![f],
-                            )
+                            Term::With(Box::new(x), vec![f])
                         }
                         Ok(x) => match x.ret().head() {
                             Term::Var(Var::Rec(id), _) if *id == predef_id => x,
@@ -1751,7 +1752,17 @@ pub fn infer(
         Pre_::With(a, v) => {
             let a = check(a, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             // TODO better reason expected
-            let v = v.into_iter().map(|x| check(x, &Val::builtin(Builtin::Eff, Val::Type), ReasonExpected::UsedAsType, db, mcxt))
+            let v = v
+                .into_iter()
+                .map(|x| {
+                    check(
+                        x,
+                        &Val::builtin(Builtin::Eff, Val::Type),
+                        ReasonExpected::UsedAsType,
+                        db,
+                        mcxt,
+                    )
+                })
                 .collect::<Result<_, _>>()?;
             Ok((Term::With(Box::new(a), v), Val::Type))
         }
@@ -1914,7 +1925,8 @@ pub fn infer(
 
         Pre_::Do(v) => {
             // We store the whole block in Salsa, then query the last expression
-            let mut block = crate::query::intern_block(v.clone(), db, mcxt.cxt, Some(mcxt.eff_stack.clone()));
+            let mut block =
+                crate::query::intern_block(v.clone(), db, mcxt.cxt, Some(mcxt.eff_stack.clone()));
             // Make sure any type errors get reported
             for &i in &block {
                 let _ = db.elaborate_def(i);
@@ -2192,13 +2204,7 @@ pub fn check(
             // TODO not clone ??
             let bty = (**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db);
             let bty = mcxt.eff_stack.fun(bty);
-            let body = check(
-                body,
-                &bty,
-                reason,
-                db,
-                mcxt,
-            )?;
+            let body = check(body, &bty, reason, db, mcxt)?;
             // TODO what if the return type was a meta?
             mcxt.eff_stack.pop_scope();
             mcxt.undef(db);
@@ -2243,13 +2249,7 @@ pub fn check(
             mcxt.define(name, NameInfo::Local(cl.ty.clone()), db);
             let bty = (**cl).clone().vquote(mcxt.size, mcxt, db);
             let bty = mcxt.eff_stack.fun(bty);
-            let body = check(
-                pre,
-                &bty,
-                reason,
-                db,
-                mcxt,
-            )?;
+            let body = check(pre, &bty, reason, db, mcxt)?;
             // TODO what if the return type was a meta?
             mcxt.eff_stack.pop_scope();
             mcxt.undef(db);

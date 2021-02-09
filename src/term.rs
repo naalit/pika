@@ -198,7 +198,13 @@ pub enum PreDef {
     Fun(SName, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
     Val(SName, PreTy, Pre),
     // The bool keeps track of whether this is an effect
-    Type(SName, bool, Vec<(Name, Icit, PreTy)>, Vec<PreCons>, Vec<PreDefAn>),
+    Type(
+        SName,
+        bool,
+        Vec<(Name, Icit, PreTy)>,
+        Vec<PreCons>,
+        Vec<PreDefAn>,
+    ),
     Impl(Option<SName>, PreTy, Pre),
     Expr(Pre),
 
@@ -588,7 +594,10 @@ impl Term {
                 .space()
                 .chain(Doc::keyword("with"))
                 .space()
-                .chain(Doc::intersperse(b.iter().map(|x| x.pretty(db, names)), Doc::start(",").space()))
+                .chain(Doc::intersperse(
+                    b.iter().map(|x| x.pretty(db, names)),
+                    Doc::start(",").space(),
+                ))
                 .prec(Prec::Term),
             Term::App(i, f, _fty, x) => f
                 .pretty(db, names)

@@ -33,7 +33,9 @@ impl Builtin {
 
     pub fn ty(self) -> Val {
         match self {
-            Builtin::I32 | Builtin::I64 | Builtin::Bool | Builtin::UnitType | Builtin::Eff => Val::Type,
+            Builtin::I32 | Builtin::I64 | Builtin::Bool | Builtin::UnitType | Builtin::Eff => {
+                Val::Type
+            }
             Builtin::True | Builtin::False => Val::builtin(Builtin::Bool, Val::Type),
             Builtin::Unit => Val::builtin(Builtin::UnitType, Val::Type),
             Builtin::BinOp(b) => b.ty(),

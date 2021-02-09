@@ -290,7 +290,12 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
     }
 }
 
-pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt, eff_stack: Option<EffStack>) -> Vec<DefId> {
+pub fn intern_block(
+    v: Vec<PreDefAn>,
+    db: &dyn Compiler,
+    mut cxt: Cxt,
+    eff_stack: Option<EffStack>,
+) -> Vec<DefId> {
     let mut rv = Vec::new();
     // This stores unordered definitions (types and functions) between local variables
     let mut temp = Vec::new();
