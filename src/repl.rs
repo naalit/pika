@@ -24,7 +24,7 @@ impl Default for ReplHelper {
         // Yes, we do have an actual lexer, but this is a little more flexible
         ReplHelper {
             literal: Regex::new(r"((^|\s)\d+)|\(\)").unwrap(),
-            keyword: Regex::new(r"\b(do|type|case|of|raise|catch|with|pure|struct|sig|end|val|fun|where|impl|if|then|else|and|or)\b").unwrap(),
+            keyword: Regex::new(r"\b(do|type|eff|case|of|with|struct|sig|end|val|fun|where|impl|if|then|else|and|or)\b").unwrap(),
             symbol: Regex::new(r">=|<=|>|<|==|!=|\+\+|\+|-|\*\*|\*|/|\^\^|&|=>|\||->|\\|\.|=|:").unwrap(),
             comment: Regex::new(r"#.*$").unwrap(),
         }

@@ -73,7 +73,6 @@ impl Term {
                         env: env.clone(),
                         term: Term::If(
                             Box::new(cond.quote(env.size, mcxt, db)),
-                            // TODO do we evaluate yes and no? we need to apply anything in the env
                             yes,
                             no,
                         ),

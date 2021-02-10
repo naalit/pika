@@ -759,7 +759,7 @@ impl Term {
                 }
             }
             Term::Catch(x, effs_) => {
-                cxt.mcxt.eff_stack.push_scope(false);
+                cxt.mcxt.eff_stack.push_scope(false, Span::empty());
 
                 let base_ty = match ty {
                     Val::With(x, _) => *x,
@@ -839,7 +839,7 @@ impl Term {
                     Some(cxt.db.lookup_intern_name(*name)),
                     param_ty.clone().lower(Val::Type, cxt),
                 )];
-                cxt.mcxt.eff_stack.push_scope(false);
+                cxt.mcxt.eff_stack.push_scope(false, Span::empty());
                 let mut effs = Vec::new();
                 let mut rcont_was_none = false;
                 let mut has_eff = false;
@@ -997,10 +997,13 @@ impl Term {
                 let base = base.lower(Val::Type, cxt);
 
                 let mut v = vec![base];
-                for e in effs {
-                    // TODO include continuation
-                    let e = e.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
-                    v.push(e);
+                for eff in effs {
+                    let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+
+                    let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                    let cont_ty = cxt.builder.fun_type_raw(&[any_ty, any_ty, any_ty] as &_);
+                    let ty = cxt.builder.prod_type(&[leff, cont_ty] as &_);
+                    v.push(ty);
                 }
                 cxt.builder.sum_type(v)
             }

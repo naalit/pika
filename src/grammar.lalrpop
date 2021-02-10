@@ -112,8 +112,6 @@ Def_: PreDef = {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Fun(name, args, ty, val)
   },
-  // // You can have a function with an effect type but not a return type
-  // "fun" "\n"* Sp<Name> Args (":" App)? ("with" Term) "=" Term => todo!("effects"),
   "val" "\n"* <name:Sp<Name>> <ty:(":" <Sp<Term>>)?> "=" <val:Sp<Term>> => {
     let ty = ty.unwrap_or_else(|| name.copy_span(Pre_::Hole(MetaSource::LocalType(*name))));
     PreDef::Val(name, ty, val)

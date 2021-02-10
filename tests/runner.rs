@@ -105,6 +105,19 @@ fn test_type_in_do() {
 // Tests for type errors
 
 #[test]
+fn test_eff_not_allowed() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/eff_not_allowed.pk"])
+        .assert()
+        .stderr(is_match("Effect .* not allowed in this context").unwrap())
+        .stderr(contains("this context does not allow effects"))
+        .stderr(contains("this context allows effects "))
+        .stderr(contains("effects are not allowed in the top level context"))
+        .failure();
+}
+
+#[test]
 fn test_curry_errors() {
     Command::cargo_bin("pika")
         .unwrap()

@@ -157,7 +157,7 @@ pub enum MCxtType {
 #[derive(Debug, Clone, PartialEq, Default, Eq, Hash)]
 pub struct EffStack {
     effs: Vec<Val>,
-    scopes: Vec<(bool, usize)>,
+    scopes: Vec<(bool, usize, Span)>,
 }
 impl EffStack {
     pub fn len(&self) -> usize {
@@ -170,18 +170,18 @@ impl EffStack {
         self.effs.pop()
     }
     /// `open` is whether this scope is open to new effects - i.e., we're inferring the type instead of checking it
-    pub fn push_scope(&mut self, open: bool) {
-        self.scopes.push((open, self.effs.len()))
+    pub fn push_scope(&mut self, open: bool, span: Span) {
+        self.scopes.push((open, self.effs.len(), span))
     }
     pub fn pop_scope(&mut self) -> Vec<Val> {
-        if let Some((_, len)) = self.scopes.pop() {
+        if let Some((_, len, _)) = self.scopes.pop() {
             self.effs.split_off(len)
         } else {
             panic!("pop_scope() without push_scope()")
         }
     }
     pub fn find_eff(&self, eff: &Val, db: &dyn Compiler, mcxt: &mut MCxt) -> Option<usize> {
-        let start = self.scopes.last().map_or(0, |(_, l)| *l);
+        let start = self.scopes.last().map_or(0, |(_, l, _)| *l);
         for (i, e) in self.effs[start..].iter().enumerate() {
             if unify(eff.clone(), e.clone(), mcxt.size, Span::empty(), db, mcxt).unwrap_or(false) {
                 return Some(i);
@@ -191,35 +191,35 @@ impl EffStack {
     }
 
     pub fn scope_start(&self) -> Option<usize> {
-        self.scopes.last().map(|(_, len)| *len)
+        self.scopes.last().map(|(_, len, _)| *len)
     }
 
     fn try_eff(&mut self, eff: Val, db: &dyn Compiler, mcxt: &mut MCxt) -> bool {
         if self.find_eff(&eff, db, mcxt).is_some() {
             return true;
         }
-        if self.scopes.last().map_or(false, |(open, _)| *open) {
+        if self.scopes.last().map_or(false, |(open, _, _)| *open) {
             self.push_eff(eff);
             return true;
         }
         false
     }
 
-    fn fun(&mut self, rty: VTy) -> VTy {
+    fn fun(&mut self, rty: VTy, span: Span) -> VTy {
         match rty {
             Val::With(ty, effs) => {
-                self.push_scope(false);
+                self.push_scope(false, span);
                 for e in effs {
                     self.push_eff(e);
                 }
                 *ty
             }
             vty @ Val::App(Var::Meta(_), _, _, _) => {
-                self.push_scope(true);
+                self.push_scope(true, span);
                 vty
             }
             vty => {
-                self.push_scope(false);
+                self.push_scope(false, span);
                 vty
             }
         }
@@ -718,7 +718,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 }
             };
             let vty = body_ty.evaluate(&mcxt.env(), &mcxt, db);
-            let vty = mcxt.eff_stack.fun(vty);
+            let vty = mcxt.eff_stack.fun(vty, tyspan);
 
             // And last, check the function body against the return type
             let body = match check(body, &vty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
@@ -1240,6 +1240,15 @@ pub enum ReasonExpected {
     ArgOf(Span, VTy),
 }
 impl ReasonExpected {
+    fn span_or(&self, or: Span) -> Span {
+        match self {
+            ReasonExpected::MustMatch(s)
+            | ReasonExpected::Given(s)
+            | ReasonExpected::ArgOf(s, _) => *s,
+            _ => or,
+        }
+    }
+
     /// Adds a description of the reason to the `err`.
     /// This function adds it to an existing error instead of returning a Doc because some reasons have spans attached, and some don't.
     fn add(self, err: Error, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
@@ -1289,6 +1298,7 @@ pub enum TypeError {
     Inexhaustive(Span, crate::pattern::Cov, VTy),
     InvalidPatternBecause(Box<TypeError>),
     WrongArity(Spanned<VTy>, usize, usize),
+    EffNotAllowed(Span, Val, EffStack),
 }
 impl TypeError {
     fn to_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
@@ -1440,6 +1450,30 @@ impl TypeError {
                     .chain(Doc::start("I64").style(Style::None))
                     .style(Style::Error),
             ),
+            TypeError::EffNotAllowed(span, eff, mut stack) => {
+                let base = Error::new(
+                    file,
+                    Doc::start("Effect ")
+                        .chain(eff.pretty(db, mcxt).style(Style::None))
+                        .add(" not allowed in this context")
+                        .style(Style::Bold),
+                    span,
+                    Doc::start("this performs effect ")
+                        .chain(eff.pretty(db, mcxt).style(Style::None))
+                        .style(Style::Error)
+                );
+                if stack.scopes.is_empty() {
+                    base.with_note("effects are not allowed in the top level context")
+                } else if stack.scope_start().unwrap() == stack.effs.len() {
+                    base.with_label(file, stack.scopes.last().unwrap().2, "this context does not allow effects")
+                } else {
+                    base.with_label(file, stack.scopes.last().unwrap().2,
+                        Doc::start("this context allows effects ")
+                            .chain(Doc::intersperse(stack.pop_scope().into_iter().map(|eff| eff.pretty(db, mcxt).style(Style::None)), Doc::start(",").space()))
+                            .style(Style::Error)
+                    )
+                }
+            }
             TypeError::WrongArity(ty, expected, got) => Error::new(
                 file,
                 Doc::start(if got > expected {
@@ -1786,7 +1820,7 @@ pub fn infer(
         }
 
         Pre_::Catch(x) => {
-            mcxt.eff_stack.push_scope(true);
+            mcxt.eff_stack.push_scope(true, pre.span());
             let (x, ty) = infer(insert, x, db, mcxt)?;
             let effs = mcxt.eff_stack.pop_scope();
             // TODO is it safe to catch multiple effects at once?
@@ -1906,7 +1940,7 @@ pub fn infer(
             let vty = ty.clone().evaluate(&mcxt.env(), mcxt, db);
             // TODO Rc to get rid of the clone()?
             mcxt.define(*name, NameInfo::Local(vty.clone()), db);
-            mcxt.eff_stack.push_scope(true);
+            mcxt.eff_stack.push_scope(true, pre.span());
 
             let (body, bty) = infer(true, body, db, mcxt)?;
             // Add the effects to the return type
@@ -2128,6 +2162,7 @@ fn infer_app(
         Val::Pi(icit2, cl) => {
             assert_eq!(icit, *icit2);
 
+            let span = Span(fspan.0, x.span().1);
             let x = check(
                 x,
                 &cl.ty,
@@ -2142,8 +2177,12 @@ fn infer_app(
             let to = match to {
                 Val::With(to, effs) => {
                     for eff in effs {
-                        if !mcxt.eff_stack.try_eff(eff, db, &mut mcxt.clone()) {
-                            todo!("Type error: effect not allowed in this context");
+                        if !mcxt.eff_stack.try_eff(eff.clone(), db, &mut mcxt.clone()) {
+                            return Err(TypeError::EffNotAllowed(
+                                span,
+                                eff,
+                                mcxt.eff_stack.clone(),
+                            ));
                         }
                     }
                     *to
@@ -2161,6 +2200,7 @@ fn infer_app(
             ))
         }
         Val::Fun(from, to) => {
+            let span = Span(fspan.0, x.span().1);
             let x = check(
                 x,
                 &from,
@@ -2172,8 +2212,12 @@ fn infer_app(
             let to = match to {
                 Val::With(to, effs) => {
                     for eff in effs {
-                        if !mcxt.eff_stack.try_eff(eff, db, &mut mcxt.clone()) {
-                            todo!("Type error: effect not allowed in this context");
+                        if !mcxt.eff_stack.try_eff(eff.clone(), db, &mut mcxt.clone()) {
+                            return Err(TypeError::EffNotAllowed(
+                                span,
+                                eff,
+                                mcxt.eff_stack.clone(),
+                            ));
                         }
                     }
                     *to
@@ -2242,7 +2286,7 @@ pub fn check(
             mcxt.define(*n, NameInfo::Local(vty.clone()), db);
             // TODO not clone ??
             let bty = (**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db);
-            let bty = mcxt.eff_stack.fun(bty);
+            let bty = mcxt.eff_stack.fun(bty, reason.span_or(pre.span()));
             let body = check(body, &bty, reason, db, mcxt)?;
             // TODO what if the return type was a meta?
             mcxt.eff_stack.pop_scope();
@@ -2269,7 +2313,9 @@ pub fn check(
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty), db);
-            let body_ty = mcxt.eff_stack.fun((**body_ty).clone());
+            let body_ty = mcxt
+                .eff_stack
+                .fun((**body_ty).clone(), reason.span_or(pre.span()));
             let body = check(body, &body_ty, reason, db, mcxt)?;
             // TODO what if the return type was a meta?
             mcxt.eff_stack.pop_scope();
@@ -2287,7 +2333,7 @@ pub fn check(
             };
             mcxt.define(name, NameInfo::Local(cl.ty.clone()), db);
             let bty = (**cl).clone().vquote(mcxt.size, mcxt, db);
-            let bty = mcxt.eff_stack.fun(bty);
+            let bty = mcxt.eff_stack.fun(bty, reason.span_or(pre.span()));
             let body = check(pre, &bty, reason, db, mcxt)?;
             // TODO what if the return type was a meta?
             mcxt.eff_stack.pop_scope();

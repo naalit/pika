@@ -1,0 +1,15 @@
+eff Console a of
+  Print a : ()
+  Read () : a
+end
+
+fun has_no_effs (i: I32) : () = do
+  Console.Print i
+end
+
+fun extra_eff (i: I32) : () with Console I64, Console Type = do
+  Console.Print (I32 -> I32)
+  Console.Print i
+end
+
+Console.Print (I32 -> I32)
