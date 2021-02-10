@@ -81,7 +81,7 @@ impl Term {
                 }
             }
             // TODO: eventually we'll want to actually evaluate do blocks when necessary
-            term @ Term::Do(_) => Val::Lazy(Box::new(Lazy {
+            term @ Term::Do(_) | term @ Term::Catch(_, _) => Val::Lazy(Box::new(Lazy {
                 env: env.clone(),
                 term,
             })),
@@ -109,6 +109,14 @@ impl Term {
             Term::Var(v, mut ty) => {
                 *ty = ty.eval_quote(env, l, mcxt, db);
                 Term::Var(v, ty)
+            }
+            Term::Catch(mut x, v) => {
+                *x = x.eval_quote(env, l, mcxt, db);
+                let v = v
+                    .into_iter()
+                    .map(|x| x.eval_quote(env, l, mcxt, db))
+                    .collect();
+                Term::Catch(x, v)
             }
             Term::Lam(name, icit, mut ty, mut body) => {
                 *ty = ty.eval_quote(env, l, mcxt, db);

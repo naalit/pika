@@ -15,6 +15,10 @@ fun other (_:()) = greet True
 
 fun maybe_raise (b: Bool) : () with Console = if b then Console.Print 3 else ()
 
+fun catch_eff (b: Bool) : () = do
+  val x : () with Console = maybe_raise b?
+end
+
 # fun main () : () = do
 #   fun handle (x : () with Console) : () = case x of
 #     () => ()

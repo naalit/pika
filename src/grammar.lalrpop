@@ -69,6 +69,7 @@ extern {
     NAME => Tok::Name(<&'input str>),
 
     // Other tokens
+    "?" => Tok::Question,
     "@" => Tok::At,
     "(" => Tok::POpen,
     ")" => Tok::PClose,
@@ -232,6 +233,7 @@ App: Pre_ = {
       Spanned::new(Pre_::App(icit, f, x), span)
     }).unwrap()
   },
+  <Sp<App>> "?" => Pre_::Catch(<>),
 }
 
 Atom: Pre_ = {

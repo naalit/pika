@@ -144,6 +144,7 @@ pub enum Pre_ {
     /// If(cond, then, else)
     If(Pre, Pre, Pre),
     With(Pre, Vec<Pre>),
+    Catch(Pre),
 }
 
 /// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.
@@ -389,6 +390,7 @@ pub enum Term {
     /// do A; B; () end
     Do(Vec<(DefId, Term)>),
     With(Box<Term>, Vec<Term>),
+    Catch(Box<Term>, Vec<Term>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
     Error,
 }
@@ -599,6 +601,7 @@ impl Term {
                     Doc::start(",").space(),
                 ))
                 .prec(Prec::Term),
+            Term::Catch(x, _) => x.pretty(db, names).add("?"),
             Term::App(i, f, _fty, x) => f
                 .pretty(db, names)
                 .nest(Prec::App)

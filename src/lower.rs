@@ -758,6 +758,72 @@ impl Term {
                     unreachable!("Empty do block in lower()!")
                 }
             }
+            Term::Catch(x, effs_) => {
+                cxt.mcxt.eff_stack.push_scope(false);
+
+                let base_ty = match ty {
+                    Val::With(x, _) => *x,
+                    _ => unreachable!(),
+                };
+                let lbase_ty = base_ty.clone().lower(Val::Type, cxt);
+
+                let env = cxt.mcxt.env();
+                let mut effs = Vec::new();
+                let mut variants = vec![lbase_ty];
+                for eff in effs_ {
+                    let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                    let eff = eff.clone().evaluate(&env, &cxt.mcxt, cxt.db);
+                    effs.push((eff, leff));
+
+                    let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                    let cont_ty = cxt.builder.fun_type_raw(&[any_ty, any_ty, any_ty] as &_);
+                    let ty = cxt.builder.prod_type(&[leff, cont_ty] as &_);
+                    variants.push(ty);
+                }
+
+                let rty = cxt.builder.sum_type(variants);
+                let rcont = cxt.builder.reserve(None);
+
+                for (i, (eff, leff)) in effs.into_iter().enumerate() {
+                    // fun cont.<eff> ( x: <eff>, k: fun( <base_ty>, <econt_ty>, <rcont_ty> ) ) = <rcont> (<rty>):<i+1>(x, k)
+                    let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
+
+                    let econt_ty = cxt.eff_cont_ty(leff, &name);
+                    let rcont_ty = cxt.builder.fun_type_raw(&[rty] as &_);
+                    let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                    let k_ty = cxt
+                        .builder
+                        .fun_type_raw(&[any_ty, econt_ty, rcont_ty] as &_);
+
+                    let args = cxt
+                        .builder
+                        .push_fun_raw(&[(None, leff), (None, k_ty)] as &_);
+                    let x = args[0];
+                    let k = args[1];
+
+                    let prod_ty = cxt.builder.sum_idx(rty, i + 1).unwrap();
+                    let prod = cxt.builder.product(prod_ty, vec![x, k]);
+                    let sum = cxt.builder.inject_sum(rty, i + 1, prod);
+
+                    let cont = cxt.builder.pop_fun_raw(rcont, &[sum] as &_);
+
+                    cxt.eff(eff, cont);
+                }
+
+                let x = x.lower(base_ty, cxt);
+                let sum = cxt.builder.inject_sum(rty, 0, x);
+                cxt.builder.call_raw(rcont, &[sum] as &_);
+
+                // fun rcont = ( ret: <rty> ) = <continue evaluating, returning ret>
+                // We're in a detached block right now, so the value we pass here doesn't matter
+                let (fun, args) = cxt.builder.push_frame(vec![(sum, rty)]);
+                let ret = args[0];
+                cxt.builder.redirect(rcont, fun);
+
+                cxt.mcxt.eff_stack.pop_scope();
+
+                ret
+            }
             // \x.f x
             // -->
             // fun a (x, r) = f x k

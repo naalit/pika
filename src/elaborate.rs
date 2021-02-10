@@ -73,6 +73,14 @@ impl Term {
                 *b = b.check_solution(meta, ren, lfrom, lto, names)?;
                 Ok(Term::Fun(a, b))
             }
+            Term::Catch(mut x, effs) => {
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.check_solution(meta.clone(), ren, lfrom, lto, names))
+                    .collect::<Result<_, _>>()?;
+                *x = x.check_solution(meta, ren, lfrom, lto, names)?;
+                Ok(Term::Catch(x, effs))
+            }
             Term::App(i, mut a, mut fty, mut b) => {
                 *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
                 *fty = fty.check_solution(meta.clone(), ren, lfrom, lto, names)?;
@@ -1495,6 +1503,12 @@ fn p_unify(
         (Val::Error, _) | (_, Val::Error) => Ok(Yes),
         (Val::Type, Val::Type) => Ok(Yes),
 
+        (Val::With(a, v), Val::With(b, v2)) => Ok(p_unify(mode, *a, *b, l, span, db, mcxt)?
+            & v.into_iter()
+                .zip(v2)
+                .map(|(a, b)| p_unify(mode, a, b, l, span, db, mcxt))
+                .fold(Ok(Yes), |acc, r| acc.and_then(|acc| r.map(|r| acc & r)))?),
+
         (Val::App(h, _, v, _), Val::App(h2, _, v2, _)) if h.unify(h2, db) => {
             let mut r = Yes;
             for ((i, a), (i2, b)) in v.into_iter().zip(v2.into_iter()) {
@@ -1769,6 +1783,27 @@ pub fn infer(
                 })
                 .collect::<Result<_, _>>()?;
             Ok((Term::With(Box::new(a), v), Val::Type))
+        }
+
+        Pre_::Catch(x) => {
+            mcxt.eff_stack.push_scope(true);
+            let (x, ty) = infer(insert, x, db, mcxt)?;
+            let effs = mcxt.eff_stack.pop_scope();
+            // TODO is it safe to catch multiple effects at once?
+            if effs.len() == 1 {
+                Ok((
+                    Term::Catch(
+                        Box::new(x),
+                        effs.iter()
+                            .cloned()
+                            .map(|x| x.quote(mcxt.size, mcxt, db))
+                            .collect(),
+                    ),
+                    Val::With(Box::new(ty), effs),
+                ))
+            } else {
+                panic!("Wrong number of effects for inferred '?'")
+            }
         }
 
         Pre_::Lit(_) => Err(TypeError::UntypedLiteral(pre.span())),
