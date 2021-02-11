@@ -400,6 +400,8 @@ PiArgs: Vec<(Name, Icit, PreTy)> = {
 
 // ArgGroup is also used in Pi, where a bare name isn't allowed.
 ArgGroupN: (Vec<Name>, Icit, PreTy) = {
+  // TODO arbitrary patterns in function arguments, not just ()
+  <l:@L> "(" ")" <r:@R> => (vec![db.intern_name("_".to_string())], Icit::Expl, Spanned::new(Pre_::Unit, Span(l, r))),
   <l:@L> <n:Name> <r:@R> => (vec![n], Icit::Expl, Spanned::new(Pre_::Hole(MetaSource::LocalType(n)), Span(l, r))),
   ArgGroup,
 }

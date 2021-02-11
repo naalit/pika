@@ -3,7 +3,7 @@ eff Console of
   Read () : I32
 end
 
-fun f (_:()) : () with Console = Console.Print (Console.Read ())
+fun f () : () with Console = Console.Print (Console.Read ())
 
 fun greet (b: Bool) : () with Console = do
   Console.Print 1
@@ -11,7 +11,7 @@ fun greet (b: Bool) : () with Console = do
   Console.Print name
 end
 
-fun other (_:()) = greet True
+fun other () = greet True
 
 fun maybe_raise (b: Bool) : () with Console = if b then Console.Print 3 else ()
 

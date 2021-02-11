@@ -1,4 +1,4 @@
-fun main (_ : ()) : () = do
+fun main () : () = do
   fun inc x = x + 1
   val four = inc 3
   # Implicitly returns ()
