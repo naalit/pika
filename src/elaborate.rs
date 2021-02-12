@@ -334,6 +334,24 @@ impl MCxt {
         self.cxt.lookup(name, db)
     }
 
+    pub fn last_local(&self, db: &dyn Compiler) -> Option<(Var<Lvl>, VTy)> {
+        let mut cxt = self.cxt;
+        loop {
+            match db.lookup_cxt_entry(cxt) {
+                MaybeEntry::Yes(CxtEntry { rest, info, .. }) => {
+                    cxt = rest;
+                    match info {
+                        NameInfo::Local(ty) => {
+                            break Some((Var::Local(self.size), ty));
+                        }
+                        _ => continue,
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
     /// Adds a definition to the context, and handles increasing the cached size.
     pub fn define(&mut self, name: Name, info: NameInfo, db: &dyn Compiler) {
         if let NameInfo::Local(_) = &info {
@@ -1240,7 +1258,7 @@ pub enum ReasonExpected {
     ArgOf(Span, VTy),
 }
 impl ReasonExpected {
-    fn span_or(&self, or: Span) -> Span {
+    pub fn span_or(&self, or: Span) -> Span {
         match self {
             ReasonExpected::MustMatch(s)
             | ReasonExpected::Given(s)
@@ -2144,6 +2162,7 @@ pub fn infer(
         }
 
         Pre_::OrPat(_, _) => unreachable!("| is only allowed in patterns"),
+        Pre_::EffPat(_, _) => unreachable!("eff _ _ is only allowed in patterns"),
     }
 }
 
@@ -2342,14 +2361,14 @@ pub fn check(
             Ok(Term::Lam(cl.name, Icit::Impl, Box::new(ty), Box::new(body)))
         }
 
-        (Pre_::Lit(l), _) => match ty.unarc() {
+        (Pre_::Lit(l), _) => match ty.clone().inline(mcxt.size, db, mcxt) {
             Val::App(Var::Builtin(b), _, _, _) if matches!(b, Builtin::I32 | Builtin::I64) => {
-                Ok(Term::Lit(*l, *b))
+                Ok(Term::Lit(*l, b))
             }
             Val::App(Var::Meta(_), _, _, _) => Err(TypeError::UntypedLiteral(pre.span())),
-            _ => Err(TypeError::NotIntType(
+            ty => Err(TypeError::NotIntType(
                 pre.span(),
-                ty.clone().inline_metas(mcxt, db),
+                ty.inline_metas(mcxt, db),
                 reason,
             )),
         },

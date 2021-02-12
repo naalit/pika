@@ -135,6 +135,7 @@ pub enum Pre_ {
     /// Dot(a, b, [c, d]) = a.b c d
     Dot(Pre, SName, Vec<(Icit, Pre)>),
     OrPat(Pre, Pre),
+    EffPat(Pre, Pre),
     Case(Pre, Vec<(Pre, Pre)>),
     Lit(Literal),
     Unit,
@@ -480,8 +481,12 @@ impl<T> IVec<T> {
 // -- pretty printing --
 
 #[derive(Clone, Debug)]
-pub struct Names(VecDeque<Name>);
+pub struct Names(VecDeque<Name>, Name);
 impl Names {
+    /// Returns the name representing "_"
+    pub fn hole_name(&self) -> Name {
+        self.1
+    }
     pub fn new(mut cxt: Cxt, db: &dyn Compiler) -> Names {
         let mut v = VecDeque::new();
         while let MaybeEntry::Yes(CxtEntry {
@@ -494,7 +499,7 @@ impl Names {
                 _ => (),
             }
         }
-        Names(v)
+        Names(v, db.intern_name("_".into()))
     }
     pub fn get(&self, ix: Ix) -> Name {
         self.0[ix.0 as usize]

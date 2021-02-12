@@ -208,8 +208,21 @@ Branch: (Pre, Pre) = {
   <Sp<Pat>> "=>" <Sp<Term>>,
 }
 Pat: Pre_ = {
-  App,
-  <f:Sp<Atom>> "." <n:Sp<Name>> <v:Sp<AppArg>*> => {
+  PApp,
+  <a:Sp<PApp>> "|" <b:Sp<Pat>> => Pre_::OrPat(a, b),
+}
+PApp: Pre_ = {
+  PAtom,
+  <f:Sp<PAtom>> <args:Sp<AppArg>+> => {
+    args.into_iter().fold(f, |f, x| {
+      let xspan = x.span();
+      let span = Span(f.span().0, xspan.1);
+      let (icit, x) = x.unwrap();
+      let x = Spanned::new(x, xspan);
+      Spanned::new(Pre_::App(icit, f, x), span)
+    }).unwrap()
+  },
+  <f:Sp<PAtom>> "." <n:Sp<Name>> <v:Sp<AppArg>*> => {
     let v = v.into_iter().map(|x| {
       let span = x.span();
       let (icit, pre) = x.unwrap();
@@ -217,7 +230,13 @@ Pat: Pre_ = {
     }).collect();
     Pre_::Dot(f, n, v)
   },
-  <a:Sp<App>> "|" <b:Sp<Pat>> => Pre_::OrPat(a, b),
+  "eff" <a:Sp<PAtom>> <k:Sp<PAtom>> => Pre_::EffPat(a, k),
+}
+PAtom: Pre_ = {
+  Name => if &<>.get(db) == "_" { Pre_::Hole(MetaSource::Hole) } else { Pre_::Var(<>) },
+  Lit => Pre_::Lit(<>),
+  "(" ")" => Pre_::Unit,
+  "(" <Pat> ")",
 }
 
 App: Pre_ = {

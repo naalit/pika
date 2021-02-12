@@ -71,11 +71,7 @@ impl Term {
                     Val::App(Var::Builtin(Builtin::False), _, _, _) => no.evaluate(env, mcxt, db),
                     cond => Val::Lazy(Box::new(Lazy {
                         env: env.clone(),
-                        term: Term::If(
-                            Box::new(cond.quote(env.size, mcxt, db)),
-                            yes,
-                            no,
-                        ),
+                        term: Term::If(Box::new(cond.quote(env.size, mcxt, db)), yes, no),
                     })),
                 }
             }
@@ -163,10 +159,11 @@ impl Term {
                 let cases = cases
                     .into_iter()
                     .map(|(pat, body)| {
-                        (
-                            pat.inline_metas(mcxt, db),
-                            body.eval_quote(env, l, mcxt, db),
-                        )
+                        let mut env = env.clone();
+                        let mut l = l;
+                        let pat = pat.eval_quote(&mut env, &mut l, mcxt, db);
+                        let body = body.eval_quote(&mut env, l, mcxt, db);
+                        (pat, body)
                     })
                     .collect();
                 Term::Case(x, ty, cases)

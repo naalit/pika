@@ -19,12 +19,12 @@ fun catch_eff (b: Bool) : () = do
   val x : () with Console = maybe_raise b?
 end
 
-# fun main () : () = do
-#   fun handle (x : () with Console) : () = case x of
-#     () => ()
-#     eff (Console.Print _) k => handle (k ()?)
-#     eff Console.Read k => handle (k 12?)
-#   end
-#
-#   handle (greet ()?)
-# end
+fun main () : () = do
+  fun handle (x : () with Console) : () = case x of
+    () => ()
+    eff (Console.Print _) k => handle (k ()?)
+    eff (Console.Read ()) k => handle (k 12?)
+  end
+
+  handle (greet True?)
+end

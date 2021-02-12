@@ -12,6 +12,9 @@ pub enum Pat {
     Or(Box<Pat>, Box<Pat>),
     Lit(Literal, Width),
     Bool(bool),
+    /// eff p k
+    Eff(Box<Pat>, Box<Pat>),
+    EffRet(Box<Pat>),
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
@@ -26,6 +29,7 @@ pub enum Cov {
     Lit(BitSet),
     /// we *did* cover this Bool
     Bool(bool),
+    Eff(Box<Cov>, Box<Cov>),
 }
 impl Cov {
     pub fn or(self, other: Self) -> Self {
@@ -51,6 +55,11 @@ impl Cov {
                     }
                 }
                 Cov::Cons(v)
+            }
+            (Cov::Eff(mut a, mut b), Cov::Eff(a2, b2)) => {
+                *a = a.or(*a2);
+                *b = b.or(*b2);
+                Cov::Eff(a, b)
             }
             _ => unreachable!(),
         }
@@ -170,6 +179,23 @@ impl Cov {
                 }
                 _ => unreachable!(),
             },
+            Cov::Eff(a, b) => {
+                let base_ty = match ty {
+                    Val::With(ty, _) => ty,
+                    _ => unreachable!(),
+                };
+                let mut d = None;
+                if !matches!(&**a, Cov::All) {
+                    d = Some(a.pretty_rest(base_ty, db, mcxt));
+                }
+                if !matches!(&**b, Cov::All) {
+                    d = Some(match d {
+                        Some(d) => d.add("; ").chain(b.pretty_rest(ty, db, mcxt)),
+                        None => b.pretty_rest(ty, db, mcxt),
+                    });
+                }
+                d.expect("Empty Cov::Eff")
+            }
         }
     }
 
@@ -179,78 +205,114 @@ impl Cov {
             Cov::None => Cov::None,
             Cov::Lit(s) => Cov::Lit(s),
             Cov::Bool(x) => Cov::Bool(x),
-            Cov::Cons(mut covs) => match ty {
-                Val::App(Var::Type(_, sid), _, _, _) => {
-                    let mut unmatched: Vec<DefId> = db
-                        .lookup_intern_scope(*sid)
-                        .iter()
-                        .filter_map(|&(_name, id)| {
-                            let info = db.elaborate_def(id).ok()?;
-                            match &*info.term {
-                                Term::Var(Var::Cons(cid), _) if id == *cid => {
-                                    let cty = IntoOwned::<Val>::into_owned(info.typ)
-                                        .ret_type(mcxt.size, mcxt, db);
-                                    if crate::elaborate::local_unify(
-                                        cty,
-                                        ty.clone(),
-                                        mcxt.size,
-                                        Span::empty(),
-                                        db,
-                                        &mut mcxt.clone(),
-                                    )
-                                    .ok()?
-                                    {
-                                        Some(id)
-                                    } else {
-                                        None
-                                    }
-                                }
-                                _ => None,
-                            }
-                        })
-                        .collect();
-                    for (cons, args) in &mut covs {
-                        let mut cons_ty = (*db
-                            .elaborate_def(*cons)
-                            .expect("probably an invalid constructor?")
-                            .typ)
-                            .clone();
-                        let mut l = mcxt.size;
+            Cov::Cons(mut covs) => {
+                let mut mcxt = mcxt.clone();
+                mcxt.define(db.intern_name("_".into()), NameInfo::Local(Val::Type), db);
+                let (var, vty) = mcxt.last_local(db).unwrap();
+                let cont_ty = Val::App(var, Box::new(vty), Vec::new(), Glued::new());
 
-                        for x in std::mem::take(args) {
-                            let ty = match cons_ty {
-                                Val::Fun(from, to) => {
-                                    cons_ty = *to;
-                                    *from
-                                }
-                                Val::Pi(_, cl) => {
-                                    let from = cl.ty.clone();
-                                    cons_ty = cl.vquote(l.inc(), mcxt, db);
-                                    l = l.inc();
-                                    from
-                                }
-                                _ => unreachable!(),
-                            };
-                            args.push(x.simplify(&ty, db, mcxt));
-                        }
-
-                        if args.iter().all(|x| *x == Cov::All) {
-                            // This pattern is guaranteed to cover this constructor completely
-                            unmatched.retain(|id| id != cons);
+                let (sid, ty) = match ty {
+                    Val::App(Var::Type(_, sid), _, _, _) => (*sid, ty.clone()),
+                    Val::With(_, effs) if effs.len() == 1 => {
+                        match effs[0].clone().inline(mcxt.size, db, &mcxt) {
+                            // The actual return type of the term doesn't matter, the constructor can have a different one
+                            // So we use a local here, like we did when elaborating the pattern
+                            Val::App(Var::Type(_, sid), _, _, _) => (sid, Val::With(Box::new(cont_ty), effs.clone())),
+                            _ => panic!(
+                                "Called Cov::simplify() on a Cov::Cons but passed non-datatype {:?}",
+                                ty
+                            ),
                         }
                     }
+                    _ => panic!(
+                        "Called Cov::simplify() on a Cov::Cons but passed non-datatype {:?}",
+                        ty
+                    ),
+                };
+                let mut unmatched: Vec<DefId> = db
+                    .lookup_intern_scope(sid)
+                    .iter()
+                    .filter_map(|&(_name, id)| {
+                        let info = db.elaborate_def(id).ok()?;
+                        match &*info.term {
+                            Term::Var(Var::Cons(cid), _) if id == *cid => {
+                                let cty = IntoOwned::<Val>::into_owned(info.typ)
+                                    .ret_type(mcxt.size, &mcxt, db);
+                                if crate::elaborate::local_unify(
+                                    cty,
+                                    ty.clone(),
+                                    mcxt.size,
+                                    Span::empty(),
+                                    db,
+                                    &mut mcxt.clone(),
+                                )
+                                .ok()?
+                                {
+                                    Some(id)
+                                } else {
+                                    println!(
+                                        "Skipping constructor {}",
+                                        info.term
+                                            .pretty(db, &mut Names::new(mcxt.cxt, db))
+                                            .ansi_string()
+                                    );
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                for (cons, args) in &mut covs {
+                    let mut cons_ty = (*db
+                        .elaborate_def(*cons)
+                        .expect("probably an invalid constructor?")
+                        .typ)
+                        .clone();
+                    let mut l = mcxt.size;
 
-                    if unmatched.is_empty() {
-                        Cov::All
-                    } else {
-                        Cov::Cons(covs)
+                    for x in std::mem::take(args) {
+                        let ty = match cons_ty {
+                            Val::Fun(from, to) => {
+                                cons_ty = *to;
+                                *from
+                            }
+                            Val::Pi(_, cl) => {
+                                let from = cl.ty.clone();
+                                cons_ty = cl.vquote(l.inc(), &mcxt, db);
+                                l = l.inc();
+                                from
+                            }
+                            _ => unreachable!(),
+                        };
+                        args.push(x.simplify(&ty, db, &mcxt));
+                    }
+
+                    if args.iter().all(|x| *x == Cov::All) {
+                        // This pattern is guaranteed to cover this constructor completely
+                        unmatched.retain(|id| id != cons);
                     }
                 }
-                _ => panic!(
-                    "Called Cov::simplify() on a Cov::Cons but passed non-datatype {:?}",
-                    ty
-                ),
-            },
+
+                if unmatched.is_empty() {
+                    Cov::All
+                } else {
+                    Cov::Cons(covs)
+                }
+            }
+            Cov::Eff(mut a, mut b) => {
+                let base_ty = match ty {
+                    Val::With(ty, _) => ty,
+                    _ => unreachable!(),
+                };
+                *a = a.simplify(base_ty, db, mcxt);
+                *b = b.simplify(ty, db, mcxt);
+                if matches!((&*a, &*b), (Cov::All, Cov::All)) {
+                    Cov::All
+                } else {
+                    Cov::Eff(a, b)
+                }
+            }
         }
     }
 }
@@ -270,6 +332,11 @@ impl Pat {
             Pat::Or(x, y) => x.cov().or(y.cov()),
             Pat::Lit(l, _) => Cov::Lit(std::iter::once(l.to_usize()).collect()),
             Pat::Bool(b) => Cov::Bool(*b),
+            Pat::Eff(p, k) => {
+                assert_eq!(k.cov(), Cov::All);
+                Cov::Eff(Box::new(Cov::None), Box::new(p.cov()))
+            }
+            Pat::EffRet(p) => Cov::Eff(Box::new(p.cov()), Box::new(Cov::None)),
         }
     }
 
@@ -303,6 +370,12 @@ impl Pat {
                 true => "True",
                 false => "False",
             }),
+            Pat::Eff(p, k) => Doc::keyword("eff")
+                .space()
+                .chain(p.pretty(db, names))
+                .space()
+                .chain(k.pretty(db, names)),
+            Pat::EffRet(x) => x.pretty(db, names),
         }
     }
 
@@ -319,6 +392,13 @@ impl Pat {
                 // Right now we don't allow bindings in or-patterns
                 ()
             }
+            Pat::Eff(p, k) => {
+                // A hidden local for the effect return type
+                mcxt.define(db.intern_name("_".into()), NameInfo::Local(Val::Type), db);
+                p.add_locals(mcxt, db);
+                k.add_locals(mcxt, db);
+            }
+            Pat::EffRet(p) => p.add_locals(mcxt, db),
         }
     }
 
@@ -331,14 +411,23 @@ impl Pat {
             }
             Pat::Cons(_, _, v) => v.iter().fold(l, |l, p| p.add_names(l, names)),
             Pat::Or(_, _) => l,
+            Pat::Eff(p, k) => {
+                // A hidden local for the effect return type
+                names.add(names.hole_name());
+                let l = p.add_names(l.inc(), names);
+                k.add_names(l, names)
+            }
+            Pat::EffRet(p) => p.add_names(l, names),
         }
     }
 
-    pub fn inline_metas(self, mcxt: &MCxt, db: &dyn Compiler) -> Self {
+    pub fn eval_quote(self, env: &mut Env, l: &mut Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Self {
         match self {
             Pat::Any => Pat::Any,
             Pat::Var(n, mut t) => {
                 *t = t.inline_metas(mcxt, db);
+                env.push(None);
+                *l = l.inc();
                 Pat::Var(n, t)
             }
             Pat::Cons(x, mut ty, y) => {
@@ -346,16 +435,29 @@ impl Pat {
                 Pat::Cons(
                     x,
                     ty,
-                    y.into_iter().map(|x| x.inline_metas(mcxt, db)).collect(),
+                    y.into_iter()
+                        .map(|x| x.eval_quote(env, l, mcxt, db))
+                        .collect(),
                 )
             }
             Pat::Or(mut x, mut y) => {
-                *x = x.inline_metas(mcxt, db);
-                *y = y.inline_metas(mcxt, db);
+                *x = x.eval_quote(env, l, mcxt, db);
+                *y = y.eval_quote(env, l, mcxt, db);
                 Pat::Or(x, y)
             }
             Pat::Lit(x, w) => Pat::Lit(x, w),
             Pat::Bool(x) => Pat::Bool(x),
+            Pat::Eff(mut p, mut k) => {
+                env.push(None);
+                *l = l.inc();
+                *p = p.eval_quote(env, l, mcxt, db);
+                *k = k.eval_quote(env, l, mcxt, db);
+                Pat::Eff(p, k)
+            }
+            Pat::EffRet(mut x) => {
+                *x = x.eval_quote(env, l, mcxt, db);
+                Pat::EffRet(x)
+            }
         }
     }
 
@@ -427,6 +529,8 @@ impl Pat {
                 No => y.match_with(val, env, mcxt, db),
                 Maybe => Maybe,
             },
+            // TODO effects in the evaluator
+            Pat::Eff(_, _) | Pat::EffRet(_) => Maybe,
         }
     }
 }
@@ -447,7 +551,12 @@ pub fn elab_case(
 
     let mut first = true;
     for (pat, body) in cases {
-        let pat = elab_pat(pat, &val_ty, reason.clone(), mcxt, db)?;
+        let pat = elab_pat(false, pat, &val_ty, reason.clone(), mcxt, db)?;
+        let pat = match (pat, &val_ty) {
+            (pat @ Pat::Eff(_, _), _) => pat,
+            (pat, Val::With(_, _)) => Pat::EffRet(Box::new(pat)),
+            (pat, _) => pat,
+        };
         let body = match &mut ret_ty {
             Some((ty, reason)) => {
                 let term = check(body, &ty, reason.clone(), db, mcxt)?;
@@ -471,7 +580,10 @@ pub fn elab_case(
         let cov = last_cov.clone().or(pat.cov()).simplify(&val_ty, db, mcxt);
         if cov == last_cov {
             // TODO real warnings
-            eprintln!("warning: redundant pattern");
+            eprintln!(
+                "warning: redundant pattern '{}'",
+                pat.pretty(db, &mut Names::new(mcxt.cxt, db)).ansi_string()
+            );
         }
         last_cov = cov;
 
@@ -490,13 +602,54 @@ pub fn elab_case(
 }
 
 pub fn elab_pat(
+    in_eff: bool,
     pre: &Pre,
-    ty: &VTy,
+    pty: &VTy,
     reason: ReasonExpected,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
 ) -> Result<Pat, TypeError> {
+    let (ty, effs) = match pty {
+        Val::With(ty, effs) if !in_eff => (&**ty, effs.clone()),
+        ty => (ty, Vec::new()),
+    };
     match &**pre {
+        Pre_::EffPat(p, k) => {
+            if effs.len() > 1 {
+                todo!("What if there's more than one effect?");
+            }
+
+            if effs.is_empty() {
+                let mut stack = mcxt.eff_stack.clone();
+                stack.push_scope(false, reason.span_or(pre.span()));
+                // TODO better error message
+                Err(TypeError::InvalidPatternBecause(Box::new(
+                    TypeError::EffNotAllowed(pre.span(), Val::Type, stack),
+                )))
+            } else {
+                // Use local unification to find the effect's return type
+                mcxt.define(db.intern_name("_".into()), NameInfo::Local(Val::Type), db);
+                let (var, vty) = mcxt.last_local(db).unwrap();
+                let ret_ty = Val::App(var, Box::new(vty), Vec::new(), Glued::new());
+                let p = elab_pat(
+                    true,
+                    p,
+                    &Val::With(Box::new(ret_ty.clone()), vec![effs[0].clone()]),
+                    reason.clone(),
+                    mcxt,
+                    db,
+                )?;
+                let k = elab_pat(
+                    true,
+                    k,
+                    &Val::Fun(Box::new(ret_ty), Box::new(pty.clone())),
+                    reason,
+                    mcxt,
+                    db,
+                )?;
+                Ok(Pat::Eff(Box::new(p), Box::new(k)))
+            }
+        }
         Pre_::Lit(l) => match ty {
             Val::App(Var::Builtin(b), _, _, _) => match b {
                 Builtin::I32 => Ok(Pat::Lit(*l, Width::W32)),
@@ -527,7 +680,15 @@ pub fn elab_pat(
                     if let Term::Var(Var::Cons(id2), _) = &*info.term {
                         if id == *id2 {
                             // This is a constructor
-                            return elab_pat_app(pre, VecDeque::new(), ty, reason, mcxt, db);
+                            return elab_pat_app(
+                                in_eff,
+                                pre,
+                                VecDeque::new(),
+                                ty,
+                                reason,
+                                mcxt,
+                                db,
+                            );
                         }
                     }
                 }
@@ -599,9 +760,10 @@ pub fn elab_pat(
             }
             let (head, spine) = sep(pre);
 
-            elab_pat_app(head, spine, ty, reason, mcxt, db)
+            elab_pat_app(in_eff, head, spine, ty, reason, mcxt, db)
         }
         Pre_::Dot(head, member, spine) => elab_pat_app(
+            in_eff,
             &pre.copy_span(Pre_::Dot(head.clone(), member.clone(), Vec::new())),
             spine.iter().map(|(i, x)| (*i, x)).collect(),
             ty,
@@ -611,11 +773,11 @@ pub fn elab_pat(
         ),
         Pre_::OrPat(x, y) => {
             let size_before = mcxt.size;
-            let x = elab_pat(x, ty, reason.clone(), mcxt, db)?;
+            let x = elab_pat(in_eff, x, ty, reason.clone(), mcxt, db)?;
             if mcxt.size != size_before {
                 todo!("error: for now we don't support capturing inside or-patterns")
             }
-            let y = elab_pat(y, ty, reason, mcxt, db)?;
+            let y = elab_pat(in_eff, y, ty, reason, mcxt, db)?;
             if mcxt.size != size_before {
                 todo!("error: for now we don't support capturing inside or-patterns")
             }
@@ -627,6 +789,7 @@ pub fn elab_pat(
 }
 
 fn elab_pat_app(
+    in_eff: bool,
     head: &Pre,
     mut spine: VecDeque<(Icit, &Pre)>,
     expected_ty: &VTy,
@@ -663,13 +826,13 @@ fn elab_pat_app(
                         l = l.inc();
                     }
                     Val::Pi(i2, cl) if i == i2 => {
-                        let pat = elab_pat(pat, &cl.ty, reason.clone(), mcxt, db)?;
+                        let pat = elab_pat(in_eff, pat, &cl.ty, reason.clone(), mcxt, db)?;
                         pspine.push(pat);
                         ty = cl.vquote(l.inc(), mcxt, db);
                         l = l.inc();
                     }
                     Val::Fun(from, to) if i == Icit::Expl => {
-                        let pat = elab_pat(pat, &from, reason.clone(), mcxt, db)?;
+                        let pat = elab_pat(in_eff, pat, &from, reason.clone(), mcxt, db)?;
                         pspine.push(pat);
                         ty = *to;
                     }

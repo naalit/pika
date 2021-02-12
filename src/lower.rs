@@ -759,6 +759,8 @@ impl Term {
                 }
             }
             Term::Catch(x, effs_) => {
+                let before_rcont = cxt.rcont;
+
                 cxt.mcxt.eff_stack.push_scope(false, Span::empty());
 
                 let base_ty = match ty {
@@ -821,6 +823,7 @@ impl Term {
                 cxt.builder.redirect(rcont, fun);
 
                 cxt.mcxt.eff_stack.pop_scope();
+                cxt.rcont = before_rcont;
 
                 ret
             }
@@ -1101,6 +1104,19 @@ impl Pat {
                         .get(id)
                         .map(|&(x, y)| (x, y, sp.iter().map(|(_, v)| v.clone()).collect()))
                         .expect("Datatypes should be lowered before their constructors"),
+                    Val::With(_, effs) if effs.len() == 1 => {
+                        match effs[0].clone().inline(cxt.mcxt.size, cxt.db, &cxt.mcxt) {
+                            Val::App(Var::Type(tid, sid), _, sp, _) => {
+                                (tid, sid, sp.iter().map(|(_, v)| v.clone()).collect())
+                            }
+                            Val::App(Var::Rec(id), _, sp, _) => cxt
+                                .scope_ids
+                                .get(&id)
+                                .map(|&(x, y)| (x, y, sp.iter().map(|(_, v)| v.clone()).collect()))
+                                .expect("Datatypes should be lowered before their constructors"),
+                            x => unreachable!("{:?}", x),
+                        }
+                    }
                     x => unreachable!("{:?}", x),
                 };
 
@@ -1153,6 +1169,50 @@ impl Pat {
                     rest: Box::new(rest.clone()),
                 };
                 a.lower(x, cont, &rest, ty, cxt)
+            }
+            Pat::Eff(p, k) => {
+                {
+                    let xty = cxt.builder.type_of(x);
+                    let xty = cxt.builder.sum_idx(xty, 1).unwrap();
+                    let x = cxt.ifcase(1, x, xty);
+                    let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                    // We don't use it in the generated code, but we need add this local so the levels add up
+                    cxt.local(cxt.db.intern_name("_".into()), any_ty, Val::Type);
+
+                    let payload = cxt.builder.project(x, 0);
+                    let eff_cont = cxt.builder.project(x, 1);
+
+                    let cont = PatCont::Pat {
+                        x: eff_cont,
+                        pat: k,
+                        cont: Box::new(cont.clone()),
+                        // It's impossible for a valid pattern to not match a value of function type
+                        rest: Box::new(PatCont::Unreachable),
+                    };
+                    let p = p.lower(payload, &cont, rest, ty.clone(), cxt);
+                    cxt.otherwise(p);
+                }
+
+                {
+                    let lty = ty.clone().lower(Val::Type, cxt);
+                    let rest = rest.lower(ty, cxt);
+                    cxt.endif(rest, lty)
+                }
+            }
+            Pat::EffRet(p) => {
+                {
+                    let xty = cxt.builder.type_of(x);
+                    let xty = cxt.builder.sum_idx(xty, 0).unwrap();
+                    let x = cxt.ifcase(0, x, xty);
+                    let p = p.lower(x, &cont, rest, ty.clone(), cxt);
+                    cxt.otherwise(p);
+                }
+
+                {
+                    let lty = ty.clone().lower(Val::Type, cxt);
+                    let rest = rest.lower(ty, cxt);
+                    cxt.endif(rest, lty)
+                }
             }
         }
     }

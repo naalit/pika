@@ -102,6 +102,15 @@ fn test_type_in_do() {
         .success();
 }
 
+#[test]
+fn test_effects() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/effects.pk"])
+        .assert()
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

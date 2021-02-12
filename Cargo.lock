@@ -202,7 +202,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 [[package]]
 name = "durin"
 version = "0.1.0"
-source = "git+https://github.com/tolziplohu/durin#813b027b8cab5a6af260256d3fda2bd68c09d913"
+source = "git+https://github.com/tolziplohu/durin#0cdc96d7e981b655fef9617a8138add02be8eec4"
 dependencies = [
  "either",
  "inkwell",
@@ -308,7 +308,7 @@ dependencies = [
 [[package]]
 name = "inkwell"
 version = "0.1.0"
-source = "git+https://github.com/TheDan64/inkwell?branch=llvm10-0#79070d9fbb0e7ed1c96c7133273770dc2e000a88"
+source = "git+https://github.com/TheDan64/inkwell?branch=master#a2db15b0bd1c06d71763585ae10d9ea4e775da0c"
 dependencies = [
  "either",
  "inkwell_internals",
@@ -321,8 +321,8 @@ dependencies = [
 
 [[package]]
 name = "inkwell_internals"
-version = "0.2.0"
-source = "git+https://github.com/TheDan64/inkwell?branch=llvm10-0#79070d9fbb0e7ed1c96c7133273770dc2e000a88"
+version = "0.3.0"
+source = "git+https://github.com/TheDan64/inkwell?branch=master#a2db15b0bd1c06d71763585ae10d9ea4e775da0c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -393,9 +393,9 @@ checksum = "1cca32fa0182e8c0989459524dc356b8f2b5c10f1b9eb521b7d182c03cf8c5ff"
 
 [[package]]
 name = "llvm-sys"
-version = "100.2.0"
+version = "110.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9109e19fbfac3458f2970189719fa19f1007c6fd4e08c44fdebf4be0ddbe261d"
+checksum = "b0062a0c6635fb5d57c6ebba072dcae50e41651030363cf06d220b0d016840f2"
 dependencies = [
  "cc",
  "lazy_static",
@@ -496,6 +496,15 @@ dependencies = [
  "redox_syscall 0.1.57",
  "smallvec",
  "winapi",
+]
+
+[[package]]
+name = "pest"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10f4872ae94d7b90ae48754df22fd42ad52ce740b8f370b03da4835417403e53"
+dependencies = [
+ "ucd-trie",
 ]
 
 [[package]]
@@ -736,18 +745,21 @@ checksum = "d29ab0c6d3fc0ee92fe66e2d99f700eab17a8d57d1c1d3b748380fb20baa78cd"
 
 [[package]]
 name = "semver"
-version = "0.9.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d7eb9ef2c18661902cc47e535f9bc51b78acd254da71d375c2f6720d9a40403"
+checksum = "f301af10236f6df4160f7c3f04eec6dbc70ace82d23326abad5edee88801c6b6"
 dependencies = [
  "semver-parser",
 ]
 
 [[package]]
 name = "semver-parser"
-version = "0.7.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
+checksum = "00b0bef5b7f9e0df16536d3961cfb6e84331c065b4066afb39768d0e319411f7"
+dependencies = [
+ "pest",
+]
 
 [[package]]
 name = "siphasher"
@@ -833,6 +845,12 @@ name = "typed-arena"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0685c84d5d54d1c26f7d3eb96cd41550adb97baed141a761cf335d3d33bcd0ae"
+
+[[package]]
+name = "ucd-trie"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56dee185309b50d1f11bfedef0fe6d036842e3fb77413abef29f8f8d1c5d4c1c"
 
 [[package]]
 name = "unicode-segmentation"
