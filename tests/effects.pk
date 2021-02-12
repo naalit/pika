@@ -20,7 +20,9 @@ fun catch_eff (b: Bool) : () = do
 end
 
 fun something (f: (_:()) -> () with Console) = f ()
-fun something2 () = something other
+fun something2 () = do
+  something other
+end
 
 fun main () : () = do
   fun handle (x : () with Console) : () = case x of

@@ -215,6 +215,8 @@ pub struct ElabInfo {
     pub solved_globals: Arc<Vec<RecSolution>>,
     /// Only used for definitions in the associated namespace of a datatype
     pub children: Arc<Vec<DefId>>,
+    /// Used for definitions in do blocks with open effect scopes
+    pub effects: Arc<Vec<Val>>,
 }
 
 #[salsa::query_group(InternerDatabase)]

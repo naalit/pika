@@ -650,7 +650,7 @@ impl Term {
                 .chain(no.pretty(db, names))
                 .prec(Prec::Term),
             Term::Do(sc) => {
-                let mut doc = Doc::keyword("do").line();
+                let mut doc = Doc::keyword("do");
                 let mut i = 0;
                 for (id, term) in sc {
                     let (pre_id, _cxt, _) = db.lookup_intern_def(*id);
@@ -658,7 +658,7 @@ impl Term {
                     match predef.name() {
                         Some(n) => {
                             let n = names.disamb(n, db);
-                            doc = doc.chain(
+                            doc = doc.hardline().chain(
                                 Doc::keyword("val")
                                     .space()
                                     .add(n.get(db))
@@ -666,21 +666,23 @@ impl Term {
                                     .space()
                                     .add("=")
                                     .space()
-                                    .chain(term.pretty(db, names))
-                                    .hardline(),
+                                    .chain(term.pretty(db, names)),
                             );
                             names.add(n);
                             i += 1;
                         }
                         None => {
-                            doc = doc.chain(term.pretty(db, names));
+                            doc = doc.hardline().chain(term.pretty(db, names));
                         }
                     };
                 }
                 for _ in 0..i {
                     names.remove();
                 }
-                doc.chain(Doc::keyword("end")).prec(Prec::Atom)
+                doc.indent()
+                    .line()
+                    .chain(Doc::keyword("end"))
+                    .prec(Prec::Atom)
             }
         }
     }

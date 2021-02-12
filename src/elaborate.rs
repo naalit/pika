@@ -204,26 +204,6 @@ impl EffStack {
         }
         false
     }
-
-    fn fun(&mut self, rty: VTy, span: Span) -> VTy {
-        match rty {
-            Val::With(ty, effs) => {
-                self.push_scope(false, span);
-                for e in effs {
-                    self.push_eff(e);
-                }
-                *ty
-            }
-            vty @ Val::App(Var::Meta(_), _, _, _) => {
-                self.push_scope(true, span);
-                vty
-            }
-            vty => {
-                self.push_scope(false, span);
-                vty
-            }
-        }
-    }
 }
 
 /// The context used for typechecking a term.
@@ -736,23 +716,16 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 }
             };
             let vty = body_ty.evaluate(&mcxt.env(), &mcxt, db);
-            let vty = mcxt.eff_stack.fun(vty, tyspan);
 
             // And last, check the function body against the return type
-            let body = match check(body, &vty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
-                Ok(x) => x,
-                Err(e) => {
-                    db.report_error(e.to_error(file, db, &mcxt));
-                    return Err(DefError::ElabError(def));
-                }
-            };
-
-            let effs = mcxt.eff_stack.pop_scope();
-            let vty = if effs.is_empty() {
-                vty
-            } else {
-                Val::With(Box::new(vty), effs)
-            };
+            let (body, vty) =
+                match check_fun(body, vty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        db.report_error(e.to_error(file, db, &mcxt));
+                        return Err(DefError::ElabError(def));
+                    }
+                };
 
             // Then construct the function term and type
             Ok((
@@ -907,7 +880,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                             // so Ix's decrease from left to right, and start at the first implicit argument
                             // which is right after the state cxt_before stores
                             let ty_ty = ty_ty.clone().quote(mcxt.size, &mcxt, db);
-                            let (f, _, fty, _) = targs.iter().fold(
+                            let (f, _, _, _) = targs.iter().fold(
                                 (
                                     Term::Var(Var::Rec(predef_id), Box::new(ty_ty.clone())),
                                     cxt_before.size.to_ix(mcxt.size),
@@ -1176,11 +1149,18 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             //     .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)));
             // println!("{}\n", d.ansi_string());
 
+            let effects = if mcxt.eff_stack.scopes.last().map_or(false, |x| x.0) {
+                mcxt.eff_stack.pop_scope()
+            } else {
+                Vec::new()
+            };
+
             Ok(ElabInfo {
                 term: Arc::new(term),
                 typ: Arc::new(ty),
                 solved_globals: Arc::new(mcxt.solved_globals),
                 children: Arc::new(mcxt.children),
+                effects: Arc::new(effects),
             })
         }
         Err(()) => {
@@ -2019,8 +1999,15 @@ pub fn infer(
             let mut block =
                 crate::query::intern_block(v.clone(), db, mcxt.cxt, Some(mcxt.eff_stack.clone()));
             // Make sure any type errors get reported
-            for &i in &block {
-                let _ = db.elaborate_def(i);
+            {
+                let mut mcxt2 = mcxt.clone();
+                for &i in &block {
+                    if let Ok(info) = db.elaborate_def(i) {
+                        for e in &*info.effects {
+                            assert!(mcxt.eff_stack.try_eff(e.clone(), db, &mut mcxt2));
+                        }
+                    }
+                }
             }
             // Now query the last expression again
             let mut ret_ty = None;
@@ -2305,10 +2292,7 @@ pub fn check(
             mcxt.define(*n, NameInfo::Local(vty.clone()), db);
             // TODO not clone ??
             let bty = (**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db);
-            let bty = mcxt.eff_stack.fun(bty, reason.span_or(pre.span()));
-            let body = check(body, &bty, reason, db, mcxt)?;
-            // TODO what if the return type was a meta?
-            mcxt.eff_stack.pop_scope();
+            let (body, _bty) = check_fun(body, bty, reason, db, mcxt)?;
             mcxt.undef(db);
             Ok(Term::Lam(*n, *i, Box::new(ety), Box::new(body)))
         }
@@ -2332,12 +2316,7 @@ pub fn check(
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty), db);
-            let body_ty = mcxt
-                .eff_stack
-                .fun((**body_ty).clone(), reason.span_or(pre.span()));
-            let body = check(body, &body_ty, reason, db, mcxt)?;
-            // TODO what if the return type was a meta?
-            mcxt.eff_stack.pop_scope();
+            let (body, _body_ty) = check_fun(body, (**body_ty).clone(), reason, db, mcxt)?;
             mcxt.undef(db);
             Ok(Term::Lam(*n, Icit::Expl, Box::new(ety), Box::new(body)))
         }
@@ -2352,10 +2331,7 @@ pub fn check(
             };
             mcxt.define(name, NameInfo::Local(cl.ty.clone()), db);
             let bty = (**cl).clone().vquote(mcxt.size, mcxt, db);
-            let bty = mcxt.eff_stack.fun(bty, reason.span_or(pre.span()));
-            let body = check(pre, &bty, reason, db, mcxt)?;
-            // TODO what if the return type was a meta?
-            mcxt.eff_stack.pop_scope();
+            let (body, _bty) = check_fun(pre, bty, reason, db, mcxt)?;
             mcxt.undef(db);
             let ty = cl.ty.clone().quote(mcxt.size, mcxt, db);
             Ok(Term::Lam(cl.name, Icit::Impl, Box::new(ty), Box::new(body)))
@@ -2436,6 +2412,45 @@ pub fn check(
                 ));
             }
             Ok(term)
+        }
+    }
+}
+
+fn check_fun(
+    body: &Pre,
+    rty: VTy,
+    reason: ReasonExpected,
+    db: &dyn Compiler,
+    mcxt: &mut MCxt,
+) -> Result<(Term, VTy), TypeError> {
+    let span = reason.span_or(body.span());
+    match rty {
+        Val::With(ty, effs) => {
+            mcxt.eff_stack.push_scope(false, span);
+            for e in effs.clone() {
+                mcxt.eff_stack.push_eff(e);
+            }
+            let term = check(body, &*ty, reason, db, mcxt)?;
+            mcxt.eff_stack.pop_scope();
+            Ok((term, Val::With(ty, effs)))
+        }
+        vty @ Val::App(Var::Meta(_), _, _, _) => {
+            mcxt.eff_stack.push_scope(true, span);
+            let (term, ty) = infer(true, body, db, mcxt)?;
+            let effs = mcxt.eff_stack.pop_scope();
+            let ty = if effs.is_empty() {
+                ty
+            } else {
+                Val::With(Box::new(ty), effs)
+            };
+            assert!(unify(vty, ty.clone(), mcxt.size, body.span(), db, mcxt)?);
+            Ok((term, ty))
+        }
+        vty => {
+            mcxt.eff_stack.push_scope(false, span);
+            let term = check(body, &vty, reason, db, mcxt)?;
+            mcxt.eff_stack.pop_scope();
+            Ok((term, vty))
         }
     }
 }
