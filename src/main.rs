@@ -33,7 +33,7 @@ fn main() {
         if db.num_errors() == 0 {
             println!("File elaborated successfully!");
             let mut durin = db.durin(id);
-            // println!("Durin module:\n{}", durin.emit());
+            println!("Durin module:\n{}", durin.emit());
             let backend = durin::backend::Backend::native();
             let m = backend.codegen_module(&mut durin);
             // println!("LLVM module:\n{}", m.print_to_string().to_str().unwrap());

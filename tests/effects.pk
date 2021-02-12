@@ -19,6 +19,9 @@ fun catch_eff (b: Bool) : () = do
   val x : () with Console = maybe_raise b?
 end
 
+fun something (f: (_:()) -> () with Console) = f ()
+fun something2 () = something other
+
 fun main () : () = do
   fun handle (x : () with Console) : () = case x of
     () => ()

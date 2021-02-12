@@ -951,24 +951,66 @@ impl Term {
             }
             Term::Fun(from, to) => {
                 let from = from.lower(Val::Type, cxt);
-                let to = to.lower(Val::Type, cxt);
-                cxt.builder.fun_type(from, to)
+                match &**to {
+                    Term::With(base, effs) => {
+                        let base = base.lower(Val::Type, cxt);
+
+                        let mut params = vec![from];
+                        for eff in effs {
+                            let name = eff
+                                .pretty(cxt.db, &mut Names::new(cxt.mcxt.cxt, cxt.db))
+                                .raw_string();
+                            let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                            params.push(cxt.eff_cont_ty(leff, &name));
+                        }
+
+                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                        let econt_ty = cxt.builder.fun_type_raw(&[any_ty, any_ty, any_ty] as &_);
+                        let rcont_ty = cxt.builder.fun_type_raw(&[any_ty] as &_);
+                        params.push(cxt.builder.fun_type_raw(&[base, econt_ty, rcont_ty] as &_));
+
+                        cxt.builder.fun_type_raw(params)
+                    }
+                    to => {
+                        let to = to.lower(Val::Type, cxt);
+                        cxt.builder.fun_type(from, to)
+                    }
+                }
             }
             Term::Pi(name, _icit, from, to) => {
                 let from_ = from.lower(Val::Type, cxt);
-                let pi = cxt
+                let mut pi = cxt
                     .builder
                     .start_pi(Some(cxt.db.lookup_intern_name(*name)), from_);
                 cxt.local(
                     *name,
-                    pi.arg,
+                    pi.args[0],
                     (**from)
                         .clone()
                         .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
                 );
-                let to = to.lower(Val::Type, cxt);
-                cxt.pop_local();
-                cxt.builder.end_pi(pi, to)
+                match &**to {
+                    Term::With(base, effs) => {
+                        let base = base.lower(Val::Type, cxt);
+
+                        for eff in effs {
+                            let name = eff
+                                .pretty(cxt.db, &mut Names::new(cxt.mcxt.cxt, cxt.db))
+                                .raw_string();
+                            let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
+                            pi.add_arg(cxt.eff_cont_ty(leff, &name), &mut cxt.builder);
+                        }
+
+                        // TODO: the return continuation type here is wrong, but it's inside two function types so it's not a problem right now
+                        cxt.pop_local();
+                        cxt.builder.end_pi(pi, base)
+                    }
+                    to => {
+                        let to = to.lower(Val::Type, cxt);
+                        cxt.pop_local();
+                        cxt.builder.end_pi(pi, to)
+                    }
+                }
             }
             Term::Error => panic!("type errors should have been caught by now!"),
             Term::Case(x, xty, cases) => {
