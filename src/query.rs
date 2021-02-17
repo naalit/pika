@@ -228,7 +228,7 @@ pub trait Interner: salsa::Database {
     fn intern_predef(&self, def: Arc<PreDefAn>) -> PreDefId;
 
     #[salsa::interned]
-    fn intern_def(&self, def: PreDefId, cxt: Cxt, eff_stack: Option<EffStack>) -> DefId;
+    fn intern_def(&self, def: PreDefId, state: CxtState) -> DefId;
 
     #[salsa::interned]
     fn intern_scope(&self, scope: Arc<Vec<(Name, DefId)>>) -> ScopeId;
@@ -283,8 +283,9 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
 
     let parser = DefsParser::new();
     let cxt = Cxt::new(file, db);
+    let state = CxtState::new(cxt, db);
     match parser.parse(db, crate::lexer::Lexer::new(&source)) {
-        Ok(v) => Arc::new(intern_block(v, db, cxt, None)),
+        Ok(v) => Arc::new(intern_block(v, db, state.clone())),
         Err(e) => {
             db.report_error(e.to_error(file));
             Arc::new(Vec::new())
@@ -292,12 +293,7 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
     }
 }
 
-pub fn intern_block(
-    v: Vec<PreDefAn>,
-    db: &dyn Compiler,
-    mut cxt: Cxt,
-    eff_stack: Option<EffStack>,
-) -> Vec<DefId> {
+pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) -> Vec<DefId> {
     let mut rv = Vec::new();
     // This stores unordered definitions (types and functions) between local variables
     let mut temp = Vec::new();
@@ -312,10 +308,10 @@ pub fn intern_block(
                 let def = Arc::new(def);
                 let id = db.intern_predef(def.clone());
                 if let Some(name) = name {
-                    if let Some(ty) = def.given_type(id, cxt, db) {
-                        cxt = cxt.define(name, NameInfo::Rec(id, ty), db);
+                    if let Some(ty) = def.given_type(id, state.cxt, db) {
+                        state.define(name, NameInfo::Rec(id, ty), db);
                     } else {
-                        cxt = cxt.define(name, NameInfo::Rec(id, Val::Error), db);
+                        state.define(name, NameInfo::Rec(id, Val::Error), db);
                     }
                 }
                 temp.push((name, id));
@@ -324,10 +320,10 @@ pub fn intern_block(
             PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) | PreDef::Cons(_, _) => {
                 // Process `temp` first
                 for (name, pre) in temp.drain(0..) {
-                    let id = db.intern_def(pre, cxt, eff_stack.clone());
+                    let id = db.intern_def(pre, state.clone());
                     if let Some(name) = name {
                         // Define it for real now
-                        cxt = cxt.define(name, NameInfo::Def(id), db);
+                        state.define(name, NameInfo::Def(id), db);
                     }
                     rv.push(id);
                 }
@@ -335,9 +331,9 @@ pub fn intern_block(
                 // Then add this one
                 let name = def.name();
                 let pre = db.intern_predef(Arc::new(def));
-                let id = db.intern_def(pre, cxt, eff_stack.clone());
+                let id = db.intern_def(pre, state.clone());
                 if let Some(name) = name {
-                    cxt = cxt.define(name, NameInfo::Def(id), db);
+                    state.define(name, NameInfo::Def(id), db);
                 }
                 rv.push(id);
             }
@@ -345,10 +341,10 @@ pub fn intern_block(
     }
     // If anything is left in `temp`, clear it out
     for (name, pre) in temp {
-        let id = db.intern_def(pre, cxt, eff_stack.clone());
+        let id = db.intern_def(pre, state.clone());
         if let Some(name) = name {
             // Define it for real now
-            cxt = cxt.define(name, NameInfo::Def(id), db);
+            state.define(name, NameInfo::Def(id), db);
         }
         rv.push(id);
     }

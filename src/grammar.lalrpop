@@ -1,5 +1,4 @@
-use std::str::FromStr;
-use crate::query::{Compiler, Name, CompilerExt};
+use crate::query::{Compiler, Name};
 use crate::error::*;
 use crate::term::*;
 use crate::lexer::*;

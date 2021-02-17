@@ -1,0 +1,32 @@
+# This is a test to make sure the way effects are compiled actually works
+eff Console of
+    Print I32 : ()
+    Read () : I32
+end
+
+fun producer () = do
+    Console.Print 1
+    val x = Console.Read ()
+    Console.Print x
+    val y = Console.Read ()
+    Console.Print y
+    x + y
+end
+
+# Expected output:
+# 1
+# 2
+# 3
+# 5
+fun main () : () with IO = do
+    fun handle (x : I32 with Console) (acc : I32) : I32 with IO = case x of
+        x => x
+        eff (Console.Print i) k => do
+            print i
+            handle (k ()?) acc
+        end
+        eff (Console.Read ()) k => handle (k acc?) (acc + 1)
+    end
+    val x = handle (producer ()?) 2
+    print x
+end

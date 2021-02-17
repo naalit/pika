@@ -31,11 +31,11 @@ impl<'m> ModCxt<'m> {
     }
 
     pub fn local(&mut self, def: DefId, f: impl FnOnce(&mut LCxt) -> ir::Val) {
-        let (pre, cxt, _) = self.db.lookup_intern_def(def);
+        let (pre, state) = self.db.lookup_intern_def(def);
         let locals = IVec::new();
         let mut lcxt = LCxt::new(
             self.db,
-            MCxt::new(cxt, MCxtType::Local(def), self.db),
+            MCxt::from_state(state, MCxtType::Local(def)),
             &mut self.module,
             &mut self.defs,
             &mut self.scope_ids,
@@ -91,6 +91,12 @@ impl<'db> LCxt<'db> {
     pub fn pop_local(&mut self) {
         self.locals.remove();
         self.mcxt.undef(self.db);
+    }
+
+    pub fn trunc_locals(&mut self, to_lvl: Lvl) {
+        while self.mcxt.size != to_lvl {
+            self.pop_local();
+        }
     }
 
     pub fn eff(&mut self, ty: Val, cont: ir::Val) {
@@ -242,7 +248,7 @@ fn lower_children(def: DefId, cxt: &mut LCxt) {
     };
     while let Some(def) = stack.pop() {
         if let Ok(info) = cxt.db.elaborate_def(def) {
-            let (pre_id, _cxt, _) = cxt.db.lookup_intern_def(def);
+            let (pre_id, _state) = cxt.db.lookup_intern_def(def);
             let val = info.term.lower((*info.typ).clone(), cxt);
             let val2 = cxt.get_or_reserve(pre_id);
             cxt.builder.redirect(val2, val);
@@ -473,6 +479,17 @@ impl Builtin {
             }
             // An Eff at runtime is just the type of the effect payload
             Builtin::Eff => cxt.builder.cons(ir::Constant::TypeType),
+            Builtin::IO => panic!("IO effects should disappear before this stage!"),
+            Builtin::Print => {
+                let i32_ty = cxt.builder.cons(ir::Constant::IntType(ir::Width::W32));
+                let void_ty = cxt.builder.prod_type(vec![]);
+                let extern_fun =
+                    cxt.builder
+                        .extern_declare("print_i32".into(), &[i32_ty] as &_, void_ty);
+                let x = cxt.builder.push_fun([(None, i32_ty)]);
+                let r = cxt.builder.extern_call(extern_fun, x);
+                cxt.builder.pop_fun(r, void_ty)
+            }
         }
     }
 }
@@ -510,13 +527,13 @@ impl Term {
                 Var::Builtin(b) => b.lower(cxt),
                 Var::Local(i) => *cxt.locals.get(*i),
                 Var::Top(i) => {
-                    let (i, _, _) = cxt.db.lookup_intern_def(*i);
+                    let (i, _) = cxt.db.lookup_intern_def(*i);
                     cxt.get_or_reserve(i)
                 }
                 Var::Rec(i) => cxt.get_or_reserve(*i),
                 Var::Meta(_) => panic!("unsolved meta passed to lower()"),
                 Var::Type(tid, sid) => {
-                    let (pre, _, _) = cxt.db.lookup_intern_def(*tid);
+                    let (pre, _) = cxt.db.lookup_intern_def(*tid);
                     cxt.scope_ids.insert(pre, (*tid, *sid));
 
                     let mut ty = ty;
@@ -594,11 +611,18 @@ impl Term {
                                         let leff =
                                             eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
                                         let cont_ty = cxt.eff_cont_ty(leff, &ename);
+                                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                                        let rcont_ty = cxt.builder.fun_type_raw(&[any_ty] as &_);
 
                                         ty = *to;
+                                        // The function takes a continuation for each effect, plus two return continuations
+                                        // The first one is for returning to the outermost `catch` and isn't manually called, just passed around
+                                        // (except in the implementation of `catch`)
+                                        // The second one is the normal return continuation, which this function will call when it's done
                                         let p = cxt.builder.push_fun([
                                             (None, lty),
                                             (Some(format!("$cont.{}", ename)), cont_ty),
+                                            (Some(format!("$cont.eff.return")), rcont_ty),
                                         ]);
                                         cxt.local(name, p[0], from);
                                         funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
@@ -623,11 +647,18 @@ impl Term {
                                         let leff =
                                             eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
                                         let cont_ty = cxt.eff_cont_ty(leff, &name);
+                                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                                        let rcont_ty = cxt.builder.fun_type_raw(&[any_ty] as &_);
 
                                         ty = *to;
+                                        // The function takes a continuation for each effect, plus two return continuations
+                                        // The first one is for returning to the outermost `catch` and isn't manually called, just passed around
+                                        // (except in the implementation of `catch`)
+                                        // The second one is the normal return continuation, which this function will call when it's done
                                         let p = cxt.builder.push_fun([
                                             (None, from),
                                             (Some(format!("$cont.{}", name)), cont_ty),
+                                            (Some(format!("$cont.eff.return")), rcont_ty),
                                         ]);
                                         funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
                                         break Some((p[1], cont_ty));
@@ -694,7 +725,7 @@ impl Term {
                         let rets = cxt.builder.call_multi(
                             eff_cont,
                             &[val] as &_,
-                            &[base_ty, eff_cont_ty, rcont_ty],
+                            &[base_ty, eff_cont_ty, rcont_ty, rcont_ty],
                         );
 
                         let (_p, _ty, is_pi) = funs.pop().expect(
@@ -723,7 +754,7 @@ impl Term {
             Term::Do(sc) => {
                 // Declare all the terms first
                 for (id, _term) in sc {
-                    let (pre_id, _cxt, _) = cxt.db.lookup_intern_def(*id);
+                    let (pre_id, _state) = cxt.db.lookup_intern_def(*id);
                     let predef = cxt.db.lookup_intern_predef(pre_id);
                     let v = cxt
                         .builder
@@ -732,7 +763,7 @@ impl Term {
                 }
                 // Now lower them all
                 for (id, term) in &sc[0..sc.len() - 1] {
-                    let (pre_id, _cxt, _) = cxt.db.lookup_intern_def(*id);
+                    let (pre_id, _state) = cxt.db.lookup_intern_def(*id);
 
                     let ty = cxt.db.def_type(*id).unwrap();
 
@@ -745,7 +776,7 @@ impl Term {
                 }
                 // And return the last one
                 if let Some((id, term)) = sc.last() {
-                    let (pre_id, _cxt, _) = cxt.db.lookup_intern_def(*id);
+                    let (pre_id, _state) = cxt.db.lookup_intern_def(*id);
 
                     let ty = cxt.db.def_type(*id).unwrap();
 
@@ -784,8 +815,10 @@ impl Term {
                 }
 
                 let rty = cxt.builder.sum_type(variants);
+                // This will be the function that effect and return continuations call after creating a `_ with _` sum type
                 let rcont = cxt.builder.reserve(None);
 
+                // Create the effect continuations, which create an `eff` variant and pass it to `rcont`
                 for (i, (eff, leff)) in effs.into_iter().enumerate() {
                     // fun cont.<eff> ( x: <eff>, k: fun( <base_ty>, <econt_ty>, <rcont_ty> ) ) = <rcont> (<rty>):<i+1>(x, k)
                     let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
@@ -812,12 +845,22 @@ impl Term {
                     cxt.eff(eff, cont);
                 }
 
-                let x = x.lower(base_ty, cxt);
-                let sum = cxt.builder.inject_sum(rty, 0, x);
-                cxt.builder.call_raw(rcont, &[sum] as &_);
+                // This (`r_rcont`) is the return continuation, which creates a `return` variant and passes it to `rcont`
+                let args = cxt.builder.push_fun_raw(&[(None, lbase_ty)] as &_);
+                let sum = cxt.builder.inject_sum(rty, 0, args[0]);
+                let r_rcont = cxt.builder.pop_fun_raw(rcont, &[sum] as &_);
 
+                // If the value raises an effect which gets caught somewhere else, `r_rcont` is obsolete
+                // So we store it in the context, and it will get passed around and overwriten if necessary
+                cxt.rcont = Some(r_rcont);
+
+                // Then we evaluate the thing we're catching, and call `r_rcont` or its replacement with the result
+                let x = x.lower(base_ty, cxt);
+                cxt.builder.call_raw(cxt.rcont.unwrap(), &[x] as &_);
+
+                // The catch expression actually returns the `with` sum type, which is passed to `rcont`
                 // fun rcont = ( ret: <rty> ) = <continue evaluating, returning ret>
-                // We're in a detached block right now, so the value we pass here doesn't matter
+                // We're in a detached block right now, so the value `sum` we pass here doesn't matter
                 let (fun, args) = cxt.builder.push_frame(vec![(sum, rty)]);
                 let ret = args[0];
                 cxt.builder.redirect(rcont, fun);
@@ -844,14 +887,22 @@ impl Term {
                 )];
                 cxt.mcxt.eff_stack.push_scope(false, Span::empty());
                 let mut effs = Vec::new();
-                let mut rcont_was_none = false;
-                let mut has_eff = false;
+                let old_rcont = cxt.rcont;
+                let mut neffs = 0;
+                let any_ty = cxt.builder.cons(ir::Constant::TypeType);
 
                 let ret_ty = match ret_ty {
-                    Term::With(ty, effs_) => {
-                        has_eff = true;
+                    Term::With(ty, effs_)
+                        if effs_.len() != 1
+                            || !matches!(&effs_[0], Term::Var(Var::Builtin(Builtin::IO), _)) =>
+                    {
+                        neffs = effs_.len();
                         let mut env = cxt.mcxt.env();
                         env.push(None);
+                        // The function takes a continuation for each effect, plus two return continuations
+                        // The first one is for returning to the outermost `catch` and isn't manually called, just passed around
+                        // (except in the implementation of `catch`)
+                        // The second one is the normal return continuation, which this function will call when it's done
                         for eff in effs_ {
                             let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
                             let eff = eff.evaluate(&env, &cxt.mcxt, cxt.db);
@@ -860,14 +911,16 @@ impl Term {
                             effs.push(eff);
                             params.push((Some(format!("$cont.{}", name)), cont_ty))
                         }
+                        let rcont_ty = cxt.builder.fun_type_raw(&[any_ty] as &_);
+                        params.push((Some(format!("$cont.eff.return")), rcont_ty));
                         *ty
                     }
                     ty => ty,
                 };
+
                 let args = cxt.builder.push_fun(params);
-                if has_eff && cxt.rcont.is_none() {
-                    cxt.rcont = cxt.builder.cont();
-                    rcont_was_none = true;
+                if neffs > 0 {
+                    cxt.rcont = Some(args[neffs + 1]);
                 }
                 cxt.local(*name, args[0], param_ty);
                 for (k, e) in args.into_iter().skip(1).zip(effs) {
@@ -879,7 +932,7 @@ impl Term {
                 );
                 let ret_ty = ret_ty.lower(Val::Type, cxt);
 
-                let val = if has_eff {
+                let val = if neffs > 0 {
                     let mut rets = vec![(ret, ret_ty)];
                     let any_ty = cxt.builder.cons(ir::Constant::TypeType);
                     for &k in &cxt.eff_conts[cxt.mcxt.eff_stack.scope_start().unwrap()..] {
@@ -893,9 +946,8 @@ impl Term {
                 } else {
                     cxt.builder.pop_fun(ret, ret_ty)
                 };
-                if rcont_was_none {
-                    cxt.rcont = None;
-                }
+
+                cxt.rcont = old_rcont;
                 cxt.mcxt.eff_stack.pop_scope();
                 cxt.pop_local();
                 val
@@ -915,7 +967,13 @@ impl Term {
                 let f = f.lower(fty, cxt);
                 let x = x.lower(xty, cxt);
                 match rty {
-                    Val::With(rty, effs) => {
+                    Val::With(rty, effs)
+                        if effs.len() != 1
+                            || !matches!(
+                                &effs[0],
+                                Val::App(Var::Builtin(Builtin::IO), _, _, _)
+                            ) =>
+                    {
                         let mut args = vec![x];
                         let mut rets = vec![rty.lower(Val::Type, cxt)];
                         let mut is = Vec::new();
@@ -937,8 +995,13 @@ impl Term {
                             rets.push(cxt.eff_cont_ty(leff, &name));
                             is.push(i);
                         }
+
                         let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                        args.push(cxt.rcont.unwrap());
                         rets.push(cxt.builder.fun_type_raw(&[any_ty] as &_));
+
+                        // If the call raised an effect, the location of the catch to return to changed
+                        // So store the updated effect and return continuations in the context
                         let rets = cxt.builder.call_multi(f, args, &rets);
                         for (k, i) in rets.iter().skip(1).zip(is) {
                             cxt.eff_conts[i] = *k;
@@ -952,7 +1015,10 @@ impl Term {
             Term::Fun(from, to) => {
                 let from = from.lower(Val::Type, cxt);
                 match &**to {
-                    Term::With(base, effs) => {
+                    Term::With(base, effs)
+                        if effs.len() != 1
+                            || !matches!(&effs[0], Term::Var(Var::Builtin(Builtin::IO), _)) =>
+                    {
                         let base = base.lower(Val::Type, cxt);
 
                         let mut params = vec![from];
@@ -968,6 +1034,7 @@ impl Term {
                         let econt_ty = cxt.builder.fun_type_raw(&[any_ty, any_ty, any_ty] as &_);
                         let rcont_ty = cxt.builder.fun_type_raw(&[any_ty] as &_);
                         params.push(cxt.builder.fun_type_raw(&[base, econt_ty, rcont_ty] as &_));
+                        params.push(rcont_ty);
 
                         cxt.builder.fun_type_raw(params)
                     }
@@ -990,7 +1057,10 @@ impl Term {
                         .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
                 );
                 match &**to {
-                    Term::With(base, effs) => {
+                    Term::With(base, effs)
+                        if effs.len() != 1
+                            || !matches!(&effs[0], Term::Var(Var::Builtin(Builtin::IO), _)) =>
+                    {
                         let base = base.lower(Val::Type, cxt);
 
                         for eff in effs {
@@ -1000,6 +1070,10 @@ impl Term {
                             let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
                             pi.add_arg(cxt.eff_cont_ty(leff, &name), &mut cxt.builder);
                         }
+
+                        let any_ty = cxt.builder.cons(ir::Constant::TypeType);
+                        let rcont_ty = cxt.builder.fun_type_raw(&[any_ty] as &_);
+                        pi.add_arg(rcont_ty, &mut cxt.builder);
 
                         // TODO: the return continuation type here is wrong, but it's inside two function types so it's not a problem right now
                         cxt.pop_local();
@@ -1017,15 +1091,19 @@ impl Term {
                 let xty = (**xty).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
                 let x = x.lower(xty, cxt);
 
+                let before_level = cxt.mcxt.size;
                 let cont = cases
                     .iter()
                     .rfold(PatCont::Unreachable, |rest, (pat, term)| PatCont::Pat {
                         x,
                         pat,
                         cont: Box::new(PatCont::Term(term)),
+                        rest_lvl: before_level,
                         rest: Box::new(rest),
                     });
-                cont.lower(ty, cxt)
+                let ret = cont.lower(ty, cxt);
+                cxt.trunc_locals(before_level);
+                ret
             }
             Term::If(cond, yes, no) => {
                 let cond = cond.lower(Val::builtin(Builtin::Bool, Val::Type), cxt);
@@ -1041,12 +1119,21 @@ impl Term {
             Term::With(base, effs) => {
                 let base = base.lower(Val::Type, cxt);
 
+                if effs.is_empty()
+                    || (effs.len() == 1
+                        && matches!(&effs[0], Term::Var(Var::Builtin(Builtin::IO), _)))
+                {
+                    return base;
+                }
+
                 let mut v = vec![base];
                 for eff in effs {
                     let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
 
                     let any_ty = cxt.builder.cons(ir::Constant::TypeType);
-                    let cont_ty = cxt.builder.fun_type_raw(&[any_ty, any_ty, any_ty] as &_);
+                    let cont_ty = cxt
+                        .builder
+                        .fun_type_raw(&[any_ty, any_ty, any_ty, any_ty] as &_);
                     let ty = cxt.builder.prod_type(&[leff, cont_ty] as &_);
                     v.push(ty);
                 }
@@ -1063,7 +1150,11 @@ enum PatCont<'a> {
     Pat {
         x: ir::Val,
         pat: &'a Pat,
+        /// What to do next if the pattern matches
         cont: Box<PatCont<'a>>,
+        /// The level that the context should be at for lowering `rest`
+        rest_lvl: Lvl,
+        /// What to do next if the pattern doesn't match
         rest: Box<PatCont<'a>>,
     },
 }
@@ -1075,7 +1166,13 @@ impl<'a> PatCont<'a> {
                 cxt.builder.unreachable(ty)
             }
             PatCont::Term(x) => x.lower(ty, cxt),
-            PatCont::Pat { x, pat, cont, rest } => pat.lower(*x, &cont, &rest, ty, cxt),
+            PatCont::Pat {
+                x,
+                pat,
+                cont,
+                rest_lvl,
+                rest,
+            } => pat.lower(*x, &cont, *rest_lvl, &rest, ty, cxt),
         }
     }
 }
@@ -1094,6 +1191,7 @@ impl Pat {
         &'a self,
         x: ir::Val,
         cont: &'a PatCont<'a>,
+        rest_lvl: Lvl,
         rest: &'a PatCont<'a>,
         ty: VTy,
         cxt: &mut LCxt,
@@ -1116,6 +1214,7 @@ impl Pat {
                 cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
+                cxt.trunc_locals(rest_lvl);
                 let no = rest.lower(ty, cxt);
 
                 cxt.endif(no, lty)
@@ -1132,6 +1231,7 @@ impl Pat {
                 cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
+                cxt.trunc_locals(rest_lvl);
                 let no = rest.lower(ty, cxt);
 
                 cxt.endif(no, lty)
@@ -1191,6 +1291,7 @@ impl Pat {
                             x,
                             pat,
                             cont: Box::new(cont),
+                            rest_lvl,
                             rest: Box::new(rest.clone()),
                         }
                     });
@@ -1199,6 +1300,7 @@ impl Pat {
                 cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
+                cxt.trunc_locals(rest_lvl);
                 let no = rest.lower(ty, cxt);
 
                 cxt.endif(no, lty)
@@ -1208,9 +1310,10 @@ impl Pat {
                     x,
                     pat: b,
                     cont: Box::new(cont.clone()),
+                    rest_lvl,
                     rest: Box::new(rest.clone()),
                 };
-                a.lower(x, cont, &rest, ty, cxt)
+                a.lower(x, cont, cxt.mcxt.size, &rest, ty, cxt)
             }
             Pat::Eff(p, k) => {
                 {
@@ -1218,7 +1321,7 @@ impl Pat {
                     let xty = cxt.builder.sum_idx(xty, 1).unwrap();
                     let x = cxt.ifcase(1, x, xty);
                     let any_ty = cxt.builder.cons(ir::Constant::TypeType);
-                    // We don't use it in the generated code, but we need add this local so the levels add up
+                    // We don't use it in the generated code, but we need to add this local so the levels add up
                     cxt.local(cxt.db.intern_name("_".into()), any_ty, Val::Type);
 
                     let payload = cxt.builder.project(x, 0);
@@ -1228,15 +1331,17 @@ impl Pat {
                         x: eff_cont,
                         pat: k,
                         cont: Box::new(cont.clone()),
+                        rest_lvl: cxt.mcxt.size,
                         // It's impossible for a valid pattern to not match a value of function type
                         rest: Box::new(PatCont::Unreachable),
                     };
-                    let p = p.lower(payload, &cont, rest, ty.clone(), cxt);
+                    let p = p.lower(payload, &cont, rest_lvl, rest, ty.clone(), cxt);
                     cxt.otherwise(p);
                 }
 
                 {
                     let lty = ty.clone().lower(Val::Type, cxt);
+                    cxt.trunc_locals(rest_lvl);
                     let rest = rest.lower(ty, cxt);
                     cxt.endif(rest, lty)
                 }
@@ -1246,12 +1351,13 @@ impl Pat {
                     let xty = cxt.builder.type_of(x);
                     let xty = cxt.builder.sum_idx(xty, 0).unwrap();
                     let x = cxt.ifcase(0, x, xty);
-                    let p = p.lower(x, &cont, rest, ty.clone(), cxt);
+                    let p = p.lower(x, &cont, rest_lvl, rest, ty.clone(), cxt);
                     cxt.otherwise(p);
                 }
 
                 {
                     let lty = ty.clone().lower(Val::Type, cxt);
+                    cxt.trunc_locals(rest_lvl);
                     let rest = rest.lower(ty, cxt);
                     cxt.endif(rest, lty)
                 }

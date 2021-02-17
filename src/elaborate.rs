@@ -146,6 +146,37 @@ pub struct CxtState {
     pub cxt: Cxt,
     pub size: Lvl,
     pub local_constraints: HashMap<Lvl, Val>,
+    pub eff_stack: EffStack,
+}
+impl std::hash::Hash for CxtState {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.cxt.hash(state);
+        self.size.hash(state);
+        for (k, v) in &self.local_constraints {
+            k.hash(state);
+            v.hash(state);
+        }
+        self.eff_stack.hash(state);
+    }
+}
+impl CxtState {
+    pub fn new(cxt: Cxt, db: &dyn Compiler) -> Self {
+        CxtState {
+            cxt,
+            size: cxt.size(db),
+            local_constraints: Default::default(),
+            eff_stack: Default::default(),
+        }
+    }
+
+    /// Adds a definition to the context, and handles increasing the cached size.
+    pub fn define(&mut self, name: Name, info: NameInfo, db: &dyn Compiler) {
+        if let NameInfo::Local(_) = &info {
+            self.size = self.size.inc();
+        }
+        self.cxt = self.cxt.define(name, info, db);
+        debug_assert_eq!(self.size, self.cxt.size(db));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -226,6 +257,7 @@ impl MCxt {
             cxt: self.cxt,
             size: self.size,
             local_constraints: self.local_constraints.clone(),
+            eff_stack: self.eff_stack.clone(),
         }
     }
     pub fn set_state(&mut self, state: CxtState) {
@@ -233,10 +265,12 @@ impl MCxt {
             cxt,
             size,
             local_constraints,
+            eff_stack,
         } = state;
         self.cxt = cxt;
         self.size = size;
         self.local_constraints = local_constraints;
+        self.eff_stack = eff_stack;
     }
 
     pub fn new(cxt: Cxt, ty: MCxtType, db: &dyn Compiler) -> Self {
@@ -247,6 +281,25 @@ impl MCxt {
             ty,
             local_metas: Vec::new(),
             local_constraints: HashMap::new(),
+            solved_globals: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    pub fn from_state(state: CxtState, ty: MCxtType) -> Self {
+        let CxtState {
+            cxt,
+            size,
+            local_constraints,
+            eff_stack,
+        } = state;
+        MCxt {
+            cxt,
+            size,
+            eff_stack,
+            ty,
+            local_metas: Vec::new(),
+            local_constraints,
             solved_globals: Vec::new(),
             children: Vec::new(),
         }
@@ -660,13 +713,11 @@ impl PreDef {
 pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError> {
     let start_time = Instant::now();
 
-    let (predef_id, cxt, eff_stack) = db.lookup_intern_def(def);
+    let (predef_id, state) = db.lookup_intern_def(def);
     let predef = db.lookup_intern_predef(predef_id);
+    let cxt = state.cxt;
     let file = cxt.file(db);
-    let mut mcxt = MCxt::new(cxt, MCxtType::Local(def), db);
-    if let Some(eff_stack) = eff_stack {
-        mcxt.eff_stack = eff_stack;
-    }
+    let mut mcxt = MCxt::from_state(state, MCxtType::Local(def));
     let (term, ty): (Term, VTy) = match &**predef {
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
             let tyspan = ty.span();
@@ -1051,8 +1102,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     let ty = ty.inline_metas(&mcxt, db);
                     let def_id = db.intern_def(
                         db.intern_predef(Arc::new(PreDef::Cons(cname.clone(), ty).into())),
-                        cxt_before.cxt,
-                        None,
+                        cxt_before.clone(),
                     );
                     (*cname, def_id)
                 })
@@ -1074,10 +1124,10 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             });
             scope.extend(
                 // The associated namespace can't directly use effects
-                intern_block(assoc.clone(), db, assoc_cxt, None)
+                intern_block(assoc.clone(), db, CxtState::new(assoc_cxt, db))
                     .into_iter()
                     .filter_map(|id| {
-                        let (pre, _, _) = db.lookup_intern_def(id);
+                        let (pre, _) = db.lookup_intern_def(id);
                         let pre = db.lookup_intern_predef(pre);
                         // If it doesn't have a name, we don't include it in the Vec
                         // TODO: but then we don't elaborate it and check for errors. Does this ever happen?
@@ -1823,6 +1873,15 @@ pub fn infer(
             let effs = mcxt.eff_stack.pop_scope();
             // TODO is it safe to catch multiple effects at once?
             if effs.len() == 1 {
+                if matches!(effs[0], Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
+                    // IO effects aren't catchable
+                    // TODO better type error for trying to catch IO effects
+                    return Err(TypeError::EffNotAllowed(
+                        pre.span(),
+                        effs[0].clone(),
+                        mcxt.eff_stack.clone(),
+                    ));
+                }
                 Ok((
                     Term::Catch(
                         Box::new(x),
@@ -1923,10 +1982,10 @@ pub fn infer(
                     ty,
                 )),
                 // If something else had a type error, try to keep going anyway and maybe catch more
-                Err(DefError::ElabError(def)) => Ok((
+                Err(DefError::ElabError(_def)) => Ok((
                     Term::Error,
                     // TODO pros/cons of using a meta here?
-                    Val::Error, //Val::meta(Meta::Type(db.lookup_intern_def(def).0), Val::Type),
+                    Val::Error,
                 )),
                 Err(DefError::NoValue) => Err(TypeError::NotFound(pre.copy_span(*name))),
             }?;
@@ -1996,8 +2055,7 @@ pub fn infer(
 
         Pre_::Do(v) => {
             // We store the whole block in Salsa, then query the last expression
-            let mut block =
-                crate::query::intern_block(v.clone(), db, mcxt.cxt, Some(mcxt.eff_stack.clone()));
+            let mut block = crate::query::intern_block(v.clone(), db, mcxt.state());
             // Make sure any type errors get reported
             {
                 let mut mcxt2 = mcxt.clone();
@@ -2011,10 +2069,10 @@ pub fn infer(
             }
             // Now query the last expression again
             let mut ret_ty = None;
-            let mut cxt = mcxt.cxt;
+            let mut state = mcxt.state();
             if let Some(&last) = block.last() {
-                let (pre, cxt2, _) = db.lookup_intern_def(last);
-                cxt = cxt2;
+                let (pre, state2) = db.lookup_intern_def(last);
+                state = state2;
                 // If it's not an expression, don't return anything
                 if let PreDef::Expr(_) = &**db.lookup_intern_predef(pre) {
                     if let Ok(info) = db.elaborate_def(last) {
@@ -2031,7 +2089,7 @@ pub fn infer(
                     let predef = db.intern_predef(Arc::new(PreDefAn::from(PreDef::Expr(
                         pre.copy_span(Pre_::Unit),
                     ))));
-                    let unit_def = db.intern_def(predef, cxt, Some(mcxt.eff_stack.clone()));
+                    let unit_def = db.intern_def(predef, state);
                     block.push(unit_def);
                     Val::builtin(Builtin::UnitType, Val::Type)
                 }

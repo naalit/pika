@@ -625,11 +625,12 @@ impl Term {
                 .line()
                 .chain(Doc::intersperse(
                     cases.iter().map(|(pat, body)| {
-                        pat.pretty(db, &mut names.clone())
+                        let mut names = names.clone();
+                        pat.pretty(db, &mut names)
                             .space()
                             .add("=>")
                             .space()
-                            .chain(body.pretty(db, names))
+                            .chain(body.pretty(db, &mut names))
                     }),
                     Doc::none().line(),
                 ))
@@ -653,7 +654,7 @@ impl Term {
                 let mut doc = Doc::keyword("do");
                 let mut i = 0;
                 for (id, term) in sc {
-                    let (pre_id, _cxt, _) = db.lookup_intern_def(*id);
+                    let (pre_id, _state) = db.lookup_intern_def(*id);
                     let predef = db.lookup_intern_predef(pre_id);
                     match predef.name() {
                         Some(n) => {
@@ -874,7 +875,7 @@ impl<T: PartialEq> Var<T> {
             | (Var::Top(b), Var::Rec(a))
             | (Var::Cons(b), Var::Rec(a))
             | (Var::Rec(a), Var::Cons(b)) => {
-                let (b, _, _) = db.lookup_intern_def(b);
+                let (b, _) = db.lookup_intern_def(b);
                 a == b
             }
 

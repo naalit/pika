@@ -112,7 +112,7 @@ impl Cov {
                     for (cons, args) in covs {
                         unmatched.retain(|id| id != cons);
                         if args.iter().any(|x| *x != Cov::All) {
-                            let (pre, _, _) = db.lookup_intern_def(*cons);
+                            let (pre, _) = db.lookup_intern_def(*cons);
                             let pre = db.lookup_intern_predef(pre);
                             let name = pre.name().unwrap();
 
@@ -146,7 +146,7 @@ impl Cov {
                     }
 
                     for cons in unmatched {
-                        let (pre, _, _) = db.lookup_intern_def(cons);
+                        let (pre, _) = db.lookup_intern_def(cons);
                         let pre = db.lookup_intern_predef(pre);
                         let name = pre.name().unwrap();
 
@@ -370,11 +370,14 @@ impl Pat {
                 true => "True",
                 false => "False",
             }),
-            Pat::Eff(p, k) => Doc::keyword("eff")
-                .space()
-                .chain(p.pretty(db, names))
-                .space()
-                .chain(k.pretty(db, names)),
+            Pat::Eff(p, k) => {
+                names.add(names.hole_name());
+                Doc::keyword("eff")
+                    .space()
+                    .chain(p.pretty(db, names))
+                    .space()
+                    .chain(k.pretty(db, names))
+            }
             Pat::EffRet(x) => x.pretty(db, names),
         }
     }

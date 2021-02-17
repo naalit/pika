@@ -184,12 +184,11 @@ pub fn run_repl() {
                     for &i in &*defs {
                         if started_yet {
                             // Print out the type and value of each definition
-                            let (pre_id, cxt, _) = db.lookup_intern_def(i);
+                            let (pre_id, state) = db.lookup_intern_def(i);
                             let predef = db.lookup_intern_predef(pre_id);
-                            let mcxt = crate::elaborate::MCxt::new(
-                                cxt,
+                            let mcxt = crate::elaborate::MCxt::from_state(
+                                state,
                                 crate::elaborate::MCxtType::Local(i),
-                                &db,
                             );
                             let info = db.elaborate_def(i).unwrap();
                             let val = (*info.term)

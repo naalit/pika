@@ -111,6 +111,26 @@ fn test_effects() {
         .success();
 }
 
+#[test]
+fn test_basic_print() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/basic_print.pk"])
+        .assert()
+        .stdout("3\n")
+        .success();
+}
+
+#[test]
+fn test_effects_run() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/effects_run.pk"])
+        .assert()
+        .stdout("1\n2\n3\n5\n")
+        .success();
+}
+
 // Tests for type errors
 
 #[test]
