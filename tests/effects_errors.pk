@@ -1,0 +1,29 @@
+# This file is just to make sure errors related to effects look okay
+eff Console of
+  Print I32 : ()
+  Read () : I32
+end
+
+fun has_no_effs (i: I32) : () = do
+  Console.Print i
+end
+
+fun useless_catch (f : () -> ()) = f ()?
+
+fun multicatch (x : () -> () with Console, IO) = do
+    val y = x ()?
+end
+
+fun case_no_effs (x : ()) = case x of
+    () => ()
+    eff (Console.Print _) _ => ()
+end
+
+fun case_missing_effs (x : () with Console) = case x of
+    () => ()
+    eff (Console.Print _) _ => ()
+end
+
+fun catch_io () = print 3?
+
+fun wrong_with () : () with () = ()

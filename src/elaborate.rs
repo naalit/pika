@@ -1281,6 +1281,7 @@ pub enum ScopeType {
 #[derive(Clone, PartialEq, Debug)]
 pub enum ReasonExpected {
     UsedAsType,
+    UsedInWith,
     IfCond,
     LogicOp,
     MustMatch(Span),
@@ -1303,6 +1304,10 @@ impl ReasonExpected {
         match self {
             ReasonExpected::UsedAsType => err
                 .with_note(Doc::start("expected because it was used as a type").style(Style::Note)),
+            ReasonExpected::UsedInWith => err.with_note(
+                Doc::start("expected because it was used as an effect in a `with` type")
+                    .style(Style::Note),
+            ),
             ReasonExpected::IfCond => err.with_note(
                 Doc::start("expected because if conditions must have type Bool").style(Style::Note),
             ),
@@ -1347,6 +1352,8 @@ pub enum TypeError {
     InvalidPatternBecause(Box<TypeError>),
     WrongArity(Spanned<VTy>, usize, usize),
     EffNotAllowed(Span, Val, EffStack),
+    WrongCatchType(Span, Vec<Val>),
+    EffPatternType(Span, Span, Val),
 }
 impl TypeError {
     fn to_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
@@ -1415,7 +1422,7 @@ impl TypeError {
                 s,
                 format!("solution depends on a non-variable"),
             )
-            .with_note("because here it depends on a specific value, the compiler doesn't know what the solution should be for other values"),
+            .with_note(Doc::start("because here it depends on a specific value, the compiler doesn't know what the solution should be for other values").style(Style::Note)),
             TypeError::NotStruct(ty) => Error::new(
                 file,
                 Doc::start("Value of type ")
@@ -1551,6 +1558,42 @@ impl TypeError {
                     },
                     got
                 ),
+            ),
+            TypeError::WrongCatchType(span, effs) if effs.len() == 0 => Error::new(
+                file,
+                Doc::start("Catch (`?`) expression requires effect to catch, but expression raises no effects")
+                    .style(Style::Bold),
+                span,
+                format!("this expression has no effects"),
+            ),
+            TypeError::WrongCatchType(span, effs) if matches!(&effs[0], Val::App(Var::Builtin(Builtin::IO), _, _, _)) => Error::new(
+                file,
+                Doc::start("Tried to catch IO effect, but IO effects can't be caught")
+                    .style(Style::Bold),
+                span,
+                format!("this has the IO effect, which can't be caught"),
+            )
+            .with_note(Doc::start("IO effects may include calls to arbitrary foreign functions, which can't be interrupted").style(Style::Note)),
+            TypeError::WrongCatchType(span, effs) => Error::new(
+                file,
+                Doc::start("Catch (`?`) expression can only catch 1 effect at once, but expression has effects ")
+                    .chain(Doc::intersperse(effs.iter().map(|e| e.pretty(db, mcxt).style(Style::None)), Doc::start(',').space()))
+                    .style(Style::Bold),
+                span,
+                format!("expected 1 effect here, got {}", effs.len()),
+            ),
+            TypeError::EffPatternType(vspan, pspan, ty) => Error::new(
+                file,
+                Doc::start("`eff` pattern requires the scrutinee to have effects, but got type ")
+                    .chain(ty.pretty(db, mcxt).style(Style::None))
+                    .style(Style::Bold),
+                pspan,
+                format!("`eff` pattern requires effects"),
+            )
+            .with_label(
+                file,
+                vspan,
+                format!("if this expression raises effects, try using the catch operator `?` here"),
             ),
         }
     }
@@ -1851,14 +1894,13 @@ pub fn infer(
 
         Pre_::With(a, v) => {
             let a = check(a, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
-            // TODO better reason expected
             let v = v
                 .into_iter()
                 .map(|x| {
                     check(
                         x,
                         &Val::builtin(Builtin::Eff, Val::Type),
-                        ReasonExpected::UsedAsType,
+                        ReasonExpected::UsedInWith,
                         db,
                         mcxt,
                     )
@@ -1869,31 +1911,27 @@ pub fn infer(
 
         Pre_::Catch(x) => {
             mcxt.eff_stack.push_scope(true, pre.span());
+            let xspan = x.span();
             let (x, ty) = infer(insert, x, db, mcxt)?;
             let effs = mcxt.eff_stack.pop_scope();
-            // TODO is it safe to catch multiple effects at once?
             if effs.len() == 1 {
                 if matches!(effs[0], Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
                     // IO effects aren't catchable
-                    // TODO better type error for trying to catch IO effects
-                    return Err(TypeError::EffNotAllowed(
-                        pre.span(),
-                        effs[0].clone(),
-                        mcxt.eff_stack.clone(),
-                    ));
+                    Err(TypeError::WrongCatchType(xspan, effs))
+                } else {
+                    Ok((
+                        Term::Catch(
+                            Box::new(x),
+                            effs.iter()
+                                .cloned()
+                                .map(|x| x.quote(mcxt.size, mcxt, db))
+                                .collect(),
+                        ),
+                        Val::With(Box::new(ty), effs),
+                    ))
                 }
-                Ok((
-                    Term::Catch(
-                        Box::new(x),
-                        effs.iter()
-                            .cloned()
-                            .map(|x| x.quote(mcxt.size, mcxt, db))
-                            .collect(),
-                    ),
-                    Val::With(Box::new(ty), effs),
-                ))
             } else {
-                panic!("Wrong number of effects for inferred '?'")
+                Err(TypeError::WrongCatchType(xspan, effs))
             }
         }
 

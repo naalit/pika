@@ -66,8 +66,12 @@ impl Cov {
     }
 
     pub fn pretty_rest(&self, ty: &VTy, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
+        println!("Prettying {:?}", self);
         match self {
             Cov::All => Doc::start("<nothing>"),
+            Cov::None if matches!(ty, Val::App(Var::Builtin(Builtin::UnitType), _, _, _)) => {
+                Doc::start("()")
+            }
             Cov::None => Doc::start("_"),
             // We don't show what literals we've covered.
             // In the future, we may switch to ranges like Rust uses.
@@ -77,108 +81,132 @@ impl Cov {
                 false => "True",
                 true => "False",
             }),
-            Cov::Cons(covs) => match ty {
-                Val::App(Var::Type(_, sid), _, _, _) => {
-                    let mut v = Vec::new();
-                    let mut unmatched: Vec<DefId> = db
-                        .lookup_intern_scope(*sid)
-                        .iter()
-                        .filter_map(|&(_name, id)| {
-                            let info = db.elaborate_def(id).ok()?;
-                            match &*info.term {
-                                Term::Var(Var::Cons(cid), _) if id == *cid => {
-                                    let cty = IntoOwned::<Val>::into_owned(info.typ)
-                                        .ret_type(mcxt.size, mcxt, db);
-                                    if crate::elaborate::local_unify(
-                                        cty,
-                                        ty.clone(),
-                                        mcxt.size,
-                                        Span::empty(),
-                                        db,
-                                        &mut mcxt.clone(),
-                                    )
-                                    .ok()?
-                                    {
-                                        Some(id)
-                                    } else {
-                                        None
-                                    }
-                                }
-                                _ => None,
-                            }
-                        })
-                        .collect();
+            Cov::Cons(covs) => {
+                let mut mcxt = mcxt.clone();
+                mcxt.define(db.intern_name("_".into()), NameInfo::Local(Val::Type), db);
+                let (var, vty) = mcxt.last_local(db).unwrap();
+                let cont_ty = Val::App(var, Box::new(vty), Vec::new(), Glued::new());
 
-                    for (cons, args) in covs {
-                        unmatched.retain(|id| id != cons);
-                        if args.iter().any(|x| *x != Cov::All) {
-                            let (pre, _) = db.lookup_intern_def(*cons);
-                            let pre = db.lookup_intern_predef(pre);
-                            let name = pre.name().unwrap();
-
-                            let mut cons_ty = (*db
-                                .elaborate_def(*cons)
-                                .expect("probably an invalid constructor?")
-                                .typ)
-                                .clone();
-                            let mut l = mcxt.size;
-
-                            let mut v2 = vec![Doc::start(name.get(db))];
-                            for x in args {
-                                let ty = match cons_ty {
-                                    Val::Fun(from, to) => {
-                                        cons_ty = *to;
-                                        *from
-                                    }
-                                    Val::Pi(_, cl) => {
-                                        let from = cl.ty.clone();
-                                        cons_ty = cl.vquote(l.inc(), mcxt, db);
-                                        l = l.inc();
-                                        from
-                                    }
-                                    _ => unreachable!(),
-                                };
-                                v2.push(x.pretty_rest(&ty, db, mcxt));
-                            }
-
-                            v.push(Doc::intersperse(v2, Doc::none().space()));
+                let (sid, ty) = match ty {
+                    Val::App(Var::Type(_, sid), _, _, _) => (*sid, ty.clone()),
+                    Val::With(_, effs) if effs.len() == 1 => {
+                        match effs[0].clone().inline(mcxt.size, db, &mcxt) {
+                            // The actual return type of the term doesn't matter, the constructor can have a different one
+                            // So we use a local here, like we did when elaborating the pattern
+                            Val::App(Var::Type(_, sid), _, _, _) => (sid, Val::With(Box::new(cont_ty), effs.clone())),
+                            _ => panic!(
+                                "Called Cov::pretty_rest() on a Cov::Cons but passed non-datatype {:?}",
+                                ty
+                            ),
                         }
                     }
+                    _ => panic!(
+                        "Called Cov::pretty_rest() on a Cov::Cons but passed non-datatype {:?}",
+                        ty
+                    ),
+                };
 
-                    for cons in unmatched {
-                        let (pre, _) = db.lookup_intern_def(cons);
+                let mut v = Vec::new();
+                let mut unmatched: Vec<DefId> = db
+                    .lookup_intern_scope(sid)
+                    .iter()
+                    .filter_map(|&(_name, id)| {
+                        let info = db.elaborate_def(id).ok()?;
+                        match &*info.term {
+                            Term::Var(Var::Cons(cid), _) if id == *cid => {
+                                let cty = IntoOwned::<Val>::into_owned(info.typ)
+                                    .ret_type(mcxt.size, &mcxt, db);
+                                if crate::elaborate::local_unify(
+                                    cty,
+                                    ty.clone(),
+                                    mcxt.size,
+                                    Span::empty(),
+                                    db,
+                                    &mut mcxt.clone(),
+                                )
+                                .ok()?
+                                {
+                                    Some(id)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect();
+
+                for (cons, args) in covs {
+                    unmatched.retain(|id| id != cons);
+                    if args.iter().any(|x| *x != Cov::All) {
+                        let (pre, _) = db.lookup_intern_def(*cons);
                         let pre = db.lookup_intern_predef(pre);
                         let name = pre.name().unwrap();
 
                         let mut cons_ty = (*db
-                            .elaborate_def(cons)
+                            .elaborate_def(*cons)
                             .expect("probably an invalid constructor?")
                             .typ)
                             .clone();
                         let mut l = mcxt.size;
 
                         let mut v2 = vec![Doc::start(name.get(db))];
-                        loop {
-                            match cons_ty {
-                                Val::Fun(_, to) => {
+                        for x in args {
+                            let ty = match cons_ty {
+                                Val::Fun(from, to) => {
                                     cons_ty = *to;
+                                    *from
                                 }
-                                Val::Pi(_, to) => {
-                                    cons_ty = to.vquote(l.inc(), mcxt, db);
+                                Val::Pi(_, cl) => {
+                                    let from = cl.ty.clone();
+                                    cons_ty = cl.vquote(l.inc(), &mcxt, db);
                                     l = l.inc();
+                                    from
                                 }
-                                _ => break,
+                                _ => unreachable!(),
                             };
-                            v2.push(Doc::start("_"));
+                            v2.push(x.pretty_rest(&ty, db, &mcxt));
                         }
 
                         v.push(Doc::intersperse(v2, Doc::none().space()));
                     }
-
-                    Doc::intersperse(v, Doc::start("; "))
                 }
-                _ => unreachable!(),
-            },
+
+                for cons in unmatched {
+                    let (pre, _) = db.lookup_intern_def(cons);
+                    let pre = db.lookup_intern_predef(pre);
+                    let name = pre.name().unwrap();
+
+                    let mut cons_ty = (*db
+                        .elaborate_def(cons)
+                        .expect("probably an invalid constructor?")
+                        .typ)
+                        .clone();
+                    let mut l = mcxt.size;
+
+                    let mut v2 = vec![Doc::start(name.get(db))];
+                    loop {
+                        let from = match cons_ty {
+                            Val::Fun(from, to) => {
+                                cons_ty = *to;
+                                *from
+                            }
+                            Val::Pi(_, to) => {
+                                let from = to.ty.clone();
+                                cons_ty = to.vquote(l.inc(), &mcxt, db);
+                                l = l.inc();
+                                from
+                            }
+                            _ => break,
+                        };
+                        v2.push(Cov::None.pretty_rest(&from, db, &mcxt));
+                    }
+
+                    v.push(Doc::intersperse(v2, Doc::none().space()));
+                }
+
+                Doc::intersperse(v, Doc::start(" | "))
+            }
             Cov::Eff(a, b) => {
                 let base_ty = match ty {
                     Val::With(ty, _) => ty,
@@ -190,8 +218,16 @@ impl Cov {
                 }
                 if !matches!(&**b, Cov::All) {
                     d = Some(match d {
-                        Some(d) => d.add("; ").chain(b.pretty_rest(ty, db, mcxt)),
-                        None => b.pretty_rest(ty, db, mcxt),
+                        Some(d) => d.add(" | ").chain(
+                            Doc::keyword("eff")
+                                .space()
+                                .chain(b.pretty_rest(ty, db, mcxt).nest(Prec::Atom))
+                                .add(" _"),
+                        ),
+                        None => Doc::keyword("eff")
+                            .space()
+                            .chain(b.pretty_rest(ty, db, mcxt).nest(Prec::Atom))
+                            .add(" _"),
                     });
                 }
                 d.expect("Empty Cov::Eff")
@@ -554,7 +590,7 @@ pub fn elab_case(
 
     let mut first = true;
     for (pat, body) in cases {
-        let pat = elab_pat(false, pat, &val_ty, reason.clone(), mcxt, db)?;
+        let pat = elab_pat(false, pat, &val_ty, vspan, reason.clone(), mcxt, db)?;
         let pat = match (pat, &val_ty) {
             (pat @ Pat::Eff(_, _), _) => pat,
             (pat, Val::With(_, _)) => Pat::EffRet(Box::new(pat)),
@@ -608,6 +644,7 @@ pub fn elab_pat(
     in_eff: bool,
     pre: &Pre,
     pty: &VTy,
+    vspan: Span,
     reason: ReasonExpected,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
@@ -623,11 +660,8 @@ pub fn elab_pat(
             }
 
             if effs.is_empty() {
-                let mut stack = mcxt.eff_stack.clone();
-                stack.push_scope(false, reason.span_or(pre.span()));
-                // TODO better error message
                 Err(TypeError::InvalidPatternBecause(Box::new(
-                    TypeError::EffNotAllowed(pre.span(), Val::Type, stack),
+                    TypeError::EffPatternType(vspan, pre.span(), pty.clone()),
                 )))
             } else {
                 // Use local unification to find the effect's return type
@@ -638,6 +672,7 @@ pub fn elab_pat(
                     true,
                     p,
                     &Val::With(Box::new(ret_ty.clone()), vec![effs[0].clone()]),
+                    vspan,
                     reason.clone(),
                     mcxt,
                     db,
@@ -646,6 +681,7 @@ pub fn elab_pat(
                     true,
                     k,
                     &Val::Fun(Box::new(ret_ty), Box::new(pty.clone())),
+                    vspan,
                     reason,
                     mcxt,
                     db,
@@ -688,6 +724,7 @@ pub fn elab_pat(
                                 pre,
                                 VecDeque::new(),
                                 ty,
+                                vspan,
                                 reason,
                                 mcxt,
                                 db,
@@ -763,24 +800,25 @@ pub fn elab_pat(
             }
             let (head, spine) = sep(pre);
 
-            elab_pat_app(in_eff, head, spine, ty, reason, mcxt, db)
+            elab_pat_app(in_eff, head, spine, ty, vspan, reason, mcxt, db)
         }
         Pre_::Dot(head, member, spine) => elab_pat_app(
             in_eff,
             &pre.copy_span(Pre_::Dot(head.clone(), member.clone(), Vec::new())),
             spine.iter().map(|(i, x)| (*i, x)).collect(),
             ty,
+            vspan,
             reason,
             mcxt,
             db,
         ),
         Pre_::OrPat(x, y) => {
             let size_before = mcxt.size;
-            let x = elab_pat(in_eff, x, ty, reason.clone(), mcxt, db)?;
+            let x = elab_pat(in_eff, x, ty, vspan, reason.clone(), mcxt, db)?;
             if mcxt.size != size_before {
                 todo!("error: for now we don't support capturing inside or-patterns")
             }
-            let y = elab_pat(in_eff, y, ty, reason, mcxt, db)?;
+            let y = elab_pat(in_eff, y, ty, vspan, reason, mcxt, db)?;
             if mcxt.size != size_before {
                 todo!("error: for now we don't support capturing inside or-patterns")
             }
@@ -796,6 +834,7 @@ fn elab_pat_app(
     head: &Pre,
     mut spine: VecDeque<(Icit, &Pre)>,
     expected_ty: &VTy,
+    vspan: Span,
     reason: ReasonExpected,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
@@ -829,13 +868,13 @@ fn elab_pat_app(
                         l = l.inc();
                     }
                     Val::Pi(i2, cl) if i == i2 => {
-                        let pat = elab_pat(in_eff, pat, &cl.ty, reason.clone(), mcxt, db)?;
+                        let pat = elab_pat(in_eff, pat, &cl.ty, vspan, reason.clone(), mcxt, db)?;
                         pspine.push(pat);
                         ty = cl.vquote(l.inc(), mcxt, db);
                         l = l.inc();
                     }
                     Val::Fun(from, to) if i == Icit::Expl => {
-                        let pat = elab_pat(in_eff, pat, &from, reason.clone(), mcxt, db)?;
+                        let pat = elab_pat(in_eff, pat, &from, vspan, reason.clone(), mcxt, db)?;
                         pspine.push(pat);
                         ty = *to;
                     }
