@@ -804,6 +804,9 @@ impl Term {
                 let mut effs = Vec::new();
                 let mut variants = vec![lbase_ty];
                 for eff in effs_ {
+                    if matches!(eff, Term::Var(Var::Builtin(Builtin::IO), _)) {
+                        continue;
+                    }
                     let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
                     let eff = eff.clone().evaluate(&env, &cxt.mcxt, cxt.db);
                     effs.push((eff, leff));
@@ -896,7 +899,6 @@ impl Term {
                         if effs_.len() != 1
                             || !matches!(&effs_[0], Term::Var(Var::Builtin(Builtin::IO), _)) =>
                     {
-                        neffs = effs_.len();
                         let mut env = cxt.mcxt.env();
                         env.push(None);
                         // The function takes a continuation for each effect, plus two return continuations
@@ -904,6 +906,11 @@ impl Term {
                         // (except in the implementation of `catch`)
                         // The second one is the normal return continuation, which this function will call when it's done
                         for eff in effs_ {
+                            if matches!(eff, Term::Var(Var::Builtin(Builtin::IO), _)) {
+                                continue;
+                            } else {
+                                neffs += 1;
+                            }
                             let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
                             let eff = eff.evaluate(&env, &cxt.mcxt, cxt.db);
                             let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
@@ -979,6 +986,9 @@ impl Term {
                         let mut is = Vec::new();
                         let mut tcxt = cxt.mcxt.clone();
                         for eff in effs {
+                            if matches!(eff, Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
+                                continue;
+                            }
                             let i = cxt
                                 .mcxt
                                 .eff_stack
@@ -1023,6 +1033,9 @@ impl Term {
 
                         let mut params = vec![from];
                         for eff in effs {
+                            if matches!(eff, Term::Var(Var::Builtin(Builtin::IO), _)) {
+                                continue;
+                            }
                             let name = eff
                                 .pretty(cxt.db, &mut Names::new(cxt.mcxt.cxt, cxt.db))
                                 .raw_string();
@@ -1064,6 +1077,9 @@ impl Term {
                         let base = base.lower(Val::Type, cxt);
 
                         for eff in effs {
+                            if matches!(eff, Term::Var(Var::Builtin(Builtin::IO), _)) {
+                                continue;
+                            }
                             let name = eff
                                 .pretty(cxt.db, &mut Names::new(cxt.mcxt.cxt, cxt.db))
                                 .raw_string();
@@ -1128,6 +1144,9 @@ impl Term {
 
                 let mut v = vec![base];
                 for eff in effs {
+                    if matches!(eff, Term::Var(Var::Builtin(Builtin::IO), _)) {
+                        continue;
+                    }
                     let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
 
                     let any_ty = cxt.builder.cons(ir::Constant::TypeType);

@@ -4,13 +4,17 @@ eff Console of
   Read () : I32
 end
 
+eff Yield of
+  Yield I32 : ()
+end
+
 fun has_no_effs (i: I32) : () = do
   Console.Print i
 end
 
 fun useless_catch (f : () -> ()) = f ()?
 
-fun multicatch (x : () -> () with Console, IO) = do
+fun multicatch (x : () -> () with Console, Yield) = do
     val y = x ()?
 end
 

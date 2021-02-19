@@ -4,7 +4,8 @@ eff Console of
     Read () : I32
 end
 
-fun producer () = do
+fun producer () : I32 with Console, IO = do
+    print 0
     Console.Print 1
     val x = Console.Read ()
     Console.Print x
@@ -14,6 +15,7 @@ fun producer () = do
 end
 
 # Expected output:
+# 0
 # 1
 # 2
 # 3

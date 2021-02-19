@@ -66,7 +66,6 @@ impl Cov {
     }
 
     pub fn pretty_rest(&self, ty: &VTy, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
-        println!("Prettying {:?}", self);
         match self {
             Cov::All => Doc::start("<nothing>"),
             Cov::None if matches!(ty, Val::App(Var::Builtin(Builtin::UnitType), _, _, _)) => {

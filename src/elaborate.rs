@@ -1914,25 +1914,54 @@ pub fn infer(
             let xspan = x.span();
             let (x, ty) = infer(insert, x, db, mcxt)?;
             let effs = mcxt.eff_stack.pop_scope();
-            if effs.len() == 1 {
+            let eff = if effs.len() == 1 {
                 if matches!(effs[0], Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
                     // IO effects aren't catchable
-                    Err(TypeError::WrongCatchType(xspan, effs))
+                    return Err(TypeError::WrongCatchType(xspan, effs));
                 } else {
-                    Ok((
-                        Term::Catch(
-                            Box::new(x),
-                            effs.iter()
-                                .cloned()
-                                .map(|x| x.quote(mcxt.size, mcxt, db))
-                                .collect(),
-                        ),
-                        Val::With(Box::new(ty), effs),
-                    ))
+                    effs[0].clone()
                 }
             } else {
-                Err(TypeError::WrongCatchType(xspan, effs))
-            }
+                let mut not_allowed = None;
+                let neffs: Vec<_> = effs
+                    .iter()
+                    .filter_map(|x| match x {
+                        eff @ Val::App(Var::Builtin(Builtin::IO), _, _, _) => {
+                            if !mcxt.eff_stack.try_eff(eff.clone(), db, &mut mcxt.clone()) {
+                                not_allowed = Some(eff.clone());
+                            }
+                            None
+                        }
+                        x => Some(x.clone()),
+                    })
+                    .collect();
+                if let Some(not_allowed) = not_allowed {
+                    return Err(TypeError::EffNotAllowed(
+                        pre.span(),
+                        not_allowed,
+                        mcxt.eff_stack.clone(),
+                    ));
+                }
+                if neffs.len() == 1 {
+                    neffs[0].clone()
+                } else {
+                    return Err(TypeError::WrongCatchType(xspan, effs));
+                }
+            };
+            Ok((
+                Term::Catch(Box::new(x), vec![eff.clone().quote(mcxt.size, mcxt, db)]),
+                Val::With(Box::new(ty), vec![eff]),
+            ))
+            // if effs.len() == 1 {
+            //     if matches!(effs[0], Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
+            //         // IO effects aren't catchable
+            //         Err(TypeError::WrongCatchType(xspan, effs))
+            //     } else {
+
+            //     }
+            // } else {
+            //     Err(TypeError::WrongCatchType(xspan, effs))
+            // }
         }
 
         Pre_::Lit(_) => Err(TypeError::UntypedLiteral(pre.span())),
