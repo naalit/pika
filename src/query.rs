@@ -277,14 +277,14 @@ fn def_type(db: &dyn Compiler, def: DefId) -> Result<Arc<VTy>, DefError> {
 }
 
 fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
-    use crate::grammar::DefsParser;
+    use crate::parser::Parser;
 
     let source = db.file_source(file);
 
-    let parser = DefsParser::new();
+    let mut parser = Parser::new(db, crate::lexer::Lexer::new(&source));
     let cxt = Cxt::new(file, db);
     let state = CxtState::new(cxt, db);
-    match parser.parse(db, crate::lexer::Lexer::new(&source)) {
+    match parser.defs() {
         Ok(v) => Arc::new(intern_block(v, db, state.clone())),
         Err(e) => {
             db.report_error(e.to_error(file));

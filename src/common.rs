@@ -28,6 +28,27 @@ impl<T: Clone> IntoOwned<T> for Arc<T> {
     }
 }
 
+/// A trait for things which can be empty.
+/// The `take()` method returns the value that was in `*self`, and replaces `*self` with the empty form.
+/// It shouldn't allocate.
+///
+/// This is especially helpful in patterns like `*x = some_function(x.take())` where `*x` can't be moved out of.
+pub trait Take {
+    fn take(&mut self) -> Self;
+}
+impl<T> Take for Option<T> {
+    fn take(&mut self) -> Self {
+        Option::take(self)
+    }
+}
+impl<T> Take for Vec<T> {
+    fn take(&mut self) -> Self {
+        let mut other = Vec::new();
+        std::mem::swap(self, &mut other);
+        other
+    }
+}
+
 /// A three-value logic type, useful for analysis with limited information.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TBool {

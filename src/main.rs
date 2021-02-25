@@ -2,7 +2,6 @@ use durin::inkwell::{
     types::{AnyType, BasicType},
     values::BasicValue,
 };
-use lalrpop_util::lalrpop_mod;
 use std::fs::File;
 use std::io::Read;
 
@@ -20,7 +19,7 @@ pub mod repl;
 pub mod term;
 use query::*;
 
-lalrpop_mod!(pub grammar);
+mod parser;
 
 /// For the generated code to call
 #[no_mangle]

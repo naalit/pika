@@ -1186,18 +1186,18 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             let ty = ty.inline_metas(&mcxt, db);
 
             // Print out the type and value of each definition
-            // let d = Doc::keyword("val")
-            //     .space()
-            //     .add(predef.name().map_or("_".to_string(), |x| x.get(db)))
-            //     .space()
-            //     .add(":")
-            //     .space()
-            //     .chain(ty.pretty(db, &mcxt))
-            //     .space()
-            //     .add("=")
-            //     .space()
-            //     .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)));
-            // println!("{}\n", d.ansi_string());
+            let d = Doc::keyword("val")
+                .space()
+                .add(predef.name().map_or("_".to_string(), |x| x.get(db)))
+                .space()
+                .add(":")
+                .space()
+                .chain(ty.pretty(db, &mcxt))
+                .space()
+                .add("=")
+                .space()
+                .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)));
+            println!("{}\n", d.ansi_string());
 
             let effects = if mcxt.eff_stack.scopes.last().map_or(false, |x| x.0) {
                 mcxt.eff_stack.pop_scope()
@@ -2043,6 +2043,16 @@ pub fn infer(
         }
 
         Pre_::Var(name) => {
+            // If its name is `_`, it's a hole
+            if &db.lookup_intern_name(*name) == "_" {
+                return infer(
+                    insert,
+                    &pre.copy_span(Pre_::Hole(MetaSource::Hole)),
+                    db,
+                    mcxt,
+                );
+            }
+
             let (term, ty) = match mcxt.lookup(*name, db) {
                 Ok((v, ty)) => Ok((
                     Term::Var(v, Box::new(ty.clone().quote(mcxt.size, mcxt, db))),

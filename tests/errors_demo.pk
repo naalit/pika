@@ -25,7 +25,7 @@ val mismatched_if = if True then False else Type
 val wrong_if_type = if 3 then 4 else 5
 val ambiguous_literal = 12
 val not_found = nonexistent
-val solution_for_type_not_found = \x.x
+val solution_for_type_not_found = x => x
 val solution_for_arg_not_found = do
   fun f [x: Type] (_: I32) = x
   f 12

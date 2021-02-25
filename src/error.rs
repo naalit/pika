@@ -4,7 +4,6 @@ use codespan_reporting::diagnostic::{Diagnostic, Label};
 use codespan_reporting::files::{Error as FError, Files as FilesT, SimpleFile};
 use codespan_reporting::term::termcolor;
 use codespan_reporting::term::{emit, Config};
-use lalrpop_util::ParseError;
 use lazy_static::lazy_static;
 use std::ops::Range;
 use std::sync::RwLock;
@@ -217,64 +216,5 @@ impl Error {
             &*FILES.read().unwrap(),
             &self.0,
         )
-    }
-}
-
-/// Used only to format the "expected x, y, or z" text in parse errors
-struct Alternatives(Vec<String>);
-use std::fmt;
-impl fmt::Display for Alternatives {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fn to_err(x: &str) -> String {
-            match x {
-                r#""\n""# => "newline".to_string(),
-                "IDENT" => "identifier".to_string(),
-                x => x.replace('"', "'"),
-            }
-        }
-
-        if self.0.len() == 1 {
-            return write!(f, "{}", to_err(&self.0[0]));
-        }
-        for i in 0..self.0.len() {
-            if i == self.0.len() - 1 {
-                write!(f, "or {}", to_err(&self.0[i]))?;
-            } else {
-                write!(f, "{}, ", to_err(&self.0[i]))?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<L: std::fmt::Display, U: ToString> ToError for ParseError<usize, L, Spanned<U>> {
-    fn to_error(self, file: FileId) -> Error {
-        let (message, span) = match self {
-            ParseError::InvalidToken { location } => {
-                ("Invalid token".to_string(), Span(location, location))
-            }
-            ParseError::UnrecognizedEOF { location, expected } => (
-                format!("Unexpected EOF, expected {}", Alternatives(expected)),
-                Span(location, location),
-            ),
-            ParseError::UnrecognizedToken {
-                token: (start, tok, end),
-                expected,
-            } => (
-                format!("Unexpected {}, expected {}", tok, Alternatives(expected)),
-                Span(start, end),
-            ),
-            ParseError::ExtraToken {
-                token: (start, tok, end),
-            } => (
-                format!("Unexpected {}, expected EOF", tok),
-                Span(start, end),
-            ),
-            ParseError::User { error } => {
-                let span = error.span();
-                (error.unwrap().to_string(), span)
-            }
-        };
-        Error::new(file, format!("Parse error: {}", message), span, message)
     }
 }

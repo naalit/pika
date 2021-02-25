@@ -11,7 +11,7 @@ where
 end
 
 val one : Term Type = Term.TypeType
-val two : Term (Type -> Type) = Term.Fun (\x. x)
+val two : Term (Type -> Type) = Term.Fun (x => x)
 # Make sure the associated namespace works
 val three : Term Type = Term.also_lit Type
 
