@@ -12,22 +12,27 @@ fun has_no_effs (i: I32) : () = do
   Console.Print i
 end
 
-fun useless_catch (f : () -> ()) = f ()?
-
-fun multicatch (x : () -> () with Console, Yield) = do
-    val y = x ()?
-end
-
-fun case_no_effs (x : ()) = case x of
+fun eff_in_case (x : ()) = case x of
     () => ()
     eff (Console.Print _) _ => ()
 end
 
-fun case_missing_effs (x : () with Console) = case x of
+fun catch_no_effs (x: ()) = catch x of
+  () => ()
+end
+
+fun catch_io (f: () -> () with IO) = catch f () of
+  () => ()
+end
+
+fun catch_missing_effs (f : () -> () with Console) = catch f () of
     () => ()
     eff (Console.Print _) _ => ()
 end
 
-fun catch_io () = print 3?
+fun wrong_eff_type (f : () -> () with Console) = catch f () of
+  () => ()
+  eff (Yield.Yield _) _ => ()
+end
 
 fun wrong_with () : () with () = ()

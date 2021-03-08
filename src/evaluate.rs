@@ -28,7 +28,7 @@ impl Term {
                     name,
                 }),
             ),
-            Term::Pi(name, icit, ty, body) => Val::Pi(
+            Term::Pi(name, icit, ty, body, effs) => Val::Pi(
                 icit,
                 Box::new(Clos {
                     env: env.clone(),
@@ -36,18 +36,25 @@ impl Term {
                     ty: ty.evaluate(env, mcxt, db),
                     name,
                 }),
+                effs.into_iter()
+                    .map(|x| x.evaluate(env, mcxt, db))
+                    .collect(),
             ),
-            Term::Fun(from, to) => {
+            Term::Fun(from, to, effs) => {
                 let from = from.evaluate(env, mcxt, db);
                 let to = to.evaluate(env, mcxt, db);
-                Val::Fun(Box::new(from), Box::new(to))
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.evaluate(env, mcxt, db))
+                    .collect();
+                Val::Fun(Box::new(from), Box::new(to), effs)
             }
             Term::App(icit, f, _fty, x) => {
                 let f = f.evaluate(env, mcxt, db);
                 let x = x.evaluate(env, mcxt, db);
                 f.app(icit, x, mcxt, db)
             }
-            Term::Case(x, ty, cases) => {
+            Term::Case(x, ty, cases, effs) => {
                 let x = x.evaluate(env, mcxt, db);
                 for (pat, body) in &cases {
                     use crate::pattern::MatchResult::*;
@@ -57,7 +64,12 @@ impl Term {
                         Maybe => {
                             return Val::Lazy(Box::new(Lazy {
                                 env: env.clone(),
-                                term: Term::Case(Box::new(x.quote(env.size, mcxt, db)), ty, cases),
+                                term: Term::Case(
+                                    Box::new(x.quote(env.size, mcxt, db)),
+                                    ty,
+                                    cases,
+                                    effs,
+                                ),
                             }))
                         }
                     }
@@ -76,14 +88,10 @@ impl Term {
                 }
             }
             // TODO: eventually we'll want to actually evaluate do blocks when necessary
-            term @ Term::Do(_) | term @ Term::Catch(_, _) => Val::Lazy(Box::new(Lazy {
+            term @ Term::Do(_) => Val::Lazy(Box::new(Lazy {
                 env: env.clone(),
                 term,
             })),
-            Term::With(a, v) => Val::With(
-                Box::new(a.evaluate(env, mcxt, db)),
-                v.into_iter().map(|x| x.evaluate(env, mcxt, db)).collect(),
-            ),
         }
     }
 
@@ -105,14 +113,6 @@ impl Term {
                 *ty = ty.eval_quote(env, l, mcxt, db);
                 Term::Var(v, ty)
             }
-            Term::Catch(mut x, v) => {
-                *x = x.eval_quote(env, l, mcxt, db);
-                let v = v
-                    .into_iter()
-                    .map(|x| x.eval_quote(env, l, mcxt, db))
-                    .collect();
-                Term::Catch(x, v)
-            }
             Term::Lam(name, icit, mut ty, mut body) => {
                 *ty = ty.eval_quote(env, l, mcxt, db);
                 env.push(Some(Val::local(
@@ -123,7 +123,7 @@ impl Term {
                 env.pop();
                 Term::Lam(name, icit, ty, body)
             }
-            Term::Pi(name, icit, mut ty, mut body) => {
+            Term::Pi(name, icit, mut ty, mut body, effs) => {
                 *ty = ty.eval_quote(env, l, mcxt, db);
                 env.push(Some(Val::local(
                     l.inc(),
@@ -131,12 +131,20 @@ impl Term {
                 )));
                 *body = body.eval_quote(env, l.inc(), mcxt, db);
                 env.pop();
-                Term::Pi(name, icit, ty, body)
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.eval_quote(env, l, mcxt, db))
+                    .collect();
+                Term::Pi(name, icit, ty, body, effs)
             }
-            Term::Fun(mut a, mut b) => {
+            Term::Fun(mut a, mut b, effs) => {
                 *a = a.eval_quote(env, l, mcxt, db);
                 *b = b.eval_quote(env, l, mcxt, db);
-                Term::Fun(a, b)
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.eval_quote(env, l, mcxt, db))
+                    .collect();
+                Term::Fun(a, b, effs)
             }
             // We have to perform beta-reduction, so we manually evaluate and then quote again
             Term::App(icit, f, _fty, x) => {
@@ -144,7 +152,7 @@ impl Term {
                 let x = x.evaluate(env, mcxt, db);
                 f.app(icit, x, mcxt, db).quote(l, mcxt, db)
             }
-            Term::Case(mut x, mut ty, cases) => {
+            Term::Case(mut x, mut ty, cases, effs) => {
                 let vx = x.evaluate(env, mcxt, db);
                 for (pat, body) in &cases {
                     use crate::pattern::MatchResult::*;
@@ -166,7 +174,11 @@ impl Term {
                         (pat, body)
                     })
                     .collect();
-                Term::Case(x, ty, cases)
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.eval_quote(env, l, mcxt, db))
+                    .collect();
+                Term::Case(x, ty, cases, effs)
             }
             Term::If(mut cond, mut yes, mut no) => match cond
                 .evaluate(env, mcxt, db)
@@ -187,15 +199,6 @@ impl Term {
                     .map(|(id, term)| (id, term.eval_quote(env, l, mcxt, db)))
                     .collect(),
             ),
-            Term::With(mut a, v) => {
-                *a = a.eval_quote(env, l, mcxt, db);
-                Term::With(
-                    a,
-                    v.into_iter()
-                        .map(|x| x.eval_quote(env, l, mcxt, db))
-                        .collect(),
-                )
-            }
         }
     }
 }
@@ -228,13 +231,13 @@ impl Val {
             self
         } else {
             match self {
-                Val::Fun(from, mut to) => {
+                Val::Fun(from, mut to, effs) => {
                     *to = to.inline_args(n - 1, l, db, mcxt);
-                    Val::Fun(from, to)
+                    Val::Fun(from, to, effs)
                 }
-                Val::Pi(i, cl) => {
+                Val::Pi(i, cl, effs) => {
                     if n == 1 {
-                        Val::Pi(i, cl)
+                        Val::Pi(i, cl, effs)
                     } else {
                         let name = cl.name;
                         let ty = cl.ty.clone();
@@ -250,6 +253,7 @@ impl Val {
                                 ty,
                                 name,
                             }),
+                            effs,
                         )
                     }
                 }
@@ -281,10 +285,11 @@ impl Val {
                     Val::App(h, hty, sp, g)
                 }
             }
-            Val::Fun(mut a, mut b) => {
+            Val::Fun(mut a, mut b, effs) => {
                 *a = a.force(l, db, mcxt);
                 *b = b.force(l, db, mcxt);
-                Val::Fun(a, b)
+                let effs = effs.into_iter().map(|x| x.force(l, db, mcxt)).collect();
+                Val::Fun(a, b, effs)
             }
             Val::Error => Val::Error,
 
@@ -304,18 +309,15 @@ impl Val {
                     .quote(l.inc(), mcxt, db);
                 Val::Lam(i, cl)
             }
-            Val::Pi(i, mut cl) => {
+            Val::Pi(i, mut cl, effs) => {
                 cl.ty = cl.ty.force(l, db, mcxt);
                 cl.term = (*cl)
                     .clone()
                     .vquote(l.inc(), mcxt, db)
                     .force(l.inc(), db, mcxt)
                     .quote(l.inc(), mcxt, db);
-                Val::Pi(i, cl)
-            }
-            Val::With(mut a, v) => {
-                *a = a.force(l, db, mcxt);
-                Val::With(a, v)
+                let effs = effs.into_iter().map(|x| x.force(l, db, mcxt)).collect();
+                Val::Pi(i, cl, effs)
             }
         }
     }
@@ -372,11 +374,12 @@ impl Val {
                     Var::Cons(id) => Term::Var(Var::Cons(id), Box::new(hty.clone())),
                     Var::Builtin(b) => Term::Var(Var::Builtin(b), Box::new(hty.clone())),
                 };
+                // println!("{:?}: {:?} @ {:?}", enclosing, h, sp);
                 sp.into_iter()
                     .fold((h, hty), |(f, fty), (icit, x)| {
                         let rty = match &fty {
-                            Term::Fun(_, to) => (**to).clone(),
-                            Term::Pi(_, _, _, to) => {
+                            Term::Fun(_, to, _) => (**to).clone(),
+                            Term::Pi(_, _, _, to, _) => {
                                 // Peel off one Pi to get the type of the next `f`.
                                 // It's dependent, so we need to add `x` to the environment.
                                 let mut env = Env::new(enclosing);
@@ -405,24 +408,24 @@ impl Val {
                 Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),
                 Box::new(cl.quote(enclosing, mcxt, db)),
             ),
-            Val::Pi(icit, cl) => Term::Pi(
+            Val::Pi(icit, cl, effs) => Term::Pi(
                 cl.name,
                 icit,
                 Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),
                 Box::new(cl.quote(enclosing, mcxt, db)),
-            ),
-            Val::Fun(from, to) => Term::Fun(
-                Box::new(from.quote(enclosing, mcxt, db)),
-                Box::new(to.quote(enclosing, mcxt, db)),
-            ),
-            Val::Error => Term::Error,
-            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).quote(enclosing, mcxt, db),
-            Val::With(a, v) => Term::With(
-                Box::new(a.quote(enclosing, mcxt, db)),
-                v.into_iter()
+                effs.into_iter()
                     .map(|x| x.quote(enclosing, mcxt, db))
                     .collect(),
             ),
+            Val::Fun(from, to, effs) => Term::Fun(
+                Box::new(from.quote(enclosing, mcxt, db)),
+                Box::new(to.quote(enclosing, mcxt, db)),
+                effs.into_iter()
+                    .map(|x| x.quote(enclosing, mcxt, db))
+                    .collect(),
+            ),
+            Val::Error => Term::Error,
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).quote(enclosing, mcxt, db),
         }
     }
 }
@@ -478,7 +481,7 @@ impl Term {
 
     /// Shorthand for `eval_quote()` without changing levels
     pub fn inline_metas(self, mcxt: &MCxt, l: Lvl, db: &dyn Compiler) -> Self {
-        return self.eval_quote(&mut Env::new(l), l, mcxt, db);
+        self.eval_quote(&mut Env::new(l), l, mcxt, db)
     }
 }
 
@@ -489,9 +492,9 @@ impl Val {
             Val::Lit(x, t) => Val::Lit(x, t),
             Val::App(h, mut ty, sp, g) => {
                 let h = match h {
-                    Var::Meta(m) => match g.resolve_meta(h, &sp, mcxt, db) {
+                    Var::Meta(_) | Var::Local(_) => match g.resolve_meta(h, &sp, mcxt, db) {
                         Some(v) => return v.inline_metas(mcxt, db),
-                        None => Var::Meta(m),
+                        None => h,
                     },
                     h => h,
                 };
@@ -516,25 +519,22 @@ impl Val {
                 cl.ty = cl.ty.inline_metas(mcxt, db);
                 Val::Lam(i, cl)
             }
-            Val::Pi(i, mut cl) => {
+            Val::Pi(i, mut cl, effs) => {
                 let l = cl.env_size();
                 cl.env.inline_metas(mcxt, db);
                 cl.term = cl.term.inline_metas(mcxt, l.inc(), db);
                 cl.ty = cl.ty.inline_metas(mcxt, db);
-                Val::Pi(i, cl)
+                let effs = effs.into_iter().map(|x| x.inline_metas(mcxt, db)).collect();
+                Val::Pi(i, cl, effs)
             }
-            Val::Fun(mut from, mut to) => {
+            Val::Fun(mut from, mut to, effs) => {
                 *from = from.inline_metas(mcxt, db);
                 *to = to.inline_metas(mcxt, db);
-                Val::Fun(from, to)
+                let effs = effs.into_iter().map(|x| x.inline_metas(mcxt, db)).collect();
+                Val::Fun(from, to, effs)
             }
             Val::Error => Val::Error,
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).inline_metas(mcxt, db),
-            Val::With(mut a, v) => {
-                *a = a.inline_metas(mcxt, db);
-                let v = v.into_iter().map(|x| x.inline_metas(mcxt, db)).collect();
-                Val::With(a, v)
-            }
         }
     }
 }

@@ -1,1 +1,1 @@
-fun main () = print 3
+fun main () with IO = print 3

@@ -212,15 +212,22 @@ impl<'i> Parser<'i> {
                     Spanned::new(Pre_::Hole(MetaSource::LocalType(*name)), name.span())
                 };
 
+                let effs = self.maybe_effs_list()?;
+
                 self.expect(Tok::Equals)?;
 
                 let body = self.term()?;
 
-                Ok(PreDef::Fun(name, args, ty, body).into())
+                // TODO: do we ever infer effects? Maybe if no return type is given?
+                Ok(PreDef::Fun(name, args, ty, body, Some(effs)).into())
             }
-            Tok::Type => {
-                // Consume the `type`
-                self.next();
+            Tok::Type | Tok::Eff => {
+                // Consume the `type` or `eff`
+                let is_eff = match self.next().unwrap() {
+                    Tok::Type => false,
+                    Tok::Eff => true,
+                    _ => unreachable!(),
+                };
 
                 let name = self.name()?;
 
@@ -293,13 +300,33 @@ impl<'i> Parser<'i> {
 
                 self.expect(Tok::End)?;
 
-                Ok(PreDef::Type(name, false, args, ctors, assoc).into())
+                Ok(PreDef::Type(name, is_eff, args, ctors, assoc).into())
             }
             _ => {
                 // We don't allow lambdas in expression statements, so the multiline lambda syntax is ambiguous
                 let term = self.binop(Vec::new())?;
                 Ok(PreDef::Expr(term).into())
             }
+        }
+    }
+
+    fn maybe_effs_list(&mut self) -> PResult<Vec<Pre>> {
+        if let Ok(Tok::With) = self.peek("_") {
+            // Consume the `with`
+            self.next();
+
+            let mut v = Vec::new();
+            loop {
+                let eff = self.term()?;
+                v.push(eff);
+                if let Ok(Tok::Comma) = self.peek("_") {
+                    self.next();
+                } else {
+                    break Ok(v);
+                }
+            }
+        } else {
+            Ok(Vec::new())
         }
     }
 
@@ -327,12 +354,8 @@ impl<'i> Parser<'i> {
             Tok::POpen => {
                 let mut mode = ArgMode::PiOrLambda;
                 match self.arg_group(&mut mode, Vec::new())? {
-                    Ok(args) => {
-                        return self.lambda_pi(args, mode);
-                    }
-                    Err(val) => {
-                        return Ok(val);
-                    }
+                    Ok(args) => self.lambda_pi(args, mode),
+                    Err(val) => Ok(val),
                 }
             }
 
@@ -358,12 +381,8 @@ impl<'i> Parser<'i> {
                 let mut mode = ArgMode::Lambda;
                 let args = names.into_iter().map(|n| (n, Icit::Expl, None)).collect();
                 match self.arg_group(&mut mode, args)? {
-                    Ok(args) => {
-                        return self.lambda_pi(args, mode);
-                    }
-                    Err(val) => {
-                        return Ok(val);
-                    }
+                    Ok(args) => self.lambda_pi(args, mode),
+                    Err(val) => Ok(val),
                 }
             }
 
@@ -417,13 +436,21 @@ impl<'i> Parser<'i> {
 
                     let body = self.term()?;
 
-                    Ok(args.into_iter().rfold(body, |to, (name, icit, ty)| {
-                        let ty = ty.unwrap_or_else(|| {
-                            Spanned::new(Pre_::Hole(MetaSource::LocalType(*name)), name.span())
-                        });
-                        let span = Span(name.span().0, to.span().1);
-                        Spanned::new(Pre_::Pi(*name, icit, ty, to), span)
-                    }))
+                    let effs = self.maybe_effs_list()?;
+
+                    Ok(args
+                        .into_iter()
+                        .rfold((body, effs), |(to, effs), (name, icit, ty)| {
+                            let ty = ty.unwrap_or_else(|| {
+                                Spanned::new(Pre_::Hole(MetaSource::LocalType(*name)), name.span())
+                            });
+                            let span = Span(name.span().0, to.span().1);
+                            (
+                                Spanned::new(Pre_::Pi(*name, icit, ty, to, effs), span),
+                                Vec::new(),
+                            )
+                        })
+                        .0)
                 } else {
                     self.err("pi type cannot have bare names as arguments")
                 }
@@ -762,7 +789,7 @@ impl<'i> Parser<'i> {
         let mut ops: Vec<Tok<'i>> = Vec::new();
 
         /// Helper function that takes two terms off the stack and combines them with the given operator
-        fn resolve_op(terms: &mut Vec<Pre>, op: Tok) -> PResult<()> {
+        fn resolve_op(terms: &mut Vec<Pre>, op: Tok) {
             let b = terms.pop().unwrap();
             let a = terms.pop().unwrap();
 
@@ -773,7 +800,8 @@ impl<'i> Parser<'i> {
             let v = match op {
                 Tok::And => Pre_::And(a, b),
                 Tok::Or => Pre_::Or(a, b),
-                Tok::Arrow => Pre_::Fun(a, b),
+                // If we're resolving it already, we know it doesn't have a `with` clause
+                Tok::Arrow => Pre_::Fun(a, b, Vec::new()),
                 Tok::Plus => Pre_::BinOp(Spanned::new(BinOp::Add, span), a, b),
                 Tok::Minus => Pre_::BinOp(Spanned::new(BinOp::Sub, span), a, b),
                 Tok::Times => Pre_::BinOp(Spanned::new(BinOp::Mul, span), a, b),
@@ -797,8 +825,6 @@ impl<'i> Parser<'i> {
                 _ => panic!("Couldn't resolve {}", op),
             };
             terms.push(Spanned::new(v, vspan));
-
-            Ok(())
         }
 
         // Get ready for an operator next
@@ -814,7 +840,7 @@ impl<'i> Parser<'i> {
                     let prec2 = op2.binop_prec().unwrap();
                     if prec2 > prec || (prec2 == prec && op.associates_with(op2)) {
                         ops.pop().unwrap();
-                        resolve_op(&mut terms, op2)?;
+                        resolve_op(&mut terms, op2);
                     // Arrows are right associative, so resolve the last one first in stack order
                     } else if prec2 < prec || (prec == Prec::Arrow && prec2 == Prec::Arrow) {
                         break;
@@ -834,12 +860,37 @@ impl<'i> Parser<'i> {
                 terms.push(self.app()?);
             } else {
                 match op {
+                    Tok::With => {
+                        // If we have any arrows on the stack, this goes with the top one; otherwise, we stop here
+                        // So resolve all remaining operators until we get to an arrow
+                        let mut found = false;
+                        while let Some(op2) = ops.pop() {
+                            if let Tok::Arrow = op2 {
+                                let b = terms.pop().unwrap();
+                                let a = terms.pop().unwrap();
+                                let span = Span(a.span().1, b.span().0);
+
+                                // We haven't consumed the `with` yet, so we let `maybe_effs_list()` consume it
+                                let effs = self.maybe_effs_list()?;
+
+                                terms.push(Spanned::new(Pre_::Fun(a, b, effs), span));
+                                found = true;
+                                break;
+                            } else {
+                                resolve_op(&mut terms, op2);
+                            }
+                        }
+                        // No matching arrow on the stack, so it belongs to an outer pi and we should stop
+                        if !found {
+                            break;
+                        }
+                    }
                     Tok::OpNewline => {
                         // A newline before a binop essentially wraps the previous lines in parentheses
                         self.next();
                         // Resolve all remaining operators
                         while let Some(op2) = ops.pop() {
-                            resolve_op(&mut terms, op2)?;
+                            resolve_op(&mut terms, op2);
                         }
                         // And if the next token is a dot, do that first
                         if let Ok(Tok::Dot) = self.peek("_") {
@@ -870,7 +921,7 @@ impl<'i> Parser<'i> {
 
         // Resolve all remaining operators
         while let Some(op2) = ops.pop() {
-            resolve_op(&mut terms, op2)?;
+            resolve_op(&mut terms, op2);
         }
 
         assert_eq!(terms.len(), 1);
@@ -965,6 +1016,7 @@ impl<'i> Parser<'i> {
     /// ```text
     /// if cond then 1 else (2 + 3)
     /// ```
+    // TODO is that actually what we want? It conflicts with the thing where binops group preceding lines
     fn atom(&mut self) -> PResult<Pre> {
         match self.peek("expression")? {
             Tok::POpen => {
@@ -1039,9 +1091,13 @@ impl<'i> Parser<'i> {
 
                 Ok(Spanned::new(Pre_::If(cond, yes, no), Span(start, end)))
             }
-            Tok::Case => {
+            Tok::Case | Tok::Catch => {
                 let start = self.span().0;
-                self.next();
+                let is_catch = match self.next().unwrap() {
+                    Tok::Case => false,
+                    Tok::Catch => true,
+                    _ => unreachable!(),
+                };
                 self.newline();
 
                 let scrutinee = self.term()?;
@@ -1059,7 +1115,7 @@ impl<'i> Parser<'i> {
                         return self.unexpected(next_tok, "newline before next case branch");
                     }
 
-                    let pat = self.binop(Vec::new())?;
+                    let pat = self.pat()?;
                     self.expect(Tok::WideArrow)?;
                     let body = self.term()?;
 
@@ -1071,9 +1127,28 @@ impl<'i> Parser<'i> {
                 let end = self.span().1;
                 self.expect(Tok::End)?;
 
-                Ok(Spanned::new(Pre_::Case(scrutinee, v), Span(start, end)))
+                Ok(Spanned::new(
+                    Pre_::Case(is_catch, scrutinee, v),
+                    Span(start, end),
+                ))
             }
             t => self.unexpected(t, "expression"),
+        }
+    }
+
+    fn pat(&mut self) -> PResult<Pre> {
+        match self.peek("pattern")? {
+            Tok::Eff => {
+                let start = self.span().0;
+                self.next();
+                let p = self.atom()?;
+                let k = self.atom()?;
+
+                let end = k.span().1;
+                let span = Span(start, end);
+                Ok(Spanned::new(Pre_::EffPat(p, k), span))
+            }
+            _ => self.binop(Vec::new()),
         }
     }
 
@@ -1230,6 +1305,7 @@ impl<'i> Tok<'i> {
                 | Tok::Of
                 | Tok::Newline
                 | Tok::End
+                | Tok::With
         )
     }
 
@@ -1276,7 +1352,7 @@ impl<'i> Tok<'i> {
             Tok::Exp => Prec::Exp,
             Tok::Bar | Tok::Xor | Tok::LShift | Tok::RShift | Tok::BitAnd => Prec::Bitwise,
             Tok::Gt | Tok::GtE | Tok::Lt | Tok::LtE | Tok::Eq | Tok::NEq => Prec::Comp,
-            Tok::Comma => todo!(","),
+            Tok::Comma => return None,
             Tok::LPipe | Tok::RPipe => Prec::Pipe,
             _ => return None,
         })

@@ -23,8 +23,8 @@ pub enum LexError {
     Other(String),
 }
 
-impl ToError for Spanned<LexError> {
-    fn to_error(self, file: FileId) -> Error {
+impl IntoError for Spanned<LexError> {
+    fn into_error(self, file: FileId) -> Error {
         let s = format!("{}", *self);
         Error::new(file, format!("Parse error: {}", s), self.span(), s)
     }
@@ -113,10 +113,7 @@ impl<'i> Tok<'i> {
     /// Returns true if we should completely ignore newlines before this token.
     /// Currently only true for '=>', '->', '=' and ':'.
     fn is_special_binop(self) -> bool {
-        match self {
-            Tok::Equals | Tok::Colon | Tok::WideArrow | Tok::Arrow => true,
-            _ => false,
-        }
+        matches!(self, Tok::Equals | Tok::Colon | Tok::WideArrow | Tok::Arrow)
     }
 
     pub fn closes_type(self) -> Option<NestType> {

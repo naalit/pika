@@ -10,13 +10,14 @@ use std::sync::RwLock;
 
 pub type FileId = usize;
 
+#[derive(Default, Clone)]
 pub struct Files {
     files: Vec<SimpleFile<String, String>>,
 }
 
 impl Files {
     pub fn new() -> Files {
-        Files { files: Vec::new() }
+        Default::default()
     }
 
     pub fn add(&mut self, name: String, source: String) -> FileId {
@@ -159,8 +160,8 @@ impl PartialEq for Error {
     }
 }
 
-pub trait ToError {
-    fn to_error(self, file: FileId) -> Error;
+pub trait IntoError {
+    fn into_error(self, file: FileId) -> Error;
 }
 
 impl Eq for Error {}

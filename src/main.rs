@@ -31,7 +31,7 @@ extern "C" {
 }
 
 fn main() {
-    if let Some(file_name) = std::env::args().skip(1).next() {
+    if let Some(file_name) = std::env::args().nth(1) {
         let mut file = File::open(file_name.clone()).unwrap();
         let mut buf = String::new();
         file.read_to_string(&mut buf).unwrap();

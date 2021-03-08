@@ -113,17 +113,16 @@ impl Validator for ReplHelper {
         } else {
             let l: Vec<_> = ctx.input().lines().collect();
             let first_line = l.first().unwrap().trim();
-            if first_line.is_empty() && !ctx.input().ends_with('\n') {
-                Ok(ValidationResult::Incomplete)
-            } else if ctx.input().trim().ends_with("do")
+            if first_line.is_empty() && !ctx.input().ends_with('\n')
+                || ctx.input().trim().ends_with("do")
                 || ctx.input().trim().ends_with("of")
                 || ctx.input().trim().ends_with("where")
                 || ctx.input().trim().ends_with("struct")
                 || ctx.input().trim().ends_with("sig")
-                || ctx.input().trim().ends_with("=")
-                || ctx.input().trim().ends_with(":")
+                || ctx.input().trim().ends_with('=')
+                || ctx.input().trim().ends_with(':')
                 || ctx.input().trim().ends_with("=>")
-                || l.last().unwrap().starts_with(" ")
+                || l.last().unwrap().starts_with(' ')
             {
                 Ok(ValidationResult::Incomplete)
             } else {

@@ -285,9 +285,9 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
     let cxt = Cxt::new(file, db);
     let state = CxtState::new(cxt, db);
     match parser.defs() {
-        Ok(v) => Arc::new(intern_block(v, db, state.clone())),
+        Ok(v) => Arc::new(intern_block(v, db, state)),
         Err(e) => {
-            db.report_error(e.to_error(file));
+            db.report_error(e.into_error(file));
             Arc::new(Vec::new())
         }
     }
@@ -300,9 +300,9 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) ->
     for def in v {
         match &*def {
             // Unordered
-            PreDef::Fun(_, _, _, _)
+            PreDef::Fun(_, _, _, _, _)
             | PreDef::Type(_, _, _, _, _)
-            | PreDef::FunDec(_, _, _)
+            | PreDef::FunDec(_, _, _, _)
             | PreDef::ValDec(_, _) => {
                 let name = def.name();
                 let def = Arc::new(def);

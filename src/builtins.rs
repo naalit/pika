@@ -47,13 +47,11 @@ impl Builtin {
             // print : I32 -> () with IO
             Builtin::Print => Val::Fun(
                 Box::new(Val::builtin(Builtin::I32, Val::Type)),
-                Box::new(Val::With(
-                    Box::new(Val::builtin(Builtin::UnitType, Val::Type)),
-                    vec![Val::builtin(
-                        Builtin::IO,
-                        Val::builtin(Builtin::Eff, Val::Type),
-                    )],
-                )),
+                Box::new(Val::builtin(Builtin::UnitType, Val::Type)),
+                vec![Val::builtin(
+                    Builtin::IO,
+                    Val::builtin(Builtin::Eff, Val::Type),
+                )],
             ),
         }
     }

@@ -1,5 +1,19 @@
 # Tests for edge cases in the new handwritten parser
-val pi = [a] (b: a) -> (c: a) -> a
+# This finds an edge case in Durin, actually:
+# TODO make the (c 3) here work, by making pi types more powerful
+val pi = [a] (b: a) (c: I32 -> Type) (c 3) -> a
+val pi2 = (a: Type) ((b: a) -> a) -> a
+
+# This was allowed before, but it's confusing so I'm not going to support it in the new parser for now
+# If allowed, this would parse as `(f: _) -> (f I32 I32) -> I32`
+# val pi3 = (f: Type -> Type -> Type) (f I32) I32 -> I32
+
+val pi4 = (a b c: Type) -> a
+
+val lam = () => ()
+# () is only allowed as the last argument in a lambda right now, otherwise it's ambiguous with application
+# val lam2 = () a b => a + b
+val lam3 = a b () => a + b
 
 # I'm not 100% sure if this should be allowed? It is right now
 val multiline : (a: _) -> a -> a -> a = (x : Type)
@@ -10,3 +24,5 @@ val multiline : (a: _) -> a -> a -> a = (x : Type)
 # val not_multiline = x
 #     y => y
 
+fun test b : I32 = if b then 3 else 4
+    + 2

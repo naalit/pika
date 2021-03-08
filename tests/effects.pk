@@ -11,25 +11,25 @@ fun greet (b: Bool) : () with Console = do
   Console.Print name
 end
 
-fun other () = greet True
+fun other () with Console = greet True
 
 fun maybe_raise (b: Bool) : () with Console = if b then Console.Print 3 else ()
 
-fun catch_eff (b: Bool) : () = do
-  val x : () with Console = maybe_raise b?
-end
+# fun catch_eff (b: Bool) : () = do
+#   val x : () with Console = maybe_raise b?
+# end
 
-fun something (f: (_:()) -> () with Console) = f ()
-fun something2 () = do
+fun something (f: () -> () with Console) with Console = f ()
+fun something2 () with Console = do
   something other
 end
 
 fun main () : () = do
-  fun handle (x : () with Console) : () = case x of
+  fun handle (f : () -> () with Console) : () = catch f () of
     () => ()
-    eff (Console.Print _) k => handle (k ()?)
-    eff (Console.Read ()) k => handle (k 12?)
+    eff (Console.Print _) k => handle k
+    eff (Console.Read ()) k => handle (() => k 12)
   end
 
-  handle (greet True?)
+  handle (() => greet True)
 end
