@@ -1281,14 +1281,17 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             // let d = Doc::keyword("val")
             //     .space()
             //     .add(predef.name().map_or("_".to_string(), |x| x.get(db)))
-            //     .space()
+            //     .line()
             //     .add(":")
             //     .space()
             //     .chain(ty.pretty(db, &mcxt))
-            //     .space()
+            //     .group()
+            //     .line()
             //     .add("=")
             //     .space()
-            //     .chain(term.pretty(db, &mut Names::new(cxt, db)));
+            //     .chain(term.pretty(db, &mut Names::new(cxt, db)))
+            //     .indent()
+            //     .group();
             // println!("{}\n", d.ansi_string());
 
             let effects = if mcxt.eff_stack.scopes.last().map_or(false, |x| x.0) {

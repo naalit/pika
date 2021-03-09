@@ -400,10 +400,14 @@ impl Pat {
                     .get(db),
             )
             .chain(Doc::intersperse(
-                p.iter()
-                    .map(|x| Doc::none().space().chain(x.pretty(db, names))),
+                p.iter().map(|x| {
+                    Doc::none()
+                        .space()
+                        .chain(x.pretty(db, names).nest(Prec::Atom))
+                }),
                 Doc::none(),
-            )),
+            ))
+            .prec(Prec::App),
             Pat::Or(x, y) => x
                 .pretty(db, names)
                 .space()
@@ -419,9 +423,10 @@ impl Pat {
                 names.add(names.hole_name());
                 Doc::keyword("eff")
                     .space()
-                    .chain(p.pretty(db, names))
+                    .chain(p.pretty(db, names).nest(Prec::Atom))
                     .space()
-                    .chain(k.pretty(db, names))
+                    .chain(k.pretty(db, names).nest(Prec::Atom))
+                    .prec(Prec::App)
             }
             Pat::EffRet(x) => x.pretty(db, names),
         }

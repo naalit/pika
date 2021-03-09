@@ -556,10 +556,12 @@ impl Term {
                 {
                     names.add(n);
                     let r = match i {
-                        Icit::Impl => Doc::start("\\[").add(n.get(db)).add("]"),
-                        Icit::Expl => Doc::start("\\").add(n.get(db)),
+                        Icit::Impl => Doc::start("[").add(n.get(db)).add("]"),
+                        Icit::Expl => Doc::start(n.get(db)),
                     }
-                    .add(". ")
+                    .space()
+                    .add("=>")
+                    .space()
                     .chain(t.pretty(db, names))
                     .prec(Prec::Term);
                     names.remove();
@@ -582,29 +584,33 @@ impl Term {
                 };
                 names.add(n);
                 let r = r
-                    .space()
+                    .group()
+                    .line()
                     .add("->")
                     .space()
-                    .chain(to.pretty(db, names))
-                    .prec(Prec::Term);
+                    .chain(to.pretty(db, names));
                 names.remove();
                 let r = if effs.is_empty() {
                     r
                 } else {
-                    r.space()
-                        .chain(Doc::keyword("with"))
-                        .space()
-                        .chain(Doc::intersperse(
-                            effs.iter().map(|e| e.pretty(db, names)),
-                            Doc::start(",").space(),
-                        ))
+                    r.chain(
+                        Doc::none()
+                            .line()
+                            .chain(Doc::keyword("with"))
+                            .space()
+                            .chain(Doc::intersperse(
+                                effs.iter().map(|e| e.pretty(db, names)),
+                                Doc::start(",").space(),
+                            ))
+                            .indent(),
+                    )
                 };
-                r
+                r.prec(Prec::Term)
             }
             Term::Fun(from, to, effs) => from
                 .pretty(db, names)
                 .nest(Prec::App)
-                .space()
+                .line()
                 .add("->")
                 .space()
                 .chain(to.pretty(db, names))
@@ -621,6 +627,17 @@ impl Term {
                         ))
                 })
                 .prec(Prec::Term),
+            // Show binops nicely
+            Term::App(i, f, _fty, x)
+                if *i == Icit::Expl
+                    && matches!(&**f, Term::Var(Var::Builtin(Builtin::BinOp(_)), _)) =>
+            {
+                x.pretty(db, names)
+                    .nest(Prec::App)
+                    .line()
+                    .chain(f.pretty(db, names))
+                    .prec(Prec::App)
+            }
             Term::App(i, f, _fty, x) => f
                 .pretty(db, names)
                 .nest(Prec::App)
@@ -647,7 +664,7 @@ impl Term {
                                 .space()
                                 .chain(body.pretty(db, &mut names))
                         }),
-                        Doc::none().line(),
+                        Doc::none().hardline(),
                     ))
                     .indent()
                     .line()
@@ -679,7 +696,6 @@ impl Term {
                                 Doc::keyword("val")
                                     .space()
                                     .add(n.get(db))
-                                    .space()
                                     .space()
                                     .add("=")
                                     .space()

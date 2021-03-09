@@ -1,51 +1,43 @@
 # This is a more realistic test using coroutines
-# It involves changing the effect continuation each time, and should print out 1-6
+# It involves changing the effect continuation each time, and should print out 0-6
 eff Yield a of
     Y a : ()
 end
 
 fun generator () with Yield I32 = do
-    # TODO we shouldn't need `the` here
+    # TODO we shouldn't need the explicit [I32] here
     Yield.Y [I32] 1
     Yield.Y [I32] 3
     Yield.Y [I32] 5
 end
 
 type Coroutine a of
-    Active a (() -> () with Yield a)
-    Done
+    Go (() -> () with Yield a)
+    Stop
 where
-    fun map_val [a] (f : a -> () with IO) (x : Coroutine a) with IO = case x of
-        Active x _ => f x
-        Done => ()
-    end
-
-    fun step [a] (x : Coroutine a): Coroutine a = case x of
-        Active x k => catch k () of
-            () => Done
-            eff (Yield.Y x) k => Active x k
+    ## Steps the coroutine, and if it yields a value, calls `run` on it. Otherwise it's done, and this function does nothing.
+    ## Returns the new coroutine.
+    fun step [a] (run : a -> () with IO) (x : Coroutine a) : Coroutine a with IO = case x of
+        Go k => catch k () of
+            () => Stop
+            eff (Yield.Y x) k => do
+                run x
+                Go k
+            end
         end
-        Done => Done
-    end
-
-    fun start [a] (f : () -> () with Yield a): Coroutine a = catch f () of
-        () => Done
-        eff (Yield.Y x) k => Active x k
+        Stop => Stop
     end
 end
 
 fun main () with IO = do
-    val k = Coroutine.start generator
+    val k = Coroutine.Go generator
     print 0
-    Coroutine.map_val print k
-    val k = Coroutine.step k
+    val k = Coroutine.step print k
     print 2
-    Coroutine.map_val print k
-    val k = Coroutine.step k
+    val k = Coroutine.step print k
     print 4
-    Coroutine.map_val print k
-    val k = Coroutine.step k
+    val k = Coroutine.step print k
     print 6
     # This shouldn't print anything, because the coroutine is done
-    Coroutine.map_val print k
+    Coroutine.step print k
 end
