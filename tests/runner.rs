@@ -152,6 +152,16 @@ fn test_coroutines() {
 }
 
 #[test]
+fn test_poly_effects() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/poly_effects.pk"])
+        .assert()
+        .stdout("1\n2\n3\n4\n")
+        .success();
+}
+
+#[test]
 fn test_new_parsing() {
     Command::cargo_bin("pika")
         .unwrap()

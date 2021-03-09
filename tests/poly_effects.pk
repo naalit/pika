@@ -1,0 +1,57 @@
+# This makes sure explicit effect polymorphism works
+eff Console of
+    Print I32 : ()
+end
+
+fun poly [E] (f : I32 -> () with E) with E = do
+    f 3
+    f 4
+end
+
+fun handle (f : () -> () with Console) : () with IO = catch f () of
+    () => ()
+    eff (Console.Print i) k => do
+        print i
+        handle k
+    end
+end
+
+eff Yield a of
+    Y a : ()
+end
+
+type Coroutine a of
+    Go (() -> () with Yield a)
+    Stop
+where
+    ## Steps the coroutine, and if it yields a value, calls `run` on it. Otherwise it's done, and this function does nothing.
+    ## Returns the new coroutine.
+    fun step [a] (run : a -> () with IO) (x : Coroutine a) : Coroutine a with IO = case x of
+        Go k => catch k () of
+            () => Stop
+            eff (Yield.Y x) k => do
+                run x
+                Go k
+            end
+        end
+        Stop => Stop
+    end
+end
+
+# Expected output:
+# 1
+# 2
+# 3
+# 4
+fun main () with IO = do
+    # TODO require less annotations
+    # TODO don't require parentheses around (Yield.Y)
+
+    # First instantiate it with Console, and print it out
+    handle (() => poly [Console] (i => Console.Print (i - 2)))
+    # Then make it a coroutine, and print out the resultls again
+    val k = Coroutine.Go [I32] (() => poly (Yield.Y))
+    val k = Coroutine.step print k
+    val k = Coroutine.step print k
+    val k = Coroutine.step print k
+end
