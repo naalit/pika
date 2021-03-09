@@ -1171,7 +1171,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     },
                 );
 
-                let full_ty = full_ty.evaluate(&Env::new(start_size), &mcxt, db);
+                let full_ty = full_ty.evaluate(&Env::new(cxt_before.size), &mcxt, db);
                 // .inline_metas(&mcxt, db);
 
                 scope.push((cname.clone(), full_ty));
@@ -1274,7 +1274,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
     //     .push(RecSolution::Defined(predef_id, 0, predef.span(), ty.clone()));
     let ret = match mcxt.check_locals(db) {
         Ok(()) => {
-            let term = term.inline_metas(&mcxt, mcxt.size, db);
+            let term = term.inline_metas(&mcxt, cxt.size(db), db);
             let ty = ty.inline_metas(&mcxt, db);
 
             // Print out the type and value of each definition
@@ -1288,7 +1288,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             //     .space()
             //     .add("=")
             //     .space()
-            //     .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)));
+            //     .chain(term.pretty(db, &mut Names::new(cxt, db)));
             // println!("{}\n", d.ansi_string());
 
             let effects = if mcxt.eff_stack.scopes.last().map_or(false, |x| x.0) {

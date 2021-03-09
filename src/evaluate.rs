@@ -124,11 +124,9 @@ impl Term {
                 Term::Lam(name, icit, ty, body)
             }
             Term::Pi(name, icit, mut ty, mut body, effs) => {
+                let vty = ty.clone().evaluate(env, mcxt, db);
                 *ty = ty.eval_quote(env, l, mcxt, db);
-                env.push(Some(Val::local(
-                    l.inc(),
-                    ty.clone().evaluate(env, mcxt, db),
-                )));
+                env.push(Some(Val::local(l.inc(), vty)));
                 *body = body.eval_quote(env, l.inc(), mcxt, db);
                 env.pop();
                 let effs = effs
@@ -361,9 +359,10 @@ impl Val {
                     .inline_args(sp.len(), enclosing, db, mcxt)
                     .quote(enclosing, mcxt, db);
                 let h = match h {
-                    Var::Local(l) => {
-                        Term::Var(Var::Local(l.to_ix(enclosing)), Box::new(hty.clone()))
-                    }
+                    Var::Local(l) => match g.resolve_meta(h, &sp, mcxt, db) {
+                        Some(v) => return v.quote(enclosing, mcxt, db),
+                        None => Term::Var(Var::Local(l.to_ix(enclosing)), Box::new(hty.clone())),
+                    },
                     Var::Top(def) => Term::Var(Var::Top(def), Box::new(hty.clone())),
                     Var::Meta(meta) => match g.resolve_meta(h, &sp, mcxt, db) {
                         Some(v) => return v.quote(enclosing, mcxt, db),

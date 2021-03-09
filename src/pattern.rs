@@ -686,10 +686,6 @@ pub fn elab_pat(
 ) -> Result<Pat, TypeError> {
     match &**pre {
         Pre_::EffPat(p, k) => {
-            if effs.len() > 1 {
-                todo!("What if there's more than one effect?");
-            }
-
             if effs.is_empty() {
                 Err(TypeError::InvalidPatternBecause(Box::new(
                     TypeError::EffPatternType(vspan, pre.span(), ty.clone(), Vec::new()),
@@ -710,11 +706,13 @@ pub fn elab_pat(
                     mcxt,
                     db,
                 )?;
-                Ok(Pat::Eff(
-                    Box::new(effs[0].clone()),
-                    Box::new(p),
-                    Box::new(k),
-                ))
+                let eff = match &p {
+                    Pat::Cons(_, ty, _) => (**ty).clone(),
+                    // We want e.g. `_` to work if there's only one effect
+                    _ if effs.len() == 1 => effs[0].clone(),
+                    _ => panic!("Could not disambiguate which effect is matched by `eff` pattern; try using a constructor pattern"),
+                };
+                Ok(Pat::Eff(Box::new(eff), Box::new(p), Box::new(k)))
             }
         }
         Pre_::Lit(l) => match ty {
@@ -983,12 +981,6 @@ fn elab_pat_app(
                                 ) {
                                     found = true;
                                     break;
-                                } else {
-                                    println!(
-                                        "Couldn't match '{}' and '{}'",
-                                        ty.pretty(db, mcxt).ansi_string(),
-                                        e.pretty(db, mcxt).ansi_string()
-                                    );
                                 }
                             }
                             if !found {

@@ -132,6 +132,26 @@ fn test_effects_run() {
 }
 
 #[test]
+fn test_multi_eff() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/multi_eff.pk"])
+        .assert()
+        .stdout("0\n1\n2\n3\n5\n")
+        .success();
+}
+
+#[test]
+fn test_coroutines() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/coroutines.pk"])
+        .assert()
+        .stdout("0\n1\n2\n3\n4\n5\n6\n")
+        .success();
+}
+
+#[test]
 fn test_new_parsing() {
     Command::cargo_bin("pika")
         .unwrap()

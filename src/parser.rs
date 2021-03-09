@@ -628,7 +628,7 @@ impl<'i> Parser<'i> {
         let (icit, closing) = match tok {
             Tok::POpen => (Icit::Expl, Tok::PClose),
             Tok::SOpen => (Icit::Impl, Tok::SClose),
-            _ => panic!("Called arg_gruop() on token {}", tok),
+            _ => panic!("Called arg_group() on token {}", tok),
         };
 
         match self.peek("_") {
@@ -753,12 +753,12 @@ impl<'i> Parser<'i> {
                         }
                     }
                     ArgMode::Cons => {
-                        let atom = self.atom()?;
+                        let term = self.term()?;
                         self.expect(closing)?;
                         args.push((
-                            atom.copy_span(self.db.intern_name("_".to_string())),
+                            term.copy_span(self.db.intern_name("_".to_string())),
                             Icit::Expl,
-                            Some(atom),
+                            Some(term),
                         ));
                     }
                     ArgMode::Pi | ArgMode::PiOrLambda => {

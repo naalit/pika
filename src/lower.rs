@@ -329,7 +329,12 @@ impl<'db> LCxt<'db> {
         // let mut old_cont_inners = Vec::new();
         let mut ktys = Vec::new();
         let mut etys = Vec::new();
-        for eff in effs {
+        let mut offset_start = 100000;
+        for (i, eff) in effs.iter().enumerate() {
+            if matches!(eff, Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
+                offset_start = i;
+                continue;
+            }
             let leff = eff
                 .clone()
                 .lower(Val::builtin(Builtin::Eff, Val::Type), self);
@@ -417,6 +422,8 @@ impl<'db> LCxt<'db> {
 
         // Now define the actual effect continuations, which inject to `eff_sum_ty` and pass it to `eff_cont`
         for (i, (&old_ptr, eff)) in old_conts.iter().zip(etys).enumerate() {
+            let i = if i >= offset_start { i + 1 } else { i };
+
             let afun_ty = self.builder.fun_type_raw(&[any_ty] as &_);
             let args = self
                 .builder
@@ -712,12 +719,17 @@ fn lower_datatype(
 
                                 // [a] -> (_:a) -> Option a
                                 let val = if let Some(x) = &solutions[i] {
-                                    keep.push(false);
+                                    // TODO: don't add the parameter to the sigma, but keep it around in some form for pattern matching
+                                    // Right now, we have to add it even if it's solved, since code can pattern match on it
+
+                                    // keep.push(false);
+                                    keep.push(true);
                                     // Add the solution to the environment
                                     env.push(Some(x.clone()));
                                     // If we solved it, skip adding it to the sigma
                                     // This shouldn't be used at all
-                                    cxt.builder.cons(ir::Constant::Unreachable)
+                                    // cxt.builder.cons(ir::Constant::Unreachable)
+                                    sigma.add(from.clone().lower(Val::Type, cxt), &mut cxt.builder)
                                 } else {
                                     // It doesn't have a solution, so it remains in the product type
                                     keep.push(true);
@@ -1195,6 +1207,8 @@ impl Term {
 
                 let to = to.lower(Val::Type, cxt);
 
+                cxt.pop_local();
+
                 for eff in effs {
                     if matches!(eff, Term::Var(Var::Builtin(Builtin::IO), _)) {
                         continue;
@@ -1206,7 +1220,6 @@ impl Term {
                     pi.add_arg(cxt.eff_cont_ty(leff, &name), &mut cxt.builder);
                 }
 
-                cxt.pop_local();
                 cxt.builder.end_pi(pi, to)
             }
             Term::Error => panic!("type errors should have been caught by now!"),
@@ -1269,7 +1282,11 @@ fn lower_case(
                     branches_pure.push((pat, body));
                 }
                 Pat::Eff(eff, p, k) => {
-                    let i = cxt.mcxt.eff_stack.find_eff(eff, cxt.db, &mut tcxt).unwrap();
+                    let i = cxt
+                        .mcxt
+                        .eff_stack
+                        .find_eff(eff, cxt.db, &mut tcxt)
+                        .unwrap_or_else(|| panic!("Couldn't find effect {:?}", eff));
                     branches_eff[i].push((p, k, body));
                 }
                 pat => unreachable!("{:?}", pat),
@@ -1462,7 +1479,7 @@ impl Pat {
                 let cont = args
                     .iter()
                     .enumerate()
-                    .fold(cont.clone(), |cont, (i, pat)| {
+                    .rfold(cont.clone(), |cont, (i, pat)| {
                         let x = cxt.builder.project(product, i);
                         PatCont::Pat {
                             x,
