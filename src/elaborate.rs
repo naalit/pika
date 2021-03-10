@@ -59,19 +59,25 @@ impl Term {
                 names.remove();
                 Ok(Term::Lam(n, i, ty, t))
             }
-            Term::Pi(n, i, mut a, mut b) => {
+            Term::Pi(n, i, mut a, mut b, effs) => {
                 *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
                 // Allow the body to use the bound variable
                 ren.insert(lfrom.inc(), lto.inc());
                 names.add(n);
-                *b = b.check_solution(meta, ren, lfrom.inc(), lto.inc(), names)?;
+                *b = b.check_solution(meta.clone(), ren, lfrom.inc(), lto.inc(), names)?;
                 names.remove();
-                Ok(Term::Pi(n, i, a, b))
+                effs.into_iter()
+                    .map(|x| x.check_solution(meta.clone(), ren, lfrom, lto, names))
+                    .collect::<Result<_, _>>()
+                    .map(|v| Term::Pi(n, i, a, b, v))
             }
-            Term::Fun(mut a, mut b) => {
+            Term::Fun(mut a, mut b, effs) => {
                 *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
-                *b = b.check_solution(meta, ren, lfrom, lto, names)?;
-                Ok(Term::Fun(a, b))
+                *b = b.check_solution(meta.clone(), ren, lfrom, lto, names)?;
+                effs.into_iter()
+                    .map(|x| x.check_solution(meta.clone(), ren, lfrom, lto, names))
+                    .collect::<Result<_, _>>()
+                    .map(|v| Term::Fun(a, b, v))
             }
             Term::App(i, mut a, mut fty, mut b) => {
                 *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
@@ -82,7 +88,7 @@ impl Term {
             Term::Error => Ok(Term::Error),
             Term::Type => Ok(Term::Type),
             Term::Lit(x, t) => Ok(Term::Lit(x, t)),
-            Term::Case(mut x, mut ty, cases) => {
+            Term::Case(mut x, mut ty, cases, effs) => {
                 let cases = cases
                     .into_iter()
                     .map(|(pat, body)| {
@@ -102,8 +108,11 @@ impl Term {
                     })
                     .collect::<Result<_, _>>()?;
                 *x = x.check_solution(meta.clone(), ren, lfrom, lto, names)?;
-                *ty = ty.check_solution(meta, ren, lfrom, lto, names)?;
-                Ok(Term::Case(x, ty, cases))
+                *ty = ty.check_solution(meta.clone(), ren, lfrom, lto, names)?;
+                effs.into_iter()
+                    .map(|x| x.check_solution(meta.clone(), ren, lfrom, lto, names))
+                    .collect::<Result<_, _>>()
+                    .map(|v| Term::Case(x, ty, cases, v))
             }
             Term::If(mut cond, mut yes, mut no) => {
                 *cond = cond.check_solution(meta.clone(), ren, lfrom, lto, names)?;
@@ -131,12 +140,111 @@ pub struct CxtState {
     pub cxt: Cxt,
     pub size: Lvl,
     pub local_constraints: HashMap<Lvl, Val>,
+    pub eff_stack: EffStack,
+}
+/// Implemented manually only because HashMap doesn't implement Hash.
+/// It should be the same as a hypothetical derived implementation.
+#[allow(clippy::derive_hash_xor_eq)]
+impl std::hash::Hash for CxtState {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.cxt.hash(state);
+        self.size.hash(state);
+        for (k, v) in &self.local_constraints {
+            k.hash(state);
+            v.hash(state);
+        }
+        self.eff_stack.hash(state);
+    }
+}
+impl CxtState {
+    pub fn new(cxt: Cxt, db: &dyn Compiler) -> Self {
+        CxtState {
+            cxt,
+            size: cxt.size(db),
+            local_constraints: Default::default(),
+            eff_stack: Default::default(),
+        }
+    }
+
+    /// Adds a definition to the context, and handles increasing the cached size.
+    pub fn define(&mut self, name: Name, info: NameInfo, db: &dyn Compiler) {
+        if let NameInfo::Local(_) = &info {
+            self.size = self.size.inc();
+        }
+        self.cxt = self.cxt.define(name, info, db);
+        debug_assert_eq!(self.size, self.cxt.size(db));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MCxtType {
     Local(DefId),
     Global(PreDefId),
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Eq, Hash)]
+pub struct EffStack {
+    effs: Vec<Val>,
+    scopes: Vec<(bool, usize, Span)>,
+}
+impl EffStack {
+    pub fn is_empty(&self) -> bool {
+        self.effs.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.effs.len()
+    }
+    pub fn push_eff(&mut self, eff: Val) {
+        self.effs.push(eff);
+    }
+    pub fn pop_eff(&mut self) -> Option<Val> {
+        self.effs.pop()
+    }
+    /// `open` is whether this scope is open to new effects - i.e., we're inferring the type instead of checking it
+    pub fn push_scope(&mut self, open: bool, span: Span) {
+        self.scopes.push((open, self.effs.len(), span))
+    }
+    pub fn pop_scope(&mut self) -> Vec<Val> {
+        if let Some((_, len, _)) = self.scopes.pop() {
+            self.effs.split_off(len)
+        } else {
+            panic!("pop_scope() without push_scope()")
+        }
+    }
+    pub fn find_eff(&self, eff: &Val, db: &dyn Compiler, mcxt: &mut MCxt) -> Option<usize> {
+        let mut mcxt = mcxt.clone();
+        let start = self.scopes.last().map_or(0, |(_, l, _)| *l);
+        for (i, e) in self.effs[start..].iter().enumerate() {
+            if unify(
+                eff.clone(),
+                e.clone(),
+                mcxt.size,
+                Span::empty(),
+                db,
+                &mut mcxt,
+            )
+            .unwrap_or(false)
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    pub fn scope_start(&self) -> Option<usize> {
+        self.scopes.last().map(|(_, len, _)| *len)
+    }
+
+    fn try_eff(&mut self, eff: Val, db: &dyn Compiler, mcxt: &mut MCxt) -> bool {
+        if self.find_eff(&eff, db, mcxt).is_some() {
+            return true;
+        }
+        if self.scopes.last().map_or(false, |(open, _, _)| *open) {
+            self.push_eff(eff);
+            return true;
+        }
+        false
+    }
 }
 
 /// The context used for typechecking a term.
@@ -146,6 +254,7 @@ pub enum MCxtType {
 pub struct MCxt {
     pub cxt: Cxt,
     pub size: Lvl,
+    pub eff_stack: EffStack,
     ty: MCxtType,
     local_metas: Vec<MetaEntry>,
     local_constraints: HashMap<Lvl, Val>,
@@ -158,6 +267,7 @@ impl MCxt {
             cxt: self.cxt,
             size: self.size,
             local_constraints: self.local_constraints.clone(),
+            eff_stack: self.eff_stack.clone(),
         }
     }
     pub fn set_state(&mut self, state: CxtState) {
@@ -165,19 +275,41 @@ impl MCxt {
             cxt,
             size,
             local_constraints,
+            eff_stack,
         } = state;
         self.cxt = cxt;
         self.size = size;
         self.local_constraints = local_constraints;
+        self.eff_stack = eff_stack;
     }
 
     pub fn new(cxt: Cxt, ty: MCxtType, db: &dyn Compiler) -> Self {
         MCxt {
             cxt,
             size: cxt.size(db),
+            eff_stack: Default::default(),
             ty,
             local_metas: Vec::new(),
             local_constraints: HashMap::new(),
+            solved_globals: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    pub fn from_state(state: CxtState, ty: MCxtType) -> Self {
+        let CxtState {
+            cxt,
+            size,
+            local_constraints,
+            eff_stack,
+        } = state;
+        MCxt {
+            cxt,
+            size,
+            eff_stack,
+            ty,
+            local_metas: Vec::new(),
+            local_constraints,
             solved_globals: Vec::new(),
             children: Vec::new(),
         }
@@ -243,6 +375,24 @@ impl MCxt {
     /// Looks up a name in the context.
     pub fn lookup(&self, name: Name, db: &dyn Compiler) -> Result<(Var<Ix>, VTy), DefError> {
         self.cxt.lookup(name, db)
+    }
+
+    pub fn last_local(&self, db: &dyn Compiler) -> Option<(Var<Lvl>, VTy)> {
+        let mut cxt = self.cxt;
+        loop {
+            match db.lookup_cxt_entry(cxt) {
+                MaybeEntry::Yes(CxtEntry { rest, info, .. }) => {
+                    cxt = rest;
+                    match info {
+                        NameInfo::Local(ty) => {
+                            break Some((Var::Local(self.size), ty));
+                        }
+                        _ => continue,
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     /// Adds a definition to the context, and handles increasing the cached size.
@@ -457,17 +607,22 @@ impl Meta {
     fn pretty(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
         match self {
             Meta::Global(id, _) => match &**db.lookup_intern_predef(id) {
-                PreDef::Fun(n, _, _, _) => Doc::start("type of function '").add(n.get(db)).add("'"),
+                PreDef::Fun(n, _, _, _, _) => {
+                    Doc::start("type of function '").add(n.get(db)).add("'")
+                }
                 PreDef::Val(n, _, _) => Doc::start("type of definition '").add(n.get(db)).add("'"),
-                PreDef::Type(n, _, _, _) => {
+                PreDef::Type(n, false, _, _, _) => {
                     Doc::start("type of data type '").add(n.get(db)).add("'")
+                }
+                PreDef::Type(n, true, _, _, _) => {
+                    Doc::start("type of effect type '").add(n.get(db)).add("'")
                 }
                 PreDef::Impl(Some(n), _, _) => {
                     Doc::start("type of implicit '").add(n.get(db)).add("'")
                 }
                 PreDef::Impl(None, _, _) => Doc::start("type of implicit"),
                 PreDef::Expr(_) => Doc::start("type of expression"),
-                PreDef::FunDec(n, _, _) => Doc::start("type of function declaration '")
+                PreDef::FunDec(n, _, _, _) => Doc::start("type of function declaration '")
                     .add(n.get(db))
                     .add("'"),
                 PreDef::ValDec(n, _) => Doc::start("type of declaration '").add(n.get(db)).add("'"),
@@ -493,38 +648,71 @@ impl PreDef {
     pub fn given_type(&self, id: PreDefId, cxt: Cxt, db: &dyn Compiler) -> Option<VTy> {
         let mut mcxt = MCxt::new(cxt, MCxtType::Global(id), db);
         match self {
-            PreDef::Fun(_, args, rty, _) | PreDef::FunDec(_, args, rty) => {
+            PreDef::Fun(_, args, rty, _, effs) | PreDef::FunDec(_, args, rty, effs) => {
                 let mut rargs = Vec::new();
                 elab_args(args, &mut rargs, cxt.file(db), &mut mcxt, db);
-                match check(rty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-                    Ok(rty) => {
+
+                // TODO what to do with inferred effects?
+                let effs: Result<_, _> = effs
+                    .iter()
+                    .flatten()
+                    .map(|x| {
+                        check(
+                            x,
+                            &Val::builtin(Builtin::Eff, Val::Type),
+                            ReasonExpected::UsedInWith,
+                            db,
+                            &mut mcxt,
+                        )
+                        .map(|x| x.evaluate(&mcxt.env(), &mcxt, db))
+                    })
+                    .collect();
+
+                match check(rty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt)
+                    .and_then(|a| effs.map(|b| (a, b)))
+                {
+                    Ok((rty, effs)) => {
                         let rty = rty.evaluate(&mcxt.env(), &mcxt, db);
                         let mut l = mcxt.size;
-                        Some(rargs.into_iter().rfold(rty, |rty, (name, i, xty)| {
-                            let rty = rty.quote(l, &mcxt, db);
-                            l = l.dec();
-                            Val::Pi(
-                                i,
-                                Box::new(Clos {
-                                    name,
-                                    ty: xty,
-                                    env: Env::new(l),
-                                    term: rty,
-                                }),
-                            )
-                        }))
+                        Some(
+                            rargs
+                                .into_iter()
+                                .rfold((rty, effs), |(rty, effs), (name, i, xty)| {
+                                    let rty = rty.quote(l, &mcxt, db);
+                                    l = l.dec();
+                                    (
+                                        Val::Pi(
+                                            i,
+                                            Box::new(Clos {
+                                                name,
+                                                ty: xty,
+                                                env: Env::new(l),
+                                                term: rty,
+                                            }),
+                                            effs,
+                                        ),
+                                        Vec::new(),
+                                    )
+                                })
+                                .0,
+                        )
                     }
                     Err(e) => {
-                        db.report_error(e.to_error(cxt.file(db), db, &mcxt));
+                        db.report_error(e.into_error(cxt.file(db), db, &mcxt));
                         None
                     }
                 }
             }
-            PreDef::Type(_, args, _, _) => {
+            PreDef::Type(_, eff, args, _, _) => {
                 let mut rargs = Vec::new();
                 elab_args(args, &mut rargs, cxt.file(db), &mut mcxt, db);
                 let mut l = mcxt.size;
-                Some(rargs.into_iter().rfold(Val::Type, |rty, (name, i, xty)| {
+                let ty_rty = if *eff {
+                    Val::builtin(Builtin::Eff, Val::Type)
+                } else {
+                    Val::Type
+                };
+                Some(rargs.into_iter().rfold(ty_rty, |rty, (name, i, xty)| {
                     let rty = rty.quote(l, &mcxt, db);
                     l = l.dec();
                     Val::Pi(
@@ -535,6 +723,7 @@ impl PreDef {
                             env: Env::new(l),
                             term: rty,
                         }),
+                        Vec::new(),
                     )
                 }))
             }
@@ -552,7 +741,7 @@ impl PreDef {
                 match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                     Ok(ty) => Some(ty.evaluate(&mcxt.env(), &mcxt, db)),
                     Err(e) => {
-                        db.report_error(e.to_error(cxt.file(db), db, &mcxt));
+                        db.report_error(e.into_error(cxt.file(db), db, &mcxt));
                         None
                     }
                 }
@@ -565,10 +754,11 @@ impl PreDef {
 pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError> {
     let start_time = Instant::now();
 
-    let (predef_id, cxt) = db.lookup_intern_def(def);
+    let (predef_id, state) = db.lookup_intern_def(def);
     let predef = db.lookup_intern_predef(predef_id);
+    let cxt = state.cxt;
     let file = cxt.file(db);
-    let mut mcxt = MCxt::new(cxt, MCxtType::Local(def), db);
+    let mut mcxt = MCxt::from_state(state, MCxtType::Local(def));
     let (term, ty): (Term, VTy) = match &**predef {
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
             let tyspan = ty.span();
@@ -578,25 +768,25 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     match check(val, &ty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
                         Ok(val) => Ok((val, ty)),
                         Err(e) => {
-                            db.report_error(e.to_error(file, db, &mcxt));
+                            db.report_error(e.into_error(file, db, &mcxt));
                             Err(DefError::ElabError(def))
                         }
                     }
                 }
                 Err(e) => {
-                    db.report_error(e.to_error(file, db, &mcxt));
+                    db.report_error(e.into_error(file, db, &mcxt));
                     // The given type is invalid, but we can still try to infer the type
                     match infer(true, val, db, &mut mcxt) {
                         Ok(x) => Ok(x),
                         Err(e) => {
-                            db.report_error(e.to_error(file, db, &mcxt));
+                            db.report_error(e.into_error(file, db, &mcxt));
                             Err(DefError::ElabError(def))
                         }
                     }
                 }
             }
         }
-        PreDef::Fun(_, args, body_ty, body) => {
+        PreDef::Fun(_, args, body_ty, body, effs) => {
             // First, add the arguments to the environment
             let mut targs = Vec::new();
             elab_args(args, &mut targs, file, &mut mcxt, db);
@@ -612,18 +802,50 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             ) {
                 Ok(x) => x,
                 Err(e) => {
-                    db.report_error(e.to_error(file, db, &mcxt));
+                    db.report_error(e.into_error(file, db, &mcxt));
                     // TODO make a meta? or just call `infer()`?
                     Term::Error
                 }
             };
             let vty = body_ty.evaluate(&mcxt.env(), &mcxt, db);
 
-            // And last, check the function body against the return type
-            let body = match check(body, &vty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
+            let (effs, open) = match effs {
+                Some(effs) => (effs.clone(), false),
+                None => (Vec::new(), true),
+            };
+            let effs = match effs
+                .iter()
+                .map(|x| {
+                    check(
+                        x,
+                        &Val::builtin(Builtin::Eff, Val::Type),
+                        ReasonExpected::UsedInWith,
+                        db,
+                        &mut mcxt,
+                    )
+                    .map(|x| x.evaluate(&mcxt.env(), &mcxt, db))
+                })
+                .collect::<Result<_, _>>()
+            {
                 Ok(x) => x,
                 Err(e) => {
-                    db.report_error(e.to_error(file, db, &mcxt));
+                    db.report_error(e.into_error(file, db, &mcxt));
+                    return Err(DefError::ElabError(def));
+                }
+            };
+            // And last, check the function body against the return type
+            let (body, vty, effs) = match check_fun(
+                body,
+                vty,
+                ReasonExpected::Given(tyspan),
+                effs,
+                open,
+                db,
+                &mut mcxt,
+            ) {
+                Ok(x) => x,
+                Err(e) => {
+                    db.report_error(e.into_error(file, db, &mcxt));
                     return Err(DefError::ElabError(def));
                 }
             };
@@ -649,21 +871,26 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     .0,
                 targs
                     .into_iter()
-                    .rfold((vty, mcxt.size), |(to, size), (name, icit, from)| {
-                        (
-                            Val::Pi(
-                                icit,
-                                Box::new(Clos {
-                                    // Don't include the closure's argument in its environment
-                                    env: Env::new(size.dec()),
-                                    ty: from,
-                                    term: to.quote(size, &mcxt, db),
-                                    name,
-                                }),
-                            ),
-                            size.dec(),
-                        )
-                    })
+                    .rfold(
+                        (vty, mcxt.size, effs),
+                        |(to, size, effs), (name, icit, from)| {
+                            (
+                                Val::Pi(
+                                    icit,
+                                    Box::new(Clos {
+                                        // Don't include the closure's argument in its environment
+                                        env: Env::new(size.dec()),
+                                        ty: from,
+                                        term: to.quote(size, &mcxt, db),
+                                        name,
+                                    }),
+                                    effs,
+                                ),
+                                size.dec(),
+                                Vec::new(),
+                            )
+                        },
+                    )
                     .0,
             ))
         }
@@ -677,7 +904,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 ty.clone(),
             ))
         }
-        PreDef::Type(name, args, cons, assoc) => {
+        PreDef::Type(name, eff, args, cons, assoc) => {
             // A copy of the context before we added the type arguments
             let cxt_before = mcxt.state();
 
@@ -687,18 +914,24 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
             // Create the type of the datatype we're defining (e.g. `Option : Type -> Type`)
             // We have to do this now, so that the constructors can use the type
+            let ty_rty = if *eff {
+                Val::builtin(Builtin::Eff, Val::Type)
+            } else {
+                Val::Type
+            };
             let (ty_ty, _) = targs
                 .iter()
-                .rfold((Val::Type, mcxt.size), |(to, l), (n, i, from)| {
+                .rfold((ty_rty, mcxt.size), |(to, l), (n, i, from)| {
                     (
                         Val::Pi(
                             *i,
                             Box::new(Clos {
                                 env: Env::new(l.dec()),
                                 ty: from.clone(),
-                                term: to.clone().quote(l, &mcxt, db),
+                                term: to.quote(l, &mcxt, db),
                                 name: *n,
                             }),
+                            Vec::new(),
                         ),
                         l.dec(),
                     )
@@ -749,7 +982,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 // If the user provided a type for the constructor, they can't use the type arguments
                 // Either way, we need to reset it somewhat so we can't use arguments from other constructors
                 // But we use the same mcxt, so meta solutions get saved, we just reset the `CxtState`
-                if cty.is_some() {
+                // Also, effect constructors can always use the type arguments
+                if cty.is_some() && !eff {
                     mcxt.set_state(cxt_before.clone());
                 } else {
                     mcxt.set_state(cxt_after.clone());
@@ -765,10 +999,67 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 elab_args(args, &mut cargs, file, &mut mcxt, db);
 
                 // If the user provided a return type for the constructor, typecheck it
-                let cty = if let Some(cty) = cty {
+                let (cty, eff_ty) = if let Some(cty) = cty {
                     match check(cty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+                        Ok(x) if *eff => {
+                            // TODO make this a function or something
+
+                            // predef_id is for the type being declared
+                            // Ty a b of C [a] [b] ... : Ty a b
+                            // so Ix's decrease from left to right, and start at the first implicit argument
+                            // which is right after the state cxt_before stores
+                            // But, this is an effect, so the parent data type isn't inside the innermost pi
+                            // So if there are any pis, decrease the level by one
+                            // TODO what if the last argument is a fun but there was a pi before that?
+                            let l = if start_size != mcxt.size {
+                                mcxt.size.dec()
+                            } else {
+                                mcxt.size
+                            };
+                            let ty_ty = ty_ty.clone().quote(l, &mcxt, db);
+                            let (f, _, _, _) = targs.iter().fold(
+                                (
+                                    Term::Var(Var::Rec(predef_id), Box::new(ty_ty.clone())),
+                                    cxt_before.size.to_ix(l),
+                                    ty_ty.clone(),
+                                    l,
+                                ),
+                                |(f, ix, ty, l), (_n, i, t)| {
+                                    let (rty, xty, l) = match &ty {
+                                        Term::Pi(_, _, xty, x, _) => {
+                                            // It might use the value, so give it that
+                                            let mut env = Env::new(l);
+                                            env.push(Some(Val::local(ix.to_lvl(l), t.clone())));
+                                            (
+                                                (**x)
+                                                    .clone()
+                                                    .evaluate(&env, &mcxt, db)
+                                                    .quote(mcxt.size, &mcxt, db),
+                                                xty.clone(),
+                                                l.inc(),
+                                            )
+                                        }
+                                        Term::Fun(xty, x, _) => ((**x).clone(), xty.clone(), l),
+                                        _ => unreachable!(),
+                                    };
+                                    let ix = ix.dec();
+                                    (
+                                        Term::App(
+                                            *i,
+                                            Box::new(f),
+                                            Box::new(ty),
+                                            Box::new(Term::Var(Var::Local(ix), xty)),
+                                        ),
+                                        ix,
+                                        rty,
+                                        l,
+                                    )
+                                },
+                            );
+                            (x, Some(f))
+                        }
                         Ok(x) => match x.ret().head() {
-                            Term::Var(Var::Rec(id), _) if *id == predef_id => x,
+                            Term::Var(Var::Rec(id), _) if *id == predef_id => (x, None),
                             _ => {
                                 // We want the type to appear in the error message as it was written - e.g. `Result T E`
                                 let mut type_string = db.lookup_intern_name(**name);
@@ -785,82 +1076,102 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                                         .style(Style::Error),
                                 );
                                 db.report_error(e);
-                                Term::Error
+                                (Term::Error, None)
                             }
                         },
                         Err(e) => {
-                            db.report_error(e.to_error(file, db, &mcxt));
+                            db.report_error(e.into_error(file, db, &mcxt));
                             // TODO make a meta? or just call `infer()`?
-                            Term::Error
+                            (Term::Error, None)
                         }
                     }
                 // If they didn't provide a return type, use the type constructor applied to all args
                 } else {
+                    if *eff {
+                        let e = Error::new(
+                            file,
+                            format!(
+                                "Effect constructor '{}' must declare return type",
+                                db.lookup_intern_name(**cname)
+                            ),
+                            cname.span(),
+                            "this requires a return type",
+                        )
+                        .with_note("use the unit type `()` if it returns nothing");
+                        db.report_error(e);
+                        continue;
+                    }
+
                     // predef_id is for the type being declared
                     // Ty a b of C [a] [b] ... : Ty a b
                     // so Ix's decrease from left to right, and start at the first implicit argument
                     // which is right after the state cxt_before stores
                     let ty_ty = ty_ty.clone().quote(mcxt.size, &mcxt, db);
-                    targs
-                        .iter()
-                        .fold(
-                            (
-                                Term::Var(Var::Rec(predef_id), Box::new(ty_ty.clone())),
-                                cxt_before.size.to_ix(mcxt.size),
-                                ty_ty.clone(),
-                                mcxt.size,
-                            ),
-                            |(f, ix, ty, l), (_n, i, t)| {
-                                let (rty, xty, l) = match &ty {
-                                    Term::Pi(_, _, xty, x) => {
-                                        // It might use the value, so give it that
-                                        let mut env = Env::new(l);
-                                        env.push(Some(Val::local(ix.to_lvl(l), t.clone())));
-                                        (
-                                            (**x)
-                                                .clone()
-                                                .evaluate(&env, &mcxt, db)
-                                                .quote(mcxt.size, &mcxt, db),
-                                            xty.clone(),
-                                            l.inc(),
-                                        )
-                                    }
-                                    Term::Fun(xty, x) => ((**x).clone(), xty.clone(), l),
-                                    _ => unreachable!(),
-                                };
-                                let ix = ix.dec();
+                    (
+                        targs
+                            .iter()
+                            .fold(
                                 (
-                                    Term::App(
-                                        *i,
-                                        Box::new(f),
-                                        Box::new(ty),
-                                        Box::new(Term::Var(Var::Local(ix), xty)),
-                                    ),
-                                    ix,
-                                    rty,
-                                    l,
-                                )
-                            },
-                        )
-                        .0
+                                    Term::Var(Var::Rec(predef_id), Box::new(ty_ty.clone())),
+                                    cxt_before.size.to_ix(mcxt.size),
+                                    ty_ty.clone(),
+                                    mcxt.size,
+                                ),
+                                |(f, ix, ty, l), (_n, i, t)| {
+                                    let (rty, xty, l) = match &ty {
+                                        Term::Pi(_, _, xty, x, _) => {
+                                            // It might use the value, so give it that
+                                            let mut env = Env::new(l);
+                                            env.push(Some(Val::local(ix.to_lvl(l), t.clone())));
+                                            (
+                                                (**x)
+                                                    .clone()
+                                                    .evaluate(&env, &mcxt, db)
+                                                    .quote(mcxt.size, &mcxt, db),
+                                                xty.clone(),
+                                                l.inc(),
+                                            )
+                                        }
+                                        Term::Fun(xty, x, _) => ((**x).clone(), xty.clone(), l),
+                                        _ => unreachable!(),
+                                    };
+                                    let ix = ix.dec();
+                                    (
+                                        Term::App(
+                                            *i,
+                                            Box::new(f),
+                                            Box::new(ty),
+                                            Box::new(Term::Var(Var::Local(ix), xty)),
+                                        ),
+                                        ix,
+                                        rty,
+                                        l,
+                                    )
+                                },
+                            )
+                            .0,
+                        None,
+                    )
                 };
 
-                let (full_ty, _) =
-                    cargs
-                        .into_iter()
-                        .rfold((cty, mcxt.size), |(to, l), (n, i, from)| {
-                            (
-                                Term::Pi(
-                                    n,
-                                    i,
-                                    Box::new(from.quote(l.dec(), &mcxt, db)),
-                                    Box::new(to),
-                                ),
-                                l.dec(),
-                            )
-                        });
+                let (full_ty, _, _) = cargs.into_iter().rfold(
+                    (cty, eff_ty, mcxt.size),
+                    |(to, eff, l), (n, i, from)| {
+                        (
+                            Term::Pi(
+                                n,
+                                i,
+                                Box::new(from.quote(l.dec(), &mcxt, db)),
+                                Box::new(to),
+                                eff.into_iter().collect(),
+                            ),
+                            None,
+                            l.dec(),
+                        )
+                    },
+                );
 
-                let full_ty = full_ty.evaluate(&Env::new(start_size), &mcxt, db);
+                let full_ty = full_ty.evaluate(&Env::new(cxt_before.size), &mcxt, db);
                 // .inline_metas(&mcxt, db);
 
                 scope.push((cname.clone(), full_ty));
@@ -882,7 +1193,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     let ty = ty.inline_metas(&mcxt, db);
                     let def_id = db.intern_def(
                         db.intern_predef(Arc::new(PreDef::Cons(cname.clone(), ty).into())),
-                        cxt_before.cxt,
+                        cxt_before.clone(),
                     );
                     (*cname, def_id)
                 })
@@ -903,7 +1214,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 cxt.define(n, NameInfo::Def(v), db)
             });
             scope.extend(
-                intern_block(assoc.clone(), db, assoc_cxt)
+                // The associated namespace can't directly use effects
+                intern_block(assoc.clone(), db, CxtState::new(assoc_cxt, db))
                     .into_iter()
                     .filter_map(|id| {
                         let (pre, _) = db.lookup_intern_def(id);
@@ -933,26 +1245,27 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         }
         PreDef::Expr(e) => match infer(true, e, db, &mut mcxt) {
             Err(e) => {
-                db.report_error(e.to_error(file, db, &mcxt));
+                db.report_error(e.into_error(file, db, &mcxt));
                 Err(DefError::ElabError(def))
             }
             Ok(stuff) => Ok(stuff),
         },
-        PreDef::FunDec(_, from, to) => {
+        PreDef::FunDec(_, _from, _to, _effs) => {
             // TODO: When function declarations are actually used, change this so they're dependent.
-            for (_, _, from) in from {
-                if let Err(e) = check(from, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-                    db.report_error(e.to_error(file, db, &mcxt));
-                }
-            }
-            if let Err(e) = check(to, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-                db.report_error(e.to_error(file, db, &mcxt));
-            }
-            Err(DefError::NoValue)
+            todo!("function declarations")
+            // for (_, _, from) in from {
+            //     if let Err(e) = check(from, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+            //         db.report_error(e.into_error(file, db, &mcxt));
+            //     }
+            // }
+            // if let Err(e) = check(to, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+            //     db.report_error(e.into_error(file, db, &mcxt));
+            // }
+            // Err(DefError::NoValue)
         }
         PreDef::ValDec(_, ty) => {
             if let Err(e) = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-                db.report_error(e.to_error(file, db, &mcxt));
+                db.report_error(e.into_error(file, db, &mcxt));
             }
             Err(DefError::NoValue)
         }
@@ -961,28 +1274,38 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
     //     .push(RecSolution::Defined(predef_id, 0, predef.span(), ty.clone()));
     let ret = match mcxt.check_locals(db) {
         Ok(()) => {
-            let term = term.inline_metas(&mcxt, mcxt.size, db);
+            let term = term.inline_metas(&mcxt, cxt.size(db), db);
             let ty = ty.inline_metas(&mcxt, db);
 
             // Print out the type and value of each definition
             // let d = Doc::keyword("val")
             //     .space()
             //     .add(predef.name().map_or("_".to_string(), |x| x.get(db)))
-            //     .space()
+            //     .line()
             //     .add(":")
             //     .space()
             //     .chain(ty.pretty(db, &mcxt))
-            //     .space()
+            //     .group()
+            //     .line()
             //     .add("=")
             //     .space()
-            //     .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)));
+            //     .chain(term.pretty(db, &mut Names::new(cxt, db)))
+            //     .indent()
+            //     .group();
             // println!("{}\n", d.ansi_string());
+
+            let effects = if mcxt.eff_stack.scopes.last().map_or(false, |x| x.0) {
+                mcxt.eff_stack.pop_scope()
+            } else {
+                Vec::new()
+            };
 
             Ok(ElabInfo {
                 term: Arc::new(term),
                 typ: Arc::new(ty),
                 solved_globals: Arc::new(mcxt.solved_globals),
                 children: Arc::new(mcxt.children),
+                effects: Arc::new(effects),
             })
         }
         Err(()) => {
@@ -997,7 +1320,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             let name = predef
                 .name()
                 .map(|x| db.lookup_intern_name(x))
-                .unwrap_or("<unnamed>".into());
+                .unwrap_or_else(|| "<unnamed>".to_string());
             println!("Elaborate time for {}: {:?}", name, end_time - start_time);
         }
         if predef.attributes.contains(&Attribute::Normalize) {
@@ -1012,7 +1335,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             let name = predef
                 .name()
                 .map(|x| db.lookup_intern_name(x))
-                .unwrap_or("<unnamed>".into());
+                .unwrap_or_else(|| "<unnamed>".to_string());
             println!("Normalize time for {}: {:?}", name, n_end - n_start);
         }
     }
@@ -1033,7 +1356,7 @@ fn elab_args(
         let ty = match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt) {
             Ok(x) => x,
             Err(e) => {
-                db.report_error(e.to_error(file, db, mcxt));
+                db.report_error(e.into_error(file, db, mcxt));
                 Term::Error
             }
         };
@@ -1053,6 +1376,7 @@ pub enum ScopeType {
 #[derive(Clone, PartialEq, Debug)]
 pub enum ReasonExpected {
     UsedAsType,
+    UsedInWith,
     IfCond,
     LogicOp,
     MustMatch(Span),
@@ -1060,12 +1384,25 @@ pub enum ReasonExpected {
     ArgOf(Span, VTy),
 }
 impl ReasonExpected {
+    pub fn span_or(&self, or: Span) -> Span {
+        match self {
+            ReasonExpected::MustMatch(s)
+            | ReasonExpected::Given(s)
+            | ReasonExpected::ArgOf(s, _) => *s,
+            _ => or,
+        }
+    }
+
     /// Adds a description of the reason to the `err`.
     /// This function adds it to an existing error instead of returning a Doc because some reasons have spans attached, and some don't.
     fn add(self, err: Error, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
         match self {
             ReasonExpected::UsedAsType => err
                 .with_note(Doc::start("expected because it was used as a type").style(Style::Note)),
+            ReasonExpected::UsedInWith => err.with_note(
+                Doc::start("expected because it was used as an effect in a `with` type")
+                    .style(Style::Note),
+            ),
             ReasonExpected::IfCond => err.with_note(
                 Doc::start("expected because if conditions must have type Bool").style(Style::Note),
             ),
@@ -1084,7 +1421,8 @@ impl ReasonExpected {
             ReasonExpected::ArgOf(span, ty) => err.with_label(
                 file,
                 span,
-                Doc::start("expected because it was passed to this, of type ")
+                Doc::start("expected because it was passed to this, of type")
+                    .line()
                     .chain(ty.pretty(db, mcxt).style(Style::None))
                     .style(Style::Note),
             ),
@@ -1109,9 +1447,13 @@ pub enum TypeError {
     Inexhaustive(Span, crate::pattern::Cov, VTy),
     InvalidPatternBecause(Box<TypeError>),
     WrongArity(Spanned<VTy>, usize, usize),
+    EffNotAllowed(Span, Val, EffStack),
+    /// No catchable effects for `catch` expression. If the `bool` is true, then IO was included.
+    WrongCatchType(Span, bool),
+    EffPatternType(Span, Span, Val, Vec<Val>),
 }
 impl TypeError {
-    fn to_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
+    fn into_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
         match self {
             TypeError::NotFound(n) => Error::new(
                 file,
@@ -1121,7 +1463,8 @@ impl TypeError {
             ),
             TypeError::NotFunction(mcxt, t) => Error::new(
                 file,
-                Doc::start("Expected function type in application, but got: ")
+                Doc::start("Expected function type in application, but got")
+                    .line()
                     .chain(t.pretty(db, &mcxt).style(Style::None))
                     .style(Style::Bold),
                 t.span(),
@@ -1130,15 +1473,20 @@ impl TypeError {
             TypeError::Unify(mcxt, a, b, r) => r.add(
                 Error::new(
                     file,
-                    Doc::start("Could not match types, expected ")
+                    Doc::start("Could not match types, expected")
+                        .line()
                         .chain(b.pretty(db, &mcxt).style(Style::None))
-                        .add(", got ")
+                        .line()
+                        .add("but got")
+                        .line()
                         .chain(a.pretty(db, &mcxt).style(Style::None))
                         .style(Style::Bold),
                     a.span(),
-                    Doc::start("expected ")
+                    Doc::start("expected")
+                        .line()
                         .chain(b.pretty(db, &mcxt).style(Style::None))
-                        .add(" here")
+                        .line()
+                        .add("here")
                         .style(Style::Error),
                 ),
                 file,
@@ -1155,7 +1503,7 @@ impl TypeError {
                     .add(", which is not in its scope")
                     .style(Style::Bold),
                 s,
-                format!("solution found here"),
+                "solution found here",
             ),
             TypeError::MetaOccurs(s, m) => Error::new(
                 file,
@@ -1164,28 +1512,31 @@ impl TypeError {
                     .add(" would be recursive")
                     .style(Style::Bold),
                 s,
-                format!("solution found here"),
+                "solution found here",
             ),
             // TODO: this is complicated to explain, so make and link to a wiki page in the error message
             TypeError::MetaSpine(s, m, v) => Error::new(
                 file,
                 Doc::start("Solution for ")
                     .chain(m.pretty_meta(mcxt, db))
-                    .add(" is ambiguous: cannot depend on value ")
+                    .add(" is ambiguous: cannot depend on value")
+                    .line()
                     .chain(v.pretty(db, mcxt).style(Style::None))
                     .style(Style::Bold),
                 s,
-                format!("solution depends on a non-variable"),
+                "solution depends on a non-variable",
             )
-            .with_note("because here it depends on a specific value, the compiler doesn't know what the solution should be for other values"),
+            .with_note(Doc::start("because here it depends on a specific value, the compiler doesn't know what the solution should be for other values").style(Style::Note)),
             TypeError::NotStruct(ty) => Error::new(
                 file,
-                Doc::start("Value of type ")
+                Doc::start("Value of type")
+                    .line()
                     .chain(ty.pretty(db, mcxt).style(Style::None))
-                    .add(" does not have members")
+                    .line()
+                    .add("does not have members")
                     .style(Style::Bold),
                 ty.span(),
-                format!("tried to access member here"),
+                "tried to access member here",
             ),
             TypeError::MemberNotFound(span, sctype, m) => Error::new(
                 file,
@@ -1196,7 +1547,7 @@ impl TypeError {
                         ScopeType::Type(name) => {
                             format!("namespace of type {}", db.lookup_intern_name(name))
                         }
-                        ScopeType::Struct => format!("struct"),
+                        ScopeType::Struct => "struct".to_string(),
                     })
                     .style(Style::Bold),
                 span,
@@ -1207,7 +1558,7 @@ impl TypeError {
                 Doc::start("Invalid pattern: expected '_', variable, literal, or constructor")
                     .style(Style::Bold),
                 span,
-                format!("invalid pattern"),
+                "invalid pattern",
             ),
             TypeError::WrongNumConsArgs(span, expected, got) => Error::new(
                 file,
@@ -1221,9 +1572,11 @@ impl TypeError {
             ),
             TypeError::Inexhaustive(span, cov, ty) => Error::new(
                 file,
-                Doc::start("Inexhaustive match: patterns ")
+                Doc::start("Inexhaustive match: patterns")
+                    .line()
                     .chain(cov.pretty_rest(&ty, db, mcxt).style(Style::None))
-                    .add(" not covered")
+                    .line()
+                    .add("not covered")
                     .style(Style::Bold),
                 span,
                 Doc::start("this has type ")
@@ -1231,7 +1584,7 @@ impl TypeError {
                     .style(Style::Error),
             ),
             TypeError::InvalidPatternBecause(e) => {
-                let mut e = e.to_error(file, db, mcxt);
+                let mut e = e.into_error(file, db, mcxt);
                 let message = format!("Invalid pattern: {}", e.message());
                 *e.message() = message;
                 e
@@ -1239,12 +1592,14 @@ impl TypeError {
             TypeError::NotIntType(span, ty, r) => r.add(
                 Error::new(
                     file,
-                    Doc::start("Expected value of type ")
+                    Doc::start("Expected value of type")
+                        .line()
                         .chain(ty.pretty(db, mcxt).style(Style::None))
-                        .add(", got integer")
+                        .line()
+                        .add("but got integer")
                         .style(Style::Bold),
                     span,
-                    format!("this is an integer"),
+                    "this is an integer",
                 ),
                 file,
                 db,
@@ -1260,6 +1615,33 @@ impl TypeError {
                     .chain(Doc::start("I64").style(Style::None))
                     .style(Style::Error),
             ),
+            TypeError::EffNotAllowed(span, eff, mut stack) => {
+                let base = Error::new(
+                    file,
+                    Doc::start("Effect")
+                        .line()
+                        .chain(eff.pretty(db, mcxt).style(Style::None))
+                        .line()
+                        .add("not allowed in this context")
+                        .style(Style::Bold),
+                    span,
+                    Doc::start("this performs effect")
+                        .line()
+                        .chain(eff.pretty(db, mcxt).style(Style::None))
+                        .style(Style::Error)
+                );
+                if stack.scopes.is_empty() {
+                    base.with_note("effects are not allowed in the top level context")
+                } else if stack.scope_start().unwrap() == stack.effs.len() {
+                    base.with_label(file, stack.scopes.last().unwrap().2, "this context does not allow effects")
+                } else {
+                    base.with_label(file, stack.scopes.last().unwrap().2,
+                        Doc::start("this context allows effects ")
+                            .chain(Doc::intersperse(stack.pop_scope().into_iter().map(|eff| eff.pretty(db, mcxt).style(Style::None)), Doc::start(",").space()))
+                            .style(Style::Error)
+                    )
+                }
+            }
             TypeError::WrongArity(ty, expected, got) => Error::new(
                 file,
                 Doc::start(if got > expected {
@@ -1268,9 +1650,11 @@ impl TypeError {
                     "Too few arguments "
                 })
                 .add(got)
-                .add(" to value of type ")
+                .add(" to value of type")
+                .line()
                 .chain(ty.pretty(db, mcxt).style(Style::None))
-                .add(" which expects ")
+                .line()
+                .add("which expects ")
                 .add(expected)
                 .add(if expected == 1 {
                     " argument"
@@ -1289,6 +1673,62 @@ impl TypeError {
                     },
                     got
                 ),
+            ),
+            TypeError::WrongCatchType(span, has_io) => Error::new(
+                file,
+                Doc::start("`catch` expression requires effect to catch, but expression performs no catchable effects")
+                    .style(Style::Bold),
+                span,
+                if has_io {
+                    "this expression only performs the IO effect, which can't be caught"
+                } else {
+                    "this expression performs no effects"
+                },
+            )
+            .with_note(
+                Doc::start("to pattern-match on a value without effects, use ")
+                    .chain(Doc::keyword("case"))
+                    .add(" instead of ")
+                    .chain(Doc::keyword("catch"))
+                    .style(Style::Note)
+            ),
+            TypeError::EffPatternType(vspan, pspan, _ty, effs) if effs.is_empty() => Error::new(
+                file,
+                Doc::start("`eff` pattern requires caught effects to match against, but `case` doesn't catch effects")
+                    .style(Style::Bold),
+                pspan,
+                "`eff` pattern requires effects",
+            )
+            .with_label(
+                file,
+                vspan,
+                Doc::start("if this expression performs effects, try using ")
+                    .chain(Doc::keyword("catch"))
+                    .add(" instead of ")
+                    .chain(Doc::keyword("case"))
+                    .add(" here")
+                    .style(Style::Note),
+            ),
+            TypeError::EffPatternType(vspan, pspan, ty, effs) => Error::new(
+                file,
+                Doc::start("got effect type")
+                    .line()
+                    .chain(ty.pretty(db, mcxt).style(Style::None))
+                    .line()
+                    .add("but expected one of")
+                    .line()
+                    .chain(Doc::intersperse(effs.iter().map(|e| e.pretty(db, mcxt).style(Style::None)), Doc::start(',').space()))
+                    .style(Style::Bold),
+                pspan,
+                "wrong effect type for `eff` pattern",
+            )
+            .with_label(
+                file,
+                vspan,
+                Doc::start("this expression performs effects")
+                    .line()
+                    .chain(Doc::intersperse(effs.iter().map(|e| e.pretty(db, mcxt).style(Style::None)), Doc::start(',').line()).group())
+                    .style(Style::Note),
             ),
         }
     }
@@ -1357,7 +1797,7 @@ fn p_unify(
             )
         }
 
-        (Val::Pi(i, cl), Val::Pi(i2, cl2)) if i == i2 => {
+        (Val::Pi(i, cl, effs), Val::Pi(i2, cl2, effs2)) if i == i2 => {
             Ok(
                 p_unify(mode, cl.ty.clone(), cl2.ty.clone(), l, span, db, mcxt)?
                 // Applying both to the same thing (Local(l))
@@ -1369,17 +1809,35 @@ fn p_unify(
                     span,
                     db,
                     mcxt,
-                )?,
+                )?
+                & TBool::from(effs.len() == effs2.len())
+                & effs
+                    .into_iter()
+                    .zip(effs2)
+                    .map(|(a, b)| p_unify(mode, a, b, l, span, db, mcxt))
+                    .fold(Ok(Yes), |acc, r| acc.and_then(|acc| r.map(|r| acc & r)))?,
             )
         }
-        (Val::Pi(Icit::Expl, cl), Val::Fun(from, to))
-        | (Val::Fun(from, to), Val::Pi(Icit::Expl, cl)) => {
+        (Val::Pi(Icit::Expl, cl, effs), Val::Fun(from, to, effs2))
+        | (Val::Fun(from, to, effs), Val::Pi(Icit::Expl, cl, effs2)) => {
             Ok(p_unify(mode, cl.ty.clone(), *from, l, span, db, mcxt)?
-                & p_unify(mode, cl.vquote(l, mcxt, db), *to, l.inc(), span, db, mcxt)?)
+                & p_unify(mode, cl.vquote(l, mcxt, db), *to, l.inc(), span, db, mcxt)?
+                & TBool::from(effs.len() == effs2.len())
+                & effs
+                    .into_iter()
+                    .zip(effs2)
+                    .map(|(a, b)| p_unify(mode, a, b, l, span, db, mcxt))
+                    .fold(Ok(Yes), |acc, r| acc.and_then(|acc| r.map(|r| acc & r)))?)
         }
-        (Val::Fun(a, b), Val::Fun(a2, b2)) => {
+        (Val::Fun(a, b, effs), Val::Fun(a2, b2, effs2)) => {
             Ok(p_unify(mode, *a, *a2, l, span, db, mcxt)?
-                & p_unify(mode, *b, *b2, l, span, db, mcxt)?)
+                & p_unify(mode, *b, *b2, l, span, db, mcxt)?
+                & TBool::from(effs.len() == effs2.len())
+                & effs
+                    .into_iter()
+                    .zip(effs2)
+                    .map(|(a, b)| p_unify(mode, a, b, l, span, db, mcxt))
+                    .fold(Ok(Yes), |acc, r| acc.and_then(|acc| r.map(|r| acc & r)))?)
         }
 
         // Solve metas
@@ -1436,6 +1894,12 @@ fn p_unify(
         // If the reason we can't unify is that one side is a top variable, then we can try again after inlining.
         (Val::App(Var::Top(_), _, _, _), _) | (_, Val::App(Var::Top(_), _, _, _))
             if !mode.inline =>
+        {
+            Ok(Maybe)
+        }
+        // Same with local variables with constraints
+        (Val::App(Var::Local(l), _, _, _), _) | (_, Val::App(Var::Local(l), _, _, _))
+            if !mode.inline && mcxt.local_val(l).is_some() =>
         {
             Ok(Maybe)
         }
@@ -1523,13 +1987,18 @@ fn insert_metas(
     db: &dyn Compiler,
 ) -> (Term, VTy) {
     match ty {
-        Val::Pi(Icit::Impl, cl) if insert => {
+        Val::Pi(Icit::Impl, cl, effs) if insert => {
             let meta = mcxt.new_meta(
                 None,
                 span,
                 MetaSource::ImplicitParam(cl.name),
                 cl.ty.clone().quote(mcxt.size, mcxt, db),
                 db,
+            );
+            // TODO effects when applying implicits
+            assert!(
+                effs.is_empty(),
+                "effects when applying implicits not supported yet"
             );
             let vmeta = meta.clone().evaluate(&mcxt.env(), mcxt, db);
             let ret = (*cl).clone().apply(vmeta, mcxt, db);
@@ -1538,7 +2007,7 @@ fn insert_metas(
                 Term::App(
                     Icit::Impl,
                     Box::new(term),
-                    Box::new(Val::Pi(Icit::Impl, cl).quote(mcxt.size, mcxt, db)),
+                    Box::new(Val::Pi(Icit::Impl, cl, effs).quote(mcxt.size, mcxt, db)),
                     Box::new(meta),
                 ),
                 ret,
@@ -1659,16 +2128,26 @@ pub fn infer(
         }
 
         Pre_::Var(name) => {
+            // If its name is `_`, it's a hole
+            if &db.lookup_intern_name(*name) == "_" {
+                return infer(
+                    insert,
+                    &pre.copy_span(Pre_::Hole(MetaSource::Hole)),
+                    db,
+                    mcxt,
+                );
+            }
+
             let (term, ty) = match mcxt.lookup(*name, db) {
                 Ok((v, ty)) => Ok((
                     Term::Var(v, Box::new(ty.clone().quote(mcxt.size, mcxt, db))),
                     ty,
                 )),
                 // If something else had a type error, try to keep going anyway and maybe catch more
-                Err(DefError::ElabError(def)) => Ok((
+                Err(DefError::ElabError(_def)) => Ok((
                     Term::Error,
                     // TODO pros/cons of using a meta here?
-                    Val::Error, //Val::meta(Meta::Type(db.lookup_intern_def(def).0), Val::Type),
+                    Val::Error,
                 )),
                 Err(DefError::NoValue) => Err(TypeError::NotFound(pre.copy_span(*name))),
             }?;
@@ -1680,9 +2159,13 @@ pub fn infer(
             let vty = ty.clone().evaluate(&mcxt.env(), mcxt, db);
             // TODO Rc to get rid of the clone()?
             mcxt.define(*name, NameInfo::Local(vty.clone()), db);
+            mcxt.eff_stack.push_scope(true, pre.span());
+
             let (body, bty) = infer(true, body, db, mcxt)?;
+            let effs = mcxt.eff_stack.pop_scope();
+
             mcxt.undef(db);
-            // TODO do we insert metas here?
+
             Ok((
                 Term::Lam(*name, *icit, Box::new(ty), Box::new(body)),
                 Val::Pi(
@@ -1694,27 +2177,56 @@ pub fn infer(
                         term: bty.quote(mcxt.size.inc(), mcxt, db),
                         name: *name,
                     }),
+                    effs,
                 ),
             ))
         }
 
-        Pre_::Pi(name, icit, ty, ret) => {
+        Pre_::Pi(name, icit, ty, ret, effs) => {
             let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             // TODO Rc to get rid of the clone()?
             let vty = ty.clone().evaluate(&mcxt.env(), mcxt, db);
             mcxt.define(*name, NameInfo::Local(vty), db);
             let ret = check(ret, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             mcxt.undef(db);
+
+            let effs = effs
+                .iter()
+                .map(|x| {
+                    check(
+                        x,
+                        &Val::builtin(Builtin::Eff, Val::Type),
+                        ReasonExpected::UsedInWith,
+                        db,
+                        mcxt,
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+
             Ok((
-                Term::Pi(*name, *icit, Box::new(ty), Box::new(ret)),
+                Term::Pi(*name, *icit, Box::new(ty), Box::new(ret), effs),
                 Val::Type,
             ))
         }
 
-        Pre_::Fun(from, to) => {
+        Pre_::Fun(from, to, effs) => {
             let from = check(from, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let to = check(to, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
-            Ok((Term::Fun(Box::new(from), Box::new(to)), Val::Type))
+
+            let effs = effs
+                .iter()
+                .map(|x| {
+                    check(
+                        x,
+                        &Val::builtin(Builtin::Eff, Val::Type),
+                        ReasonExpected::UsedInWith,
+                        db,
+                        mcxt,
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+
+            Ok((Term::Fun(Box::new(from), Box::new(to), effs), Val::Type))
         }
 
         Pre_::App(icit, f, x) => {
@@ -1728,17 +2240,24 @@ pub fn infer(
 
         Pre_::Do(v) => {
             // We store the whole block in Salsa, then query the last expression
-            let mut block = crate::query::intern_block(v.clone(), db, mcxt.cxt);
+            let mut block = crate::query::intern_block(v.clone(), db, mcxt.state());
             // Make sure any type errors get reported
-            for &i in &block {
-                let _ = db.elaborate_def(i);
+            {
+                let mut mcxt2 = mcxt.clone();
+                for &i in &block {
+                    if let Ok(info) = db.elaborate_def(i) {
+                        for e in &*info.effects {
+                            assert!(mcxt.eff_stack.try_eff(e.clone(), db, &mut mcxt2));
+                        }
+                    }
+                }
             }
             // Now query the last expression again
             let mut ret_ty = None;
-            let mut cxt = mcxt.cxt;
+            let mut state = mcxt.state();
             if let Some(&last) = block.last() {
-                let (pre, cxt2) = db.lookup_intern_def(last);
-                cxt = cxt2;
+                let (pre, state2) = db.lookup_intern_def(last);
+                state = state2;
                 // If it's not an expression, don't return anything
                 if let PreDef::Expr(_) = &**db.lookup_intern_predef(pre) {
                     if let Ok(info) = db.elaborate_def(last) {
@@ -1755,7 +2274,7 @@ pub fn infer(
                     let predef = db.intern_predef(Arc::new(PreDefAn::from(PreDef::Expr(
                         pre.copy_span(Pre_::Unit),
                     ))));
-                    let unit_def = db.intern_def(predef, cxt);
+                    let unit_def = db.intern_def(predef, state);
                     block.push(unit_def);
                     Val::builtin(Builtin::UnitType, Val::Type)
                 }
@@ -1783,7 +2302,7 @@ pub fn infer(
                     ty,
                 )
             })? {
-                (_, Val::Error) => return Ok((Term::Error, Val::Error)),
+                (_, Val::Error) => Ok((Term::Error, Val::Error)),
                 (Val::App(Var::Builtin(Builtin::Bool), _, _, _), _) => {
                     let tbool = Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type));
                     let vbool = Val::builtin(Builtin::Bool, Val::Type);
@@ -1857,13 +2376,25 @@ pub fn infer(
             }
         }
 
-        Pre_::Case(x, cases) => {
+        Pre_::Case(is_catch, x, cases) => {
             let xspan = x.span();
-            let (x, x_ty) = infer(true, x, db, mcxt)?;
+            let (x, x_ty, x_effs) = if *is_catch {
+                mcxt.eff_stack.push_scope(true, xspan);
+                let (x, x_ty) = infer(true, x, db, mcxt)?;
+                let x_effs = mcxt.eff_stack.pop_scope();
+                (x, x_ty, x_effs)
+            } else {
+                let (x, x_ty) = infer(true, x, db, mcxt)?;
+                (x, x_ty, Vec::new())
+            };
+            if *is_catch && x_effs.is_empty() {
+                return Err(TypeError::WrongCatchType(xspan, false));
+            }
             crate::pattern::elab_case(
                 x,
                 xspan,
                 x_ty,
+                x_effs,
                 ReasonExpected::MustMatch(xspan),
                 cases,
                 None,
@@ -1873,6 +2404,7 @@ pub fn infer(
         }
 
         Pre_::OrPat(_, _) => unreachable!("| is only allowed in patterns"),
+        Pre_::EffPat(_, _) => unreachable!("eff _ _ is only allowed in patterns"),
     }
 }
 
@@ -1888,9 +2420,10 @@ fn infer_app(
     mcxt: &mut MCxt,
 ) -> Result<(Term, VTy), TypeError> {
     let (term, ty) = match &fty {
-        Val::Pi(icit2, cl) => {
+        Val::Pi(icit2, cl, effs) => {
             assert_eq!(icit, *icit2);
 
+            let span = Span(fspan.0, x.span().1);
             let x = check(
                 x,
                 &cl.ty,
@@ -1902,6 +2435,15 @@ fn infer_app(
             let to = (**cl)
                 .clone()
                 .apply(x.clone().evaluate(&mcxt.env(), mcxt, db), mcxt, db);
+            for eff in effs {
+                if !mcxt.eff_stack.try_eff(eff.clone(), db, &mut mcxt.clone()) {
+                    return Err(TypeError::EffNotAllowed(
+                        span,
+                        eff.clone(),
+                        mcxt.eff_stack.clone(),
+                    ));
+                }
+            }
             Ok((
                 Term::App(
                     icit,
@@ -1912,7 +2454,8 @@ fn infer_app(
                 to,
             ))
         }
-        Val::Fun(from, to) => {
+        Val::Fun(from, to, effs) => {
+            let span = Span(fspan.0, x.span().1);
             let x = check(
                 x,
                 &from,
@@ -1921,6 +2464,15 @@ fn infer_app(
                 mcxt,
             )?;
             let to = (**to).clone();
+            for eff in effs {
+                if !mcxt.eff_stack.try_eff(eff.clone(), db, &mut mcxt.clone()) {
+                    return Err(TypeError::EffNotAllowed(
+                        span,
+                        eff.clone(),
+                        mcxt.eff_stack.clone(),
+                    ));
+                }
+            }
             Ok((
                 Term::App(
                     icit,
@@ -1968,7 +2520,7 @@ pub fn check(
             Box::new(Term::Type),
         )),
 
-        (Pre_::Lam(n, i, ty, body), Val::Pi(i2, cl)) if i == i2 => {
+        (Pre_::Lam(n, i, ty, body), Val::Pi(i2, cl, effs)) if i == i2 => {
             let ty2 = &cl.ty;
             let ety = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let vty = ety.clone().evaluate(&mcxt.env(), mcxt, db);
@@ -1981,19 +2533,14 @@ pub fn check(
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty.clone()), db);
-            let body = check(
-                body,
-                // TODO not clone ??
-                &(**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db),
-                reason,
-                db,
-                mcxt,
-            )?;
+            // TODO not clone ??
+            let bty = (**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db);
+            let (body, _bty, _effs2) = check_fun(body, bty, reason, effs.clone(), false, db, mcxt)?;
             mcxt.undef(db);
             Ok(Term::Lam(*n, *i, Box::new(ety), Box::new(body)))
         }
 
-        (Pre_::Lam(n, Icit::Expl, ty, body), Val::Fun(ty2, body_ty)) => {
+        (Pre_::Lam(n, Icit::Expl, ty, body), Val::Fun(ty2, body_ty, effs)) => {
             let ety = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let vty = ety.clone().evaluate(&mcxt.env(), mcxt, db);
             if !unify(
@@ -2012,13 +2559,26 @@ pub fn check(
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty), db);
-            let body = check(body, &*body_ty, reason, db, mcxt)?;
+            let (body, _bty, _effs2) = check_fun(
+                body,
+                (**body_ty).clone(),
+                reason,
+                effs.clone(),
+                false,
+                db,
+                mcxt,
+            )?;
             mcxt.undef(db);
             Ok(Term::Lam(*n, Icit::Expl, Box::new(ety), Box::new(body)))
         }
 
         // We implicitly insert lambdas so `\x.x : [a] -> a -> a` typechecks
-        (_, Val::Pi(Icit::Impl, cl)) => {
+        // // If we didn't have the restriction that the term must be a lambda, then it would allow something like Swift's `autoclosure`
+        // // So if we want that in the future, it would be very easy to implement
+        // // (Pre_::Lam(_, Icit::Expl, _, _), Val::Pi(Icit::Impl, cl, effs)) => {
+        // For now, we have that restriction turned off so that `val _ : [a] a -> a = id id` typechecks.
+        // TODO figure out how to make that typecheck without allowing unrestricted autoclosures.
+        (_, Val::Pi(Icit::Impl, cl, effs)) => {
             // Add a ' after the name so it doesn't shadow names the term defined (' isn't valid in Pika identifiers)
             let name = {
                 let mut s = cl.name.get(db);
@@ -2026,40 +2586,47 @@ pub fn check(
                 db.intern_name(s)
             };
             mcxt.define(name, NameInfo::Local(cl.ty.clone()), db);
-            let body = check(
-                pre,
-                &(**cl).clone().vquote(mcxt.size, mcxt, db),
-                reason,
-                db,
-                mcxt,
-            )?;
+            let bty = (**cl).clone().vquote(mcxt.size, mcxt, db);
+            let (body, _bty, _effs) = check_fun(pre, bty, reason, effs.clone(), false, db, mcxt)?;
             mcxt.undef(db);
             let ty = cl.ty.clone().quote(mcxt.size, mcxt, db);
             Ok(Term::Lam(cl.name, Icit::Impl, Box::new(ty), Box::new(body)))
         }
 
-        (Pre_::Lit(l), _) => match ty.unarc() {
+        (Pre_::Lit(l), _) => match ty.clone().inline(mcxt.size, db, mcxt) {
             Val::App(Var::Builtin(b), _, _, _) if matches!(b, Builtin::I32 | Builtin::I64) => {
-                Ok(Term::Lit(*l, *b))
+                Ok(Term::Lit(*l, b))
             }
             Val::App(Var::Meta(_), _, _, _) => Err(TypeError::UntypedLiteral(pre.span())),
-            _ => Err(TypeError::NotIntType(
+            ty => Err(TypeError::NotIntType(
                 pre.span(),
-                ty.clone().inline_metas(mcxt, db),
+                ty.inline_metas(mcxt, db),
                 reason,
             )),
         },
 
-        (Pre_::Case(value, cases), _) => {
-            let vspan = value.span();
-            let (value, val_ty) = infer(true, value, db, mcxt)?;
+        (Pre_::Case(is_catch, x, cases), _) => {
+            let xspan = x.span();
+            let (x, x_ty, x_effs) = if *is_catch {
+                mcxt.eff_stack.push_scope(true, xspan);
+                let (x, x_ty) = infer(true, x, db, mcxt)?;
+                let x_effs = mcxt.eff_stack.pop_scope();
+                (x, x_ty, x_effs)
+            } else {
+                let (x, x_ty) = infer(true, x, db, mcxt)?;
+                (x, x_ty, Vec::new())
+            };
+            if *is_catch && x_effs.is_empty() {
+                return Err(TypeError::WrongCatchType(xspan, false));
+            }
             crate::pattern::elab_case(
-                value,
-                vspan,
-                val_ty,
-                ReasonExpected::MustMatch(vspan),
+                x,
+                xspan,
+                x_ty,
+                x_effs,
+                ReasonExpected::MustMatch(xspan),
                 cases,
-                Some((ty.clone(), reason.clone())),
+                Some((ty.clone(), reason)),
                 mcxt,
                 db,
             )
@@ -2091,8 +2658,8 @@ pub fn check(
             if !unify(ty.clone(), i_ty.clone(), mcxt.size, pre.span(), db, mcxt)? {
                 // Use an arity error if we got a function type but don't expect one
                 match (&ty, &i_ty) {
-                    (Val::Pi(_, _), _) | (Val::Fun(_, _), _) => (),
-                    (_, Val::Fun(_, _)) | (_, Val::Pi(_, _))
+                    (Val::Pi(_, _, _), _) | (Val::Fun(_, _, _), _) => (),
+                    (_, Val::Fun(_, _, _)) | (_, Val::Pi(_, _, _))
                         if matches!(term, Term::App(_, _, _, _)) =>
                     {
                         let got = term.spine_len();
@@ -2115,4 +2682,23 @@ pub fn check(
             Ok(term)
         }
     }
+}
+
+fn check_fun(
+    body: &Pre,
+    rty: VTy,
+    reason: ReasonExpected,
+    effs: Vec<Val>,
+    open: bool,
+    db: &dyn Compiler,
+    mcxt: &mut MCxt,
+) -> Result<(Term, VTy, Vec<Val>), TypeError> {
+    let span = reason.span_or(body.span());
+    mcxt.eff_stack.push_scope(open, span);
+    for e in effs {
+        mcxt.eff_stack.push_eff(e.clone());
+    }
+    let term = check(body, &rty, reason, db, mcxt)?;
+    let effs = mcxt.eff_stack.pop_scope();
+    Ok((term, rty, effs))
 }

@@ -3,6 +3,7 @@
 //! Except, when there's a newline before an operator, it overrides the precedence so that the (last expression of the) last line is essentially inside parentheses.
 //! Also, semicolons and newlines are 100% equivalent to the *parser*, so they use the same token, but the lexer never ignores semicolons like it does newlines.
 
+use crate::common::*;
 use crate::error::{Span, Spanned};
 use std::collections::VecDeque;
 use std::fmt;
@@ -20,6 +21,13 @@ pub enum LexError {
     UnexpectedTerminator(NestType),
     /// This is used for specific errors that occur in one place, in the parser or lexer.
     Other(String),
+}
+
+impl IntoError for Spanned<LexError> {
+    fn into_error(self, file: FileId) -> Error {
+        let s = format!("{}", *self);
+        Error::new(file, format!("Parse error: {}", s), self.span(), s)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -55,6 +63,7 @@ pub enum Tok<'i> {
     If,
     Then,
     Else,
+    Eff,
 
     // Symbols the lexer recognizes as a "binary operator"
     Colon,     // :
@@ -88,6 +97,7 @@ pub enum Tok<'i> {
     Name(&'i str),
 
     // Other tokens
+    Question,  // ?
     At,        // @
     POpen,     // (
     PClose,    // )
@@ -102,10 +112,17 @@ pub enum Tok<'i> {
 impl<'i> Tok<'i> {
     /// Returns true if we should completely ignore newlines before this token.
     /// Currently only true for '=>', '->', '=' and ':'.
-    fn is_special_binop(&self) -> bool {
+    fn is_special_binop(self) -> bool {
+        matches!(self, Tok::Equals | Tok::Colon | Tok::WideArrow | Tok::Arrow)
+    }
+
+    pub fn closes_type(self) -> Option<NestType> {
         match self {
-            Tok::Equals | Tok::Colon | Tok::WideArrow | Tok::Arrow => true,
-            _ => false,
+            Tok::SClose => Some(NestType::Square),
+            Tok::PClose => Some(NestType::Paren),
+            Tok::CClose => Some(NestType::Curly),
+            Tok::End => Some(NestType::Block),
+            _ => None,
         }
     }
 }
@@ -158,8 +175,8 @@ impl<'i> Lexer<'i> {
         self.chars.next()
     }
 
-    fn span(&self) -> Span {
-        Span(self.tok_start, self.pos + 1)
+    pub fn span(&self) -> Span {
+        Span(self.tok_start, self.pos)
     }
     fn slice(&self) -> &'i str {
         &self.input[self.tok_start..self.pos]
@@ -260,6 +277,7 @@ impl<'i> Lexer<'i> {
             "else" => Tok::Else,
             // Where technically ends one block and starts another one, but we ignore that.
             "where" => Tok::Where,
+            "eff" => Tok::Eff,
             "do" => {
                 self.nesting.push(NestType::Block);
                 Tok::Do
@@ -409,6 +427,7 @@ impl<'i> Lexer<'i> {
                 self.tok(Tok::CClose)
             }
 
+            '?' => self.tok(Tok::Question),
             '@' => self.tok(Tok::At),
             '\\' => self.tok(Tok::Backslash),
             ';' => self.tok(Tok::Newline),
@@ -541,6 +560,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::If => "'if'",
             Tok::Then => "'then'",
             Tok::Else => "'else'",
+            Tok::Eff => "'eff'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",
@@ -568,6 +588,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::RPipe => "'|>'",
             Tok::Lit(_) => "literal",
             Tok::Name(_) => "name",
+            Tok::Question => "'?'",
             Tok::At => "'@'",
             Tok::POpen => "'('",
             Tok::PClose => "')'",

@@ -215,6 +215,8 @@ pub struct ElabInfo {
     pub solved_globals: Arc<Vec<RecSolution>>,
     /// Only used for definitions in the associated namespace of a datatype
     pub children: Arc<Vec<DefId>>,
+    /// Used for definitions in do blocks with open effect scopes
+    pub effects: Arc<Vec<Val>>,
 }
 
 #[salsa::query_group(InternerDatabase)]
@@ -226,7 +228,7 @@ pub trait Interner: salsa::Database {
     fn intern_predef(&self, def: Arc<PreDefAn>) -> PreDefId;
 
     #[salsa::interned]
-    fn intern_def(&self, def: PreDefId, cxt: Cxt) -> DefId;
+    fn intern_def(&self, def: PreDefId, state: CxtState) -> DefId;
 
     #[salsa::interned]
     fn intern_scope(&self, scope: Arc<Vec<(Name, DefId)>>) -> ScopeId;
@@ -275,40 +277,41 @@ fn def_type(db: &dyn Compiler, def: DefId) -> Result<Arc<VTy>, DefError> {
 }
 
 fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
-    use crate::grammar::DefsParser;
+    use crate::parser::Parser;
 
     let source = db.file_source(file);
 
-    let parser = DefsParser::new();
+    let mut parser = Parser::new(db, crate::lexer::Lexer::new(&source));
     let cxt = Cxt::new(file, db);
-    match parser.parse(db, crate::lexer::Lexer::new(&source)) {
-        Ok(v) => Arc::new(intern_block(v, db, cxt)),
+    let state = CxtState::new(cxt, db);
+    match parser.defs() {
+        Ok(v) => Arc::new(intern_block(v, db, state)),
         Err(e) => {
-            db.report_error(e.to_error(file));
+            db.report_error(e.into_error(file));
             Arc::new(Vec::new())
         }
     }
 }
 
-pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<DefId> {
+pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) -> Vec<DefId> {
     let mut rv = Vec::new();
     // This stores unordered definitions (types and functions) between local variables
     let mut temp = Vec::new();
     for def in v {
         match &*def {
             // Unordered
-            PreDef::Fun(_, _, _, _)
-            | PreDef::Type(_, _, _, _)
-            | PreDef::FunDec(_, _, _)
+            PreDef::Fun(_, _, _, _, _)
+            | PreDef::Type(_, _, _, _, _)
+            | PreDef::FunDec(_, _, _, _)
             | PreDef::ValDec(_, _) => {
                 let name = def.name();
                 let def = Arc::new(def);
                 let id = db.intern_predef(def.clone());
                 if let Some(name) = name {
-                    if let Some(ty) = def.given_type(id, cxt, db) {
-                        cxt = cxt.define(name, NameInfo::Rec(id, ty), db);
+                    if let Some(ty) = def.given_type(id, state.cxt, db) {
+                        state.define(name, NameInfo::Rec(id, ty), db);
                     } else {
-                        cxt = cxt.define(name, NameInfo::Rec(id, Val::Error), db);
+                        state.define(name, NameInfo::Rec(id, Val::Error), db);
                     }
                 }
                 temp.push((name, id));
@@ -317,10 +320,10 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
             PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) | PreDef::Cons(_, _) => {
                 // Process `temp` first
                 for (name, pre) in temp.drain(0..) {
-                    let id = db.intern_def(pre, cxt);
+                    let id = db.intern_def(pre, state.clone());
                     if let Some(name) = name {
                         // Define it for real now
-                        cxt = cxt.define(name, NameInfo::Def(id), db);
+                        state.define(name, NameInfo::Def(id), db);
                     }
                     rv.push(id);
                 }
@@ -328,9 +331,9 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
                 // Then add this one
                 let name = def.name();
                 let pre = db.intern_predef(Arc::new(def));
-                let id = db.intern_def(pre, cxt);
+                let id = db.intern_def(pre, state.clone());
                 if let Some(name) = name {
-                    cxt = cxt.define(name, NameInfo::Def(id), db);
+                    state.define(name, NameInfo::Def(id), db);
                 }
                 rv.push(id);
             }
@@ -338,10 +341,10 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut cxt: Cxt) -> Vec<De
     }
     // If anything is left in `temp`, clear it out
     for (name, pre) in temp {
-        let id = db.intern_def(pre, cxt);
+        let id = db.intern_def(pre, state.clone());
         if let Some(name) = name {
             // Define it for real now
-            cxt = cxt.define(name, NameInfo::Def(id), db);
+            state.define(name, NameInfo::Def(id), db);
         }
         rv.push(id);
     }

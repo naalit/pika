@@ -96,7 +96,9 @@ impl BinOp {
                     Box::new(Val::Fun(
                         Box::new(Val::builtin(Builtin::I32, Val::Type)),
                         Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                        Vec::new(),
                     )),
+                    Vec::new(),
                 )
             }
             Eq | NEq | Lt | Gt | Leq | Geq => Val::Fun(
@@ -104,7 +106,9 @@ impl BinOp {
                 Box::new(Val::Fun(
                     Box::new(Val::builtin(Builtin::I32, Val::Type)),
                     Box::new(Val::builtin(Builtin::Bool, Val::Type)),
+                    Vec::new(),
                 )),
+                Vec::new(),
             ),
             // TODO: `(<<): [t] [P: t -> Type] (f : (x : t) -> P x) (x : t) -> P x`
             PipeL | PipeR => todo!("pipes"),
@@ -124,10 +128,10 @@ pub enum Pre_ {
     Type,
     Var(Name),
     Lam(Name, Icit, PreTy, Pre),
-    Pi(Name, Icit, PreTy, PreTy),
+    Pi(Name, Icit, PreTy, PreTy, Vec<Pre>),
     /// A `Fun` is a special case of `Pi` where there's no name (or `"_"`) and it's explicit.
     /// It could be represented as `Pi`, but it's so common that this is worth it, for better performance and errors.
-    Fun(PreTy, PreTy),
+    Fun(PreTy, PreTy, Vec<Pre>),
     App(Icit, Pre, Pre),
     Do(Vec<PreDefAn>),
     Struct(Vec<PreDefAn>),
@@ -135,7 +139,9 @@ pub enum Pre_ {
     /// Dot(a, b, [c, d]) = a.b c d
     Dot(Pre, SName, Vec<(Icit, Pre)>),
     OrPat(Pre, Pre),
-    Case(Pre, Vec<(Pre, Pre)>),
+    EffPat(Pre, Pre),
+    /// The bool is `true` if this is actually a `catch`
+    Case(bool, Pre, Vec<(Pre, Pre)>),
     Lit(Literal),
     Unit,
     And(Pre, Pre),
@@ -194,14 +200,27 @@ pub struct PreCons(pub SName, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
 /// `PreDef` doesn't keep track of attributes; see `PreDefAn` for that.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PreDef {
-    Fun(SName, Vec<(Name, Icit, PreTy)>, PreTy, Pre),
+    Fun(
+        SName,
+        Vec<(Name, Icit, PreTy)>,
+        PreTy,
+        Pre,
+        Option<Vec<Pre>>,
+    ),
     Val(SName, PreTy, Pre),
-    Type(SName, Vec<(Name, Icit, PreTy)>, Vec<PreCons>, Vec<PreDefAn>),
+    /// The bool keeps track of whether this is an effect
+    Type(
+        SName,
+        bool,
+        Vec<(Name, Icit, PreTy)>,
+        Vec<PreCons>,
+        Vec<PreDefAn>,
+    ),
     Impl(Option<SName>, PreTy, Pre),
     Expr(Pre),
 
     // Declarations
-    FunDec(SName, Vec<(Name, Icit, PreTy)>, PreTy),
+    FunDec(SName, Vec<(Name, Icit, PreTy)>, PreTy, Option<Vec<Pre>>),
     ValDec(SName, PreTy),
 
     /// Pre-typed term, used for data constructors.
@@ -210,10 +229,10 @@ pub enum PreDef {
 impl PreDef {
     pub fn name(&self) -> Option<Name> {
         match self {
-            PreDef::Fun(n, _, _, _)
+            PreDef::Fun(n, _, _, _, _)
             | PreDef::Val(n, _, _)
-            | PreDef::Type(n, _, _, _)
-            | PreDef::FunDec(n, _, _)
+            | PreDef::Type(n, _, _, _, _)
+            | PreDef::FunDec(n, _, _, _)
             | PreDef::Cons(n, _)
             | PreDef::ValDec(n, _) => Some(**n),
             PreDef::Impl(n, _, _) => n.as_ref().map(|x| **x),
@@ -224,13 +243,13 @@ impl PreDef {
     /// This picks the best span for refering to the definition
     pub fn span(&self) -> Span {
         match self {
-            PreDef::Fun(n, _, _, _) => n.span(),
+            PreDef::Fun(n, _, _, _, _) => n.span(),
             PreDef::Val(n, _, _) => n.span(),
-            PreDef::Type(n, _, _, _) => n.span(),
+            PreDef::Type(n, _, _, _, _) => n.span(),
             PreDef::Impl(Some(n), _, _) => n.span(),
             PreDef::Impl(None, _, t) => t.span(),
             PreDef::Expr(t) => t.span(),
-            PreDef::FunDec(n, _, _) => n.span(),
+            PreDef::FunDec(n, _, _, _) => n.span(),
             PreDef::ValDec(n, _) => n.span(),
             PreDef::Cons(n, _) => n.span(),
         }
@@ -314,6 +333,7 @@ impl Lvl {
                         Icit::Expl,
                         Box::new(from.quote(l.dec(), mcxt, db)),
                         Box::new(to),
+                        Vec::new(),
                     ),
                     // and then each one outwards is one less
                     // The last one is at Lvl(0)
@@ -339,7 +359,7 @@ impl Lvl {
                 let mut env = Env::new(self);
                 env.push(Some(x.clone().evaluate(&env, mcxt, db)));
                 let rty = match &fty {
-                    Term::Pi(_, _, _, x) => (**x).clone().eval_quote(&mut env, self, mcxt, db),
+                    Term::Pi(_, _, _, x, _) => (**x).clone().eval_quote(&mut env, self, mcxt, db),
                     _ => unreachable!(),
                 };
                 (
@@ -368,12 +388,13 @@ pub enum Term {
     Type,
     Var(Var<Ix>, Box<Ty>),
     Lam(Name, Icit, Box<Ty>, Box<Term>),
-    Pi(Name, Icit, Box<Ty>, Box<Ty>),
-    Fun(Box<Ty>, Box<Ty>),
+    Pi(Name, Icit, Box<Ty>, Box<Ty>, Vec<Term>),
+    Fun(Box<Ty>, Box<Ty>, Vec<Term>),
     /// Stores the type of `f`
     App(Icit, Box<Term>, Box<Ty>, Box<Term>),
     /// Stores the type of the scrutinee as the second argument
-    Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>),
+    /// The last argument is the effects caught
+    Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>, Vec<Term>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
     /// If(cond, then, else)
@@ -397,8 +418,8 @@ impl Term {
     /// Returns itself unchanged if it isn't a function type.
     pub fn ret(&self) -> &Term {
         match self {
-            Term::Fun(_, to) => to.ret(),
-            Term::Pi(_, _, _, to) => to.ret(),
+            Term::Fun(_, to, _) => to.ret(),
+            Term::Pi(_, _, _, to, _) => to.ret(),
             x => x,
         }
     }
@@ -419,19 +440,16 @@ impl Term {
 
     pub fn arity(&self, only_expl: bool) -> usize {
         match self {
-            Term::Fun(_, to) => 1 + to.arity(only_expl),
-            Term::Pi(_, Icit::Impl, _, to) if only_expl => to.arity(only_expl),
-            Term::Pi(_, Icit::Impl, _, to) => 1 + to.arity(only_expl),
-            Term::Pi(_, Icit::Expl, _, to) => 1 + to.arity(only_expl),
+            Term::Fun(_, to, _) => 1 + to.arity(only_expl),
+            Term::Pi(_, Icit::Impl, _, to, _) if only_expl => to.arity(only_expl),
+            Term::Pi(_, Icit::Impl, _, to, _) => 1 + to.arity(only_expl),
+            Term::Pi(_, Icit::Expl, _, to, _) => 1 + to.arity(only_expl),
             _ => 0,
         }
     }
 
     pub fn is_cons(&self) -> bool {
-        match self {
-            Term::Var(Var::Cons(_), _) => true,
-            _ => false,
-        }
+        matches!(self, Term::Var(Var::Cons(_), _))
     }
 }
 
@@ -469,8 +487,12 @@ impl<T> IVec<T> {
 // -- pretty printing --
 
 #[derive(Clone, Debug)]
-pub struct Names(VecDeque<Name>);
+pub struct Names(VecDeque<Name>, Name);
 impl Names {
+    /// Returns the name representing "_"
+    pub fn hole_name(&self) -> Name {
+        self.1
+    }
     pub fn new(mut cxt: Cxt, db: &dyn Compiler) -> Names {
         let mut v = VecDeque::new();
         while let MaybeEntry::Yes(CxtEntry {
@@ -478,12 +500,11 @@ impl Names {
         }) = db.lookup_cxt_entry(cxt)
         {
             cxt = rest;
-            match info {
-                NameInfo::Local(_) => v.push_back(name),
-                _ => (),
+            if let NameInfo::Local(_) = info {
+                v.push_back(name)
             }
         }
-        Names(v)
+        Names(v, db.intern_name("_".into()))
     }
     pub fn get(&self, ix: Ix) -> Name {
         self.0[ix.0 as usize]
@@ -535,50 +556,88 @@ impl Term {
                 {
                     names.add(n);
                     let r = match i {
-                        Icit::Impl => Doc::start("\\[").add(n.get(db)).add("]"),
-                        Icit::Expl => Doc::start("\\").add(n.get(db)),
+                        Icit::Impl => Doc::start("[").add(n.get(db)).add("]"),
+                        Icit::Expl => Doc::start(n.get(db)),
                     }
-                    .add(". ")
+                    .space()
+                    .add("=>")
+                    .space()
                     .chain(t.pretty(db, names))
                     .prec(Prec::Term);
                     names.remove();
                     r
                 }
             }
-            Term::Pi(n, i, from, to) => {
+            Term::Pi(n, i, from, to, effs) => {
                 let n = names.disamb(*n, db);
-                {
-                    let r = match i {
-                        Icit::Impl => Doc::start("[")
-                            .add(n.get(db))
-                            .add(" : ")
-                            .chain(from.pretty(db, names))
-                            .add("]"),
-                        Icit::Expl => Doc::start("(")
-                            .add(n.get(db))
-                            .add(" : ")
-                            .chain(from.pretty(db, names))
-                            .add(")"),
-                    };
-                    names.add(n);
-                    let r = r
-                        .space()
-                        .add("->")
-                        .space()
-                        .chain(to.pretty(db, names))
-                        .prec(Prec::Term);
-                    names.remove();
+                let r = match i {
+                    Icit::Impl => Doc::start("[")
+                        .add(n.get(db))
+                        .add(" : ")
+                        .chain(from.pretty(db, names))
+                        .add("]"),
+                    Icit::Expl => Doc::start("(")
+                        .add(n.get(db))
+                        .add(" : ")
+                        .chain(from.pretty(db, names))
+                        .add(")"),
+                };
+                names.add(n);
+                let r = r
+                    .group()
+                    .line()
+                    .add("->")
+                    .space()
+                    .chain(to.pretty(db, names));
+                names.remove();
+                let r = if effs.is_empty() {
                     r
-                }
+                } else {
+                    r.chain(
+                        Doc::none()
+                            .line()
+                            .chain(Doc::keyword("with"))
+                            .space()
+                            .chain(Doc::intersperse(
+                                effs.iter().map(|e| e.pretty(db, names)),
+                                Doc::start(",").space(),
+                            ))
+                            .indent(),
+                    )
+                };
+                r.prec(Prec::Term)
             }
-            Term::Fun(from, to) => from
+            Term::Fun(from, to, effs) => from
                 .pretty(db, names)
                 .nest(Prec::App)
-                .space()
+                .line()
                 .add("->")
                 .space()
                 .chain(to.pretty(db, names))
+                .chain(if effs.is_empty() {
+                    Doc::none()
+                } else {
+                    Doc::none()
+                        .space()
+                        .chain(Doc::keyword("with"))
+                        .space()
+                        .chain(Doc::intersperse(
+                            effs.iter().map(|e| e.pretty(db, names)),
+                            Doc::start(",").space(),
+                        ))
+                })
                 .prec(Prec::Term),
+            // Show binops nicely
+            Term::App(i, f, _fty, x)
+                if *i == Icit::Expl
+                    && matches!(&**f, Term::Var(Var::Builtin(Builtin::BinOp(_)), _)) =>
+            {
+                x.pretty(db, names)
+                    .nest(Prec::App)
+                    .line()
+                    .chain(f.pretty(db, names))
+                    .prec(Prec::App)
+            }
             Term::App(i, f, _fty, x) => f
                 .pretty(db, names)
                 .nest(Prec::App)
@@ -589,26 +648,29 @@ impl Term {
                 })
                 .prec(Prec::App),
             Term::Error => Doc::start("<error>"),
-            Term::Case(x, _, cases) => Doc::keyword("case")
-                .space()
-                .chain(x.pretty(db, names))
-                .space()
-                .chain(Doc::keyword("of"))
-                .line()
-                .chain(Doc::intersperse(
-                    cases.iter().map(|(pat, body)| {
-                        pat.pretty(db, &mut names.clone())
-                            .space()
-                            .add("=>")
-                            .space()
-                            .chain(body.pretty(db, names))
-                    }),
-                    Doc::none().line(),
-                ))
-                .indent()
-                .line()
-                .chain(Doc::keyword("end"))
-                .prec(Prec::Term),
+            Term::Case(x, _, cases, effs) => {
+                Doc::keyword(if effs.is_empty() { "case" } else { "catch" })
+                    .space()
+                    .chain(x.pretty(db, names))
+                    .space()
+                    .chain(Doc::keyword("of"))
+                    .line()
+                    .chain(Doc::intersperse(
+                        cases.iter().map(|(pat, body)| {
+                            let mut names = names.clone();
+                            pat.pretty(db, &mut names)
+                                .space()
+                                .add("=>")
+                                .space()
+                                .chain(body.pretty(db, &mut names))
+                        }),
+                        Doc::none().hardline(),
+                    ))
+                    .indent()
+                    .line()
+                    .chain(Doc::keyword("end"))
+                    .prec(Prec::Term)
+            }
             Term::If(cond, yes, no) => Doc::keyword("if")
                 .space()
                 .chain(cond.pretty(db, names))
@@ -622,37 +684,38 @@ impl Term {
                 .chain(no.pretty(db, names))
                 .prec(Prec::Term),
             Term::Do(sc) => {
-                let mut doc = Doc::keyword("do").line();
+                let mut doc = Doc::keyword("do");
                 let mut i = 0;
                 for (id, term) in sc {
-                    let (pre_id, _cxt) = db.lookup_intern_def(*id);
+                    let (pre_id, _state) = db.lookup_intern_def(*id);
                     let predef = db.lookup_intern_predef(pre_id);
                     match predef.name() {
                         Some(n) => {
                             let n = names.disamb(n, db);
-                            doc = doc.chain(
+                            doc = doc.hardline().chain(
                                 Doc::keyword("val")
                                     .space()
                                     .add(n.get(db))
                                     .space()
-                                    .space()
                                     .add("=")
                                     .space()
-                                    .chain(term.pretty(db, names))
-                                    .hardline(),
+                                    .chain(term.pretty(db, names)),
                             );
                             names.add(n);
                             i += 1;
                         }
                         None => {
-                            doc = doc.chain(term.pretty(db, names));
+                            doc = doc.hardline().chain(term.pretty(db, names));
                         }
                     };
                 }
                 for _ in 0..i {
                     names.remove();
                 }
-                doc.chain(Doc::keyword("end")).prec(Prec::Atom)
+                doc.indent()
+                    .line()
+                    .chain(Doc::keyword("end"))
+                    .prec(Prec::Atom)
             }
         }
     }
@@ -701,7 +764,7 @@ impl Env {
             .cloned()
             .flatten()
             .map(Val::Arc)
-            .unwrap_or(Val::local(i.to_lvl(self.size), ty.evaluate(self, mcxt, db)))
+            .unwrap_or_else(|| Val::local(i.to_lvl(self.size), ty.evaluate(self, mcxt, db)))
     }
 
     pub fn push(&mut self, v: Option<Val>) {
@@ -881,12 +944,18 @@ impl std::hash::Hash for Glued {
     fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
 }
 
+impl Default for Glued {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Glued {
     pub fn new() -> Self {
         Glued(Arc::new(RwLock::new(None)))
     }
 
-    /// Like `resolve()`, but only inlines metas, not definitions or local constraints. So, it doesn't need a quote level.
+    /// Like `resolve()`, but only inlines metas and local constraints, not definitions or local constraints. So, it doesn't need a quote level.
     pub fn resolve_meta(
         &self,
         h: Var<Lvl>,
@@ -900,8 +969,16 @@ impl Glued {
         } else {
             drop(guard);
             match h {
-                // We won't inline the local
-                Var::Local(_) => None,
+                // Check the mcxt's local constraints
+                Var::Local(lvl) => {
+                    let val = mcxt.local_val(lvl)?.clone();
+                    let val = sp
+                        .into_owned()
+                        .into_iter()
+                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
+                    // We don't cache this, because we might use this value outside of the local scope
+                    Some(val)
+                }
                 // If we inlined the Rec, it would probably lead to infinite recursion
                 Var::Rec(_) => None,
                 Var::Type(_, _) => None,
@@ -1024,8 +1101,10 @@ pub enum Val {
     /// Stores the type of the head.
     App(Var<Lvl>, Box<VTy>, Spine, Glued),
     Lam(Icit, Box<Clos>),
-    Pi(Icit, Box<Clos>),
-    Fun(Box<VTy>, Box<VTy>),
+    /// The effects are in the outer scope, so that they can be stored as `Val`s.
+    /// So they can't depend on the immediate argument.
+    Pi(Icit, Box<Clos>, Vec<Val>),
+    Fun(Box<VTy>, Box<VTy>, Vec<Val>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
     Lazy(Box<Lazy>),
@@ -1046,10 +1125,31 @@ impl Val {
         }
     }
 
+    /// Assuming this is the type of a constructor, returns either the return type or the effect type
+    pub fn cons_ret_type(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+        match self {
+            Val::Fun(_, to, effs) if effs.is_empty() => to.cons_ret_type(l.inc(), mcxt, db),
+            Val::Fun(_, _, mut effs) => {
+                assert_eq!(effs.len(), 1);
+                effs.pop().unwrap()
+            }
+            Val::Pi(_, cl, effs) if effs.is_empty() => {
+                cl.vquote(l.inc(), mcxt, db)
+                    .cons_ret_type(l.inc(), mcxt, db)
+            }
+            Val::Pi(_, _, mut effs) => {
+                assert_eq!(effs.len(), 1);
+                effs.pop().unwrap()
+            }
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).cons_ret_type(l.inc(), mcxt, db),
+            x => x,
+        }
+    }
+
     pub fn ret_type(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
-            Val::Fun(_, to) => to.ret_type(l.inc(), mcxt, db),
-            Val::Pi(_, cl) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
+            Val::Fun(_, to, _) => to.ret_type(l.inc(), mcxt, db),
+            Val::Pi(_, cl, _) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).ret_type(l.inc(), mcxt, db),
             x => x,
         }
@@ -1057,10 +1157,10 @@ impl Val {
 
     pub fn arity(&self, only_expl: bool) -> usize {
         match self {
-            Val::Fun(_, to) => 1 + to.arity(only_expl),
-            Val::Pi(Icit::Impl, cl) if only_expl => cl.term.arity(only_expl),
-            Val::Pi(Icit::Impl, cl) => 1 + cl.term.arity(only_expl),
-            Val::Pi(Icit::Expl, cl) => 1 + cl.term.arity(only_expl),
+            Val::Fun(_, to, _) => 1 + to.arity(only_expl),
+            Val::Pi(Icit::Impl, cl, _) if only_expl => cl.term.arity(only_expl),
+            Val::Pi(Icit::Impl, cl, _) => 1 + cl.term.arity(only_expl),
+            Val::Pi(Icit::Expl, cl, _) => 1 + cl.term.arity(only_expl),
             _ => 0,
         }
     }

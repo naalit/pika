@@ -102,7 +102,88 @@ fn test_type_in_do() {
         .success();
 }
 
+#[test]
+fn test_effects() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/effects.pk"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_basic_print() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/basic_print.pk"])
+        .assert()
+        .stdout("3\n")
+        .success();
+}
+
+#[test]
+fn test_effects_run() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/effects_run.pk"])
+        .assert()
+        .stdout("1\n2\n3\n5\n")
+        .success();
+}
+
+#[test]
+fn test_multi_eff() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/multi_eff.pk"])
+        .assert()
+        .stdout("0\n1\n2\n3\n5\n")
+        .success();
+}
+
+#[test]
+fn test_coroutines() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/coroutines.pk"])
+        .assert()
+        .stdout("0\n1\n2\n3\n4\n5\n6\n")
+        .success();
+}
+
+#[test]
+fn test_poly_effects() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/poly_effects.pk"])
+        .assert()
+        .stdout("1\n2\n3\n4\n")
+        .success();
+}
+
+#[test]
+fn test_new_parsing() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/new_parsing.pk"])
+        .assert()
+        .success();
+}
+
 // Tests for type errors
+
+#[test]
+fn test_eff_not_allowed() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/eff_not_allowed.pk"])
+        .assert()
+        .stderr(is_match("Effect .* not allowed in this context").unwrap())
+        .stderr(contains("this context does not allow effects"))
+        .stderr(contains("this context allows effects "))
+        .stderr(contains("effects are not allowed in the top level context"))
+        .failure();
+}
 
 #[test]
 fn test_curry_errors() {

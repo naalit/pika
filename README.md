@@ -2,10 +2,11 @@
 Pika is a small, dependently typed ML with algebraic effects and unboxed types.
 This is the rewritten version of the compiler, and the new typechecker is heavily inspired by [smalltt](https://github.com/AndrasKovacs/smalltt).
 
-Currently, Pika can compile dependently-typed lambda calculus to LLVM (through [Durin](https://github.com/tolziplohu/durin), a dependently typed optimizing intermediate language) and thus native code, but it doesn't have many features implemented yet.
+Currently, Pika can compile dependently-typed lambda calculus to LLVM (through [Durin](https://github.com/tolziplohu/durin), a dependently typed optimizing intermediate language) and thus native code, but it doesn't have all its planned features implemented yet.
 
 ### Example
-Pika doesn't have many features implemented yet, but here are some that currently work.
+Pika doesn't have all its planned features implemented yet, but here are some that currently work.
+Look in the `tests` folder for more examples of Pika code that works today.
 For a demonstration of planned features, see `demo.pk`.
 ```
 # Syntax is similar to Standard ML, but comments use #
@@ -40,6 +41,31 @@ where
   end
 end
 val _ = Option.unwrap_or (Option.Some Type) (Type -> Type)
+
+# And algebraic effects
+# Of course, this example would be better if we had strings
+eff Console of
+  Print I32 : ()
+  Read () : I32
+end
+
+fun greet () : () with Console = do
+  Console.Print 1
+  val name : I32 = Console.Read ()
+  Console.Print name
+end
+
+fun main () : () = do
+  fun handle (x : () with Console) : () = case x of
+    () => ()
+    eff (Console.Print _) k => handle (k ()?)
+    eff (Console.Read ()) k => handle (k 12?)
+  end
+
+  # ? stops effect propagation so it can be match on
+  # It's the opposite of ? in Rust
+  handle (greet ()?)
+end
 ```
 
 #### Why "Pika"?

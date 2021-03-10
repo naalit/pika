@@ -24,7 +24,7 @@ impl Default for ReplHelper {
         // Yes, we do have an actual lexer, but this is a little more flexible
         ReplHelper {
             literal: Regex::new(r"((^|\s)\d+)|\(\)").unwrap(),
-            keyword: Regex::new(r"\b(do|type|case|of|raise|catch|with|pure|struct|sig|end|val|fun|where|impl|if|then|else|and|or)\b").unwrap(),
+            keyword: Regex::new(r"\b(do|type|eff|case|of|with|struct|sig|end|val|fun|where|impl|if|then|else|and|or)\b").unwrap(),
             symbol: Regex::new(r">=|<=|>|<|==|!=|\+\+|\+|-|\*\*|\*|/|\^\^|&|=>|\||->|\\|\.|=|:").unwrap(),
             comment: Regex::new(r"#.*$").unwrap(),
         }
@@ -113,17 +113,16 @@ impl Validator for ReplHelper {
         } else {
             let l: Vec<_> = ctx.input().lines().collect();
             let first_line = l.first().unwrap().trim();
-            if first_line.is_empty() && !ctx.input().ends_with('\n') {
-                Ok(ValidationResult::Incomplete)
-            } else if ctx.input().trim().ends_with("do")
+            if first_line.is_empty() && !ctx.input().ends_with('\n')
+                || ctx.input().trim().ends_with("do")
                 || ctx.input().trim().ends_with("of")
                 || ctx.input().trim().ends_with("where")
                 || ctx.input().trim().ends_with("struct")
                 || ctx.input().trim().ends_with("sig")
-                || ctx.input().trim().ends_with("=")
-                || ctx.input().trim().ends_with(":")
+                || ctx.input().trim().ends_with('=')
+                || ctx.input().trim().ends_with(':')
                 || ctx.input().trim().ends_with("=>")
-                || l.last().unwrap().starts_with(" ")
+                || l.last().unwrap().starts_with(' ')
             {
                 Ok(ValidationResult::Incomplete)
             } else {
@@ -184,12 +183,11 @@ pub fn run_repl() {
                     for &i in &*defs {
                         if started_yet {
                             // Print out the type and value of each definition
-                            let (pre_id, cxt) = db.lookup_intern_def(i);
+                            let (pre_id, state) = db.lookup_intern_def(i);
                             let predef = db.lookup_intern_predef(pre_id);
-                            let mcxt = crate::elaborate::MCxt::new(
-                                cxt,
+                            let mcxt = crate::elaborate::MCxt::from_state(
+                                state,
                                 crate::elaborate::MCxtType::Local(i),
-                                &db,
                             );
                             let info = db.elaborate_def(i).unwrap();
                             let val = (*info.term)

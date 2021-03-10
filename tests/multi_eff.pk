@@ -1,0 +1,37 @@
+# This is the same as effects_run, but Console is split into two different effects
+# Also, it prints 0 first using an IO effect, which shouldn't be caught
+eff P of
+    Print I32 : ()
+end
+eff R of
+    Read () : I32
+end
+
+fun producer () : I32 with P, R, IO = do
+    print 0
+    P.Print 1
+    val x = R.Read ()
+    P.Print x
+    val y = R.Read ()
+    P.Print y
+    x + y
+end
+
+# Expected output:
+# 0
+# 1
+# 2
+# 3
+# 5
+fun main () : () with IO = do
+    fun handle (f : () -> I32 with P, R, IO) (acc : I32) : I32 with IO = catch f () of
+        x => x
+        eff (P.Print i) k => do
+            print i
+            handle k acc
+        end
+        eff (R.Read ()) k => handle (() => k acc) (acc + 1)
+    end
+    val x = handle producer 2
+    print x
+end

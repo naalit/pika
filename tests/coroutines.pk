@@ -1,0 +1,43 @@
+# This is a more realistic test using coroutines
+# It involves changing the effect continuation each time, and should print out 0-6
+eff Yield a of
+    Y a : ()
+end
+
+fun generator () with Yield I32 = do
+    # TODO we shouldn't need the explicit [I32] here
+    Yield.Y [I32] 1
+    Yield.Y [I32] 3
+    Yield.Y [I32] 5
+end
+
+type Coroutine a of
+    Go (() -> () with Yield a)
+    Stop
+where
+    ## Steps the coroutine, and if it yields a value, calls `run` on it. Otherwise it's done, and this function does nothing.
+    ## Returns the new coroutine.
+    fun step [a] (run : a -> () with IO) (x : Coroutine a) : Coroutine a with IO = case x of
+        Go k => catch k () of
+            () => Stop
+            eff (Yield.Y x) k => do
+                run x
+                Go k
+            end
+        end
+        Stop => Stop
+    end
+end
+
+fun main () with IO = do
+    val k = Coroutine.Go generator
+    print 0
+    val k = Coroutine.step print k
+    print 2
+    val k = Coroutine.step print k
+    print 4
+    val k = Coroutine.step print k
+    print 6
+    # This shouldn't print anything, because the coroutine is done
+    Coroutine.step print k
+end

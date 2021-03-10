@@ -1,0 +1,1 @@
+fun main () with IO = print 3

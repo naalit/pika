@@ -97,36 +97,30 @@ end
 # Pika has algebraic effects, which can take two forms.
 # This is a function that uses the `IO` effect:
 # (note that the `with IO` would have been inferred if it wasn't written)
-fun f () with IO = do
+fun f () : () with IO = do
   print "Hello, world!"
 end
-# Effects can also exist in free-monad form, as an instance of this type:
-type Eff r e of
-  Return r
-  # This has a value of `e a` (which is probably a GADT) and a continuation with an `a` arguent.
-  Eff [a] (e a) (a -> Eff r e)
-end
 # We can define the IO effect like so:
-type IO a of
-  # () has type Unit
-  Print String : IO Unit
+eff IO of
+  Print String : ()
   # This returns a String (its continuation takes a String).
-  Input : IO String
+  Input () : String
 end
-# We can convert between "frozen" free-monad effects and "active" effects that propagate through functions with `raise` and `catch`:
-fun print (s : String) : Unit with IO = do
-  raise (IO.Print s)
+# Effects are invoked by calling them
+fun print (s : String) : () with IO = do
+  IO.Print s
 end
-# If we just didn't give a `with` clause, it would be inferred, so marking it `pure` helps us be sure our function gets the right type.
-fun run_pure [r] (f : Unit -> r with IO) : r pure = handler (catch (f ()))
-fun handler [r] (x : Eff r IO) : r pure = do
+# Since we specified the return type without a `with` clause, Pika will ensure it doesn't perform any effects
+# The `?` operator stops propagation of an effect so we can pass it to `handler` as type `r with IO`; it's the opposite of `?` in Rust.
+fun run_pure [r] (f : () -> r with IO) : r = handler (f ()?)
+fun handler [r] (x : r with IO) : r = do
   case x of
-    Eff.Return x => x
+    x => x
     # We'll ignore the output.
-    # Note that the continuation doesn't need to be caught again.
-    Eff.Eff (IO.Print _) k => handler  (k ())
+    # Note that we need to use ? again on the continuation.
+    eff (IO.Print _) k => handler  (k ()?)
     # And we'll always input "yes"
-    Eff.Eff (IO.Input) k = handler (k "yes")
+    eff (IO.Input ()) k = handler (k "yes"?)
   end
 end
 
@@ -137,19 +131,19 @@ apply_to_3 \x. do
     print (to_string x)
     x + 2
   end
-# Again, you can specify effects, or `pure`, on function types.
-fun run [r] (f : Unit -> r with IO) : r with IO = f ()
+# Again, you can specify effects on function types.
+fun run [r] (f : () -> r with IO) : r with IO = f ()
 
 
 # We can use dependent types to make a `printf`-like function!
-# We insert `with IO` on every curried function boundary, it might not be true but it's easier and still sound.
 fun nfmtargs ret (n : U32) : Type = case n of
-  0 => ret
+  # After taking the last argument, it performs an IO effect
+  0 => ret with IO
   # This requires a Display instance for t. Note that [: t] is equivalent to [_ : t]
-  Suc n => [t] [: Display t] t -> nfmtargs ret n with IO
+  Suc n => [t] [: Display t] t -> nfmtargs ret n
 end
-fun printf (s : String) : nfmtargs Unit (s.count "{}") with IO = do
-  fun printf_impl buf l : nfmtargs Unit (l.len) with IO = case l of
+fun printf (s : String) : nfmtargs () (s.count "{}") = do
+  fun printf_impl buf l : nfmtargs () (l.len) = case l of
     Nil => _ffi.puts buf
     Cons s l => do
       # `s` should go after `x`

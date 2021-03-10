@@ -4,20 +4,20 @@ use codespan_reporting::diagnostic::{Diagnostic, Label};
 use codespan_reporting::files::{Error as FError, Files as FilesT, SimpleFile};
 use codespan_reporting::term::termcolor;
 use codespan_reporting::term::{emit, Config};
-use lalrpop_util::ParseError;
 use lazy_static::lazy_static;
 use std::ops::Range;
 use std::sync::RwLock;
 
 pub type FileId = usize;
 
+#[derive(Default, Clone)]
 pub struct Files {
     files: Vec<SimpleFile<String, String>>,
 }
 
 impl Files {
     pub fn new() -> Files {
-        Files { files: Vec::new() }
+        Default::default()
     }
 
     pub fn add(&mut self, name: String, source: String) -> FileId {
@@ -160,8 +160,22 @@ impl PartialEq for Error {
     }
 }
 
-pub trait ToError {
-    fn to_error(self, file: FileId) -> Error;
+pub trait ErrMessage {
+    fn message(self, start_col: usize, end_col: usize) -> String;
+}
+impl ErrMessage for String {
+    fn message(self, _start_col: usize, _end_col: usize) -> String {
+        self
+    }
+}
+impl ErrMessage for &str {
+    fn message(self, _start_col: usize, _end_col: usize) -> String {
+        self.to_string()
+    }
+}
+
+pub trait IntoError {
+    fn into_error(self, file: FileId) -> Error;
 }
 
 impl Eq for Error {}
@@ -185,27 +199,35 @@ impl Error {
     /// ```
     pub fn new(
         file: FileId,
-        primary: impl Into<String>,
+        primary: impl ErrMessage,
         span: Span,
-        secondary: impl Into<String>,
+        secondary: impl ErrMessage,
     ) -> Self {
+        let start_col = {
+            let files = FILES.read().unwrap();
+            4 + files.location(file, span.0).unwrap().column_number
+        };
         let d = Diagnostic::error()
-            .with_message(primary)
-            .with_labels(vec![Label::primary(file, span).with_message(secondary)]);
+            .with_message(primary.message(0, 80))
+            .with_labels(vec![Label::primary(file, span).with_message(secondary.message(start_col, 80))]);
         Error(d)
     }
 
     /// Add a note to the `Error`, which appears at the bottom unattached to any span
-    pub fn with_note(mut self, msg: impl Into<String>) -> Self {
-        self.0.notes.push(msg.into());
+    pub fn with_note(mut self, msg: impl ErrMessage) -> Self {
+        self.0.notes.push(msg.message(4, 80));
         self
     }
 
     /// Add a label to the `Error`
-    pub fn with_label(mut self, file: FileId, span: Span, msg: impl Into<String>) -> Self {
+    pub fn with_label(mut self, file: FileId, span: Span, msg: impl ErrMessage) -> Self {
+        let start_col = {
+            let files = FILES.read().unwrap();
+            4 + files.location(file, span.0).unwrap().column_number
+        };
         self.0
             .labels
-            .push(Label::secondary(file, span).with_message(msg.into()));
+            .push(Label::secondary(file, span).with_message(msg.message(start_col, 80)));
         self
     }
 
@@ -217,64 +239,5 @@ impl Error {
             &*FILES.read().unwrap(),
             &self.0,
         )
-    }
-}
-
-/// Used only to format the "expected x, y, or z" text in parse errors
-struct Alternatives(Vec<String>);
-use std::fmt;
-impl fmt::Display for Alternatives {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fn to_err(x: &str) -> String {
-            match x {
-                r#""\n""# => "newline".to_string(),
-                "IDENT" => "identifier".to_string(),
-                x => x.replace('"', "'"),
-            }
-        }
-
-        if self.0.len() == 1 {
-            return write!(f, "{}", to_err(&self.0[0]));
-        }
-        for i in 0..self.0.len() {
-            if i == self.0.len() - 1 {
-                write!(f, "or {}", to_err(&self.0[i]))?;
-            } else {
-                write!(f, "{}, ", to_err(&self.0[i]))?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<L: std::fmt::Display, U: ToString> ToError for ParseError<usize, L, Spanned<U>> {
-    fn to_error(self, file: FileId) -> Error {
-        let (message, span) = match self {
-            ParseError::InvalidToken { location } => {
-                ("Invalid token".to_string(), Span(location, location))
-            }
-            ParseError::UnrecognizedEOF { location, expected } => (
-                format!("Unexpected EOF, expected {}", Alternatives(expected)),
-                Span(location, location),
-            ),
-            ParseError::UnrecognizedToken {
-                token: (start, tok, end),
-                expected,
-            } => (
-                format!("Unexpected {}, expected {}", tok, Alternatives(expected)),
-                Span(start, end),
-            ),
-            ParseError::ExtraToken {
-                token: (start, tok, end),
-            } => (
-                format!("Unexpected {}, expected EOF", tok),
-                Span(start, end),
-            ),
-            ParseError::User { error } => {
-                let span = error.span();
-                (error.unwrap().to_string(), span)
-            }
-        };
-        Error::new(file, format!("Parse error: {}", message), span, message)
     }
 }

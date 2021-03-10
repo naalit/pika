@@ -10,6 +10,9 @@ pub enum Builtin {
     False,
     Unit,
     UnitType,
+    Eff,
+    IO,
+    Print,
 }
 impl Builtin {
     pub fn name(self) -> &'static str {
@@ -22,6 +25,9 @@ impl Builtin {
             Builtin::False => "False",
             Builtin::Unit => "()",
             Builtin::UnitType => "()",
+            Builtin::Eff => "Eff",
+            Builtin::IO => "IO",
+            Builtin::Print => "print",
         }
     }
 
@@ -31,17 +37,29 @@ impl Builtin {
 
     pub fn ty(self) -> Val {
         match self {
-            Builtin::I32 | Builtin::I64 | Builtin::Bool | Builtin::UnitType => Val::Type,
+            Builtin::I32 | Builtin::I64 | Builtin::Bool | Builtin::UnitType | Builtin::Eff => {
+                Val::Type
+            }
             Builtin::True | Builtin::False => Val::builtin(Builtin::Bool, Val::Type),
             Builtin::Unit => Val::builtin(Builtin::UnitType, Val::Type),
             Builtin::BinOp(b) => b.ty(),
+            Builtin::IO => Val::builtin(Builtin::Eff, Val::Type),
+            // print : I32 -> () with IO
+            Builtin::Print => Val::Fun(
+                Box::new(Val::builtin(Builtin::I32, Val::Type)),
+                Box::new(Val::builtin(Builtin::UnitType, Val::Type)),
+                vec![Val::builtin(
+                    Builtin::IO,
+                    Val::builtin(Builtin::Eff, Val::Type),
+                )],
+            ),
         }
     }
 }
 
 pub fn define_builtins<T: ?Sized + Interner>(cxt: Cxt, db: &T) -> Cxt {
     use Builtin::*;
-    let list = vec![I32, I64, Bool, True, False];
+    let list = vec![I32, I64, Bool, True, False, Eff, IO, Print];
 
     let mut cxt = cxt;
     for b in list {

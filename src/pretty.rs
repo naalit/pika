@@ -5,6 +5,8 @@ use termcolor::*;
 
 pub use termcolor::{Color, ColorChoice, ColorSpec};
 
+use crate::common::ErrMessage;
+
 #[derive(PartialOrd, PartialEq, Eq, Ord, Clone, Copy)]
 pub enum Prec {
     Term,
@@ -53,10 +55,15 @@ pub struct Doc {
     prec: Prec,
 }
 
-impl Into<String> for Doc {
-    /// Calls `Doc::ansi_string()`. This is primarily for interop with codespan_reporting
-    fn into(self) -> String {
-        self.ansi_string()
+impl ErrMessage for Doc {
+    fn message(self, start_col: usize, end_col: usize) -> String {
+        let mut buffer = Buffer::ansi();
+        buffer.reset().unwrap();
+        self.doc
+            .nest(start_col as isize + 2)
+            .render_colored(end_col, &mut buffer)
+            .unwrap();
+        String::from_utf8(buffer.into_inner()).unwrap()
     }
 }
 

@@ -1,0 +1,38 @@
+# This file is just to make sure errors related to effects look okay
+eff Console of
+  Print I32 : ()
+  Read () : I32
+end
+
+eff Yield of
+  Yield I32 : ()
+end
+
+fun has_no_effs (i: I32) : () = do
+  Console.Print i
+end
+
+fun eff_in_case (x : ()) = case x of
+    () => ()
+    eff (Console.Print _) _ => ()
+end
+
+fun catch_no_effs (x: ()) = catch x of
+  () => ()
+end
+
+fun catch_io (f: () -> () with IO) = catch f () of
+  () => ()
+end
+
+fun catch_missing_effs (f : () -> () with Console) = catch f () of
+    () => ()
+    eff (Console.Print _) _ => ()
+end
+
+fun wrong_eff_type (f : () -> () with Console) = catch f () of
+  () => ()
+  eff (Yield.Yield _) _ => ()
+end
+
+fun wrong_with () : () with () = ()
