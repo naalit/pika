@@ -1421,7 +1421,8 @@ impl ReasonExpected {
             ReasonExpected::ArgOf(span, ty) => err.with_label(
                 file,
                 span,
-                Doc::start("expected because it was passed to this, of type ")
+                Doc::start("expected because it was passed to this, of type")
+                    .line()
                     .chain(ty.pretty(db, mcxt).style(Style::None))
                     .style(Style::Note),
             ),
@@ -1462,7 +1463,8 @@ impl TypeError {
             ),
             TypeError::NotFunction(mcxt, t) => Error::new(
                 file,
-                Doc::start("Expected function type in application, but got: ")
+                Doc::start("Expected function type in application, but got")
+                    .line()
                     .chain(t.pretty(db, &mcxt).style(Style::None))
                     .style(Style::Bold),
                 t.span(),
@@ -1471,15 +1473,20 @@ impl TypeError {
             TypeError::Unify(mcxt, a, b, r) => r.add(
                 Error::new(
                     file,
-                    Doc::start("Could not match types, expected ")
+                    Doc::start("Could not match types, expected")
+                        .line()
                         .chain(b.pretty(db, &mcxt).style(Style::None))
-                        .add(", got ")
+                        .line()
+                        .add("but got")
+                        .line()
                         .chain(a.pretty(db, &mcxt).style(Style::None))
                         .style(Style::Bold),
                     a.span(),
-                    Doc::start("expected ")
+                    Doc::start("expected")
+                        .line()
                         .chain(b.pretty(db, &mcxt).style(Style::None))
-                        .add(" here")
+                        .line()
+                        .add("here")
                         .style(Style::Error),
                 ),
                 file,
@@ -1512,7 +1519,8 @@ impl TypeError {
                 file,
                 Doc::start("Solution for ")
                     .chain(m.pretty_meta(mcxt, db))
-                    .add(" is ambiguous: cannot depend on value ")
+                    .add(" is ambiguous: cannot depend on value")
+                    .line()
                     .chain(v.pretty(db, mcxt).style(Style::None))
                     .style(Style::Bold),
                 s,
@@ -1521,9 +1529,11 @@ impl TypeError {
             .with_note(Doc::start("because here it depends on a specific value, the compiler doesn't know what the solution should be for other values").style(Style::Note)),
             TypeError::NotStruct(ty) => Error::new(
                 file,
-                Doc::start("Value of type ")
+                Doc::start("Value of type")
+                    .line()
                     .chain(ty.pretty(db, mcxt).style(Style::None))
-                    .add(" does not have members")
+                    .line()
+                    .add("does not have members")
                     .style(Style::Bold),
                 ty.span(),
                 "tried to access member here",
@@ -1562,9 +1572,11 @@ impl TypeError {
             ),
             TypeError::Inexhaustive(span, cov, ty) => Error::new(
                 file,
-                Doc::start("Inexhaustive match: patterns ")
+                Doc::start("Inexhaustive match: patterns")
+                    .line()
                     .chain(cov.pretty_rest(&ty, db, mcxt).style(Style::None))
-                    .add(" not covered")
+                    .line()
+                    .add("not covered")
                     .style(Style::Bold),
                 span,
                 Doc::start("this has type ")
@@ -1580,9 +1592,11 @@ impl TypeError {
             TypeError::NotIntType(span, ty, r) => r.add(
                 Error::new(
                     file,
-                    Doc::start("Expected value of type ")
+                    Doc::start("Expected value of type")
+                        .line()
                         .chain(ty.pretty(db, mcxt).style(Style::None))
-                        .add(", got integer")
+                        .line()
+                        .add("but got integer")
                         .style(Style::Bold),
                     span,
                     "this is an integer",
@@ -1604,12 +1618,15 @@ impl TypeError {
             TypeError::EffNotAllowed(span, eff, mut stack) => {
                 let base = Error::new(
                     file,
-                    Doc::start("Effect ")
+                    Doc::start("Effect")
+                        .line()
                         .chain(eff.pretty(db, mcxt).style(Style::None))
-                        .add(" not allowed in this context")
+                        .line()
+                        .add("not allowed in this context")
                         .style(Style::Bold),
                     span,
-                    Doc::start("this performs effect ")
+                    Doc::start("this performs effect")
+                        .line()
                         .chain(eff.pretty(db, mcxt).style(Style::None))
                         .style(Style::Error)
                 );
@@ -1633,9 +1650,11 @@ impl TypeError {
                     "Too few arguments "
                 })
                 .add(got)
-                .add(" to value of type ")
+                .add(" to value of type")
+                .line()
                 .chain(ty.pretty(db, mcxt).style(Style::None))
-                .add(" which expects ")
+                .line()
+                .add("which expects ")
                 .add(expected)
                 .add(if expected == 1 {
                     " argument"
@@ -1690,12 +1709,14 @@ impl TypeError {
                     .add(" here")
                     .style(Style::Note),
             ),
-
             TypeError::EffPatternType(vspan, pspan, ty, effs) => Error::new(
                 file,
-                Doc::start("got effect type ")
+                Doc::start("got effect type")
+                    .line()
                     .chain(ty.pretty(db, mcxt).style(Style::None))
-                    .add(" but expected one of: ")
+                    .line()
+                    .add("but expected one of")
+                    .line()
                     .chain(Doc::intersperse(effs.iter().map(|e| e.pretty(db, mcxt).style(Style::None)), Doc::start(',').space()))
                     .style(Style::Bold),
                 pspan,
@@ -1704,8 +1725,9 @@ impl TypeError {
             .with_label(
                 file,
                 vspan,
-                Doc::start("this expression performs effects ")
-                    .chain(Doc::intersperse(effs.iter().map(|e| e.pretty(db, mcxt).style(Style::None)), Doc::start(',').space()))
+                Doc::start("this expression performs effects")
+                    .line()
+                    .chain(Doc::intersperse(effs.iter().map(|e| e.pretty(db, mcxt).style(Style::None)), Doc::start(',').line()).group())
                     .style(Style::Note),
             ),
         }

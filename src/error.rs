@@ -160,6 +160,20 @@ impl PartialEq for Error {
     }
 }
 
+pub trait ErrMessage {
+    fn message(self, start_col: usize, end_col: usize) -> String;
+}
+impl ErrMessage for String {
+    fn message(self, _start_col: usize, _end_col: usize) -> String {
+        self
+    }
+}
+impl ErrMessage for &str {
+    fn message(self, _start_col: usize, _end_col: usize) -> String {
+        self.to_string()
+    }
+}
+
 pub trait IntoError {
     fn into_error(self, file: FileId) -> Error;
 }
@@ -185,27 +199,35 @@ impl Error {
     /// ```
     pub fn new(
         file: FileId,
-        primary: impl Into<String>,
+        primary: impl ErrMessage,
         span: Span,
-        secondary: impl Into<String>,
+        secondary: impl ErrMessage,
     ) -> Self {
+        let start_col = {
+            let files = FILES.read().unwrap();
+            4 + files.location(file, span.0).unwrap().column_number
+        };
         let d = Diagnostic::error()
-            .with_message(primary)
-            .with_labels(vec![Label::primary(file, span).with_message(secondary)]);
+            .with_message(primary.message(0, 80))
+            .with_labels(vec![Label::primary(file, span).with_message(secondary.message(start_col, 80))]);
         Error(d)
     }
 
     /// Add a note to the `Error`, which appears at the bottom unattached to any span
-    pub fn with_note(mut self, msg: impl Into<String>) -> Self {
-        self.0.notes.push(msg.into());
+    pub fn with_note(mut self, msg: impl ErrMessage) -> Self {
+        self.0.notes.push(msg.message(4, 80));
         self
     }
 
     /// Add a label to the `Error`
-    pub fn with_label(mut self, file: FileId, span: Span, msg: impl Into<String>) -> Self {
+    pub fn with_label(mut self, file: FileId, span: Span, msg: impl ErrMessage) -> Self {
+        let start_col = {
+            let files = FILES.read().unwrap();
+            4 + files.location(file, span.0).unwrap().column_number
+        };
         self.0
             .labels
-            .push(Label::secondary(file, span).with_message(msg.into()));
+            .push(Label::secondary(file, span).with_message(msg.message(start_col, 80)));
         self
     }
 
