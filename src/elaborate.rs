@@ -1921,9 +1921,11 @@ fn p_unify(
                 mcxt,
             )
         }
-        // is_none() because if it's already solved, we'll do that with the normal inlining logic down below
         (Val::App(Var::Local(l), _, sp, _), t) | (t, Val::App(Var::Local(l), _, sp, _))
-            if mode.local && mcxt.local_val(l).is_none() =>
+            if mode.local
+                // because if it's already solved, or if the other one is a solved local, we'll handle that with the normal inlining logic down below
+                && mcxt.local_val(l).is_none()
+                && !matches!(t, Val::App(Var::Local(l2), _, _, _) if mcxt.local_val(l2).is_some()) =>
         {
             mcxt.solve_local(l, &sp, t)?;
             Ok(Yes)

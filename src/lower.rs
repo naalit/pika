@@ -1407,9 +1407,7 @@ impl Pat {
             Pat::Any => cont.lower(ty, cxt),
             Pat::Var(n, vty) => {
                 cxt.local(*n, x, (**vty).clone());
-                let ret = cont.lower(ty, cxt);
-                cxt.pop_local();
-                ret
+                cont.lower(ty, cxt)
             }
             Pat::Lit(l, w) => {
                 let l = l.lower(*w, cxt);
