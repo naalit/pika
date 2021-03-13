@@ -231,9 +231,9 @@ impl<'i> Parser<'i> {
 
                 let name = self.name()?;
 
-                let mut args = Vec::new();
-                self.args(&mut args, &mut ArgMode::FunDef)?;
-                let args: Vec<_> = args
+                let mut ty_args = Vec::new();
+                self.args(&mut ty_args, &mut ArgMode::FunDef)?;
+                let ty_args: Vec<_> = ty_args
                     .into_iter()
                     .map(|(n, i, t)| {
                         let t =
@@ -242,48 +242,61 @@ impl<'i> Parser<'i> {
                     })
                     .collect();
 
-                self.expect(Tok::Of)?;
-                self.newline();
+                let ctors = if let Tok::Equals = self.peek("of")? {
+                    // Short form
 
-                // Now the constructors
-                let mut ctors = Vec::new();
-                let mut had_newline = true;
-                while !matches!(self.peek("_"), Err(_) | Ok(Tok::End) | Ok(Tok::Where)) {
-                    if !had_newline {
-                        let next_tok = self.peek("_")?;
-                        return self.unexpected(next_tok, "newline before next definition");
+                    // Consume the `=`
+                    self.next();
+
+                    let term = self.term()?;
+                    PreDataType::ShortForm(term)
+                } else {
+                    // Long form
+
+                    self.expect(Tok::Of)?;
+                    self.newline();
+
+                    // Now the constructors
+                    let mut ctors = Vec::new();
+                    let mut had_newline = true;
+                    while !matches!(self.peek("_"), Err(_) | Ok(Tok::End) | Ok(Tok::Where)) {
+                        if !had_newline {
+                            let next_tok = self.peek("_")?;
+                            return self.unexpected(next_tok, "newline before next definition");
+                        }
+
+                        let name = self.name()?;
+
+                        let mut args = Vec::new();
+                        self.args(&mut args, &mut ArgMode::Cons)?;
+                        let args: Vec<_> = args
+                            .into_iter()
+                            .map(|(n, i, t)| {
+                                let t = t.unwrap_or_else(|| {
+                                    n.copy_span(Pre_::Hole(MetaSource::LocalType(*n)))
+                                });
+                                (*n, i, t)
+                            })
+                            .collect();
+
+                        let ty = if self.peek("_") == Ok(Tok::Colon) {
+                            // Consume the :
+                            self.next();
+
+                            Some(self.term()?)
+                        } else {
+                            None
+                        };
+
+                        ctors.push(PreCons(name, args, ty));
+                        had_newline = self.newline();
                     }
-
-                    let name = self.name()?;
-
-                    let mut args = Vec::new();
-                    self.args(&mut args, &mut ArgMode::Cons)?;
-                    let args: Vec<_> = args
-                        .into_iter()
-                        .map(|(n, i, t)| {
-                            let t = t.unwrap_or_else(|| {
-                                n.copy_span(Pre_::Hole(MetaSource::LocalType(*n)))
-                            });
-                            (*n, i, t)
-                        })
-                        .collect();
-
-                    let ty = if self.peek("_") == Ok(Tok::Colon) {
-                        // Consume the :
-                        self.next();
-
-                        Some(self.term()?)
-                    } else {
-                        None
-                    };
-
-                    ctors.push(PreCons(name, args, ty));
-                    had_newline = self.newline();
-                }
+                    PreDataType::Standard(ctors)
+                };
 
                 // Do the associated namespace
-                let mut assoc = Vec::new();
-                if self.peek("'end' or 'where'")? == Tok::Where {
+                let mut namespace = Vec::new();
+                if self.peek("_") == Ok(Tok::Where) {
                     self.next();
                     self.newline();
                     let mut had_newline = true;
@@ -293,14 +306,23 @@ impl<'i> Parser<'i> {
                             let next_tok = self.peek("_")?;
                             return self.unexpected(next_tok, "newline before next definition");
                         }
-                        assoc.push(self.def()?);
+                        namespace.push(self.def()?);
                         had_newline = self.newline();
                     }
+
+                    self.expect(Tok::End)?;
+                } else if !ctors.is_short_form() {
+                    self.expect(Tok::End)?;
                 }
 
-                self.expect(Tok::End)?;
-
-                Ok(PreDef::Type(name, is_eff, args, ctors, assoc).into())
+                Ok(PreDef::Type {
+                    name,
+                    is_eff,
+                    ty_args,
+                    ctors,
+                    namespace,
+                }
+                .into())
             }
             _ => {
                 // We don't allow lambdas in expression statements, so the multiline lambda syntax is ambiguous
@@ -697,7 +719,7 @@ impl<'i> Parser<'i> {
                         return ret;
                     }
                 } else if icit == Icit::Expl {
-                    if mode.yes_pi() {
+                    if mode.yes_pi() || *mode == ArgMode::Cons {
                         let term = to_term(names).unwrap();
                         let term = self.app2(term)?;
                         let term = self.binop(vec![term])?;

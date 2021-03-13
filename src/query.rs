@@ -301,7 +301,7 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) ->
         match &*def {
             // Unordered
             PreDef::Fun(_, _, _, _, _)
-            | PreDef::Type(_, _, _, _, _)
+            | PreDef::Type { .. }
             | PreDef::FunDec(_, _, _, _)
             | PreDef::ValDec(_, _) => {
                 let name = def.name();

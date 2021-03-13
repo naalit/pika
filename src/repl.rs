@@ -198,21 +198,25 @@ pub fn run_repl() {
                                 Some(name) => crate::pretty::Doc::keyword("val")
                                     .space()
                                     .add(name.get(&db))
-                                    .space()
+                                    .line()
                                     .add(":")
                                     .space()
-                                    .chain(info.typ.pretty(&db, &mcxt))
-                                    .space()
+                                    .chain(info.typ.pretty(&db, &mcxt).group())
+                                    .line()
                                     .add("=")
                                     .space()
-                                    .chain(val.pretty(&db, &mcxt))
+                                    .chain(val.pretty(&db, &mcxt).group())
+                                    .group()
+                                    .indent()
                                     .line(),
                                 None => val
                                     .pretty(&db, &mcxt)
-                                    .space()
+                                    .line()
                                     .add(":")
                                     .space()
                                     .chain(info.typ.pretty(&db, &mcxt))
+                                    .group()
+                                    .indent()
                                     .line(),
                             };
                             printer.print(d).unwrap();

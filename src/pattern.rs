@@ -308,7 +308,8 @@ impl Cov {
                         .elaborate_def(*cons)
                         .expect("probably an invalid constructor?")
                         .typ)
-                        .clone();
+                        .clone()
+                        .inline_metas(&mcxt, db);
                     let mut l = mcxt.size;
 
                     for x in std::mem::take(args) {
@@ -732,36 +733,49 @@ pub fn elab_pat(
                 TypeError::NotIntType(pre.span(), ty.clone().inline_metas(mcxt, db), reason),
             ))),
         },
-        Pre_::Unit => match ty {
-            // We just translate () into Pat::Any, since it's guaranteed to match anything of type ()
-            Val::App(Var::Builtin(Builtin::UnitType), _, _, _) => Ok(Pat::Any),
-            _ => Err(TypeError::InvalidPatternBecause(Box::new(
-                TypeError::Unify(
-                    mcxt.clone(),
-                    pre.copy_span(Val::builtin(Builtin::UnitType, Val::Type)),
-                    ty.clone(),
-                    reason,
-                ),
-            ))),
-        },
+        Pre_::Unit => {
+            if unify(
+                ty.clone(),
+                Val::builtin(Builtin::UnitType, Val::Type),
+                mcxt.size,
+                pre.span(),
+                db,
+                mcxt,
+            )? {
+                // We just translate () into Pat::Any, since it's guaranteed to match anything of type ()
+                Ok(Pat::Any)
+            } else {
+                Err(TypeError::InvalidPatternBecause(Box::new(
+                    TypeError::Unify(
+                        mcxt.clone(),
+                        pre.copy_span(Val::builtin(Builtin::UnitType, Val::Type)),
+                        ty.clone(),
+                        reason,
+                    ),
+                )))
+            }
+        }
         Pre_::Var(n) => {
             if let Ok((Var::Top(id), _)) = mcxt.lookup(*n, db) {
                 if let Ok(info) = db.elaborate_def(id) {
-                    if let Term::Var(Var::Cons(id2), _) = &*info.term {
-                        if id == *id2 {
-                            // This is a constructor
-                            return elab_pat_app(
-                                in_eff,
-                                pre,
-                                VecDeque::new(),
-                                ty,
-                                effs,
-                                vspan,
-                                reason,
-                                mcxt,
-                                db,
-                            );
+                    match &*info.term {
+                        Term::Var(Var::Cons(id2), _) | Term::Var(Var::Type(id2, _), _) => {
+                            if id == *id2 {
+                                // This is a constructor
+                                return elab_pat_app(
+                                    in_eff,
+                                    pre,
+                                    VecDeque::new(),
+                                    ty,
+                                    effs,
+                                    vspan,
+                                    reason,
+                                    mcxt,
+                                    db,
+                                );
+                            }
                         }
+                        _ => (),
                     }
                 }
             }
@@ -879,187 +893,302 @@ fn elab_pat_app(
         spine.back().map(|(_, x)| x.span()).unwrap_or(head.span()).1,
     );
 
-    let (term, mut ty) = infer(false, head, db, mcxt)?;
+    let (term, fty) = infer(false, head, db, mcxt)?;
     let mut l = mcxt.size;
-    match term.inline_top(db) {
-        Term::Var(Var::Cons(id), _) => {
-            let mut pspine = Vec::new();
-
-            let arity = ty.arity(true);
-            let f_arity = spine.iter().filter(|(i, _)| *i == Icit::Expl).count();
-            let mut eff_ret = None;
-
-            // TODO unify constructor effects with given ones
-            while let Some((i, pat)) = spine.pop_front() {
-                match ty {
-                    Val::Pi(Icit::Impl, cl, mut effs) if i == Icit::Expl => {
-                        // Add an implicit argument to the pattern, and keep the explicit one on the stack
-                        spine.push_front((i, pat));
-                        mcxt.define(
-                            db.intern_name("_".into()),
-                            NameInfo::Local(cl.ty.clone()),
-                            db,
-                        );
-                        pspine.push(Pat::Var(cl.name, Box::new(cl.ty.clone())));
-                        ty = cl.vquote(l.inc(), mcxt, db);
-                        if !effs.is_empty() {
-                            assert_eq!(effs.len(), 1);
-                            eff_ret = Some(ty);
-                            ty = effs.pop().unwrap();
-                            break;
-                        }
-                        l = l.inc();
-                    }
-                    Val::Pi(i2, cl, mut effs) if i == i2 => {
-                        let pat =
-                            elab_pat(in_eff, pat, &cl.ty, &[], vspan, reason.clone(), mcxt, db)?;
-                        pspine.push(pat);
-                        ty = cl.vquote(l.inc(), mcxt, db);
-                        if !effs.is_empty() {
-                            assert_eq!(effs.len(), 1);
-                            eff_ret = Some(ty);
-                            ty = effs.pop().unwrap();
-                            break;
-                        }
-                        l = l.inc();
-                    }
-                    Val::Fun(from, to, mut effs) if i == Icit::Expl => {
-                        let pat =
-                            elab_pat(in_eff, pat, &from, &[], vspan, reason.clone(), mcxt, db)?;
-                        pspine.push(pat);
-                        ty = *to;
-                        if !effs.is_empty() {
-                            assert_eq!(effs.len(), 1);
-                            eff_ret = Some(ty);
-                            ty = effs.pop().unwrap();
-                            break;
-                        }
-                    }
-                    _ => return Err(TypeError::WrongNumConsArgs(span, arity, f_arity)),
+    let (id, fty, is_short_form) = match term.inline_top(db) {
+        Term::Var(Var::Cons(id), _) => (id, fty, false),
+        Term::Var(Var::Type(_, sid), _) => {
+            let scope = db.lookup_intern_scope(sid);
+            let m = db.intern_name(String::new());
+            let mut found = None;
+            let mut ty = fty;
+            for &(n, v) in scope.iter() {
+                if n == m {
+                    ty = match db.elaborate_def(v) {
+                        Ok(info) => info.typ.into_owned(),
+                        Err(_) => return Ok(Pat::Any),
+                    };
+                    found = Some(v);
+                    break;
                 }
             }
+            if let Some(f) = found {
+                (f, ty, true)
+            } else {
+                return Err(TypeError::InvalidPattern(span));
+            }
+        }
+        _ => return Err(TypeError::InvalidPattern(span)),
+    };
 
-            // Apply any remaining implicits
-            loop {
-                match ty {
-                    Val::Pi(Icit::Impl, cl, mut effs) => {
-                        mcxt.define(
-                            db.intern_name("_".into()),
-                            NameInfo::Local(cl.ty.clone()),
-                            db,
-                        );
-                        pspine.push(Pat::Var(cl.name, Box::new(cl.ty.clone())));
-                        ty = cl.vquote(l.inc(), mcxt, db);
-                        if !effs.is_empty() {
-                            assert_eq!(effs.len(), 1);
-                            eff_ret = Some(ty);
-                            ty = effs.pop().unwrap();
-                            break;
-                        }
-                        l = l.inc();
-                    }
-                    ty2 => {
-                        // Put it back
-                        ty = ty2;
+    let fty = fty.inline_metas(mcxt, db);
+    let mut eff_ret = None;
+
+    let mut pspine = Vec::new();
+
+    let arity = fty.arity(true);
+    let f_arity = spine.iter().filter(|(i, _)| *i == Icit::Expl).count();
+    let mut ty = fty.clone();
+
+    // TODO unify constructor effects with given ones
+    while let Some((i, pat)) = spine.pop_front() {
+        match ty {
+            Val::Pi(Icit::Impl, cl, mut effs) if i == Icit::Expl => {
+                // Add an implicit argument to the pattern, and keep the explicit one on the stack
+                spine.push_front((i, pat));
+                mcxt.define(
+                    db.intern_name("_".into()),
+                    NameInfo::Local(cl.ty.clone()),
+                    db,
+                );
+                pspine.push(Pat::Var(cl.name, Box::new(cl.ty.clone())));
+                ty = cl.vquote(l.inc(), mcxt, db);
+                if !effs.is_empty() {
+                    assert_eq!(effs.len(), 1);
+                    eff_ret = Some(ty);
+                    ty = effs.pop().unwrap();
+                    break;
+                }
+                l = l.inc();
+            }
+            Val::Pi(i2, cl, mut effs) if i == i2 => {
+                let pat = elab_pat(in_eff, pat, &cl.ty, &[], vspan, reason.clone(), mcxt, db)?;
+                pspine.push(pat);
+                ty = cl.vquote(l.inc(), mcxt, db);
+                if !effs.is_empty() {
+                    assert_eq!(effs.len(), 1);
+                    eff_ret = Some(ty);
+                    ty = effs.pop().unwrap();
+                    break;
+                }
+                l = l.inc();
+            }
+            Val::Fun(from, to, mut effs) if i == Icit::Expl => {
+                let pat = elab_pat(in_eff, pat, &from, &[], vspan, reason.clone(), mcxt, db)?;
+                pspine.push(pat);
+                ty = *to;
+                if !effs.is_empty() {
+                    assert_eq!(effs.len(), 1);
+                    eff_ret = Some(ty);
+                    ty = effs.pop().unwrap();
+                    break;
+                }
+            }
+            _ => return Err(TypeError::WrongArity(head.copy_span(fty), arity, f_arity)),
+        }
+        unify_ret_type(
+            ty.clone(),
+            expected_ty,
+            effs,
+            vspan,
+            span,
+            &reason,
+            mcxt,
+            db,
+        )?;
+        ty = ty.inline_metas(mcxt, db);
+    }
+
+    // Apply any remaining implicits
+    loop {
+        match ty {
+            Val::Pi(Icit::Impl, cl, mut effs) => {
+                mcxt.define(
+                    db.intern_name("_".into()),
+                    NameInfo::Local(cl.ty.clone()),
+                    db,
+                );
+                pspine.push(Pat::Var(cl.name, Box::new(cl.ty.clone())));
+                ty = cl.vquote(l.inc(), mcxt, db);
+                if !effs.is_empty() {
+                    assert_eq!(effs.len(), 1);
+                    eff_ret = Some(ty);
+                    ty = effs.pop().unwrap();
+                    break;
+                }
+                l = l.inc();
+            }
+            ty2 => {
+                // Put it back
+                ty = ty2;
+                break;
+            }
+        }
+    }
+
+    match &ty {
+        Val::Fun(_, _, _) | Val::Pi(_, _, _) => {
+            return Err(TypeError::WrongArity(head.copy_span(fty), arity, f_arity))
+        }
+        ty => {
+            if let Some(eff_ret) = eff_ret {
+                // First try to find an effect in `effs` that matches `rty`
+                let mut found = false;
+                for e in effs {
+                    if let Ok(true) =
+                        crate::elaborate::local_unify(ty.clone(), e.clone(), l, span, db, mcxt)
+                    {
+                        found = true;
                         break;
                     }
                 }
-            }
-
-            match &ty {
-                Val::Fun(_, _, _) | Val::Pi(_, _, _) => {
-                    return Err(TypeError::WrongNumConsArgs(span, arity, f_arity))
+                if !found {
+                    return Err(TypeError::InvalidPatternBecause(Box::new(
+                        TypeError::EffPatternType(vspan, span, ty.clone(), effs.to_vec()),
+                    )));
                 }
-                ty => {
-                    match eff_ret {
-                        Some(eff_ret) => {
-                            // First try to find an effect in `effs` that matches `ty`
-                            let mut found = false;
-                            for e in effs {
-                                if let Ok(true) = crate::elaborate::local_unify(
-                                    ty.clone(),
-                                    e.clone(),
-                                    l,
-                                    span,
-                                    db,
-                                    mcxt,
-                                ) {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                return Err(TypeError::InvalidPatternBecause(Box::new(
-                                    TypeError::EffPatternType(
-                                        vspan,
-                                        span,
-                                        ty.clone(),
-                                        effs.to_vec(),
-                                    ),
-                                )));
-                            }
 
-                            // Now unify the expected type with the return type
-                            match crate::elaborate::local_unify(
-                                eff_ret,
-                                expected_ty.clone(),
-                                l,
-                                span,
-                                db,
-                                mcxt,
-                            ) {
-                                Ok(true) => (),
-                                Ok(false) => {
-                                    return Err(TypeError::InvalidPatternBecause(Box::new(
-                                        TypeError::Unify(
-                                            mcxt.clone(),
-                                            Spanned::new(ty.clone().inline_metas(mcxt, db), span),
-                                            expected_ty.clone().inline_metas(mcxt, db),
-                                            reason,
-                                        ),
-                                    )))
-                                }
-                                Err(e) => {
-                                    return Err(TypeError::InvalidPatternBecause(Box::new(e)))
-                                }
-                            }
-                        }
-                        None => {
-                            // Unify with the expected type, for GADTs and constructors of different datatypes
-                            match crate::elaborate::local_unify(
-                                ty.clone(),
-                                expected_ty.clone(),
-                                l,
-                                span,
-                                db,
-                                mcxt,
-                            ) {
-                                Ok(true) => (),
-                                Ok(false) => {
-                                    return Err(TypeError::InvalidPatternBecause(Box::new(
-                                        TypeError::Unify(
-                                            mcxt.clone(),
-                                            Spanned::new(ty.clone().inline_metas(mcxt, db), span),
-                                            expected_ty.clone().inline_metas(mcxt, db),
-                                            reason,
-                                        ),
-                                    )))
-                                }
-                                Err(e) => {
-                                    return Err(TypeError::InvalidPatternBecause(Box::new(e)))
-                                }
-                            }
-                        }
+                // Now unify the expected type with the return type
+                match crate::elaborate::local_unify(
+                    eff_ret.clone(),
+                    expected_ty.clone(),
+                    l,
+                    span,
+                    db,
+                    mcxt,
+                ) {
+                    Ok(true) => (),
+                    Ok(false) => {
+                        return Err(TypeError::InvalidPatternBecause(Box::new(
+                            TypeError::Unify(
+                                mcxt.clone(),
+                                Spanned::new(eff_ret.clone().inline_metas(mcxt, db), span),
+                                expected_ty.clone().inline_metas(mcxt, db),
+                                reason,
+                            ),
+                        )))
                     }
+                    Err(e) => return Err(TypeError::InvalidPatternBecause(Box::new(e))),
+                }
+            } else {
+                // Unify with the expected type, for GADTs and constructors of different datatypes
+                match crate::elaborate::local_unify(
+                    ty.clone(),
+                    expected_ty.clone(),
+                    l,
+                    span,
+                    db,
+                    mcxt,
+                ) {
+                    Ok(true) => (),
+                    Ok(false) => {
+                        return Err(TypeError::InvalidPatternBecause(Box::new(
+                            TypeError::Unify(
+                                mcxt.clone(),
+                                Spanned::new(ty.clone().inline_metas(mcxt, db), span),
+                                expected_ty.clone().inline_metas(mcxt, db),
+                                reason,
+                            ),
+                        )))
+                    }
+                    Err(e) => return Err(TypeError::InvalidPatternBecause(Box::new(e))),
                 }
             }
-
-            Ok(Pat::Cons(
-                id,
-                Box::new(ty.clone().inline_metas(mcxt, db)),
-                pspine,
-            ))
         }
-        _ => Err(TypeError::InvalidPattern(span)),
     }
+
+    let ty = ty.clone().inline_metas(mcxt, db);
+    Ok(Pat::Cons(id, Box::new(ty), pspine))
+}
+
+fn unify_ret_type(
+    fty: VTy,
+    expected_ty: &VTy,
+    effs: &[VTy],
+    vspan: Span,
+    span: Span,
+    reason: &ReasonExpected,
+    mcxt: &mut MCxt,
+    db: &dyn Compiler,
+) -> Result<(), TypeError> {
+    let before_size = mcxt.size;
+
+    let mut l = before_size;
+    let mut rty = fty;
+    let mut eff_ret = None;
+    loop {
+        match rty {
+            Val::Pi(_, cl, mut effs) => {
+                mcxt.define(
+                    db.intern_name("_".into()),
+                    NameInfo::Local(cl.ty.clone()),
+                    db,
+                );
+                rty = cl.vquote(l.inc(), mcxt, db);
+                if !effs.is_empty() {
+                    assert_eq!(effs.len(), 1);
+                    eff_ret = Some(rty);
+                    rty = effs.pop().unwrap();
+                    break;
+                }
+                l = l.inc();
+            }
+            Val::Fun(_, to, mut effs) => {
+                rty = *to;
+                if !effs.is_empty() {
+                    assert_eq!(effs.len(), 1);
+                    eff_ret = Some(rty);
+                    rty = effs.pop().unwrap();
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    if let Some(eff_ret) = eff_ret {
+        // First try to find an effect in `effs` that matches `rty`
+        let mut found = false;
+        for e in effs {
+            if let Ok(true) =
+                crate::elaborate::local_unify(rty.clone(), e.clone(), l, span, db, mcxt)
+            {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(TypeError::InvalidPatternBecause(Box::new(
+                TypeError::EffPatternType(vspan, span, rty.clone(), effs.to_vec()),
+            )));
+        }
+
+        // Now unify the expected type with the return type
+        match crate::elaborate::local_unify(eff_ret.clone(), expected_ty.clone(), l, span, db, mcxt)
+        {
+            Ok(true) => (),
+            Ok(false) => {
+                return Err(TypeError::InvalidPatternBecause(Box::new(
+                    TypeError::Unify(
+                        mcxt.clone(),
+                        Spanned::new(eff_ret.clone().inline_metas(mcxt, db), span),
+                        expected_ty.clone().inline_metas(mcxt, db),
+                        reason.clone(),
+                    ),
+                )))
+            }
+            Err(e) => return Err(TypeError::InvalidPatternBecause(Box::new(e))),
+        }
+    } else {
+        // Unify with the expected type, for GADTs and constructors of different datatypes
+        match crate::elaborate::local_unify(rty.clone(), expected_ty.clone(), l, span, db, mcxt) {
+            Ok(true) => (),
+            Ok(false) => {
+                return Err(TypeError::InvalidPatternBecause(Box::new(
+                    TypeError::Unify(
+                        mcxt.clone(),
+                        Spanned::new(rty.clone().inline_metas(mcxt, db), span),
+                        expected_ty.clone().inline_metas(mcxt, db),
+                        reason.clone(),
+                    ),
+                )))
+            }
+            Err(e) => return Err(TypeError::InvalidPatternBecause(Box::new(e))),
+        }
+    }
+
+    while mcxt.size != before_size {
+        mcxt.undef(db);
+    }
+    Ok(())
 }

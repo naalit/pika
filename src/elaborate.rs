@@ -430,6 +430,9 @@ impl MCxt {
             MaybeEntry::Yes(CxtEntry { rest, info, .. }) => {
                 if let NameInfo::Local(_) = &info {
                     self.size = self.size.dec();
+                    // Remove local constraints that no longer apply
+                    let size = self.size;
+                    self.local_constraints.retain(|&k, _| k <= size);
                 }
                 rest
             }
@@ -611,12 +614,16 @@ impl Meta {
                     Doc::start("type of function '").add(n.get(db)).add("'")
                 }
                 PreDef::Val(n, _, _) => Doc::start("type of definition '").add(n.get(db)).add("'"),
-                PreDef::Type(n, false, _, _, _) => {
-                    Doc::start("type of data type '").add(n.get(db)).add("'")
-                }
-                PreDef::Type(n, true, _, _, _) => {
-                    Doc::start("type of effect type '").add(n.get(db)).add("'")
-                }
+                PreDef::Type {
+                    name,
+                    is_eff: false,
+                    ..
+                } => Doc::start("type of data type '").add(name.get(db)).add("'"),
+                PreDef::Type {
+                    name, is_eff: true, ..
+                } => Doc::start("type of effect type '")
+                    .add(name.get(db))
+                    .add("'"),
                 PreDef::Impl(Some(n), _, _) => {
                     Doc::start("type of implicit '").add(n.get(db)).add("'")
                 }
@@ -703,11 +710,13 @@ impl PreDef {
                     }
                 }
             }
-            PreDef::Type(_, eff, args, _, _) => {
+            PreDef::Type {
+                is_eff, ty_args, ..
+            } => {
                 let mut rargs = Vec::new();
-                elab_args(args, &mut rargs, cxt.file(db), &mut mcxt, db);
+                elab_args(ty_args, &mut rargs, cxt.file(db), &mut mcxt, db);
                 let mut l = mcxt.size;
-                let ty_rty = if *eff {
+                let ty_rty = if *is_eff {
                     Val::builtin(Builtin::Eff, Val::Type)
                 } else {
                     Val::Type
@@ -904,17 +913,23 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 ty.clone(),
             ))
         }
-        PreDef::Type(name, eff, args, cons, assoc) => {
+        PreDef::Type {
+            name,
+            is_eff,
+            ty_args,
+            ctors,
+            namespace,
+        } => {
             // A copy of the context before we added the type arguments
             let cxt_before = mcxt.state();
 
             // Evaluate the argument types and collect them up
             let mut targs = Vec::new();
-            elab_args(args, &mut targs, file, &mut mcxt, db);
+            elab_args(ty_args, &mut targs, file, &mut mcxt, db);
 
             // Create the type of the datatype we're defining (e.g. `Option : Type -> Type`)
             // We have to do this now, so that the constructors can use the type
-            let ty_rty = if *eff {
+            let ty_rty = if *is_eff {
                 Val::builtin(Builtin::Eff, Val::Type)
             } else {
                 Val::Type
@@ -959,13 +974,13 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
             // Go through the constructors and elaborate them
             let mut seen: HashMap<Name, Span> = HashMap::new();
-            for PreCons(cname, args, cty) in cons {
-                if let Some(&span) = seen.get(cname) {
+            for (cname, args, cty) in ctors.iter(db) {
+                if let Some(&span) = seen.get(&cname) {
                     let e = Error::new(
                         file,
                         format!(
                             "Duplicate constructor name '{}' in type definition",
-                            db.lookup_intern_name(**cname)
+                            db.lookup_intern_name(*cname)
                         ),
                         cname.span(),
                         "declared again here",
@@ -974,7 +989,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     db.report_error(e);
                     continue;
                 } else {
-                    seen.insert(**cname, cname.span());
+                    seen.insert(*cname, cname.span());
                 }
 
                 let mut cargs = Vec::new();
@@ -983,25 +998,45 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 // Either way, we need to reset it somewhat so we can't use arguments from other constructors
                 // But we use the same mcxt, so meta solutions get saved, we just reset the `CxtState`
                 // Also, effect constructors can always use the type arguments
-                if cty.is_some() && !eff {
+                if cty.is_some() && !is_eff {
                     mcxt.set_state(cxt_before.clone());
                 } else {
                     mcxt.set_state(cxt_after.clone());
                     // If they can use the type parameters, add them all as implicit arguments
                     // They go in the same order as the type parameters, so we don't need to change the mcxt
-                    for (n, _i, t) in &targs {
-                        cargs.push((*n, Icit::Impl, t.clone()));
+                    for (n, i, t) in &targs {
+                        cargs.push((
+                            *n,
+                            if ctors.is_short_form() {
+                                *i
+                            } else {
+                                Icit::Impl
+                            },
+                            t.clone(),
+                        ));
                     }
                 }
                 let start_size = mcxt.size;
 
                 // Elaborate the constructor argument types
-                elab_args(args, &mut cargs, file, &mut mcxt, db);
+                for (name, icit, ty) in args {
+                    let ty = match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt)
+                    {
+                        Ok(x) => x,
+                        Err(e) => {
+                            db.report_error(e.into_error(file, db, &mcxt));
+                            Term::Error
+                        }
+                    };
+                    let vty = ty.evaluate(&mcxt.env(), &mcxt, db);
+                    cargs.push((name, icit, vty.clone()));
+                    mcxt.define(name, NameInfo::Local(vty), db);
+                }
 
                 // If the user provided a return type for the constructor, typecheck it
                 let (cty, eff_ty) = if let Some(cty) = cty {
                     match check(cty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-                        Ok(x) if *eff => {
+                        Ok(x) if *is_eff => {
                             // TODO make this a function or something
 
                             // predef_id is for the type being declared
@@ -1087,12 +1122,12 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     }
                 // If they didn't provide a return type, use the type constructor applied to all args
                 } else {
-                    if *eff {
+                    if *is_eff {
                         let e = Error::new(
                             file,
                             format!(
                                 "Effect constructor '{}' must declare return type",
-                                db.lookup_intern_name(**cname)
+                                db.lookup_intern_name(*cname)
                             ),
                             cname.span(),
                             "this requires a return type",
@@ -1215,7 +1250,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             });
             scope.extend(
                 // The associated namespace can't directly use effects
-                intern_block(assoc.clone(), db, CxtState::new(assoc_cxt, db))
+                intern_block(namespace.clone(), db, CxtState::new(assoc_cxt, db))
                     .into_iter()
                     .filter_map(|id| {
                         let (pre, _) = db.lookup_intern_def(id);
@@ -1871,7 +1906,10 @@ fn p_unify(
         // Solve local constraints
         // We prioritize solving the innermost local - so the one with the highest level
         (Val::App(Var::Local(m), mty, s, g), Val::App(Var::Local(m2), mty2, s2, g2))
-            if mode.local && m2 > m =>
+            if mode.local
+                && m2 > m
+                && mcxt.local_val(m).is_none()
+                && mcxt.local_val(m2).is_none() =>
         {
             p_unify(
                 mode,
@@ -2486,6 +2524,58 @@ fn infer_app(
         // The type was already Error, so we'll leave it there, not introduce a meta
         Val::Error => Ok((Term::Error, Val::Error)),
         _ => {
+            if let (Icit::Expl, Term::Var(Var::Type(_, sid), _)) =
+                (icit, f.head().clone().inline_top(db))
+            {
+                let scope = db.lookup_intern_scope(sid);
+                let m = db.intern_name(String::new());
+                for &(n, v) in scope.iter() {
+                    if n == m {
+                        match db.elaborate_def(v) {
+                            Ok(info) => {
+                                let mut fty = IntoOwned::<Val>::into_owned(info.typ)
+                                    .quote(mcxt.size, mcxt, db);
+                                let mut f2 = Term::Var(Var::Top(v), Box::new(fty.clone()));
+                                let mut f = f;
+                                // Apply the constructor to all the type arguments
+                                loop {
+                                    match f {
+                                        Term::App(i, f3, _, x) => {
+                                            f2 = Term::App(
+                                                i,
+                                                Box::new(f2),
+                                                Box::new(fty.clone()),
+                                                x.clone(),
+                                            );
+                                            match fty {
+                                                Term::Pi(_, _, _, to, _) => {
+                                                    // Peel off one Pi to get the type of the next `f`.
+                                                    // It's dependent, so we need to add `x` to the environment.
+                                                    let mut env = mcxt.env();
+                                                    let x = x.evaluate(&env, mcxt, db);
+                                                    env.push(Some(x));
+                                                    // Then we evaluate-quote to so `fty` is in the context `enclosing`.
+                                                    fty = (*to)
+                                                        .clone()
+                                                        .eval_quote(&mut env, mcxt.size, mcxt, db)
+                                                }
+                                                _ => unreachable!(),
+                                            };
+                                            f = *f3;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                let fty = fty.evaluate(&mcxt.env(), mcxt, db);
+
+                                return infer_app(f2, fty, fspan, icit, x, db, mcxt);
+                            }
+                            Err(_) => return Ok((Term::Error, Val::Error)),
+                        }
+                    }
+                }
+            }
+
             if let Term::App(_, _, hty, _) = &f {
                 let hty = f.head_ty(hty).clone().evaluate(&mcxt.env(), mcxt, db);
                 let exp = hty.arity(false);

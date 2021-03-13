@@ -23,6 +23,24 @@ where
     None => default
     Some x => x
   end
+
+  # This used to cause a bug since local constraints weren't properly applied to subpatterns
+  fun test_fun (x : Option ()) = case x of
+    Some () => ()
+    None => ()
+  end
 end
 
 fun my_fun (x : Option Type) = Option.unwrap_or x (Type -> Type)
+
+type GADT (a: Type) of
+  X : GADT ()
+end
+
+type Something a of
+  C (GADT a) a
+where
+  fun something [a] (x : Something a) : () = case x of
+    Something.C (GADT.X) () => ()
+  end
+end

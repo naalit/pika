@@ -195,6 +195,48 @@ pub type SName = Spanned<Name>;
 /// and add the type parameters declared there as implicit parameters to the constructor.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct PreCons(pub SName, pub Vec<(Name, Icit, PreTy)>, pub Option<PreTy>);
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum PreDataType {
+    Standard(Vec<PreCons>),
+    ShortForm(PreTy),
+}
+impl PreDataType {
+    pub fn is_short_form(&self) -> bool {
+        matches!(self, PreDataType::ShortForm(_))
+    }
+
+    pub fn iter<'a>(&'a self, db: &'a dyn Compiler) -> ConsIterator<'a> {
+        match self {
+            PreDataType::Standard(v) => ConsIterator::Standard(v.iter()),
+            PreDataType::ShortForm(t) => ConsIterator::ShortForm(db, Some(t)),
+        }
+    }
+}
+pub enum ConsIterator<'a> {
+    Standard(std::slice::Iter<'a, PreCons>),
+    ShortForm(&'a dyn Compiler, Option<&'a PreTy>),
+}
+impl<'a> Iterator for ConsIterator<'a> {
+    type Item = (SName, Vec<(Name, Icit, &'a PreTy)>, Option<&'a PreTy>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            ConsIterator::Standard(i) => i.next().map(|PreCons(name, args, ty)| {
+                (
+                    name.clone(),
+                    args.iter().map(|(n, i, t)| (*n, *i, t)).collect(),
+                    ty.as_ref(),
+                )
+            }),
+            ConsIterator::ShortForm(db, t) => t.take().map(|t| {
+                let name = t.copy_span(db.intern_name(String::new()));
+                let arg_name = db.intern_name("_".to_string());
+                (name, vec![(arg_name, Icit::Expl, t)], None)
+            }),
+        }
+    }
+}
+
 /// A definition, declaration, or statement - anything that can appear in a `do`, `struct`, or `sig` block.
 ///
 /// `PreDef` doesn't keep track of attributes; see `PreDefAn` for that.
@@ -208,14 +250,13 @@ pub enum PreDef {
         Option<Vec<Pre>>,
     ),
     Val(SName, PreTy, Pre),
-    /// The bool keeps track of whether this is an effect
-    Type(
-        SName,
-        bool,
-        Vec<(Name, Icit, PreTy)>,
-        Vec<PreCons>,
-        Vec<PreDefAn>,
-    ),
+    Type {
+        name: SName,
+        is_eff: bool,
+        ty_args: Vec<(Name, Icit, PreTy)>,
+        ctors: PreDataType,
+        namespace: Vec<PreDefAn>,
+    },
     Impl(Option<SName>, PreTy, Pre),
     Expr(Pre),
 
@@ -231,7 +272,7 @@ impl PreDef {
         match self {
             PreDef::Fun(n, _, _, _, _)
             | PreDef::Val(n, _, _)
-            | PreDef::Type(n, _, _, _, _)
+            | PreDef::Type { name: n, .. }
             | PreDef::FunDec(n, _, _, _)
             | PreDef::Cons(n, _)
             | PreDef::ValDec(n, _) => Some(**n),
@@ -243,15 +284,15 @@ impl PreDef {
     /// This picks the best span for refering to the definition
     pub fn span(&self) -> Span {
         match self {
-            PreDef::Fun(n, _, _, _, _) => n.span(),
-            PreDef::Val(n, _, _) => n.span(),
-            PreDef::Type(n, _, _, _, _) => n.span(),
+            PreDef::Fun(n, _, _, _, _)
+            | PreDef::Val(n, _, _)
+            | PreDef::Type { name: n, .. }
+            | PreDef::FunDec(n, _, _, _)
+            | PreDef::Cons(n, _)
+            | PreDef::ValDec(n, _) => n.span(),
             PreDef::Impl(Some(n), _, _) => n.span(),
             PreDef::Impl(None, _, t) => t.span(),
             PreDef::Expr(t) => t.span(),
-            PreDef::FunDec(n, _, _, _) => n.span(),
-            PreDef::ValDec(n, _) => n.span(),
-            PreDef::Cons(n, _) => n.span(),
         }
     }
 }

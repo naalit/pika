@@ -170,6 +170,15 @@ fn test_new_parsing() {
         .success();
 }
 
+#[test]
+fn test_newtype() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["tests/newtype.pk"])
+        .assert()
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

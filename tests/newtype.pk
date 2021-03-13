@@ -1,0 +1,14 @@
+# Demonstrates the short-form syntax for data types
+# It only works for single-argument constructors, i.e. newtypes
+type Int = I32
+val x = Int 3
+
+type Tagged a = a
+val y = Tagged Int x
+
+type Tagged2 [a] = a
+val z = Tagged2 y
+
+val q = case z of
+    Tagged2 (Tagged _ (Int i)) => i
+end

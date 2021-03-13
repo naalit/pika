@@ -373,7 +373,6 @@ impl Val {
                     Var::Cons(id) => Term::Var(Var::Cons(id), Box::new(hty.clone())),
                     Var::Builtin(b) => Term::Var(Var::Builtin(b), Box::new(hty.clone())),
                 };
-                // println!("{:?}: {:?} @ {:?}", enclosing, h, sp);
                 sp.into_iter()
                     .fold((h, hty), |(f, fty), (icit, x)| {
                         let rty = match &fty {

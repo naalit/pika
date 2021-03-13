@@ -209,7 +209,9 @@ impl Error {
         };
         let d = Diagnostic::error()
             .with_message(primary.message(0, 80))
-            .with_labels(vec![Label::primary(file, span).with_message(secondary.message(start_col, 80))]);
+            .with_labels(vec![
+                Label::primary(file, span).with_message(secondary.message(start_col, 80))
+            ]);
         Error(d)
     }
 
