@@ -173,8 +173,7 @@ impl<'db> LCxt<'db> {
             rets.push((k, self.builder.type_of(k)));
         }
         if let Some(k) = self.rcont {
-            let any_ty = self.builder.cons(ir::Constant::TypeType);
-            rets.push((k, self.builder.fun_type_raw(&[any_ty] as &_)));
+            rets.push((k, self.builder.fun_type(1)));
         }
         let vals = self.builder.endif(&rets);
 
@@ -240,11 +239,11 @@ impl<'db> LCxt<'db> {
 /// ```
 impl<'db> LCxt<'db> {
     /// The logic shared by `runcont_Console` and `cont_wrapper` above, which collapses the `**continuation` and returns its value of type `ContTy_Console_inner`
-    fn collapse_continuation(&mut self, k: ir::Val, eff: ir::Val) -> ir::Val {
+    fn collapse_continuation(&mut self, k: ir::Val) -> ir::Val {
         let any_ty = self.builder.cons(ir::Constant::TypeType);
 
         // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-        let kty_inner = self.builder.fun_type(eff, any_ty);
+        let kty_inner = self.builder.fun_type(2);
 
         // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
         let kty = {
@@ -284,22 +283,14 @@ impl<'db> LCxt<'db> {
         self.builder.endif(&[(k_f, kty_inner)] as &_)[0]
     }
 
-    fn raise_effect(
-        &mut self,
-        k: ir::Val,
-        eff_ty: ir::Val,
-        eff_val: ir::Val,
-        ret_ty: ir::Val,
-    ) -> ir::Val {
-        let k = self.collapse_continuation(k, eff_ty);
+    fn raise_effect(&mut self, k: ir::Val, eff_val: ir::Val, ret_ty: ir::Val) -> ir::Val {
+        let k = self.collapse_continuation(k);
         self.builder.call(k, &[eff_val] as &_, ret_ty)
     }
 
-    fn eff_cont_ty(&mut self, eff: ir::Val, name: impl Into<String>) -> ir::Val {
-        let any_ty = self.builder.cons(ir::Constant::TypeType);
-
+    fn eff_cont_ty(&mut self, name: impl Into<String>) -> ir::Val {
         // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-        let kty_inner = self.builder.fun_type(eff, any_ty);
+        let kty_inner = self.builder.fun_type(2);
 
         // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
         let kty = self.builder.reserve(Some(name.into()));
@@ -340,7 +331,7 @@ impl<'db> LCxt<'db> {
                 .lower(Val::builtin(Builtin::Eff, Val::Type), self);
 
             // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-            let kty_inner = self.builder.fun_type(leff, any_ty);
+            let kty_inner = self.builder.fun_type(2);
 
             // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
             let kty = self.builder.reserve(None);
@@ -361,8 +352,7 @@ impl<'db> LCxt<'db> {
         }
 
         // Define the pure continuation
-        let pure_ty_l = pure_ty.clone().lower(Val::Type, self);
-        let pure_cont_ty = self.builder.fun_type_raw(&[pure_ty_l] as &_);
+        let pure_cont_ty = self.builder.fun_type(1);
         let pure_cont_inner = self.builder.reserve(None);
         let pure_cont = self.builder.refnew(pure_cont_ty);
         self.builder.refset(pure_cont, pure_cont_inner);
@@ -373,18 +363,14 @@ impl<'db> LCxt<'db> {
             .chain(std::iter::once((None, pure_cont_ty)))
             .collect();
         let new_conts = self.builder.push_fun_raw(&*args);
-        for ((&old, &new), (_, leff)) in old_conts
-            .iter()
-            .zip(new_conts.iter().skip(1))
-            .zip(args.iter().skip(1))
-        {
+        for (&old, &new) in old_conts.iter().zip(new_conts.iter().skip(1)) {
             // Make sure it's collapsed so we're updating the newest **continuation
-            self.collapse_continuation(old, *leff);
+            self.collapse_continuation(old);
             // Now update it: `**old = Redirect(new)`
             let old = self.builder.refget(old);
             let sum_ty = {
                 // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-                let kty_inner = self.builder.fun_type(*leff, any_ty);
+                let kty_inner = self.builder.fun_type(2);
 
                 // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
                 let kty = self.builder.reserve(None);
@@ -407,10 +393,10 @@ impl<'db> LCxt<'db> {
         let cont_wrapper = self.builder.pop_fun_raw(cont_inner, &new_conts[0..1]);
         let cont_wrapper_ty = self.builder.type_of(cont_wrapper);
         let cont_wrapper_wrapper = {
-            let afun_ty = self.builder.fun_type_raw(&[any_ty] as &_);
+            let afun_ty = self.builder.fun_type(1);
             let inner = self.builder.push_fun(&[(None, afun_ty)] as &_);
             self.builder.redirect(cont_inner, inner[0]);
-            self.builder.pop_fun(cont_wrapper, cont_wrapper_ty)
+            self.builder.pop_fun(cont_wrapper)
         };
 
         // Define the return continuation
@@ -424,7 +410,7 @@ impl<'db> LCxt<'db> {
         for (i, (&old_ptr, eff)) in old_conts.iter().zip(etys).enumerate() {
             let i = if i >= offset_start { i + 1 } else { i };
 
-            let afun_ty = self.builder.fun_type_raw(&[any_ty] as &_);
+            let afun_ty = self.builder.fun_type(1);
             let args = self
                 .builder
                 .push_fun_raw(&[(None, eff), (None, afun_ty)] as &_);
@@ -437,7 +423,7 @@ impl<'db> LCxt<'db> {
             let fun = self.builder.pop_fun_raw(ret_cont, &[ret] as &_);
 
             // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-            let kty_inner = self.builder.fun_type(eff, any_ty);
+            let kty_inner = self.builder.fun_type(2);
 
             // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
             let kty = self.builder.reserve(None);
@@ -484,7 +470,7 @@ impl<'db> LCxt<'db> {
         self.mcxt.eff_stack.pop_scope();
         self.rcont = old_rcont;
 
-        let (frame, args) = self.builder.push_frame(vec![(any_ty, ret_ty)]);
+        let (frame, args) = self.builder.push_frame(vec![(ret, ret_ty)]);
         self.builder.redirect(ret_cont, frame);
         args[0]
     }
@@ -813,9 +799,8 @@ impl Builtin {
                 let a = cxt.builder.push_fun([(None, i32_ty)]);
                 let b = cxt.builder.push_fun([(None, i32_ty)]);
                 let val = cxt.builder.binop(op.lower(), a[0], b[0]);
-                let f = cxt.builder.pop_fun(val, i32_ty);
-                let fty = cxt.builder.fun_type(i32_ty, i32_ty);
-                cxt.builder.pop_fun(f, fty)
+                let f = cxt.builder.pop_fun(val);
+                cxt.builder.pop_fun(f)
             }
             Builtin::True => cxt.builder.cons(ir::Constant::Int(ir::Width::W1, 1)),
             Builtin::False => cxt.builder.cons(ir::Constant::Int(ir::Width::W1, 0)),
@@ -835,7 +820,7 @@ impl Builtin {
                         .extern_declare("print_i32".into(), &[i32_ty] as &_, void_ty);
                 let x = cxt.builder.push_fun([(None, i32_ty)]);
                 let r = cxt.builder.extern_call(extern_fun, x);
-                cxt.builder.pop_fun(r, void_ty)
+                cxt.builder.pop_fun(r)
             }
         }
     }
@@ -887,11 +872,11 @@ impl Term {
                     }
                     let (conses, _) = lower_datatype(*tid, *sid, targs, cxt);
                     let mut val = cxt.builder.sum_type(conses);
-                    for (ty, is_pi) in funs.into_iter().rev() {
+                    for (_ty, is_pi) in funs.into_iter().rev() {
                         if is_pi {
                             cxt.pop_local();
                         }
-                        val = cxt.builder.pop_fun(val, ty);
+                        val = cxt.builder.pop_fun(val);
                     }
                     val
                 }
@@ -920,10 +905,7 @@ impl Term {
                                     let eff = effs.pop().unwrap();
 
                                     let ename = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
-                                    let leff = eff
-                                        .clone()
-                                        .lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
-                                    let cont_ty = cxt.eff_cont_ty(leff, &ename);
+                                    let cont_ty = cxt.eff_cont_ty(&ename);
 
                                     ty = eff;
                                     // The function takes a continuation for each effect, plus two return continuations
@@ -936,7 +918,7 @@ impl Term {
                                     ]);
                                     cxt.local(name, p[0], from);
                                     funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
-                                    break Some((p[1], leff));
+                                    break Some(p[1]);
                                 }
                             }
                             Val::Fun(from, to, mut effs) => {
@@ -951,10 +933,7 @@ impl Term {
                                     let eff = effs.pop().unwrap();
 
                                     let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
-                                    let leff = eff
-                                        .clone()
-                                        .lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
-                                    let cont_ty = cxt.eff_cont_ty(leff, &name);
+                                    let cont_ty = cxt.eff_cont_ty(&name);
 
                                     ty = eff;
                                     // The function takes a continuation for each effect, plus two return continuations
@@ -966,7 +945,7 @@ impl Term {
                                         (Some(format!("$cont.{}", name)), cont_ty),
                                     ]);
                                     funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
-                                    break Some((p[1], leff));
+                                    break Some(p[1]);
                                 }
                             }
                             _ => break None,
@@ -1009,10 +988,10 @@ impl Term {
                     let mut val = cxt.builder.inject_sum(sum_ty, idx, val);
 
                     if let Some(base_ty) = base_ty {
-                        let (eff_cont, eff_ty) = eff_cont.unwrap();
+                        let eff_cont = eff_cont.unwrap();
                         let base_ty = base_ty.lower(Val::Type, cxt);
 
-                        let ret = cxt.raise_effect(eff_cont, eff_ty, val, base_ty);
+                        let ret = cxt.raise_effect(eff_cont, val, base_ty);
 
                         let (_p, _ty, is_pi) = funs.pop().expect(
                             "Effect constructors with no parameters not supported right now!",
@@ -1020,14 +999,14 @@ impl Term {
                         if is_pi {
                             cxt.pop_local();
                         }
-                        val = cxt.builder.pop_fun(ret, base_ty);
+                        val = cxt.builder.pop_fun(ret);
                     }
 
-                    for (_p, ty, is_pi) in funs.into_iter().rev() {
+                    for (_p, _ty, is_pi) in funs.into_iter().rev() {
                         if is_pi {
                             cxt.pop_local();
                         }
-                        val = cxt.builder.pop_fun(val, ty);
+                        val = cxt.builder.pop_fun(val);
                     }
 
                     val
@@ -1104,11 +1083,8 @@ impl Term {
                         if matches!(eff, Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
                             continue;
                         }
-                        let leff = eff
-                            .clone()
-                            .lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
                         let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
-                        let cont_ty = cxt.eff_cont_ty(leff, &name);
+                        let cont_ty = cxt.eff_cont_ty(&name);
                         effs.push(eff);
                         params.push((Some(format!("$cont.{}", name)), cont_ty))
                     }
@@ -1123,9 +1099,8 @@ impl Term {
                     ret_ty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
                     cxt,
                 );
-                let ret_ty = ret_ty.lower(Val::Type, cxt);
 
-                let val = cxt.builder.pop_fun(ret, ret_ty);
+                let val = cxt.builder.pop_fun(ret);
 
                 cxt.mcxt.eff_stack.pop_scope();
                 cxt.pop_local();
@@ -1174,53 +1149,16 @@ impl Term {
                     cxt.builder.call(f, args, rty)
                 }
             }
-            Term::Fun(from, to, effs) => {
-                let from = from.lower(Val::Type, cxt);
-                let to = to.lower(Val::Type, cxt);
-
-                let mut params = vec![from];
-                for eff in effs {
-                    if matches!(eff, Term::Var(Var::Builtin(Builtin::IO), _)) {
-                        continue;
-                    }
-                    let name = eff
-                        .pretty(cxt.db, &mut Names::new(cxt.mcxt.cxt, cxt.db))
-                        .raw_string();
-                    let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
-                    params.push(cxt.eff_cont_ty(leff, &name));
-                }
-
-                cxt.builder.fun_type_multi(params, to)
-            }
-            Term::Pi(name, _icit, from, to, effs) => {
-                let from_ = from.lower(Val::Type, cxt);
-                let mut pi = cxt
-                    .builder
-                    .start_pi(Some(cxt.db.lookup_intern_name(*name)), from_);
-                cxt.local(
-                    *name,
-                    pi.args[0],
-                    (**from)
-                        .clone()
-                        .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
-                );
-
-                let to = to.lower(Val::Type, cxt);
-
-                cxt.pop_local();
+            Term::Fun(_, _, effs) | Term::Pi(_, _, _, _, effs) => {
+                let mut nargs = 2;
 
                 for eff in effs {
                     if matches!(eff, Term::Var(Var::Builtin(Builtin::IO), _)) {
                         continue;
                     }
-                    let name = eff
-                        .pretty(cxt.db, &mut Names::new(cxt.mcxt.cxt, cxt.db))
-                        .raw_string();
-                    let leff = eff.lower(Val::builtin(Builtin::Eff, Val::Type), cxt);
-                    pi.add_arg(cxt.eff_cont_ty(leff, &name), &mut cxt.builder);
+                    nargs += 1;
                 }
-
-                cxt.builder.end_pi(pi, to)
+                cxt.builder.fun_type(nargs)
             }
             Term::Error => panic!("type errors should have been caught by now!"),
             Term::Case(x, xty, cases, effs) => lower_case(x, xty, cases, effs, ty, cxt),

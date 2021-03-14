@@ -141,7 +141,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 [[package]]
 name = "durin"
 version = "0.1.0"
-source = "git+https://github.com/tolziplohu/durin#7df4b47035fed6c3041244958ee583d96d37aca0"
+source = "git+https://github.com/tolziplohu/durin#2e2f5049d30342de805c3dc0bd5cb59fd328045a"
 dependencies = [
  "either",
  "inkwell",
