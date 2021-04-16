@@ -26,7 +26,7 @@ impl<'m> ModCxt<'m> {
             db,
             defs: HashMap::new(),
             scope_ids: HashMap::new(),
-            module: ir::Module::default(),
+            module: ir::Module::new(),
         }
     }
 
@@ -339,12 +339,8 @@ impl<'db> LCxt<'db> {
             let vty = self.builder.ref_type(sum_ty);
             self.builder.redirect(kty, vty);
 
-            // let cont = self.builder.reserve(None);
-            // old_cont_inners.push(cont);
-
-            // let cont = self.builder.inject_sum(sum_ty, 0, cont);
-            // let cont_ = self.builder.refnew(sum_ty);
             let cont = self.builder.refnew(kty);
+            let kty = self.builder.ref_type(kty);
 
             old_conts.push(cont);
             etys.push(leff);
@@ -1057,7 +1053,12 @@ impl Term {
             Term::Lam(name, _icit, _arg_ty, body) => {
                 let (param_ty, ret_ty, effs_) = match ty.inline(cxt.mcxt.size, cxt.db, &cxt.mcxt) {
                     Val::Fun(from, to, effs) => {
-                        (*from, to.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db), effs)
+                        // inc() because we're evaluate()-ing it inside the lambda
+                        (
+                            *from,
+                            to.quote(cxt.mcxt.size.inc(), &cxt.mcxt, cxt.db),
+                            effs,
+                        )
                     }
                     Val::Pi(_, cl, effs) => (
                         cl.ty.clone(),
@@ -1107,6 +1108,15 @@ impl Term {
                 val
             }
             Term::App(_icit, f, fty, x) => {
+                // Uncurry binops when possible
+                if let Term::App(_, f2, _, y) = &**f {
+                    if let Term::Var(Var::Builtin(Builtin::BinOp(op)), _) = &**f2 {
+                        let x = x.lower(Val::builtin(Builtin::I32, Val::Type), cxt);
+                        let y = y.lower(Val::builtin(Builtin::I32, Val::Type), cxt);
+                        return cxt.builder.binop(op.lower(), y, x);
+                    }
+                }
+
                 let ret_ty = ty;
                 let ret_ty = ret_ty.lower(Val::Type, cxt);
                 let fty = fty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
@@ -1241,11 +1251,8 @@ fn lower_case(
             x,
             |cxt, i, x, k| {
                 // Required for the eff pattern
-                cxt.local(
-                    cxt.db.intern_name(String::new()),
-                    ir::Val::INVALID,
-                    Val::Type,
-                );
+                let nothing = cxt.builder.reserve(None);
+                cxt.local(cxt.db.intern_name(String::new()), nothing, Val::Type);
                 let before_level = cxt.mcxt.size;
 
                 let cont =

@@ -44,7 +44,7 @@ fn main() {
         db.check_all(id);
         if db.num_errors() == 0 {
             eprintln!("File elaborated successfully!");
-            let mut durin = db.durin(id);
+            let mut durin = crate::lower::durin(&db, id);
             // eprintln!("Durin module:\n{}", durin.emit());
             let backend = durin::backend::Backend::native();
             let m = backend.codegen_module(&mut durin);

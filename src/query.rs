@@ -1,6 +1,5 @@
 use crate::elaborate::*;
 use crate::error::*;
-use crate::lower::durin;
 use crate::term::*;
 use std::sync::{Arc, Mutex};
 
@@ -268,8 +267,6 @@ pub trait Compiler: CompilerExt + Interner {
     fn elaborate_def(&self, def: DefId) -> Result<ElabInfo, DefError>;
 
     fn def_type(&self, def: DefId) -> Result<Arc<VTy>, DefError>;
-
-    fn durin(&self, file: FileId) -> durin::ir::Module;
 }
 
 fn def_type(db: &dyn Compiler, def: DefId) -> Result<Arc<VTy>, DefError> {

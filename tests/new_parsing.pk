@@ -1,6 +1,4 @@
 # Tests for edge cases in the new handwritten parser
-# This finds an edge case in Durin, actually:
-# TODO make the (c 3) here work, by making pi types more powerful
 val pi = [a] (b: a) (c: I32 -> Type) (c 3) -> a
 val pi2 = (a: Type) ((b: a) -> a) -> a
 
