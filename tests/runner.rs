@@ -5,7 +5,7 @@ use predicates::str::*;
 fn test_basic() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/basic.pk"])
+        .args(&["build", "tests/basic.pk"])
         .assert()
         .success();
 }
@@ -25,7 +25,7 @@ fn test_basic() {
 fn test_data() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/data.pk"])
+        .args(&["build", "tests/data.pk"])
         .assert()
         .success();
 }
@@ -34,7 +34,7 @@ fn test_data() {
 fn test_match() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/match.pk"])
+        .args(&["build", "tests/match.pk"])
         .assert()
         .success();
 }
@@ -43,7 +43,7 @@ fn test_match() {
 fn test_gadt() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/gadt.pk"])
+        .args(&["build", "tests/gadt.pk"])
         .assert()
         .success();
 }
@@ -52,7 +52,7 @@ fn test_gadt() {
 fn test_numbers() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/numbers.pk"])
+        .args(&["build", "tests/numbers.pk"])
         .assert()
         .success();
 }
@@ -61,7 +61,7 @@ fn test_numbers() {
 fn test_bools() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/bools.pk"])
+        .args(&["build", "tests/bools.pk"])
         .assert()
         .success();
 }
@@ -70,7 +70,7 @@ fn test_bools() {
 fn test_fact() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/fact.pk"])
+        .args(&["build", "tests/fact.pk"])
         .assert()
         .success();
 }
@@ -79,7 +79,7 @@ fn test_fact() {
 fn test_unit() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/unit.pk"])
+        .args(&["build", "tests/unit.pk"])
         .assert()
         .success();
 }
@@ -88,7 +88,7 @@ fn test_unit() {
 fn test_mutual() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/mutual.pk"])
+        .args(&["build", "tests/mutual.pk"])
         .assert()
         .success();
 }
@@ -97,7 +97,7 @@ fn test_mutual() {
 fn test_type_in_do() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/type_in_do.pk"])
+        .args(&["build", "tests/type_in_do.pk"])
         .assert()
         .success();
 }
@@ -106,7 +106,7 @@ fn test_type_in_do() {
 fn test_effects() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/effects.pk"])
+        .args(&["build", "tests/effects.pk"])
         .assert()
         .success();
 }
@@ -115,7 +115,7 @@ fn test_effects() {
 fn test_basic_print() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/basic_print.pk"])
+        .args(&["run", "tests/basic_print.pk"])
         .assert()
         .stdout("3\n")
         .success();
@@ -125,7 +125,7 @@ fn test_basic_print() {
 fn test_effects_run() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/effects_run.pk"])
+        .args(&["run", "tests/effects_run.pk"])
         .assert()
         .stdout("1\n2\n3\n5\n")
         .success();
@@ -135,7 +135,7 @@ fn test_effects_run() {
 fn test_multi_eff() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/multi_eff.pk"])
+        .args(&["run", "tests/multi_eff.pk"])
         .assert()
         .stdout("0\n1\n2\n3\n5\n")
         .success();
@@ -145,7 +145,7 @@ fn test_multi_eff() {
 fn test_coroutines() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/coroutines.pk"])
+        .args(&["run", "tests/coroutines.pk"])
         .assert()
         .stdout("0\n1\n2\n3\n4\n5\n6\n")
         .success();
@@ -155,7 +155,7 @@ fn test_coroutines() {
 fn test_poly_effects() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/poly_effects.pk"])
+        .args(&["run", "tests/poly_effects.pk"])
         .assert()
         .stdout("1\n2\n3\n4\n")
         .success();
@@ -165,7 +165,7 @@ fn test_poly_effects() {
 fn test_new_parsing() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/new_parsing.pk"])
+        .args(&["build", "tests/new_parsing.pk"])
         .assert()
         .success();
 }
@@ -174,7 +174,7 @@ fn test_new_parsing() {
 fn test_newtype() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/newtype.pk"])
+        .args(&["build", "tests/newtype.pk"])
         .assert()
         .success();
 }
@@ -185,7 +185,7 @@ fn test_newtype() {
 fn test_eff_not_allowed() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/eff_not_allowed.pk"])
+        .args(&["check", "tests/eff_not_allowed.pk"])
         .assert()
         .stderr(is_match("Effect .* not allowed in this context").unwrap())
         .stderr(contains("this context does not allow effects"))
@@ -198,7 +198,7 @@ fn test_eff_not_allowed() {
 fn test_curry_errors() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/curry_errors.pk"])
+        .args(&["check", "tests/curry_errors.pk"])
         .assert()
         .stderr(contains("Too few arguments 1"))
         .stderr(contains("Too many arguments 3"))
@@ -212,7 +212,7 @@ fn test_curry_errors() {
 fn test_wrong_if_type() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/wrong_if_type.pk"])
+        .args(&["check", "tests/wrong_if_type.pk"])
         .assert()
         .stderr(is_match("Expected value of type.*Bool").unwrap())
         .failure();
@@ -222,7 +222,7 @@ fn test_wrong_if_type() {
 fn test_untyped_literal() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/untyped_literal.pk"])
+        .args(&["check", "tests/untyped_literal.pk"])
         .assert()
         .stderr(contains("Could not infer type"))
         .failure();
@@ -232,7 +232,7 @@ fn test_untyped_literal() {
 fn test_inexhaustive() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/inexhaustive.pk"])
+        .args(&["check", "tests/inexhaustive.pk"])
         .assert()
         .stderr(contains("Inexhaustive"))
         .stderr(predicates::str::is_match("False.* not covered").unwrap())
@@ -243,7 +243,7 @@ fn test_inexhaustive() {
 fn test_wrong_cons() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/wrong_cons.pk"])
+        .args(&["check", "tests/wrong_cons.pk"])
         .assert()
         .stderr(contains("Invalid"))
         .failure();
@@ -253,7 +253,7 @@ fn test_wrong_cons() {
 fn test_duplicate_constructor() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/duplicate_constructor.pk"])
+        .args(&["check", "tests/duplicate_constructor.pk"])
         .assert()
         .stderr(contains("Duplicate"))
         .failure();
@@ -263,7 +263,7 @@ fn test_duplicate_constructor() {
 fn test_wrong_constructor_type() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/wrong_constructor_type.pk"])
+        .args(&["check", "tests/wrong_constructor_type.pk"])
         .assert()
         .stderr(contains("Constructor return type"))
         .failure();
@@ -273,7 +273,7 @@ fn test_wrong_constructor_type() {
 fn test_fail() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["tests/fail.pk"])
+        .args(&["check", "tests/fail.pk"])
         .assert()
         .failure();
 }

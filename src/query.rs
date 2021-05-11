@@ -25,8 +25,11 @@ macro_rules! intern_id {
         }
     };
     ($name:ident) => {
-        intern_id!($name, "This is a handle to the actual object stored in the Salsa database.")
-    }
+        intern_id!(
+            $name,
+            "This is a handle to the actual object stored in the Salsa database."
+        )
+    };
 }
 
 intern_id!(Name, "An identifier, represented as an interned string.");

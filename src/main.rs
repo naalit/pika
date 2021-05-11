@@ -1,10 +1,8 @@
-use durin::inkwell::{
-    types::{AnyType, BasicType},
-    values::BasicValue,
-};
 use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 
+pub mod args;
 pub mod builtins;
 pub mod common;
 pub mod elaborate;
@@ -17,7 +15,9 @@ pub mod pretty;
 pub mod query;
 pub mod repl;
 pub mod term;
-use query::*;
+use crate::args::{Command, Config, Flag};
+use crate::pretty::{Doc, Style};
+use crate::query::*;
 
 mod parser;
 
@@ -31,125 +31,86 @@ extern "C" {
 }
 
 fn main() {
-    if let Some(file_name) = std::env::args().nth(1) {
-        let mut file = File::open(file_name.clone()).unwrap();
+    let config = Config::from_cmd_args();
+    for file_name in &config.files {
+        let mut file = File::open(file_name).unwrap_or_else(|_| {
+            Doc::start("error")
+                .style(Style::BoldRed)
+                .add(": File not found: ")
+                .add(file_name.display())
+                .style(Style::Bold)
+                .emit();
+            std::process::exit(1)
+        });
+
         let mut buf = String::new();
         file.read_to_string(&mut buf).unwrap();
-        if !buf.ends_with('\n') {
-            buf.push('\n');
-        }
+
         let mut db = Database::default();
-        let id = error::FILES.write().unwrap().add(file_name, buf.clone());
-        db.set_file_source(id, buf);
-        db.check_all(id);
+        let file_id = error::FILES
+            .write()
+            .unwrap()
+            .add(file_name.to_str().unwrap().to_string(), buf.clone());
+        db.set_file_source(file_id, buf);
+        db.check_all(file_id);
+
         if db.num_errors() == 0 {
-            eprintln!("File elaborated successfully!");
-            let mut durin = crate::lower::durin(&db, id);
-            // eprintln!("Durin module:\n{}", durin.emit());
-            let backend = durin::backend::Backend::native();
-            let m = backend.codegen_module(&mut durin);
-            let cxt = m.get_context();
-            // eprintln!("LLVM module:\n{}", m.print_to_string().to_str().unwrap());
-            m.verify().unwrap();
+            Doc::start("File elaborated successfully!")
+                .style(Style::Bold)
+                .emit();
 
-            // Run the main function if it exists
-            if let Some(f) = m.get_function("main") {
-                let ty = f.get_type().print_to_string();
-                // Durin might or might not have succeeded in turning `main` into direct style
-                let run = match ty.to_str().unwrap() {
-                    // () -> () in CPS
-                    "void ({}, { i8*, void (i8*, i8*)* })" => true,
-                    // () -> () in direct style
-                    "{} ({})" => true,
-                    t => {
-                        eprintln!("Warning: main function has type {}, not calling it", t);
-                        false
-                    }
-                };
-                if run {
-                    // The main function is tailcc, so we make a new ccc function which just calls it and returns
-                    let new_fun =
-                        m.add_function("$_start", cxt.void_type().fn_type(&[], false), None);
-                    {
-                        let b = cxt.create_builder();
-                        let bl = cxt.append_basic_block(new_fun, "entry");
-                        b.position_at_end(bl);
-                        if f.get_type().get_return_type().is_none() {
-                            // CPS
-                            // We need a tailcc stop function to pass as `main`'s continuation, as well as the start function
-                            let any_ty = cxt
-                                .i8_type()
-                                .ptr_type(durin::inkwell::AddressSpace::Generic)
-                                .as_basic_type_enum();
-                            let fun2 = m.add_function(
-                                "$_stop",
-                                cxt.void_type().fn_type(&[any_ty, any_ty], false),
-                                None,
-                            );
-                            fun2.set_call_conventions(durin::backend::TAILCC);
-                            let fun_ty = fun2
-                                .get_type()
-                                .ptr_type(durin::inkwell::AddressSpace::Generic)
-                                .as_basic_type_enum();
-                            let clos_ty = cxt.struct_type(&[any_ty, fun_ty], false);
-                            let clos = clos_ty.get_undef();
-                            let clos = b
-                                .build_insert_value(
-                                    clos,
-                                    fun2.as_global_value().as_pointer_value(),
-                                    1,
-                                    "_stop_clos",
-                                )
-                                .unwrap()
-                                .as_basic_value_enum();
+            if matches!(config.command, Command::Build | Command::Run) {
+                let mut durin = crate::lower::durin(&db, file_id);
+                if config.flag(Flag::EmitDurin) {
+                    eprintln!("{}", durin.emit());
+                }
 
-                            let unit = cxt
-                                .struct_type(&[], false)
-                                .get_undef()
-                                .as_basic_value_enum();
-                            let call = b.build_call(f, &[unit, clos], "main_call");
-                            call.set_call_convention(durin::backend::TAILCC);
-                            call.set_tail_call(true);
-                            b.build_return(None);
+                let out_file = config.output.clone().unwrap_or_else(|| {
+                    Path::new("target/debug/pika_out").join(file_name.file_stem().unwrap())
+                });
+                if let Some(parent) = out_file.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                if let Err(e) = durin.compile_and_link(&out_file) {
+                    Doc::start("error")
+                        .style(Style::BoldRed)
+                        .add(": Compilation error: ")
+                        .style(Style::Bold)
+                        .add(e)
+                        .emit();
+                    std::process::exit(1);
+                } else {
+                    Doc::start("Compiled successfully!")
+                        .style(Style::Bold)
+                        .emit();
+                }
 
-                            let bl2 = cxt.append_basic_block(fun2, "entry");
-                            b.position_at_end(bl2);
-                            b.build_return(None);
-                        } else {
-                            // Direct style
-                            let unit = cxt
-                                .struct_type(&[], false)
-                                .get_undef()
-                                .as_basic_value_enum();
-                            let call = b.build_call(f, &[unit], "main_call");
-                            call.set_call_convention(durin::backend::TAILCC);
-                            call.set_tail_call(true);
-                            b.build_return(None);
-                        }
-                    }
-
-                    // Then we JIT and run it
-                    let ee = m
-                        .create_jit_execution_engine(durin::inkwell::OptimizationLevel::None)
-                        .expect("Failed to create LLVM execution engine");
-                    if let Some(f) = m.get_function("malloc") {
-                        ee.add_global_mapping(&f, malloc as usize);
-                    }
-                    if let Some(f) = m.get_function("print_i32") {
-                        ee.add_global_mapping(&f, print_i32 as usize);
-                    }
-                    unsafe {
-                        ee.run_function(new_fun, &[]);
+                if matches!(config.command, Command::Run) {
+                    if let Ok(out_file) = out_file.canonicalize() {
+                        Doc::start("Running ")
+                            .add(out_file.display())
+                            .style(Style::Bold)
+                            .emit();
+                        std::process::Command::new(out_file).status().unwrap();
+                    } else {
+                        Doc::start("error")
+                            .style(Style::BoldRed)
+                            .add(": `run` command specified but module no executable present")
+                            .style(Style::Bold)
+                            .emit();
+                        std::process::exit(1);
                     }
                 }
             }
-            // `m` needs to be dropped before `cxt`
-            drop(m);
         } else {
+            let num_errors = db.num_errors();
             db.write_errors();
+            Doc::start("Exiting because of ")
+                .add(num_errors)
+                .add(" errors")
+                .style(Style::Special)
+                .emit();
             std::process::exit(1);
         }
-    } else {
-        repl::run_repl();
     }
 }

@@ -86,6 +86,13 @@ pub fn pretty_block(keyword: &str, v: impl IntoIterator<Item = Doc> + Clone) -> 
 }
 
 impl Doc {
+    pub fn emit(self) {
+        self.line()
+            .doc
+            .render_colored(80, &mut *crate::error::WRITER.write().unwrap())
+            .unwrap();
+    }
+
     /// Render into a string with no newlines and no colors
     pub fn raw_string(self) -> String {
         let mut buffer = Buffer::no_color();

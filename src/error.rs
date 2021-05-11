@@ -75,7 +75,7 @@ impl<'a> FilesT<'a> for Files {
 lazy_static! {
     pub static ref FILES: RwLock<Files> = RwLock::new(Files::new());
     static ref CONFIG: Config = Default::default();
-    static ref WRITER: RwLock<termcolor::StandardStream> = RwLock::new(
+    pub static ref WRITER: RwLock<termcolor::StandardStream> = RwLock::new(
         termcolor::StandardStream::stderr(termcolor::ColorChoice::Always)
     );
 }

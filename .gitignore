@@ -1,2 +1,4 @@
 /target
 *.code-workspace
+_pika_runtime.bc
+*.o
