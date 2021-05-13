@@ -2459,6 +2459,7 @@ fn infer_app(
     db: &dyn Compiler,
     mcxt: &mut MCxt,
 ) -> Result<(Term, VTy), TypeError> {
+    let fty = fty.inline(mcxt.size, db, mcxt);
     let (term, ty) = match &fty {
         Val::Pi(icit2, cl, effs) => {
             assert_eq!(icit, *icit2);

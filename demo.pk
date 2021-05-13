@@ -19,9 +19,9 @@
 # Pika no longer has universes, instead Type : Type.
 # In fact, Pika no longer has any subtyping at all!
 val x : Type = Type
-# I'm not 100% sure about this lambda syntax, but it's fine for now.
+# Lambdas use arrow syntax
 # Note that function types are just like SML or Haskell now.
-val y : Int -> Int = \x. x + 1
+val y : Int -> Int = x => x + 1
 
 # Unlike other MLs or Haskell, Pika doesn't have multi-clause functions.
 # Instead, use case-of.

@@ -375,6 +375,7 @@ impl Val {
                 };
                 sp.into_iter()
                     .fold((h, hty), |(f, fty), (icit, x)| {
+                        let fty = fty.inline_top(db);
                         let rty = match &fty {
                             Term::Fun(_, to, _) => (**to).clone(),
                             Term::Pi(_, _, _, to, _) => {
@@ -463,12 +464,12 @@ impl BinOp {
 }
 
 impl Term {
-    /// If self is a Var::Top, inline it (once).
+    /// If self is a Var::Top, inline it, and call inline_top on the result.
     pub fn inline_top(self, db: &dyn Compiler) -> Term {
         match self {
             Term::Var(Var::Top(id), _) => {
                 if let Ok(info) = db.elaborate_def(id) {
-                    (*info.term).clone()
+                    (*info.term).clone().inline_top(db)
                 } else {
                     self
                 }
