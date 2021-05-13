@@ -2568,16 +2568,18 @@ fn infer_app(
                 }
             }
 
-            // TODO arity errors
-            // if let Term::App(_, _, hty, _) = &f {
-            //     let hty = f.head_ty(hty).clone().evaluate(&mcxt.env(), mcxt, db);
-            //     let exp = hty.arity(false);
-            //     return Err(TypeError::WrongArity(
-            //         Spanned::new(hty, Span(fspan.0, x.span().1)),
-            //         exp,
-            //         f.spine_len() + 1,
-            //     ));
-            // }
+            if let Term::App(_, _, _) = &f {
+                let hty = f
+                    .head()
+                    .ty(mcxt.size, mcxt, db)
+                    .evaluate(&mcxt.env(), mcxt, db);
+                let exp = hty.arity(false);
+                return Err(TypeError::WrongArity(
+                    Spanned::new(hty, Span(fspan.0, x.span().1)),
+                    exp,
+                    f.spine_len() + 1,
+                ));
+            }
             return Err(TypeError::NotFunction(
                 mcxt.clone(),
                 Spanned::new(fty, fspan),

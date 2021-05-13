@@ -121,10 +121,11 @@ impl<'i> Parser<'i> {
 
     /// Consume a token, and give an error if it doesn't match the provided token.
     fn expect(&mut self, tok: Tok<'i>) -> PResult<()> {
+        let span = self.span();
         let t = self.next();
         if t != Some(tok) {
             if let Some(ty) = tok.closes_type() {
-                Err(Spanned::new(LexError::MissingTerminator(ty), self.span()))
+                Err(Spanned::new(LexError::MissingTerminator(ty), span))
             } else if let Some(t) = t {
                 self.unexpected(t, &format!("{}", tok))
             } else {
@@ -1062,12 +1063,14 @@ impl<'i> Parser<'i> {
                 Ok(Spanned::new(Pre_::Var(*name), name.span()))
             }
             Tok::Lit(l) => {
+                let span = self.span();
                 self.next();
-                Ok(Spanned::new(Pre_::Lit(l), self.span()))
+                Ok(Spanned::new(Pre_::Lit(l), span))
             }
             Tok::TypeType => {
+                let span = self.span();
                 self.next();
-                Ok(Spanned::new(Pre_::Type, self.span()))
+                Ok(Spanned::new(Pre_::Type, span))
             }
             Tok::Do => {
                 let start = self.span().0;
