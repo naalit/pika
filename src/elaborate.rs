@@ -50,14 +50,17 @@ impl Term {
                     v => Ok(Term::Var(v, ty)),
                 }
             }
-            Term::Lam(n, i, mut ty, mut t) => {
+            Term::Lam(n, i, mut ty, mut t, effs) => {
                 *ty = ty.check_solution(meta.clone(), ren, lfrom, lto, names)?;
                 // Allow the body to use the bound variable
                 ren.insert(lfrom.inc(), lto.inc());
                 names.add(n);
-                *t = t.check_solution(meta, ren, lfrom.inc(), lto.inc(), names)?;
+                *t = t.check_solution(meta.clone(), ren, lfrom.inc(), lto.inc(), names)?;
                 names.remove();
-                Ok(Term::Lam(n, i, ty, t))
+                effs.into_iter()
+                    .map(|x| x.check_solution(meta.clone(), ren, lfrom, lto, names))
+                    .collect::<Result<_, _>>()
+                    .map(|v| Term::Lam(n, i, ty, t, v))
             }
             Term::Pi(n, i, mut a, mut b, effs) => {
                 *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
@@ -510,7 +513,7 @@ impl MCxt {
         // We could look up the local variables' names in the cxt, but it's probably not worth it
         let empty_name = db.intern_name("_".to_string());
         let term = tys.into_iter().rev().fold(term, |term, ty| {
-            Term::Lam(empty_name, Icit::Expl, Box::new(ty), Box::new(term))
+            Term::Lam(empty_name, Icit::Expl, Box::new(ty), Box::new(term), Vec::new())
         });
 
         // Reevaluating the term so we don't have to clone it to quote it, and it should inline solved metas as well
@@ -687,7 +690,8 @@ impl PreDef {
                                     let rty = rty.quote(l, &mcxt, db);
                                     l = l.dec();
                                     (
-                                        Val::Pi(
+                                        Val::Clos(
+                                            Pi,
                                             i,
                                             Box::new(Clos {
                                                 name,
@@ -723,7 +727,8 @@ impl PreDef {
                 Some(rargs.into_iter().rfold(ty_rty, |rty, (name, i, xty)| {
                     let rty = rty.quote(l, &mcxt, db);
                     l = l.dec();
-                    Val::Pi(
+                    Val::Clos(
+                        Pi,
                         i,
                         Box::new(Clos {
                             name,
@@ -859,10 +864,11 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             };
 
             // Then construct the function term and type
+            let effs_t: Vec<_> = effs.iter().map(|x| x.clone().quote(mcxt.size, &mcxt, db)).collect();
             Ok((
                 targs
                     .iter()
-                    .rfold((body, mcxt.size), |(body, mut size), (name, icit, ty)| {
+                    .rfold((body, mcxt.size, effs_t), |(body, mut size, effs), (name, icit, ty)| {
                         // We need to quote the type of this argument, so decrease the size to
                         // remove this argument from the context, since its own type can't use it
                         size = size.dec();
@@ -872,8 +878,10 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                                 *icit,
                                 Box::new(ty.clone().quote(size, &mcxt, db)),
                                 Box::new(body),
+                                effs,
                             ),
                             size,
+                            Vec::new(),
                         )
                     })
                     .0,
@@ -883,7 +891,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                         (vty, mcxt.size, effs),
                         |(to, size, effs), (name, icit, from)| {
                             (
-                                Val::Pi(
+                                Val::Clos(
+                                    Pi,
                                     icit,
                                     Box::new(Clos {
                                         // Don't include the closure's argument in its environment
@@ -937,7 +946,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 .iter()
                 .rfold((ty_rty, mcxt.size), |(to, l), (n, i, from)| {
                     (
-                        Val::Pi(
+                        Val::Clos(
+                            Pi,
                             *i,
                             Box::new(Clos {
                                 env: Env::new(l.dec()),
@@ -1805,7 +1815,7 @@ fn p_unify(
         }
 
         // Since our terms are locally nameless (we're using De Bruijn levels), we automatically get alpha equivalence.
-        (Val::Lam(_, cl), Val::Lam(_, cl2)) => p_unify(
+        (Val::Clos(Lam, _, cl, _), Val::Clos(Lam,  _, cl2, _)) => p_unify(
             mode,
             cl.vquote(l, mcxt, db),
             cl2.vquote(l, mcxt, db),
@@ -1816,7 +1826,7 @@ fn p_unify(
         ),
 
         // If one side is a lambda, the other side just needs to unify to the same thing when we apply it to the same thing
-        (Val::Lam(icit, cl), t) | (t, Val::Lam(icit, cl)) => {
+        (Val::Clos(Lam, icit, cl, _), t) | (t, Val::Clos(Lam, icit, cl, _)) => {
             let ty = cl.ty.clone();
             p_unify(
                 mode,
@@ -1829,7 +1839,7 @@ fn p_unify(
             )
         }
 
-        (Val::Pi(i, cl, effs), Val::Pi(i2, cl2, effs2)) if i == i2 => {
+        (Val::Clos(Pi, i, cl, effs), Val::Clos(Pi, i2, cl2, effs2)) if i == i2 => {
             Ok(
                 p_unify(mode, cl.ty.clone(), cl2.ty.clone(), l, span, db, mcxt)?
                 // Applying both to the same thing (Local(l))
@@ -1850,8 +1860,8 @@ fn p_unify(
                     .fold(Ok(Yes), |acc, r| acc.and_then(|acc| r.map(|r| acc & r)))?,
             )
         }
-        (Val::Pi(Icit::Expl, cl, effs), Val::Fun(from, to, effs2))
-        | (Val::Fun(from, to, effs), Val::Pi(Icit::Expl, cl, effs2)) => {
+        (Val::Clos(Pi, Icit::Expl, cl, effs), Val::Fun(from, to, effs2))
+        | (Val::Fun(from, to, effs), Val::Clos(Pi, Icit::Expl, cl, effs2)) => {
             Ok(p_unify(mode, cl.ty.clone(), *from, l, span, db, mcxt)?
                 & p_unify(mode, cl.vquote(l, mcxt, db), *to, l.inc(), span, db, mcxt)?
                 & TBool::from(effs.len() == effs2.len())
@@ -2024,7 +2034,7 @@ fn insert_metas(
     db: &dyn Compiler,
 ) -> (Term, VTy) {
     match ty {
-        Val::Pi(Icit::Impl, cl, effs) if insert => {
+        Val::Clos(Pi, Icit::Impl, cl, effs) if insert => {
             let meta = mcxt.new_meta(
                 None,
                 span,
@@ -2201,10 +2211,12 @@ pub fn infer(
             let effs = mcxt.eff_stack.pop_scope();
 
             mcxt.undef(db);
-
+            
+            let effs_t = effs.iter().map(|x| x.clone().quote(mcxt.size, mcxt, db)).collect();
             Ok((
-                Term::Lam(*name, *icit, Box::new(ty), Box::new(body)),
-                Val::Pi(
+                Term::Lam(*name, *icit, Box::new(ty), Box::new(body), effs_t),
+                Val::Clos(
+                    Pi,
                     *icit,
                     // `inc()` since we're wrapping it in a lambda
                     Box::new(Clos {
@@ -2457,7 +2469,7 @@ fn infer_app(
 ) -> Result<(Term, VTy), TypeError> {
     let fty = fty.inline(mcxt.size, db, mcxt);
     let (term, ty) = match &fty {
-        Val::Pi(icit2, cl, effs) => {
+        Val::Clos(Pi, icit2, cl, effs) => {
             assert_eq!(icit, *icit2);
 
             let span = Span(fspan.0, x.span().1);
@@ -2607,7 +2619,7 @@ pub fn check(
             Box::new(Term::Type),
         )),
 
-        (Pre_::Lam(n, i, ty, body), Val::Pi(i2, cl, effs)) if i == i2 => {
+        (Pre_::Lam(n, i, ty, body), Val::Clos(Pi, i2, cl, effs)) if i == i2 => {
             let ty2 = &cl.ty;
             let ety = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let vty = ety.clone().evaluate(&mcxt.env(), mcxt, db);
@@ -2622,9 +2634,10 @@ pub fn check(
             mcxt.define(*n, NameInfo::Local(vty.clone()), db);
             // TODO not clone ??
             let bty = (**cl).clone().apply(Val::local(mcxt.size, vty), mcxt, db);
-            let (body, _bty, _effs2) = check_fun(body, bty, reason, effs.clone(), false, db, mcxt)?;
+            let (body, _bty, effs) = check_fun(body, bty, reason, effs.clone(), false, db, mcxt)?;
             mcxt.undef(db);
-            Ok(Term::Lam(*n, *i, Box::new(ety), Box::new(body)))
+            let effs = effs.iter().map(|x| x.clone().quote(mcxt.size, mcxt, db)).collect();
+            Ok(Term::Lam(*n, *i, Box::new(ety), Box::new(body), effs))
         }
 
         (Pre_::Lam(n, Icit::Expl, ty, body), Val::Fun(ty2, body_ty, effs)) => {
@@ -2646,7 +2659,7 @@ pub fn check(
                 ));
             }
             mcxt.define(*n, NameInfo::Local(vty), db);
-            let (body, _bty, _effs2) = check_fun(
+            let (body, _bty, effs) = check_fun(
                 body,
                 (**body_ty).clone(),
                 reason,
@@ -2656,7 +2669,9 @@ pub fn check(
                 mcxt,
             )?;
             mcxt.undef(db);
-            Ok(Term::Lam(*n, Icit::Expl, Box::new(ety), Box::new(body)))
+
+            let effs = effs.iter().map(|x| x.clone().quote(mcxt.size, mcxt, db)).collect();
+            Ok(Term::Lam(*n, Icit::Expl, Box::new(ety), Box::new(body), effs))
         }
 
         // We implicitly insert lambdas so `\x.x : [a] -> a -> a` typechecks
@@ -2665,7 +2680,7 @@ pub fn check(
         // // (Pre_::Lam(_, Icit::Expl, _, _), Val::Pi(Icit::Impl, cl, effs)) => {
         // For now, we have that restriction turned off so that `val _ : [a] a -> a = id id` typechecks.
         // TODO figure out how to make that typecheck without allowing unrestricted autoclosures.
-        (_, Val::Pi(Icit::Impl, cl, effs)) => {
+        (_, Val::Clos(Pi, Icit::Impl, cl, effs)) => {
             // Add a ' after the name so it doesn't shadow names the term defined (' isn't valid in Pika identifiers)
             let name = {
                 let mut s = cl.name.get(db);
@@ -2674,10 +2689,12 @@ pub fn check(
             };
             mcxt.define(name, NameInfo::Local(cl.ty.clone()), db);
             let bty = (**cl).clone().vquote(mcxt.size, mcxt, db);
-            let (body, _bty, _effs) = check_fun(pre, bty, reason, effs.clone(), false, db, mcxt)?;
+            let (body, _bty, effs) = check_fun(pre, bty, reason, effs.clone(), false, db, mcxt)?;
             mcxt.undef(db);
+
             let ty = cl.ty.clone().quote(mcxt.size, mcxt, db);
-            Ok(Term::Lam(cl.name, Icit::Impl, Box::new(ty), Box::new(body)))
+            let effs = effs.iter().map(|x| x.clone().quote(mcxt.size, mcxt, db)).collect();
+            Ok(Term::Lam(cl.name, Icit::Impl, Box::new(ty), Box::new(body), effs))
         }
 
         (Pre_::Lit(l), _) => match ty.clone().inline(mcxt.size, db, mcxt) {
@@ -2745,8 +2762,8 @@ pub fn check(
             if !unify(ty.clone(), i_ty.clone(), mcxt.size, pre.span(), db, mcxt)? {
                 // Use an arity error if we got a function type but don't expect one
                 match (&ty, &i_ty) {
-                    (Val::Pi(_, _, _), _) | (Val::Fun(_, _, _), _) => (),
-                    (_, Val::Fun(_, _, _)) | (_, Val::Pi(_, _, _))
+                    (Val::Clos(Pi, _, _, _), _) | (Val::Fun(_, _, _), _) => (),
+                    (_, Val::Fun(_, _, _)) | (_, Val::Clos(Pi, _, _, _))
                         if matches!(term, Term::App(_, _, _)) =>
                     {
                         let got = term.spine_len();

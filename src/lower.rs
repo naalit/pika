@@ -488,10 +488,10 @@ impl Val {
                 let (tid, sid, _) = effs.pop().unwrap().cons_parent(l, cxt);
                 (tid, sid, Some(*to))
             }
-            Val::Pi(_, cl, effs) if effs.is_empty() => cl
+            Val::Clos(Pi,  _, cl, effs) if effs.is_empty() => cl
                 .vquote(l.inc(), &cxt.mcxt, cxt.db)
                 .cons_parent(l.inc(), cxt),
-            Val::Pi(_, cl, mut effs) => {
+            Val::Clos(Pi, _, cl, mut effs) => {
                 assert_eq!(effs.len(), 1);
                 let (tid, sid, _) = effs.pop().unwrap().cons_parent(l, cxt);
                 let to = cl.vquote(l.inc(), &cxt.mcxt, cxt.db);
@@ -589,7 +589,7 @@ fn lower_datatype(
                         let mut ty_args = Vec::new();
                         loop {
                             match tty {
-                                Val::Pi(i, cl, _) => {
+                                Val::Clos(Pi, i, cl, _) => {
                                     let from = cl.ty.clone();
                                     cxt.mcxt
                                         .define(cl.name, NameInfo::Local(from.clone()), cxt.db);
@@ -616,7 +616,7 @@ fn lower_datatype(
                             .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
                         loop {
                             match cty {
-                                Val::Pi(_, cl, mut effs) => {
+                                Val::Clos(Pi, _, cl, mut effs) => {
                                     let from = cl.ty.clone();
                                     cxt.mcxt
                                         .define(cl.name, NameInfo::Local(from.clone()), cxt.db);
@@ -691,7 +691,7 @@ fn lower_datatype(
                     loop {
                         assert_eq!(env.size, cxt.mcxt.size);
                         match cty {
-                            Val::Pi(_, cl, effs) => {
+                            Val::Clos(Pi, _, cl, effs) => {
                                 // Quote-evaluate to apply substitutions from the environment
                                 let from = cl
                                     .ty
@@ -852,7 +852,7 @@ impl Term {
                     let mut targs = Vec::new();
                     loop {
                         match ty {
-                            Val::Pi(_, cl, _) => {
+                            Val::Clos(Pi, _, cl, _) => {
                                 let from = cl.ty.clone();
                                 targs.push(Val::local(cxt.mcxt.size.inc(), from.clone()));
 
@@ -884,7 +884,7 @@ impl Term {
                     let mut funs = Vec::new();
                     let eff_cont = loop {
                         match ty {
-                            Val::Pi(_, cl, mut effs) => {
+                            Val::Clos(Pi, _, cl, mut effs) => {
                                 let from = cl.ty.clone();
                                 let lty = from.clone().lower(Val::Type, cxt);
 
@@ -1050,7 +1050,7 @@ impl Term {
             // -->
             // fun a (x, r) = f x k
             // fun k y = r y
-            Term::Lam(name, _icit, _arg_ty, body) => {
+            Term::Lam(name, _icit, _arg_ty, body, _effs) => {
                 let (param_ty, ret_ty, effs_) = match ty.inline(cxt.mcxt.size, cxt.db, &cxt.mcxt) {
                     Val::Fun(from, to, effs) => {
                         // inc() because we're evaluate()-ing it inside the lambda
@@ -1060,7 +1060,7 @@ impl Term {
                             effs,
                         )
                     }
-                    Val::Pi(_, cl, effs) => (
+                    Val::Clos(Pi, _, cl, effs) => (
                         cl.ty.clone(),
                         cl.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db),
                         effs,
@@ -1122,7 +1122,7 @@ impl Term {
                 let fty = f.ty(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                 let fty = fty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
                 let (xty, rty, effs) = match fty.unarc() {
-                    Val::Pi(_, cl, effs) => (
+                    Val::Clos(Pi, _, cl, effs) => (
                         cl.ty.clone(),
                         cl.clone().vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db),
                         effs.clone(),

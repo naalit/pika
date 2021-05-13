@@ -435,7 +435,7 @@ pub type Ty = Term;
 pub enum Term {
     Type,
     Var(Var<Ix>, Box<Ty>),
-    Lam(Name, Icit, Box<Ty>, Box<Term>),
+    Lam(Name, Icit, Box<Ty>, Box<Term>, Vec<Term>),
     Pi(Name, Icit, Box<Ty>, Box<Ty>, Vec<Term>),
     Fun(Box<Ty>, Box<Ty>, Vec<Term>),
     App(Icit, Box<Term>, Box<Term>),
@@ -457,8 +457,7 @@ impl Term {
         match self {
             Term::Type => Term::Type,
             Term::Var(_, t) => (**t).clone(),
-            // TODO store effects in lambda
-            Term::Lam(n, i, aty, body) => Term::Pi(*n, *i, aty.clone(), Box::new(body.ty(l.inc(), mcxt, db)), Vec::new()),
+            Term::Lam(n, i, aty, body, effs) => Term::Pi(*n, *i, aty.clone(), Box::new(body.ty(l.inc(), mcxt, db)), effs.clone()),
             Term::Pi(_, _, _, _, _) => Term::Type,
             Term::Fun(_, _, _) => Term::Type,
             Term::App(_, f, x) => match f.ty(l, mcxt, db) {
@@ -631,7 +630,7 @@ impl Term {
                 Var::Builtin(b) => b.pretty(),
             },
             Term::Lit(l, _) => l.pretty(),
-            Term::Lam(n, i, _ty, t) => {
+            Term::Lam(n, i, _ty, t, _effs) => {
                 let n = names.disamb(*n, db);
                 {
                     names.add(n);
@@ -1169,6 +1168,13 @@ impl Glued {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ClosTy {
+    Lam,
+    Pi,
+}
+pub use ClosTy::*;
+
 pub type VTy = Val;
 /// A value in normal(-ish) form.
 /// Values are never behind any abstractions, since those use `Clos` to store a `Term`.
@@ -1180,10 +1186,9 @@ pub enum Val {
     /// The spine are arguments applied in order. It can be empty.
     /// Stores the type of the head.
     App(Var<Lvl>, Box<VTy>, Spine, Glued),
-    Lam(Icit, Box<Clos>),
     /// The effects are in the outer scope, so that they can be stored as `Val`s.
     /// So they can't depend on the immediate argument.
-    Pi(Icit, Box<Clos>, Vec<Val>),
+    Clos(ClosTy, Icit, Box<Clos>, Vec<Val>),
     Fun(Box<VTy>, Box<VTy>, Vec<Val>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
@@ -1213,11 +1218,11 @@ impl Val {
                 assert_eq!(effs.len(), 1);
                 effs.pop().unwrap()
             }
-            Val::Pi(_, cl, effs) if effs.is_empty() => {
+            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => {
                 cl.vquote(l.inc(), mcxt, db)
                     .cons_ret_type(l.inc(), mcxt, db)
             }
-            Val::Pi(_, _, mut effs) => {
+            Val::Clos(Pi, _, _, mut effs) => {
                 assert_eq!(effs.len(), 1);
                 effs.pop().unwrap()
             }
@@ -1229,7 +1234,7 @@ impl Val {
     pub fn ret_type(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
             Val::Fun(_, to, _) => to.ret_type(l.inc(), mcxt, db),
-            Val::Pi(_, cl, _) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
+            Val::Clos(Pi,  _, cl, _) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).ret_type(l.inc(), mcxt, db),
             x => x,
         }
@@ -1238,9 +1243,9 @@ impl Val {
     pub fn arity(&self, only_expl: bool) -> usize {
         match self {
             Val::Fun(_, to, _) => 1 + to.arity(only_expl),
-            Val::Pi(Icit::Impl, cl, _) if only_expl => cl.term.arity(only_expl),
-            Val::Pi(Icit::Impl, cl, _) => 1 + cl.term.arity(only_expl),
-            Val::Pi(Icit::Expl, cl, _) => 1 + cl.term.arity(only_expl),
+            Val::Clos(Pi, Icit::Impl, cl, _) if only_expl => cl.term.arity(only_expl),
+            Val::Clos(Pi, Icit::Impl, cl, _) => 1 + cl.term.arity(only_expl),
+            Val::Clos(Pi, Icit::Expl, cl, _) => 1 + cl.term.arity(only_expl),
             _ => 0,
         }
     }

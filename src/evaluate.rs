@@ -19,7 +19,8 @@ impl Term {
                 Some(v) => v,
                 None => Val::meta(meta, ty.evaluate(env, mcxt, db)),
             },
-            Term::Lam(name, icit, ty, body) => Val::Lam(
+            Term::Lam(name, icit, ty, body, effs) => Val::Clos(
+                Lam,
                 icit,
                 Box::new(Clos {
                     env: env.clone(),
@@ -27,8 +28,12 @@ impl Term {
                     ty: ty.evaluate(env, mcxt, db),
                     name,
                 }),
+                effs.into_iter()
+                    .map(|x| x.evaluate(env, mcxt, db))
+                    .collect(),
             ),
-            Term::Pi(name, icit, ty, body, effs) => Val::Pi(
+            Term::Pi(name, icit, ty, body, effs) => Val::Clos(
+                Pi,
                 icit,
                 Box::new(Clos {
                     env: env.clone(),
@@ -113,7 +118,7 @@ impl Term {
                 *ty = ty.eval_quote(env, l, mcxt, db);
                 Term::Var(v, ty)
             }
-            Term::Lam(name, icit, mut ty, mut body) => {
+            Term::Lam(name, icit, mut ty, mut body, effs) => {
                 *ty = ty.eval_quote(env, l, mcxt, db);
                 env.push(Some(Val::local(
                     l.inc(),
@@ -121,7 +126,11 @@ impl Term {
                 )));
                 *body = body.eval_quote(env, l.inc(), mcxt, db);
                 env.pop();
-                Term::Lam(name, icit, ty, body)
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.eval_quote(env, l, mcxt, db))
+                    .collect();
+                Term::Lam(name, icit, ty, body, effs)
             }
             Term::Pi(name, icit, mut ty, mut body, effs) => {
                 let vty = ty.clone().evaluate(env, mcxt, db);
@@ -233,9 +242,9 @@ impl Val {
                     *to = to.inline_args(n - 1, l, db, mcxt);
                     Val::Fun(from, to, effs)
                 }
-                Val::Pi(i, cl, effs) => {
+                Val::Clos(Pi, i, cl, effs) => {
                     if n == 1 {
-                        Val::Pi(i, cl, effs)
+                        Val::Clos(Pi, i, cl, effs)
                     } else {
                         let name = cl.name;
                         let ty = cl.ty.clone();
@@ -243,7 +252,8 @@ impl Val {
                             .vquote(l.inc(), mcxt, db)
                             .inline_args(n - 1, l.inc(), db, mcxt)
                             .quote(l.inc(), mcxt, db);
-                        Val::Pi(
+                        Val::Clos(
+                            Pi,
                             i,
                             Box::new(Clos {
                                 env: Env::new(l),
@@ -298,16 +308,7 @@ impl Val {
                     Val::Lazy(cl)
                 }
             },
-            Val::Lam(i, mut cl) => {
-                cl.ty = cl.ty.force(l, db, mcxt);
-                cl.term = (*cl)
-                    .clone()
-                    .vquote(l.inc(), mcxt, db)
-                    .force(l.inc(), db, mcxt)
-                    .quote(l.inc(), mcxt, db);
-                Val::Lam(i, cl)
-            }
-            Val::Pi(i, mut cl, effs) => {
+            Val::Clos(t, i, mut cl, effs) => {
                 cl.ty = cl.ty.force(l, db, mcxt);
                 cl.term = (*cl)
                     .clone()
@@ -315,7 +316,7 @@ impl Val {
                     .force(l.inc(), db, mcxt)
                     .quote(l.inc(), mcxt, db);
                 let effs = effs.into_iter().map(|x| x.force(l, db, mcxt)).collect();
-                Val::Pi(i, cl, effs)
+                Val::Clos(t, i, cl, effs)
             }
         }
     }
@@ -342,7 +343,7 @@ impl Val {
                 // Throw away the old Glued, since that could have been resolved already
                 Val::App(h, hty, sp, Glued::new())
             }
-            Val::Lam(_, cl) => cl.apply(x, mcxt, db),
+            Val::Clos(Lam, _, cl, _) => cl.apply(x, mcxt, db),
             Val::Lazy(mut l) => {
                 let size = l.env_size();
                 let x = x.quote(size, mcxt, db);
@@ -406,13 +407,16 @@ impl Val {
                     .0
             }
             Val::Lazy(cl) => cl.quote(enclosing, mcxt, db),
-            Val::Lam(icit, cl) => Term::Lam(
+            Val::Clos(Lam, icit, cl, effs) => Term::Lam(
                 cl.name,
                 icit,
                 Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),
                 Box::new(cl.quote(enclosing, mcxt, db)),
+                effs.into_iter()
+                    .map(|x| x.quote(enclosing, mcxt, db))
+                    .collect(),
             ),
-            Val::Pi(icit, cl, effs) => Term::Pi(
+            Val::Clos(Pi, icit, cl, effs) => Term::Pi(
                 cl.name,
                 icit,
                 Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),
@@ -516,20 +520,13 @@ impl Val {
                 cl.term = cl.term.inline_metas(mcxt, l, db);
                 Val::Lazy(cl)
             }
-            Val::Lam(i, mut cl) => {
-                let l = cl.env_size();
-                cl.env.inline_metas(mcxt, db);
-                cl.term = cl.term.inline_metas(mcxt, l.inc(), db);
-                cl.ty = cl.ty.inline_metas(mcxt, db);
-                Val::Lam(i, cl)
-            }
-            Val::Pi(i, mut cl, effs) => {
+            Val::Clos(t, i, mut cl, effs) => {
                 let l = cl.env_size();
                 cl.env.inline_metas(mcxt, db);
                 cl.term = cl.term.inline_metas(mcxt, l.inc(), db);
                 cl.ty = cl.ty.inline_metas(mcxt, db);
                 let effs = effs.into_iter().map(|x| x.inline_metas(mcxt, db)).collect();
-                Val::Pi(i, cl, effs)
+                Val::Clos(t, i, cl, effs)
             }
             Val::Fun(mut from, mut to, effs) => {
                 *from = from.inline_metas(mcxt, db);

@@ -174,7 +174,7 @@ impl Cov {
                                     cons_ty = *to;
                                     *from
                                 }
-                                Val::Pi(_, cl, _) => {
+                                Val::Clos(Pi, _, cl, _) => {
                                     let from = cl.ty.clone();
                                     cons_ty = cl.vquote(l.inc(), &mcxt, db);
                                     l = l.inc();
@@ -209,7 +209,7 @@ impl Cov {
                                 cons_ty = *to;
                                 *from
                             }
-                            Val::Pi(_, to, _) => {
+                            Val::Clos(Pi,  _, to, _) => {
                                 let from = to.ty.clone();
                                 cons_ty = to.vquote(l.inc(), &mcxt, db);
                                 l = l.inc();
@@ -317,7 +317,7 @@ impl Cov {
                                 cons_ty = *to;
                                 *from
                             }
-                            Val::Pi(_, cl, _) => {
+                            Val::Clos(Pi, _, cl, _) => {
                                 let from = cl.ty.clone();
                                 cons_ty = cl.vquote(l.inc(), &mcxt, db);
                                 l = l.inc();
@@ -943,7 +943,7 @@ fn elab_pat_app(
     // TODO unify constructor effects with given ones
     while let Some((i, pat)) = spine.pop_front() {
         match ty {
-            Val::Pi(Icit::Impl, cl, mut effs) if i == Icit::Expl => {
+            Val::Clos(Pi, Icit::Impl, cl, mut effs) if i == Icit::Expl => {
                 // Add an implicit argument to the pattern, and keep the explicit one on the stack
                 spine.push_front((i, pat));
                 mcxt.define(
@@ -961,7 +961,7 @@ fn elab_pat_app(
                 }
                 l = l.inc();
             }
-            Val::Pi(i2, cl, mut effs) if i == i2 => {
+            Val::Clos(Pi, i2, cl, mut effs) if i == i2 => {
                 let pat = elab_pat(in_eff, pat, &cl.ty, &[], vspan, reason.clone(), mcxt, db)?;
                 pspine.push(pat);
                 ty = cl.vquote(l.inc(), mcxt, db);
@@ -991,7 +991,7 @@ fn elab_pat_app(
     // Apply any remaining implicits
     loop {
         match ty {
-            Val::Pi(Icit::Impl, cl, mut effs) => {
+            Val::Clos(Pi, Icit::Impl, cl, mut effs) => {
                 mcxt.define(
                     db.intern_name("_".into()),
                     NameInfo::Local(cl.ty.clone()),
@@ -1016,7 +1016,7 @@ fn elab_pat_app(
     }
 
     match &ty {
-        Val::Fun(_, _, _) | Val::Pi(_, _, _) if eff_ret.is_none() => {
+        Val::Fun(_, _, _) | Val::Clos(Pi, _, _, _) if eff_ret.is_none() => {
             return Err(TypeError::WrongArity(head.copy_span(fty), arity, f_arity))
         }
         _ => (),
@@ -1093,7 +1093,7 @@ impl<'a> UnifyRetType<'a> {
         let mut rty = fty.clone();
         loop {
             match rty {
-                Val::Pi(_, cl, mut effs) => {
+                Val::Clos(Pi, _, cl, mut effs) => {
                     mcxt.define(
                         db.intern_name("_".into()),
                         NameInfo::Local(cl.ty.clone()),
