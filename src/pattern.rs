@@ -209,7 +209,7 @@ impl Cov {
                                 cons_ty = *to;
                                 *from
                             }
-                            Val::Clos(Pi,  _, to, _) => {
+                            Val::Clos(Pi, _, to, _) => {
                                 let from = to.ty.clone();
                                 cons_ty = to.vquote(l.inc(), &mcxt, db);
                                 l = l.inc();

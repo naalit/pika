@@ -488,7 +488,7 @@ impl Val {
                 let (tid, sid, _) = effs.pop().unwrap().cons_parent(l, cxt);
                 (tid, sid, Some(*to))
             }
-            Val::Clos(Pi,  _, cl, effs) if effs.is_empty() => cl
+            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => cl
                 .vquote(l.inc(), &cxt.mcxt, cxt.db)
                 .cons_parent(l.inc(), cxt),
             Val::Clos(Pi, _, cl, mut effs) => {
@@ -1050,7 +1050,7 @@ impl Term {
             // -->
             // fun a (x, r) = f x k
             // fun k y = r y
-            Term::Lam(name, _icit, _arg_ty, body, _effs) => {
+            Term::Clos(Lam, name, _icit, _arg_ty, body, _effs) => {
                 let (param_ty, ret_ty, effs_) = match ty.inline(cxt.mcxt.size, cxt.db, &cxt.mcxt) {
                     Val::Fun(from, to, effs) => {
                         // inc() because we're evaluate()-ing it inside the lambda
@@ -1160,7 +1160,7 @@ impl Term {
                     cxt.builder.call(f, args, rty)
                 }
             }
-            Term::Fun(_, _, effs) | Term::Pi(_, _, _, _, effs) => {
+            Term::Fun(_, _, effs) | Term::Clos(Pi, _, _, _, _, effs) => {
                 let mut nargs = 2;
 
                 for eff in effs {

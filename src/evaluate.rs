@@ -19,21 +19,8 @@ impl Term {
                 Some(v) => v,
                 None => Val::meta(meta, ty.evaluate(env, mcxt, db)),
             },
-            Term::Lam(name, icit, ty, body, effs) => Val::Clos(
-                Lam,
-                icit,
-                Box::new(Clos {
-                    env: env.clone(),
-                    term: *body,
-                    ty: ty.evaluate(env, mcxt, db),
-                    name,
-                }),
-                effs.into_iter()
-                    .map(|x| x.evaluate(env, mcxt, db))
-                    .collect(),
-            ),
-            Term::Pi(name, icit, ty, body, effs) => Val::Clos(
-                Pi,
+            Term::Clos(t, name, icit, ty, body, effs) => Val::Clos(
+                t,
                 icit,
                 Box::new(Clos {
                     env: env.clone(),
@@ -118,21 +105,7 @@ impl Term {
                 *ty = ty.eval_quote(env, l, mcxt, db);
                 Term::Var(v, ty)
             }
-            Term::Lam(name, icit, mut ty, mut body, effs) => {
-                *ty = ty.eval_quote(env, l, mcxt, db);
-                env.push(Some(Val::local(
-                    l.inc(),
-                    ty.clone().evaluate(env, mcxt, db),
-                )));
-                *body = body.eval_quote(env, l.inc(), mcxt, db);
-                env.pop();
-                let effs = effs
-                    .into_iter()
-                    .map(|x| x.eval_quote(env, l, mcxt, db))
-                    .collect();
-                Term::Lam(name, icit, ty, body, effs)
-            }
-            Term::Pi(name, icit, mut ty, mut body, effs) => {
+            Term::Clos(t, name, icit, mut ty, mut body, effs) => {
                 let vty = ty.clone().evaluate(env, mcxt, db);
                 *ty = ty.eval_quote(env, l, mcxt, db);
                 env.push(Some(Val::local(l.inc(), vty)));
@@ -142,7 +115,7 @@ impl Term {
                     .into_iter()
                     .map(|x| x.eval_quote(env, l, mcxt, db))
                     .collect();
-                Term::Pi(name, icit, ty, body, effs)
+                Term::Clos(t, name, icit, ty, body, effs)
             }
             Term::Fun(mut a, mut b, effs) => {
                 *a = a.eval_quote(env, l, mcxt, db);
@@ -380,43 +353,13 @@ impl Val {
                     Var::Cons(id) => Term::Var(Var::Cons(id), Box::new(hty.clone())),
                     Var::Builtin(b) => Term::Var(Var::Builtin(b), Box::new(hty.clone())),
                 };
-                sp.into_iter()
-                    .fold((h, hty), |(f, fty), (icit, x)| {
-                        let fty = fty.inline_top(db);
-                        let rty = match &fty {
-                            Term::Fun(_, to, _) => (**to).clone(),
-                            Term::Pi(_, _, _, to, _) => {
-                                // Peel off one Pi to get the type of the next `f`.
-                                // It's dependent, so we need to add `x` to the environment.
-                                let mut env = Env::new(enclosing);
-                                env.push(Some(x.clone()));
-                                // Then we evaluate-quote to so `rty` is in the context `enclosing`.
-                                (**to).clone().eval_quote(&mut env, enclosing, mcxt, db)
-                            }
-                            _ => unreachable!(),
-                        };
-                        (
-                            Term::App(
-                                icit,
-                                Box::new(f),
-                                Box::new(x.quote(enclosing, mcxt, db)),
-                            ),
-                            rty,
-                        )
-                    })
-                    .0
+                sp.into_iter().fold(h, |f, (icit, x)| {
+                    Term::App(icit, Box::new(f), Box::new(x.quote(enclosing, mcxt, db)))
+                })
             }
             Val::Lazy(cl) => cl.quote(enclosing, mcxt, db),
-            Val::Clos(Lam, icit, cl, effs) => Term::Lam(
-                cl.name,
-                icit,
-                Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),
-                Box::new(cl.quote(enclosing, mcxt, db)),
-                effs.into_iter()
-                    .map(|x| x.quote(enclosing, mcxt, db))
-                    .collect(),
-            ),
-            Val::Clos(Pi, icit, cl, effs) => Term::Pi(
+            Val::Clos(t, icit, cl, effs) => Term::Clos(
+                t,
                 cl.name,
                 icit,
                 Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),

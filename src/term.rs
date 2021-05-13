@@ -369,7 +369,8 @@ impl Lvl {
             .fold((ret_ty, self), |(to, l), (from, name)| {
                 (
                     // `ret_ty` is at level `self`, so the innermost local type is one less than that
-                    Term::Pi(
+                    Term::Clos(
+                        Pi,
                         name,
                         Icit::Expl,
                         Box::new(from.quote(l.dec(), mcxt, db)),
@@ -393,22 +394,7 @@ impl Lvl {
                     Box::new(mcxt.local_ty(Ix(i), db).quote(self, mcxt, db)),
                 )
             })
-            .fold((t, ty), |(f, fty), x| {
-                // Peel off one Pi to get the type of the next `f`.
-                // It's dependent, so we need to add `x` to the environment.
-                // Then we evaluate-quote to so `rty` is in the context `self`.
-                let mut env = Env::new(self);
-                env.push(Some(x.clone().evaluate(&env, mcxt, db)));
-                let rty = match &fty {
-                    Term::Pi(_, _, _, x, _) => (**x).clone().eval_quote(&mut env, self, mcxt, db),
-                    _ => unreachable!(),
-                };
-                (
-                    Term::App(Icit::Expl, Box::new(f), Box::new(x)),
-                    rty,
-                )
-            })
-            .0
+            .fold(t, |f, x| Term::App(Icit::Expl, Box::new(f), Box::new(x)))
     }
 }
 
@@ -435,8 +421,7 @@ pub type Ty = Term;
 pub enum Term {
     Type,
     Var(Var<Ix>, Box<Ty>),
-    Lam(Name, Icit, Box<Ty>, Box<Term>, Vec<Term>),
-    Pi(Name, Icit, Box<Ty>, Box<Ty>, Vec<Term>),
+    Clos(ClosTy, Name, Icit, Box<Ty>, Box<Term>, Vec<Term>),
     Fun(Box<Ty>, Box<Ty>, Vec<Term>),
     App(Icit, Box<Term>, Box<Term>),
     /// Stores the type of the scrutinee as the second argument
@@ -457,12 +442,19 @@ impl Term {
         match self {
             Term::Type => Term::Type,
             Term::Var(_, t) => (**t).clone(),
-            Term::Lam(n, i, aty, body, effs) => Term::Pi(*n, *i, aty.clone(), Box::new(body.ty(l.inc(), mcxt, db)), effs.clone()),
-            Term::Pi(_, _, _, _, _) => Term::Type,
+            Term::Clos(Lam, n, i, aty, body, effs) => Term::Clos(
+                Pi,
+                *n,
+                *i,
+                aty.clone(),
+                Box::new(body.ty(l.inc(), mcxt, db)),
+                effs.clone(),
+            ),
+            Term::Clos(Pi, _, _, _, _, _) => Term::Type,
             Term::Fun(_, _, _) => Term::Type,
             Term::App(_, f, x) => match f.ty(l, mcxt, db) {
                 Term::Fun(_, to, _) => *to,
-                Term::Pi(_, _, _, to, _) => {
+                Term::Clos(Pi, _, _, _, to, _) => {
                     // Peel off one Pi to get the type of the next `f`.
                     // It's dependent, so we need to add `x` to the environment.
                     let mut env = Env::new(l);
@@ -481,13 +473,13 @@ impl Term {
                 // If it's an empty case, return error, which is mostly ignored as a type
                 // I don't *think* this causes any problems
                 _ => Term::Error,
-            }
+            },
             Term::Lit(_, b) => Term::Var(Var::Builtin(*b), Box::new(Term::Type)),
             Term::If(_, a, _) => a.ty(l, mcxt, db),
             Term::Do(v) => match v.last() {
                 Some((_, x)) => x.ty(l, mcxt, db),
                 None => Term::Var(Var::Builtin(Builtin::UnitType), Box::new(Term::Type)),
-            }
+            },
             Term::Error => Term::Error,
         }
     }
@@ -505,7 +497,7 @@ impl Term {
     pub fn ret(&self) -> &Term {
         match self {
             Term::Fun(_, to, _) => to.ret(),
-            Term::Pi(_, _, _, to, _) => to.ret(),
+            Term::Clos(Pi, _, _, _, to, _) => to.ret(),
             x => x,
         }
     }
@@ -520,9 +512,9 @@ impl Term {
     pub fn arity(&self, only_expl: bool) -> usize {
         match self {
             Term::Fun(_, to, _) => 1 + to.arity(only_expl),
-            Term::Pi(_, Icit::Impl, _, to, _) if only_expl => to.arity(only_expl),
-            Term::Pi(_, Icit::Impl, _, to, _) => 1 + to.arity(only_expl),
-            Term::Pi(_, Icit::Expl, _, to, _) => 1 + to.arity(only_expl),
+            Term::Clos(Pi, _, Icit::Impl, _, to, _) if only_expl => to.arity(only_expl),
+            Term::Clos(Pi, _, Icit::Impl, _, to, _) => 1 + to.arity(only_expl),
+            Term::Clos(Pi, _, Icit::Expl, _, to, _) => 1 + to.arity(only_expl),
             _ => 0,
         }
     }
@@ -630,7 +622,7 @@ impl Term {
                 Var::Builtin(b) => b.pretty(),
             },
             Term::Lit(l, _) => l.pretty(),
-            Term::Lam(n, i, _ty, t, _effs) => {
+            Term::Clos(Lam, n, i, _ty, t, _effs) => {
                 let n = names.disamb(*n, db);
                 {
                     names.add(n);
@@ -647,7 +639,7 @@ impl Term {
                     r
                 }
             }
-            Term::Pi(n, i, from, to, effs) => {
+            Term::Clos(Pi, n, i, from, to, effs) => {
                 let n = names.disamb(*n, db);
                 let r = match i {
                     Icit::Impl => Doc::start("[")
@@ -1218,10 +1210,9 @@ impl Val {
                 assert_eq!(effs.len(), 1);
                 effs.pop().unwrap()
             }
-            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => {
-                cl.vquote(l.inc(), mcxt, db)
-                    .cons_ret_type(l.inc(), mcxt, db)
-            }
+            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => cl
+                .vquote(l.inc(), mcxt, db)
+                .cons_ret_type(l.inc(), mcxt, db),
             Val::Clos(Pi, _, _, mut effs) => {
                 assert_eq!(effs.len(), 1);
                 effs.pop().unwrap()
@@ -1234,7 +1225,7 @@ impl Val {
     pub fn ret_type(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
             Val::Fun(_, to, _) => to.ret_type(l.inc(), mcxt, db),
-            Val::Clos(Pi,  _, cl, _) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
+            Val::Clos(Pi, _, cl, _) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).ret_type(l.inc(), mcxt, db),
             x => x,
         }
