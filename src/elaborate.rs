@@ -79,11 +79,10 @@ impl Term {
                     .collect::<Result<_, _>>()
                     .map(|v| Term::Fun(a, b, v))
             }
-            Term::App(i, mut a, mut fty, mut b) => {
+            Term::App(i, mut a, mut b) => {
                 *a = a.check_solution(meta.clone(), ren, lfrom, lto, names)?;
-                *fty = fty.check_solution(meta.clone(), ren, lfrom, lto, names)?;
                 *b = b.check_solution(meta, ren, lfrom, lto, names)?;
-                Ok(Term::App(i, a, fty, b))
+                Ok(Term::App(i, a, b))
             }
             Term::Error => Ok(Term::Error),
             Term::Type => Ok(Term::Type),
@@ -1082,7 +1081,6 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                                         Term::App(
                                             *i,
                                             Box::new(f),
-                                            Box::new(ty),
                                             Box::new(Term::Var(Var::Local(ix), xty)),
                                         ),
                                         ix,
@@ -1175,7 +1173,6 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                                         Term::App(
                                             *i,
                                             Box::new(f),
-                                            Box::new(ty),
                                             Box::new(Term::Var(Var::Local(ix), xty)),
                                         ),
                                         ix,
@@ -2047,7 +2044,6 @@ fn insert_metas(
                 Term::App(
                     Icit::Impl,
                     Box::new(term),
-                    Box::new(Val::Pi(Icit::Impl, cl, effs).quote(mcxt.size, mcxt, db)),
                     Box::new(meta),
                 ),
                 ret,
@@ -2489,7 +2485,6 @@ fn infer_app(
                 Term::App(
                     icit,
                     Box::new(f),
-                    Box::new(fty.quote(mcxt.size, mcxt, db)),
                     Box::new(x),
                 ),
                 to,
@@ -2518,7 +2513,6 @@ fn infer_app(
                 Term::App(
                     icit,
                     Box::new(f),
-                    Box::new(fty.quote(mcxt.size, mcxt, db)),
                     Box::new(x),
                 ),
                 to,
@@ -2543,11 +2537,10 @@ fn infer_app(
                                 // Apply the constructor to all the type arguments
                                 loop {
                                     match f {
-                                        Term::App(i, f3, _, x) => {
+                                        Term::App(i, f3, x) => {
                                             f2 = Term::App(
                                                 i,
                                                 Box::new(f2),
-                                                Box::new(fty.clone()),
                                                 x.clone(),
                                             );
                                             match fty {
@@ -2579,15 +2572,16 @@ fn infer_app(
                 }
             }
 
-            if let Term::App(_, _, hty, _) = &f {
-                let hty = f.head_ty(hty).clone().evaluate(&mcxt.env(), mcxt, db);
-                let exp = hty.arity(false);
-                return Err(TypeError::WrongArity(
-                    Spanned::new(hty, Span(fspan.0, x.span().1)),
-                    exp,
-                    f.spine_len() + 1,
-                ));
-            }
+            // TODO arity errors
+            // if let Term::App(_, _, hty, _) = &f {
+            //     let hty = f.head_ty(hty).clone().evaluate(&mcxt.env(), mcxt, db);
+            //     let exp = hty.arity(false);
+            //     return Err(TypeError::WrongArity(
+            //         Spanned::new(hty, Span(fspan.0, x.span().1)),
+            //         exp,
+            //         f.spine_len() + 1,
+            //     ));
+            // }
             return Err(TypeError::NotFunction(
                 mcxt.clone(),
                 Spanned::new(fty, fspan),
@@ -2753,7 +2747,7 @@ pub fn check(
                 match (&ty, &i_ty) {
                     (Val::Pi(_, _, _), _) | (Val::Fun(_, _, _), _) => (),
                     (_, Val::Fun(_, _, _)) | (_, Val::Pi(_, _, _))
-                        if matches!(term, Term::App(_, _, _, _)) =>
+                        if matches!(term, Term::App(_, _, _)) =>
                     {
                         let got = term.spine_len();
                         let hty = match term.evaluate(&mcxt.env(), mcxt, db) {

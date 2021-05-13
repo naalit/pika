@@ -49,7 +49,7 @@ impl Term {
                     .collect();
                 Val::Fun(Box::new(from), Box::new(to), effs)
             }
-            Term::App(icit, f, _fty, x) => {
+            Term::App(icit, f, x) => {
                 let f = f.evaluate(env, mcxt, db);
                 let x = x.evaluate(env, mcxt, db);
                 f.app(icit, x, mcxt, db)
@@ -145,7 +145,7 @@ impl Term {
                 Term::Fun(a, b, effs)
             }
             // We have to perform beta-reduction, so we manually evaluate and then quote again
-            Term::App(icit, f, _fty, x) => {
+            Term::App(icit, f, x) => {
                 let f = f.evaluate(env, mcxt, db);
                 let x = x.evaluate(env, mcxt, db);
                 f.app(icit, x, mcxt, db).quote(l, mcxt, db)
@@ -343,6 +343,12 @@ impl Val {
                 Val::App(h, hty, sp, Glued::new())
             }
             Val::Lam(_, cl) => cl.apply(x, mcxt, db),
+            Val::Lazy(mut l) => {
+                let size = l.env_size();
+                let x = x.quote(size, mcxt, db);
+                l.term = Term::App(icit, Box::new(l.term), Box::new(x));
+                Val::Lazy(l)
+            }
             Val::Error => Val::Error,
             Val::Arc(a) => IntoOwned::<Val>::into_owned(a).app(icit, x, mcxt, db),
             _ => unreachable!(),
@@ -392,7 +398,6 @@ impl Val {
                             Term::App(
                                 icit,
                                 Box::new(f),
-                                Box::new(fty),
                                 Box::new(x.quote(enclosing, mcxt, db)),
                             ),
                             rty,

@@ -404,7 +404,7 @@ impl Lvl {
                     _ => unreachable!(),
                 };
                 (
-                    Term::App(Icit::Expl, Box::new(f), Box::new(fty), Box::new(x)),
+                    Term::App(Icit::Expl, Box::new(f), Box::new(x)),
                     rty,
                 )
             })
@@ -422,6 +422,13 @@ pub enum Meta {
     Local(DefId, u16),
 }
 
+/*
+Problem: `(if a then b else c) d`
+We can turn that into `Lazy(App(If(...), d))`, but then we need the head type.
+We need the head type for all applications, to see what effects to pass.
+
+*/
+
 pub type Ty = Term;
 /// The core syntax. This uses `Ix`, De Bruijn indices.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -431,8 +438,7 @@ pub enum Term {
     Lam(Name, Icit, Box<Ty>, Box<Term>),
     Pi(Name, Icit, Box<Ty>, Box<Ty>, Vec<Term>),
     Fun(Box<Ty>, Box<Ty>, Vec<Term>),
-    /// Stores the type of `f`
-    App(Icit, Box<Term>, Box<Ty>, Box<Term>),
+    App(Icit, Box<Term>, Box<Term>),
     /// Stores the type of the scrutinee as the second argument
     /// The last argument is the effects caught
     Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>, Vec<Term>),
@@ -447,10 +453,50 @@ pub enum Term {
 }
 
 impl Term {
+    pub fn ty(&self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+        match self {
+            Term::Type => Term::Type,
+            Term::Var(_, t) => (**t).clone(),
+            // TODO store effects in lambda
+            Term::Lam(n, i, aty, body) => Term::Pi(*n, *i, aty.clone(), Box::new(body.ty(l.inc(), mcxt, db)), Vec::new()),
+            Term::Pi(_, _, _, _, _) => Term::Type,
+            Term::Fun(_, _, _) => Term::Type,
+            Term::App(_, f, x) => match f.ty(l, mcxt, db) {
+                Term::Fun(_, to, _) => *to,
+                Term::Pi(_, _, _, to, _) => {
+                    // Peel off one Pi to get the type of the next `f`.
+                    // It's dependent, so we need to add `x` to the environment.
+                    let mut env = Env::new(l);
+                    let x = (**x).clone().evaluate(&env, mcxt, db);
+                    env.push(Some(x));
+                    // Then we evaluate-quote to so `rty` is in the context `enclosing`.
+                    to.eval_quote(&mut env, l, mcxt, db)
+                }
+                fty => unreachable!("{:?}", fty),
+            },
+            Term::Case(_, _, v, _) => match v.first() {
+                Some((pat, body)) => {
+                    let l = pat.add_names(l, &mut Names::new(mcxt.cxt, db));
+                    body.ty(l, mcxt, db)
+                }
+                // If it's an empty case, return error, which is mostly ignored as a type
+                // I don't *think* this causes any problems
+                _ => Term::Error,
+            }
+            Term::Lit(_, b) => Term::Var(Var::Builtin(*b), Box::new(Term::Type)),
+            Term::If(_, a, _) => a.ty(l, mcxt, db),
+            Term::Do(v) => match v.last() {
+                Some((_, x)) => x.ty(l, mcxt, db),
+                None => Term::Var(Var::Builtin(Builtin::UnitType), Box::new(Term::Type)),
+            }
+            Term::Error => Term::Error,
+        }
+    }
+
     /// If this is an application, return its head. Otherwise, return itself unchanged.
     pub fn head(&self) -> &Term {
         match self {
-            Term::App(_, f, _, _) => f.head(),
+            Term::App(_, f, _) => f.head(),
             x => x,
         }
     }
@@ -465,16 +511,9 @@ impl Term {
         }
     }
 
-    pub fn head_ty<'a>(&'a self, or: &'a Term) -> &'a Term {
-        match self {
-            Term::App(_, f, fty, _) => f.head_ty(fty),
-            _ => or,
-        }
-    }
-
     pub fn spine_len(&self) -> usize {
         match self {
-            Term::App(_, f, _, _) => f.spine_len() + 1,
+            Term::App(_, f, _) => f.spine_len() + 1,
             _ => 0,
         }
     }
@@ -669,7 +708,7 @@ impl Term {
                 })
                 .prec(Prec::Term),
             // Show binops nicely
-            Term::App(i, f, _fty, x)
+            Term::App(i, f, x)
                 if *i == Icit::Expl
                     && matches!(&**f, Term::Var(Var::Builtin(Builtin::BinOp(_)), _)) =>
             {
@@ -679,7 +718,7 @@ impl Term {
                     .chain(f.pretty(db, names))
                     .prec(Prec::App)
             }
-            Term::App(i, f, _fty, x) => f
+            Term::App(i, f, x) => f
                 .pretty(db, names)
                 .nest(Prec::App)
                 .space()

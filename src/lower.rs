@@ -1107,9 +1107,9 @@ impl Term {
                 cxt.pop_local();
                 val
             }
-            Term::App(_icit, f, fty, x) => {
+            Term::App(_icit, f, x) => {
                 // Uncurry binops when possible
-                if let Term::App(_, f2, _, y) = &**f {
+                if let Term::App(_, f2, y) = &**f {
                     if let Term::Var(Var::Builtin(Builtin::BinOp(op)), _) = &**f2 {
                         let x = x.lower(Val::builtin(Builtin::I32, Val::Type), cxt);
                         let y = y.lower(Val::builtin(Builtin::I32, Val::Type), cxt);
@@ -1119,6 +1119,7 @@ impl Term {
 
                 let ret_ty = ty;
                 let ret_ty = ret_ty.lower(Val::Type, cxt);
+                let fty = f.ty(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                 let fty = fty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
                 let (xty, rty, effs) = match fty.unarc() {
                     Val::Pi(_, cl, effs) => (
