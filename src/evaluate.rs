@@ -16,7 +16,7 @@ impl Term {
             Term::Var(Var::Cons(id), ty) => Val::cons(id, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Builtin(b), ty) => Val::builtin(b, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Meta(meta), ty) => match mcxt.get_meta(meta) {
-                Some(v) => v,
+                Some(v) => v.evaluate(env, mcxt, db),
                 None => Val::meta(meta, ty.evaluate(env, mcxt, db)),
             },
             Term::Clos(t, name, icit, ty, body, effs) => Val::Clos(
@@ -46,7 +46,7 @@ impl Term {
                 let x = x.evaluate(env, mcxt, db);
                 f.app(icit, x, mcxt, db)
             }
-            Term::Case(x, ty, cases, effs) => {
+            Term::Case(x, ty, cases, effs, rty) => {
                 let x = x.evaluate(env, mcxt, db);
                 for (pat, body) in &cases {
                     use crate::pattern::MatchResult::*;
@@ -61,6 +61,7 @@ impl Term {
                                     ty,
                                     cases,
                                     effs,
+                                    rty,
                                 ),
                             }))
                         }
@@ -89,94 +90,110 @@ impl Term {
 
     /// Transfers this term from one context to another; equivalent to calling `term.evaluate(env, ...).quote(l, ...)`
     /// but faster and doesn't cause infinite recursion with `Lazy` values.
-    pub fn eval_quote(self, env: &mut Env, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+    pub fn eval_quote(self, env: &mut Env, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         match self {
             Term::Type => Term::Type,
             Term::Lit(l, b) => Term::Lit(l, b),
-            Term::Var(Var::Local(ix), ty) => env.val(ix, *ty, mcxt, db).quote(l, mcxt, db),
+            Term::Var(Var::Local(ix), ty) => env.val(ix, *ty, mcxt, db).quote(at, mcxt, db),
             Term::Var(Var::Meta(m), mut ty) => match mcxt.get_meta(m) {
-                Some(v) => v.quote(l, mcxt, db),
+                Some(v) => v.eval_quote(env, at, mcxt, db),
                 None => {
-                    *ty = ty.eval_quote(env, l, mcxt, db);
+                    *ty = ty.eval_quote(env, at, mcxt, db);
                     Term::Var(Var::Meta(m), ty)
                 }
             },
             Term::Var(v, mut ty) => {
-                *ty = ty.eval_quote(env, l, mcxt, db);
+                *ty = ty.eval_quote(env, at, mcxt, db);
                 Term::Var(v, ty)
             }
             Term::Clos(t, name, icit, mut ty, mut body, effs) => {
                 let vty = ty.clone().evaluate(env, mcxt, db);
-                *ty = ty.eval_quote(env, l, mcxt, db);
-                env.push(Some(Val::local(l.inc(), vty)));
-                *body = body.eval_quote(env, l.inc(), mcxt, db);
+                *ty = ty.eval_quote(env, at, mcxt, db);
+
+                env.push(Some(Val::local(at.next_lvl(), vty)));
+                *body = body.eval_quote(env, at.inc(), mcxt, db);
                 env.pop();
+
                 let effs = effs
                     .into_iter()
-                    .map(|x| x.eval_quote(env, l, mcxt, db))
+                    .map(|x| x.eval_quote(env, at, mcxt, db))
                     .collect();
                 Term::Clos(t, name, icit, ty, body, effs)
             }
             Term::Fun(mut a, mut b, effs) => {
-                *a = a.eval_quote(env, l, mcxt, db);
-                *b = b.eval_quote(env, l, mcxt, db);
+                *a = a.eval_quote(env, at, mcxt, db);
+                *b = b.eval_quote(env, at, mcxt, db);
                 let effs = effs
                     .into_iter()
-                    .map(|x| x.eval_quote(env, l, mcxt, db))
+                    .map(|x| x.eval_quote(env, at, mcxt, db))
                     .collect();
                 Term::Fun(a, b, effs)
             }
             // We have to perform beta-reduction, so we manually evaluate and then quote again
-            Term::App(icit, f, x) => {
-                let f = f.evaluate(env, mcxt, db);
-                let x = x.evaluate(env, mcxt, db);
-                f.app(icit, x, mcxt, db).quote(l, mcxt, db)
+            Term::App(icit, mut f, mut x) => {
+                *f = f.eval_quote(env, at, mcxt, db);
+                match *f {
+                    Term::Clos(Lam, _n, _i, _ty, body, _effs) => {
+                        let x = x.evaluate(env, mcxt, db);
+                        env.push(Some(x));
+                        let b = body.eval_quote(env, at, mcxt, db);
+                        env.pop();
+                        b
+                    }
+                    Term::Error => Term::Error,
+                    _ => {
+                        // No beta reduction necessary
+                        *x = x.eval_quote(env, at, mcxt, db);
+                        Term::App(icit, f, x)
+                    }
+                }
             }
-            Term::Case(mut x, mut ty, cases, effs) => {
+            Term::Case(mut x, mut ty, cases, effs, mut rty) => {
                 let vx = x.evaluate(env, mcxt, db);
                 for (pat, body) in &cases {
                     use crate::pattern::MatchResult::*;
                     match pat.match_with(&vx, env.clone(), mcxt, db) {
-                        Yes(mut env) => return body.clone().eval_quote(&mut env, l, mcxt, db),
+                        Yes(mut env) => return body.clone().eval_quote(&mut env, at, mcxt, db),
                         No => continue,
                         Maybe => break,
                     }
                 }
-                *x = vx.quote(l, mcxt, db);
-                *ty = ty.eval_quote(env, l, mcxt, db);
+                *x = vx.quote(at, mcxt, db);
+                *ty = ty.eval_quote(env, at, mcxt, db);
+                *rty = rty.eval_quote(env, at, mcxt, db);
                 let cases = cases
                     .into_iter()
                     .map(|(pat, body)| {
                         let mut env = env.clone();
-                        let mut l = l;
-                        let pat = pat.eval_quote(&mut env, &mut l, mcxt, db);
-                        let body = body.eval_quote(&mut env, l, mcxt, db);
+                        let mut at = at;
+                        let pat = pat.eval_quote(&mut env, &mut at, mcxt, db);
+                        let body = body.eval_quote(&mut env, at, mcxt, db);
                         (pat, body)
                     })
                     .collect();
                 let effs = effs
                     .into_iter()
-                    .map(|x| x.eval_quote(env, l, mcxt, db))
+                    .map(|x| x.eval_quote(env, at, mcxt, db))
                     .collect();
-                Term::Case(x, ty, cases, effs)
+                Term::Case(x, ty, cases, effs, rty)
             }
             Term::If(mut cond, mut yes, mut no) => match cond
                 .evaluate(env, mcxt, db)
                 .inline(env.size, db, mcxt)
             {
-                Val::App(Var::Builtin(Builtin::True), _, _, _) => yes.eval_quote(env, l, mcxt, db),
-                Val::App(Var::Builtin(Builtin::False), _, _, _) => no.eval_quote(env, l, mcxt, db),
+                Val::App(Var::Builtin(Builtin::True), _, _, _) => yes.eval_quote(env, at, mcxt, db),
+                Val::App(Var::Builtin(Builtin::False), _, _, _) => no.eval_quote(env, at, mcxt, db),
                 vcond => {
-                    *cond = vcond.quote(l, mcxt, db);
-                    *yes = yes.eval_quote(env, l, mcxt, db);
-                    *no = no.eval_quote(env, l, mcxt, db);
+                    *cond = vcond.quote(at, mcxt, db);
+                    *yes = yes.eval_quote(env, at, mcxt, db);
+                    *no = no.eval_quote(env, at, mcxt, db);
                     Term::If(cond, yes, no)
                 }
             },
             Term::Error => Term::Error,
             Term::Do(v) => Term::Do(
                 v.into_iter()
-                    .map(|(id, term)| (id, term.eval_quote(env, l, mcxt, db)))
+                    .map(|(id, term)| (id, term.eval_quote(env, at, mcxt, db)))
                     .collect(),
             ),
         }
@@ -185,11 +202,11 @@ impl Term {
 
 impl Val {
     /// If self is an App, resolve it recursively; only on the top level.
-    pub fn inline(self, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
+    pub fn inline(self, at: Size, db: &dyn Compiler, mcxt: &MCxt) -> Val {
         match self {
             Val::App(h, hty, sp, g) => {
-                if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
-                    v.inline(l, db, mcxt)
+                if let Some(v) = g.resolve(h, &sp, at, db, mcxt) {
+                    v.inline(at, db, mcxt)
                 } else {
                     Val::App(h, hty, sp, g)
                 }
@@ -197,22 +214,22 @@ impl Val {
             // Avoid infinite recursion
             Val::Lazy(cl) => match cl.evaluate(mcxt, db) {
                 Val::Lazy(cl) => Val::Lazy(cl),
-                v => v.inline(l, db, mcxt),
+                v => v.inline(at, db, mcxt),
             },
-            Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline(l, db, mcxt),
+            Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline(at, db, mcxt),
             x => x,
         }
     }
 
     /// Inlines Apps to expose Pi or Fun nodes giving it at least `n` arguments.
     /// Panics on failure.
-    pub fn inline_args(self, n: usize, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
+    pub fn inline_args(self, n: usize, at: Size, db: &dyn Compiler, mcxt: &MCxt) -> Val {
         if n == 0 {
             self
         } else {
             match self {
                 Val::Fun(from, mut to, effs) => {
-                    *to = to.inline_args(n - 1, l, db, mcxt);
+                    *to = to.inline_args(n - 1, at, db, mcxt);
                     Val::Fun(from, to, effs)
                 }
                 Val::Clos(Pi, i, cl, effs) => {
@@ -222,14 +239,14 @@ impl Val {
                         let name = cl.name;
                         let ty = cl.ty.clone();
                         let term = cl
-                            .vquote(l.inc(), mcxt, db)
-                            .inline_args(n - 1, l.inc(), db, mcxt)
-                            .quote(l.inc(), mcxt, db);
+                            .vquote(at, mcxt, db)
+                            .inline_args(n - 1, at.inc(), db, mcxt)
+                            .quote(at.inc(), mcxt, db);
                         Val::Clos(
                             Pi,
                             i,
                             Box::new(Clos {
-                                env: Env::new(l),
+                                env: Env::new(at),
                                 term,
                                 ty,
                                 name,
@@ -239,13 +256,13 @@ impl Val {
                     }
                 }
                 Val::App(h, hty, sp, g) => {
-                    if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
-                        v.inline_args(n, l, db, mcxt)
+                    if let Some(v) = g.resolve(h, &sp, at, db, mcxt) {
+                        v.inline_args(n, at, db, mcxt)
                     } else {
                         Val::App(h, hty, sp, g)
                     }
                 }
-                Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline_args(n, l, db, mcxt),
+                Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline_args(n, at, db, mcxt),
                 v => unreachable!("{:?}", v),
             }
         }
@@ -253,23 +270,23 @@ impl Val {
 
     /// Evaluates closures, inlines variables, and calls `force()` recursively, returning a term in normal form.
     /// This should never be used during normal compilation - it's only for benchmarking.
-    pub fn force(self, l: Lvl, db: &dyn Compiler, mcxt: &MCxt) -> Val {
+    pub fn force(self, at: Size, db: &dyn Compiler, mcxt: &MCxt) -> Val {
         match self {
             Val::Type => Val::Type,
             Val::Lit(x, t) => Val::Lit(x, t),
-            Val::Arc(x) => (*x).clone().force(l, db, mcxt),
+            Val::Arc(x) => (*x).clone().force(at, db, mcxt),
             Val::App(h, mut hty, sp, g) => {
-                *hty = hty.force(l, db, mcxt);
-                if let Some(v) = g.resolve(h, &sp, l, db, mcxt) {
-                    v.force(l, db, mcxt)
+                *hty = hty.force(at, db, mcxt);
+                if let Some(v) = g.resolve(h, &sp, at, db, mcxt) {
+                    v.force(at, db, mcxt)
                 } else {
                     Val::App(h, hty, sp, g)
                 }
             }
             Val::Fun(mut a, mut b, effs) => {
-                *a = a.force(l, db, mcxt);
-                *b = b.force(l, db, mcxt);
-                let effs = effs.into_iter().map(|x| x.force(l, db, mcxt)).collect();
+                *a = a.force(at, db, mcxt);
+                *b = b.force(at, db, mcxt);
+                let effs = effs.into_iter().map(|x| x.force(at, db, mcxt)).collect();
                 Val::Fun(a, b, effs)
             }
             Val::Error => Val::Error,
@@ -277,18 +294,18 @@ impl Val {
             Val::Lazy(mut cl) => match (*cl).clone().evaluate(mcxt, db) {
                 v @ Val::Lazy(_) => v,
                 v => {
-                    cl.term = v.force(l, db, mcxt).quote(l, mcxt, db);
+                    cl.term = v.force(at, db, mcxt).quote(at, mcxt, db);
                     Val::Lazy(cl)
                 }
             },
             Val::Clos(t, i, mut cl, effs) => {
-                cl.ty = cl.ty.force(l, db, mcxt);
+                cl.ty = cl.ty.force(at, db, mcxt);
                 cl.term = (*cl)
                     .clone()
-                    .vquote(l.inc(), mcxt, db)
-                    .force(l.inc(), db, mcxt)
-                    .quote(l.inc(), mcxt, db);
-                let effs = effs.into_iter().map(|x| x.force(l, db, mcxt)).collect();
+                    .vquote(at, mcxt, db)
+                    .force(at.inc(), db, mcxt)
+                    .quote(at.inc(), mcxt, db);
+                let effs = effs.into_iter().map(|x| x.force(at, db, mcxt)).collect();
                 Val::Clos(t, i, cl, effs)
             }
         }
@@ -329,23 +346,21 @@ impl Val {
         }
     }
 
-    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+    pub fn quote(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         match self {
             Val::Type => Term::Type,
             Val::Lit(x, t) => Term::Lit(x, t),
             Val::App(h, hty, sp, g) => {
                 // Inline the type to expose the Pi or Fun
-                let hty = hty
-                    .inline_args(sp.len(), enclosing, db, mcxt)
-                    .quote(enclosing, mcxt, db);
+                let hty = hty.inline_args(sp.len(), at, db, mcxt).quote(at, mcxt, db);
                 let h = match h {
-                    Var::Local(l) => match g.resolve_meta(h, &sp, mcxt, db) {
-                        Some(v) => return v.quote(enclosing, mcxt, db),
-                        None => Term::Var(Var::Local(l.to_ix(enclosing)), Box::new(hty.clone())),
+                    Var::Local(l) => match g.resolve(h, &sp, at, db, mcxt) {
+                        Some(v) => return v.quote(at, mcxt, db),
+                        None => Term::Var(Var::Local(at.to_ix(l)), Box::new(hty.clone())),
                     },
                     Var::Top(def) => Term::Var(Var::Top(def), Box::new(hty.clone())),
-                    Var::Meta(meta) => match g.resolve_meta(h, &sp, mcxt, db) {
-                        Some(v) => return v.quote(enclosing, mcxt, db),
+                    Var::Meta(meta) => match g.resolve(h, &sp, at, db, mcxt) {
+                        Some(v) => return v.quote(at, mcxt, db),
                         None => Term::Var(Var::Meta(meta), Box::new(hty.clone())),
                     },
                     Var::Rec(id) => Term::Var(Var::Rec(id), Box::new(hty.clone())),
@@ -354,29 +369,25 @@ impl Val {
                     Var::Builtin(b) => Term::Var(Var::Builtin(b), Box::new(hty.clone())),
                 };
                 sp.into_iter().fold(h, |f, (icit, x)| {
-                    Term::App(icit, Box::new(f), Box::new(x.quote(enclosing, mcxt, db)))
+                    Term::App(icit, Box::new(f), Box::new(x.quote(at, mcxt, db)))
                 })
             }
-            Val::Lazy(cl) => cl.quote(enclosing, mcxt, db),
+            Val::Lazy(cl) => cl.quote(at, mcxt, db),
             Val::Clos(t, icit, cl, effs) => Term::Clos(
                 t,
                 cl.name,
                 icit,
-                Box::new(cl.ty.clone().quote(enclosing, mcxt, db)),
-                Box::new(cl.quote(enclosing, mcxt, db)),
-                effs.into_iter()
-                    .map(|x| x.quote(enclosing, mcxt, db))
-                    .collect(),
+                Box::new(cl.ty.clone().quote(at, mcxt, db)),
+                Box::new(cl.quote(at, mcxt, db)),
+                effs.into_iter().map(|x| x.quote(at, mcxt, db)).collect(),
             ),
             Val::Fun(from, to, effs) => Term::Fun(
-                Box::new(from.quote(enclosing, mcxt, db)),
-                Box::new(to.quote(enclosing, mcxt, db)),
-                effs.into_iter()
-                    .map(|x| x.quote(enclosing, mcxt, db))
-                    .collect(),
+                Box::new(from.quote(at, mcxt, db)),
+                Box::new(to.quote(at, mcxt, db)),
+                effs.into_iter().map(|x| x.quote(at, mcxt, db)).collect(),
             ),
             Val::Error => Term::Error,
-            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).quote(enclosing, mcxt, db),
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).quote(at, mcxt, db),
         }
     }
 }
@@ -431,54 +442,60 @@ impl Term {
     }
 
     /// Shorthand for `eval_quote()` without changing levels
-    pub fn inline_metas(self, mcxt: &MCxt, l: Lvl, db: &dyn Compiler) -> Self {
-        self.eval_quote(&mut Env::new(l), l, mcxt, db)
+    pub fn inline_metas(self, mcxt: &MCxt, at: Size, db: &dyn Compiler) -> Self {
+        self.eval_quote(&mut Env::new(at), at, mcxt, db)
     }
 }
 
 impl Val {
-    pub fn inline_metas(self, mcxt: &MCxt, db: &dyn Compiler) -> Self {
+    pub fn inline_metas(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Self {
         match self {
             Val::Type => Val::Type,
             Val::Lit(x, t) => Val::Lit(x, t),
             Val::App(h, mut ty, sp, g) => {
                 let h = match h {
-                    Var::Meta(_) | Var::Local(_) => match g.resolve_meta(h, &sp, mcxt, db) {
-                        Some(v) => return v.inline_metas(mcxt, db),
+                    Var::Meta(_) | Var::Local(_) => match g.resolve(h, &sp, at, db, mcxt) {
+                        Some(v) => return v.inline_metas(at, mcxt, db),
                         None => h,
                     },
                     h => h,
                 };
                 let sp = sp
                     .into_iter()
-                    .map(|(i, x)| (i, x.inline_metas(mcxt, db)))
+                    .map(|(i, x)| (i, x.inline_metas(at, mcxt, db)))
                     .collect();
-                *ty = ty.inline_metas(mcxt, db);
+                *ty = ty.inline_metas(at, mcxt, db);
                 // Reset the Glued in case it has metas inside
                 Val::App(h, ty, sp, Glued::new())
             }
             Val::Lazy(mut cl) => {
-                let l = cl.env_size();
+                let cl_size = cl.env_size();
                 cl.env.inline_metas(mcxt, db);
-                cl.term = cl.term.inline_metas(mcxt, l, db);
+                cl.term = cl.term.inline_metas(mcxt, cl_size, db);
                 Val::Lazy(cl)
             }
             Val::Clos(t, i, mut cl, effs) => {
-                let l = cl.env_size();
+                let cl_size = cl.env_size();
                 cl.env.inline_metas(mcxt, db);
-                cl.term = cl.term.inline_metas(mcxt, l.inc(), db);
-                cl.ty = cl.ty.inline_metas(mcxt, db);
-                let effs = effs.into_iter().map(|x| x.inline_metas(mcxt, db)).collect();
+                cl.term = cl.term.inline_metas(mcxt, cl_size.inc(), db);
+                cl.ty = cl.ty.inline_metas(at, mcxt, db);
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.inline_metas(at, mcxt, db))
+                    .collect();
                 Val::Clos(t, i, cl, effs)
             }
             Val::Fun(mut from, mut to, effs) => {
-                *from = from.inline_metas(mcxt, db);
-                *to = to.inline_metas(mcxt, db);
-                let effs = effs.into_iter().map(|x| x.inline_metas(mcxt, db)).collect();
+                *from = from.inline_metas(at, mcxt, db);
+                *to = to.inline_metas(at, mcxt, db);
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.inline_metas(at, mcxt, db))
+                    .collect();
                 Val::Fun(from, to, effs)
             }
             Val::Error => Val::Error,
-            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).inline_metas(mcxt, db),
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).inline_metas(at, mcxt, db),
         }
     }
 }

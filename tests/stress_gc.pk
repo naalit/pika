@@ -1,13 +1,13 @@
-val Nat = [t] (t -> t) -> t -> t
+val Nat = (t: Type) -> (t -> t) -> t -> t
 
-val zero : Nat = f x => x
-val one : Nat = f x => f x
+val zero : Nat = _ f x => x
+val one : Nat = _ f x => f x
 
-fun iszero (n : Nat) : Bool = n (_ => False) True
+fun iszero (n : Nat) : Bool = n _ (_ => False) True
 
-fun suc (n : Nat) : Nat = f x => f (n f x)
-fun add (a : Nat) (b : Nat) : Nat = a suc b
-fun mul (a : Nat) (b : Nat) : Nat = a (add b) zero
+fun suc (n : Nat) : Nat = t f x => f (n t f x)
+fun add (a : Nat) (b : Nat) : Nat = a _ suc b
+fun mul (a : Nat) (b : Nat) : Nat = a _ (add b) zero
 
 type Pair a b of New a b end
 fun fst [a b] (p : Pair a b) : a = case p of
@@ -15,18 +15,17 @@ fun fst [a b] (p : Pair a b) : a = case p of
 end
 
 fun the t x : t = x
-fun pred (n : Nat) : Nat = fst (n [Pair Nat Nat] (p => case p of
-        Pair.New _a b => Pair.New ([t] => b [t]) ([t] => suc b [t])
-    end) (Pair.New [Nat] [Nat] zero zero))
+fun pred (n : Nat) : Nat = fst (n (Pair Nat Nat) (p => case p of
+        Pair.New _a b => Pair.New b (suc b)
+    end) (Pair.New zero zero))
 
-fun nat_to_int (n : Nat) : I32 = n (x => x + 1) 0
+fun nat_to_int (n : Nat) : I32 = n _ (x => x + 1) 0
 fun int_to_nat (i : I32) : Nat = if i == 0 then zero else suc (int_to_nat (i - 1))
 
-fun fib (i : Nat) : Nat = if iszero (pred i) then one else
-    add (fib (pred i)) (fib (pred (pred i)))
+fun fib (i : Nat) : Nat with IO = if iszero (pred i) then one else add (fib (pred i)) (fib (pred (pred i)))
 
-# fun main () with IO = do
-#     val n : Nat = fib (int_to_nat 35)
-#     val i = nat_to_int n
-#     print i
-# end
+fun main () with IO = do
+    val n : Nat = fib (int_to_nat 12)
+    val i = nat_to_int n
+    print i
+end

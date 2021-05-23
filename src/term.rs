@@ -321,18 +321,6 @@ impl Ix {
     pub fn dec(self) -> Self {
         Self(self.0 - 1)
     }
-
-    /// Converts an index to a level, given the number of enclosing abstractions.
-    pub fn to_lvl(self, enclosing: Lvl) -> Lvl {
-        assert!(
-            self.0 <= enclosing.0,
-            "Can't access a variable (index {}) that hasn't been bound yet (enclosing = {})!",
-            self.0,
-            enclosing.0,
-        );
-        // If we go up `self` levels, we'll still be this many away from the root.
-        Lvl(enclosing.0 - self.0)
-    }
 }
 impl Lvl {
     pub fn max(self, o: Lvl) -> Lvl {
@@ -350,17 +338,47 @@ impl Lvl {
     pub fn dec(self) -> Self {
         Self(self.0 - 1)
     }
+}
 
-    /// Converts a level to an index, given the number of enclosing abstractions.
-    pub fn to_ix(self, enclosing: Lvl) -> Ix {
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Ord, PartialOrd)]
+pub struct Size(u32);
+impl Size {
+    pub fn next_lvl(self) -> Lvl {
+        Lvl(self.0)
+    }
+
+    pub fn to_ix(self, l: Lvl) -> Ix {
         assert!(
-            self.0 <= enclosing.0,
+            l.0 + 1 <= self.0,
             "Can't access a variable (level {}) that hasn't been bound yet (enclosing = {})!",
+            l.0,
             self.0,
-            enclosing.0,
         );
         // If we go down `self` levels from the root, there are still this many levels between us and the binding.
-        Ix(enclosing.0 - self.0)
+        Ix(self.0 - l.0 - 1)
+    }
+
+    pub fn to_lvl_(self, l: Ix) -> Lvl {
+        assert!(
+            l.0 + 1 <= self.0,
+            "Can't access a variable (ix {}) that hasn't been bound yet (enclosing = {})!",
+            l.0,
+            self.0,
+        );
+        // If we go down `self` levels from the root, there are still this many levels between us and the binding.
+        Lvl(self.0 - l.0 - 1)
+    }
+
+    pub fn inc(self) -> Size {
+        Size(self.0 + 1)
+    }
+
+    pub fn dec(self) -> Size {
+        Size(self.0 - 1)
+    }
+
+    pub fn zero() -> Size {
+        Size(0)
     }
 
     pub fn apply_meta(self, v: Var<Ix>, ret_ty: Ty, mcxt: &MCxt, db: &dyn Compiler) -> Term {
@@ -426,7 +444,7 @@ pub enum Term {
     App(Icit, Box<Term>, Box<Term>),
     /// Stores the type of the scrutinee as the second argument
     /// The last argument is the effects caught
-    Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>, Vec<Term>),
+    Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>, Vec<Term>, Box<Ty>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
     /// If(cond, then, else)
@@ -438,7 +456,7 @@ pub enum Term {
 }
 
 impl Term {
-    pub fn ty(&self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+    pub fn ty(&self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         match self {
             Term::Type => Term::Type,
             Term::Var(_, t) => (**t).clone(),
@@ -447,37 +465,29 @@ impl Term {
                 *n,
                 *i,
                 aty.clone(),
-                Box::new(body.ty(l.inc(), mcxt, db)),
+                Box::new(body.ty(at.inc(), mcxt, db)),
                 effs.clone(),
             ),
             Term::Clos(Pi, _, _, _, _, _) => Term::Type,
             Term::Fun(_, _, _) => Term::Type,
-            Term::App(_, f, x) => match f.ty(l, mcxt, db) {
+            Term::App(_, f, x) => match f.ty(at, mcxt, db).inline_top(db) {
                 Term::Fun(_, to, _) => *to,
                 Term::Clos(Pi, _, _, _, to, _) => {
                     // Peel off one Pi to get the type of the next `f`.
                     // It's dependent, so we need to add `x` to the environment.
-                    let mut env = Env::new(l);
+                    let mut env = Env::new(at);
                     let x = (**x).clone().evaluate(&env, mcxt, db);
                     env.push(Some(x));
-                    // Then we evaluate-quote to so `rty` is in the context `enclosing`.
-                    to.eval_quote(&mut env, l, mcxt, db)
+                    // Then we evaluate-quote to so `rty` is in the context `at`.
+                    to.eval_quote(&mut env, at, mcxt, db)
                 }
                 fty => unreachable!("{:?}", fty),
             },
-            Term::Case(_, _, v, _) => match v.first() {
-                Some((pat, body)) => {
-                    let l = pat.add_names(l, &mut Names::new(mcxt.cxt, db));
-                    body.ty(l, mcxt, db)
-                }
-                // If it's an empty case, return error, which is mostly ignored as a type
-                // I don't *think* this causes any problems
-                _ => Term::Error,
-            },
+            Term::Case(_, _, _, _, ty) => (**ty).clone(),
             Term::Lit(_, b) => Term::Var(Var::Builtin(*b), Box::new(Term::Type)),
-            Term::If(_, a, _) => a.ty(l, mcxt, db),
+            Term::If(_, a, _) => a.ty(at, mcxt, db),
             Term::Do(v) => match v.last() {
-                Some((_, x)) => x.ty(l, mcxt, db),
+                Some((_, x)) => x.ty(at, mcxt, db),
                 None => Term::Var(Var::Builtin(Builtin::UnitType), Box::new(Term::Type)),
             },
             Term::Error => Term::Error,
@@ -550,8 +560,8 @@ impl<T> IVec<T> {
         self.0.pop_front()
     }
 
-    pub fn size(&self) -> Lvl {
-        Lvl(self.0.len() as u32)
+    pub fn size(&self) -> Size {
+        Size(self.0.len() as u32)
     }
 }
 
@@ -577,8 +587,17 @@ impl Names {
         }
         Names(v, db.intern_name("_".into()))
     }
+    pub fn size(&self) -> Size {
+        Size(self.0.len() as u32)
+    }
     pub fn get(&self, ix: Ix) -> Name {
-        self.0[ix.0 as usize]
+        *self.0.get(ix.0 as usize).unwrap_or_else(|| {
+            panic!(
+                "Name index out of bounds: ix={} but len={}",
+                ix.0,
+                self.0.len()
+            )
+        })
     }
     pub fn disamb(&self, n: Name, db: &dyn Compiler) -> Name {
         // Disambiguate names by adding ' at the end
@@ -719,7 +738,7 @@ impl Term {
                 })
                 .prec(Prec::App),
             Term::Error => Doc::start("<error>"),
-            Term::Case(x, _, cases, effs) => {
+            Term::Case(x, _, cases, effs, _) => {
                 Doc::keyword(if effs.is_empty() { "case" } else { "catch" })
                     .space()
                     .chain(x.pretty(db, names))
@@ -800,18 +819,18 @@ pub struct Env {
     /// When elaborating, we often want to evaluate something without any locals, or just add one or two at the front.
     /// To make that efficient, we leave off the tail of `None`s, and if an index goes past the length, it's `None`.
     vals: VecDeque<Option<Arc<Val>>>,
-    pub size: Lvl,
+    pub size: Size,
 }
 impl Env {
     pub fn inline_metas(&mut self, mcxt: &MCxt, db: &dyn Compiler) {
         for i in &mut self.vals {
             if let Some(x) = i {
-                *x = Arc::new((**x).clone().inline_metas(mcxt, db));
+                *x = Arc::new((**x).clone().inline_metas(self.size, mcxt, db));
             }
         }
     }
 
-    pub fn new(size: Lvl) -> Self {
+    pub fn new(size: Size) -> Self {
         Env {
             vals: VecDeque::new(),
             size,
@@ -835,7 +854,7 @@ impl Env {
             .cloned()
             .flatten()
             .map(Val::Arc)
-            .unwrap_or_else(|| Val::local(i.to_lvl(self.size), ty.evaluate(self, mcxt, db)))
+            .unwrap_or_else(|| Val::local(self.size.to_lvl_(i), ty.evaluate(self, mcxt, db)))
     }
 
     pub fn push(&mut self, v: Option<Val>) {
@@ -863,26 +882,27 @@ pub struct Clos {
     pub name: Name,
 }
 impl Clos {
-    pub fn env_size(&self) -> Lvl {
+    pub fn env_size(&self) -> Size {
         self.env.size
     }
 
     /// Quotes the closure back into a `Term`, but leaves it behind the lambda.
-    /// So `enclosing` is the number of abstractions enclosing the *lambda*, it doesn't include the lambda.
-    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+    /// So `at` is the number of abstractions enclosing the *lambda*, it doesn't include the lambda.
+    pub fn quote(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         let Clos {
             mut env, term, ty, ..
         } = self;
-        env.push(Some(Val::local(enclosing.inc(), ty)));
-        term.eval_quote(&mut env, enclosing.inc(), mcxt, db)
+        env.push(Some(Val::local(at.next_lvl(), ty)));
+        term.eval_quote(&mut env, at.inc(), mcxt, db)
     }
 
-    /// Equivalent to `self.apply(Val::local(l, cl.ty), mcxt)`
-    pub fn vquote(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+    /// Equivalent to `self.apply(Val::local(at.next_lvl(), cl.ty), mcxt)`.
+    /// Like `quote`, `at` should not be incremented for the closure.
+    pub fn vquote(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         let Clos {
             mut env, term, ty, ..
         } = self;
-        env.push(Some(Val::local(l, ty)));
+        env.push(Some(Val::local(at.next_lvl(), ty)));
         term.evaluate(&env, mcxt, db)
     }
 
@@ -903,14 +923,14 @@ pub struct Lazy {
     pub term: Term,
 }
 impl Lazy {
-    pub fn env_size(&self) -> Lvl {
+    pub fn env_size(&self) -> Size {
         self.env.size
     }
 
     /// Quotes the closure back into a `Term`.
-    pub fn quote(self, enclosing: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+    pub fn quote(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         let Lazy { mut env, term } = self;
-        term.eval_quote(&mut env, enclosing, mcxt, db)
+        term.eval_quote(&mut env, at, mcxt, db)
     }
 
     /// Tries to evaluate the `Lazy` again; if it can't be evaluated, this will just return another `Lazy`.
@@ -937,9 +957,9 @@ pub enum Var<Local> {
     Builtin(Builtin),
 }
 impl Var<Ix> {
-    pub fn cvt(self, l: Lvl) -> Var<Lvl> {
+    pub fn cvt(self, l: Size) -> Var<Lvl> {
         match self {
-            Var::Local(i) => Var::Local(i.to_lvl(l)),
+            Var::Local(i) => Var::Local(l.to_lvl_(i)),
             Var::Top(i) => Var::Top(i),
             Var::Rec(i) => Var::Rec(i),
             Var::Meta(m) => Var::Meta(m),
@@ -950,9 +970,9 @@ impl Var<Ix> {
     }
 }
 impl Var<Lvl> {
-    pub fn cvt(self, l: Lvl) -> Var<Ix> {
+    pub fn cvt(self, l: Size) -> Var<Ix> {
         match self {
-            Var::Local(i) => Var::Local(i.to_ix(l)),
+            Var::Local(i) => Var::Local(l.to_ix(i)),
             Var::Top(i) => Var::Top(i),
             Var::Rec(i) => Var::Rec(i),
             Var::Meta(m) => Var::Meta(m),
@@ -1026,68 +1046,23 @@ impl Glued {
         Glued(Arc::new(RwLock::new(None)))
     }
 
-    /// Like `resolve()`, but only inlines metas and local constraints, not definitions or local constraints. So, it doesn't need a quote level.
-    pub fn resolve_meta(
-        &self,
-        h: Var<Lvl>,
-        sp: impl IntoOwned<Spine>,
-        mcxt: &MCxt,
-        db: &dyn Compiler,
-    ) -> Option<Val> {
-        let guard = self.0.read().unwrap();
-        if let Some(v) = &*guard {
-            Some(v.clone())
-        } else {
-            drop(guard);
-            match h {
-                // Check the mcxt's local constraints
-                Var::Local(lvl) => {
-                    let val = mcxt.local_val(lvl)?.clone();
-                    let val = sp
-                        .into_owned()
-                        .into_iter()
-                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
-                    // We don't cache this, because we might use this value outside of the local scope
-                    Some(val)
-                }
-                // If we inlined the Rec, it would probably lead to infinite recursion
-                Var::Rec(_) => None,
-                Var::Type(_, _) => None,
-                Var::Cons(_) => None,
-                Var::Top(_) => None,
-                Var::Builtin(_) => None,
-                Var::Meta(m) => {
-                    if let Some(val) = mcxt.get_meta(m) {
-                        let val = sp
-                            .into_owned()
-                            .into_iter()
-                            .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
-                        let val = Val::Arc(Arc::new(val));
-                        *self.0.write().unwrap() = Some(val.clone());
-                        Some(val)
-                    } else {
-                        None
-                    }
-                }
-            }
-        }
-    }
-
     /// Resolves the `Glued`: returns a `Val::Arc` to the cached value if available, otherwise inlines the head and beta-reduces, returning the result.
     /// If the head can't be inlined, e.g. because it's a parameter, returns None.
     pub fn resolve(
         &self,
         h: Var<Lvl>,
         sp: impl IntoOwned<Spine>,
-        l: Lvl,
+        at: Size,
         db: &dyn Compiler,
         mcxt: &MCxt,
     ) -> Option<Val> {
-        let guard = self.0.read().unwrap();
-        if let Some(v) = &*guard {
-            Some(v.clone())
-        } else {
-            drop(guard);
+        // TODO make this work
+        // let guard = self.0.read().unwrap();
+        // if let Some(v) = &*guard {
+        //     Some(v.clone())
+        // } else
+        {
+            // drop(guard);
             match h {
                 // Check the mcxt's local constraints
                 Var::Local(lvl) => {
@@ -1107,8 +1082,8 @@ impl Glued {
                     if sp.len() != 2 {
                         None
                     } else {
-                        let a = sp[0].1.clone().inline(l, db, mcxt);
-                        let b = sp[1].1.clone().inline(l, db, mcxt);
+                        let a = sp[0].1.clone().inline(at, db, mcxt);
+                        let b = sp[1].1.clone().inline(at, db, mcxt);
                         if let Some(v) = op.eval(&a, &b) {
                             Some(v)
                         } else {
@@ -1121,35 +1096,37 @@ impl Glued {
                     let def = mcxt.cxt.lookup_rec(rec, db)?;
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
-                    let val = val.evaluate(&Env::new(l), mcxt, db);
+                    let val = val.evaluate(&Env::new(at), mcxt, db);
                     let val = sp
                         .into_owned()
                         .into_iter()
                         .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
-                    let val = Val::Arc(Arc::new(val));
-                    *self.0.write().unwrap() = Some(val.clone());
+                    // let val = Val::Arc(Arc::new(val));
+                    // *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
                 }
                 Var::Top(def) => {
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
-                    let val = val.evaluate(&Env::new(l), mcxt, db);
+                    let val = val.evaluate(&Env::new(at), mcxt, db);
                     let val = sp
                         .into_owned()
                         .into_iter()
                         .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
-                    let val = Val::Arc(Arc::new(val));
-                    *self.0.write().unwrap() = Some(val.clone());
+                    // let val = Val::Arc(Arc::new(val));
+                    // *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
                 }
                 Var::Meta(m) => {
-                    if let Some(val) = mcxt.get_meta(m) {
+                    if let Some(term) = mcxt.get_meta(m) {
                         let val = sp
                             .into_owned()
                             .into_iter()
-                            .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
-                        let val = Val::Arc(Arc::new(val));
-                        *self.0.write().unwrap() = Some(val.clone());
+                            .fold(term.evaluate(&Env::new(at), mcxt, db), |f, (i, x)| {
+                                f.app(i, x, mcxt, db)
+                            });
+                        // let val = Val::Arc(Arc::new(val));
+                        // *self.0.write().unwrap() = Some(val.clone());
                         Some(val)
                     } else {
                         None
@@ -1202,31 +1179,31 @@ impl Val {
         }
     }
 
-    /// Assuming this is the type of a constructor, returns either the return type or the effect type
-    pub fn cons_ret_type(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+    /// Assuming this is the type of a constructor, returns either the return type or the effect type.
+    /// Increments `at` as needed.
+    pub fn cons_ret_type(self, at: &mut Size, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
-            Val::Fun(_, to, effs) if effs.is_empty() => to.cons_ret_type(l.inc(), mcxt, db),
+            // The return type is
+            Val::Fun(_, to, effs) if effs.is_empty() => to.cons_ret_type(at, mcxt, db),
             Val::Fun(_, _, mut effs) => {
                 assert_eq!(effs.len(), 1);
                 effs.pop().unwrap()
             }
-            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => cl
-                .vquote(l.inc(), mcxt, db)
-                .cons_ret_type(l.inc(), mcxt, db),
+            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => {
+                cl.vquote(*at, mcxt, db).cons_ret_type(
+                    {
+                        *at = at.inc();
+                        at
+                    },
+                    mcxt,
+                    db,
+                )
+            }
             Val::Clos(Pi, _, _, mut effs) => {
                 assert_eq!(effs.len(), 1);
                 effs.pop().unwrap()
             }
-            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).cons_ret_type(l.inc(), mcxt, db),
-            x => x,
-        }
-    }
-
-    pub fn ret_type(self, l: Lvl, mcxt: &MCxt, db: &dyn Compiler) -> Val {
-        match self {
-            Val::Fun(_, to, _) => to.ret_type(l.inc(), mcxt, db),
-            Val::Clos(Pi, _, cl, _) => cl.vquote(l.inc(), mcxt, db).ret_type(l.inc(), mcxt, db),
-            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).ret_type(l.inc(), mcxt, db),
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).cons_ret_type(at, mcxt, db),
             x => x,
         }
     }

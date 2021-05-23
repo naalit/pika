@@ -61,10 +61,10 @@ intern_id!(
 This is slower than a hashmap or flat array, but it has better incrementality."#
 );
 impl Cxt {
-    pub fn size<T: ?Sized + Interner>(self, db: &T) -> Lvl {
+    pub fn size<T: ?Sized + Interner>(self, db: &T) -> Size {
         match db.lookup_cxt_entry(self) {
             MaybeEntry::Yes(CxtEntry { size, .. }) => size,
-            MaybeEntry::No(_) => Lvl::zero(),
+            MaybeEntry::No(_) => Size::zero(),
         }
     }
 
@@ -140,7 +140,7 @@ impl Cxt {
     pub fn define<T: ?Sized + Interner>(self, name: Name, info: NameInfo, db: &T) -> Cxt {
         let (file, size) = match db.lookup_cxt_entry(self) {
             MaybeEntry::Yes(CxtEntry { file, size, .. }) => (file, size),
-            MaybeEntry::No(file) => (file, Lvl::zero()),
+            MaybeEntry::No(file) => (file, Size::zero()),
         };
         let next_size = match &info {
             NameInfo::Local(_) => size.inc(),
@@ -163,8 +163,8 @@ impl Cxt {
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum RecSolution {
-    Defined(PreDefId, u16, Span, Val),
-    Inferred(PreDefId, u16, Span, Val),
+    Defined(PreDefId, u16, Span, Term),
+    Inferred(PreDefId, u16, Span, Term),
 }
 impl RecSolution {
     pub fn id(&self) -> PreDefId {
@@ -179,7 +179,7 @@ impl RecSolution {
         }
     }
 
-    pub fn val(&self) -> &Val {
+    pub fn term(&self) -> &Term {
         match self {
             RecSolution::Defined(_, _, _, v) | RecSolution::Inferred(_, _, _, v) => v,
         }
@@ -201,7 +201,7 @@ pub struct CxtEntry {
     pub name: Name,
     pub info: NameInfo,
     pub file: FileId,
-    pub size: Lvl,
+    pub size: Size,
     pub rest: Cxt,
 }
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]

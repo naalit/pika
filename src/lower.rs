@@ -93,8 +93,8 @@ impl<'db> LCxt<'db> {
         self.mcxt.undef(self.db);
     }
 
-    pub fn trunc_locals(&mut self, to_lvl: Lvl) {
-        while self.mcxt.size != to_lvl {
+    pub fn trunc_locals(&mut self, to_size: Size) {
+        while self.mcxt.size != to_size {
             self.pop_local();
         }
     }
@@ -474,7 +474,7 @@ impl<'db> LCxt<'db> {
 
 impl Val {
     /// Assuming this is the type of a constructor, returns `(type ID, scope ID, base type if this is an effect constructor)`
-    pub fn cons_parent(self, l: Lvl, cxt: &LCxt) -> (DefId, ScopeId, Option<Val>) {
+    pub fn cons_parent(self, at: Size, cxt: &LCxt) -> (DefId, ScopeId, Option<Val>) {
         match self {
             Val::App(Var::Type(tid, sid), _, _, _) => (tid, sid, None),
             Val::App(Var::Rec(id), _, _, _) => cxt
@@ -482,22 +482,22 @@ impl Val {
                 .get(&id)
                 .map(|&(a, b)| (a, b, None))
                 .expect("Datatypes should be lowered before their constructors"),
-            Val::Fun(_, to, effs) if effs.is_empty() => to.cons_parent(l.inc(), cxt),
+            Val::Fun(_, to, effs) if effs.is_empty() => to.cons_parent(at, cxt),
             Val::Fun(_, to, mut effs) => {
                 assert_eq!(effs.len(), 1);
-                let (tid, sid, _) = effs.pop().unwrap().cons_parent(l, cxt);
+                let (tid, sid, _) = effs.pop().unwrap().cons_parent(at, cxt);
                 (tid, sid, Some(*to))
             }
-            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => cl
-                .vquote(l.inc(), &cxt.mcxt, cxt.db)
-                .cons_parent(l.inc(), cxt),
+            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => {
+                cl.vquote(at, &cxt.mcxt, cxt.db).cons_parent(at.inc(), cxt)
+            }
             Val::Clos(Pi, _, cl, mut effs) => {
                 assert_eq!(effs.len(), 1);
-                let (tid, sid, _) = effs.pop().unwrap().cons_parent(l, cxt);
-                let to = cl.vquote(l.inc(), &cxt.mcxt, cxt.db);
+                let (tid, sid, _) = effs.pop().unwrap().cons_parent(at, cxt);
+                let to = cl.vquote(at, &cxt.mcxt, cxt.db);
                 (tid, sid, Some(to))
             }
-            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).cons_parent(l.inc(), cxt),
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).cons_parent(at, cxt),
             x => unreachable!("{:?}", x),
         }
     }
@@ -591,10 +591,12 @@ fn lower_datatype(
                             match tty {
                                 Val::Clos(Pi, i, cl, _) => {
                                     let from = cl.ty.clone();
-                                    cxt.mcxt
-                                        .define(cl.name, NameInfo::Local(from.clone()), cxt.db);
-                                    ty_args.push((i, Val::local(cxt.mcxt.size, from)));
-                                    tty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                    ty_args.push((
+                                        i,
+                                        Val::local(cxt.mcxt.size.next_lvl(), from.clone()),
+                                    ));
+                                    cxt.mcxt.define(cl.name, NameInfo::Local(from), cxt.db);
+                                    tty = cl.vquote(cxt.mcxt.size.dec(), &cxt.mcxt, cxt.db);
                                 }
                                 Val::Fun(_, _, _) => unreachable!("Datatypes must have pi types"),
                                 _ => break,
@@ -621,7 +623,7 @@ fn lower_datatype(
                                     cxt.mcxt
                                         .define(cl.name, NameInfo::Local(from.clone()), cxt.db);
                                     if effs.is_empty() {
-                                        cty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                        cty = cl.vquote(cxt.mcxt.size.dec(), &cxt.mcxt, cxt.db);
                                     } else {
                                         assert_eq!(effs.len(), 1);
                                         cty = effs.pop().unwrap();
@@ -665,11 +667,10 @@ fn lower_datatype(
                         assert_eq!(env.size, lbefore);
 
                         // And for each constructor pi-parameter, add the constraint to `solutions` if it exists
-                        let mut l = lbefore;
+                        let mut size = lbefore;
                         let mut solutions: Vec<Option<Val>> = Vec::new();
-                        while l <= tcxt.size {
-                            l = l.inc();
-                            if let Some(v) = tcxt.local_val(l) {
+                        while size <= tcxt.size {
+                            if let Some(v) = tcxt.local_val(size.next_lvl()) {
                                 let v = v
                                     .clone()
                                     .quote(env.size, &tcxt, cxt.db)
@@ -678,6 +679,7 @@ fn lower_datatype(
                             } else {
                                 solutions.push(None);
                             }
+                            size = size.inc();
                         }
                         cxt.mcxt.set_state(start_state);
                         solutions
@@ -721,7 +723,7 @@ fn lower_datatype(
 
                                 // Define the variable and go to the next level
                                 cxt.local(cl.name, val, from);
-                                cty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                cty = cl.vquote(cxt.mcxt.size.dec(), &cxt.mcxt, cxt.db);
                                 i += 1;
                                 if !effs.is_empty() {
                                     break;
@@ -854,13 +856,14 @@ impl Term {
                         match ty {
                             Val::Clos(Pi, _, cl, _) => {
                                 let from = cl.ty.clone();
-                                targs.push(Val::local(cxt.mcxt.size.inc(), from.clone()));
+                                targs.push(Val::local(cxt.mcxt.size.next_lvl(), from.clone()));
 
                                 let lty = from.clone().lower(Val::Type, cxt);
                                 let p = cxt.builder.push_fun([(None, lty)]);
                                 cxt.local(cl.name, p[0], from);
                                 funs.push((lty, true));
-                                ty = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                                // Make sure to vquote outside of the closure
+                                ty = cl.vquote(cxt.mcxt.size.dec(), &cxt.mcxt, cxt.db);
                             }
                             Val::Fun(_, _, _) => unreachable!("Datatypes must have pi types"),
                             _ => break,
@@ -889,7 +892,7 @@ impl Term {
                                 let lty = from.clone().lower(Val::Type, cxt);
 
                                 let name = cl.name;
-                                let to = cl.vquote(cxt.mcxt.size.inc(), &cxt.mcxt, cxt.db);
+                                let to = cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
 
                                 if effs.is_empty() {
                                     ty = to;
@@ -1054,15 +1057,11 @@ impl Term {
                 let (param_ty, ret_ty, effs_) = match ty.inline(cxt.mcxt.size, cxt.db, &cxt.mcxt) {
                     Val::Fun(from, to, effs) => {
                         // inc() because we're evaluate()-ing it inside the lambda
-                        (
-                            *from,
-                            to.quote(cxt.mcxt.size.inc(), &cxt.mcxt, cxt.db),
-                            effs,
-                        )
+                        (*from, *to, effs)
                     }
                     Val::Clos(Pi, _, cl, effs) => (
                         cl.ty.clone(),
-                        cl.quote(cxt.mcxt.size, &cxt.mcxt, cxt.db),
+                        cl.vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db),
                         effs,
                     ),
                     _ => unreachable!(),
@@ -1096,10 +1095,7 @@ impl Term {
                 for (k, e) in args.into_iter().skip(1).zip(effs) {
                     cxt.eff(e, k);
                 }
-                let ret = body.lower(
-                    ret_ty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
-                    cxt,
-                );
+                let ret = body.lower(ret_ty, cxt);
 
                 let val = cxt.builder.pop_fun(ret);
 
@@ -1120,7 +1116,10 @@ impl Term {
                 let ret_ty = ty;
                 let ret_ty = ret_ty.lower(Val::Type, cxt);
                 let fty = f.ty(cxt.mcxt.size, &cxt.mcxt, cxt.db);
-                let fty = fty.clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db);
+                let fty = fty
+                    .clone()
+                    .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db)
+                    .inline(cxt.mcxt.size, cxt.db, &cxt.mcxt);
                 let (xty, rty, effs) = match fty.unarc() {
                     Val::Clos(Pi, _, cl, effs) => (
                         cl.ty.clone(),
@@ -1172,7 +1171,7 @@ impl Term {
                 cxt.builder.fun_type(nargs)
             }
             Term::Error => panic!("type errors should have been caught by now!"),
-            Term::Case(x, xty, cases, effs) => lower_case(x, xty, cases, effs, ty, cxt),
+            Term::Case(x, xty, cases, effs, _) => lower_case(x, xty, cases, effs, ty, cxt),
             Term::If(cond, yes, no) => {
                 let cond = cond.lower(Val::builtin(Builtin::Bool, Val::Type), cxt);
                 cxt.if_expr(cond);
@@ -1208,7 +1207,7 @@ fn lower_case(
                 x,
                 pat,
                 cont: Box::new(PatCont::Term(term)),
-                rest_lvl: before_level,
+                rest_size: before_level,
                 rest: Box::new(rest),
             });
         let ret = cont.lower(ty, cxt);
@@ -1231,10 +1230,11 @@ fn lower_case(
                     branches_pure.push((pat, body));
                 }
                 Pat::Eff(eff, p, k) => {
+                    let veff = (**eff).clone().evaluate(&env, &cxt.mcxt, cxt.db);
                     let i = cxt
                         .mcxt
                         .eff_stack
-                        .find_eff(eff, cxt.db, &mut tcxt)
+                        .find_eff(&veff, cxt.db, &mut tcxt)
                         .unwrap_or_else(|| panic!("Couldn't find effect {:?}", eff));
                     branches_eff[i].push((p, k, body));
                 }
@@ -1266,10 +1266,10 @@ fn lower_case(
                                 x: k,
                                 pat: pk,
                                 cont: Box::new(PatCont::Term(term)),
-                                rest_lvl: before_level,
+                                rest_size: before_level,
                                 rest: Box::new(rest.clone()),
                             }),
-                            rest_lvl: before_level,
+                            rest_size: before_level,
                             rest: Box::new(rest),
                         });
                 let ret = cont.lower(ty.clone(), cxt);
@@ -1285,7 +1285,7 @@ fn lower_case(
                         x,
                         pat,
                         cont: Box::new(PatCont::Term(term)),
-                        rest_lvl: before_level,
+                        rest_size: before_level,
                         rest: Box::new(rest),
                     });
                 let ret = cont.lower(ty.clone(), cxt);
@@ -1300,13 +1300,14 @@ fn lower_case(
 enum PatCont<'a> {
     Unreachable,
     Term(&'a Term),
+    Var(ir::Val, Name, &'a Term, Box<PatCont<'a>>),
     Pat {
         x: ir::Val,
         pat: &'a Pat,
         /// What to do next if the pattern matches
         cont: Box<PatCont<'a>>,
-        /// The level that the context should be at for lowering `rest`
-        rest_lvl: Lvl,
+        /// The size that the context should be at for lowering `rest`
+        rest_size: Size,
         /// What to do next if the pattern doesn't match
         rest: Box<PatCont<'a>>,
     },
@@ -1319,13 +1320,21 @@ impl<'a> PatCont<'a> {
                 cxt.builder.unreachable(ty)
             }
             PatCont::Term(x) => x.lower(ty, cxt),
+            PatCont::Var(x, name, vty, cont) => {
+                cxt.local(
+                    *name,
+                    *x,
+                    (**vty).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
+                );
+                cont.lower(ty, cxt)
+            }
             PatCont::Pat {
                 x,
                 pat,
                 cont,
-                rest_lvl,
+                rest_size,
                 rest,
-            } => pat.lower(*x, &cont, *rest_lvl, &rest, ty, cxt),
+            } => pat.lower(*x, &cont, *rest_size, &rest, ty, cxt),
         }
     }
 }
@@ -1344,7 +1353,7 @@ impl Pat {
         &'a self,
         x: ir::Val,
         cont: &'a PatCont<'a>,
-        rest_lvl: Lvl,
+        rest_size: Size,
         rest: &'a PatCont<'a>,
         ty: VTy,
         cxt: &mut LCxt,
@@ -1352,7 +1361,11 @@ impl Pat {
         match self {
             Pat::Any => cont.lower(ty, cxt),
             Pat::Var(n, vty) => {
-                cxt.local(*n, x, (**vty).clone());
+                cxt.local(
+                    *n,
+                    x,
+                    (**vty).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
+                );
                 cont.lower(ty, cxt)
             }
             Pat::Lit(l, w) => {
@@ -1365,7 +1378,7 @@ impl Pat {
                 cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
-                cxt.trunc_locals(rest_lvl);
+                cxt.trunc_locals(rest_size);
                 let no = rest.lower(ty, cxt);
 
                 cxt.endif(no, lty)
@@ -1382,13 +1395,18 @@ impl Pat {
                 cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
-                cxt.trunc_locals(rest_lvl);
+                cxt.trunc_locals(rest_size);
                 let no = rest.lower(ty, cxt);
 
                 cxt.endif(no, lty)
             }
             Pat::Cons(id, xty, args) => {
-                let (tid, sid, targs) = match xty.unarc() {
+                // TODO unarc_owned() or something
+                let (tid, sid, targs) = match xty
+                    .clone()
+                    .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db)
+                    .unarc()
+                {
                     Val::App(Var::Type(tid, sid), _, sp, _) => {
                         (*tid, *sid, sp.iter().map(|(_, v)| v.clone()).collect())
                     }
@@ -1416,6 +1434,12 @@ impl Pat {
                     .unwrap()
                     .0;
 
+                // if x.id() == 704 {
+                //     eprintln!("{:?} -> {:?}: tid={:?}, sid={:?}, targs={:?}", cxt.mcxt.size, rest_size, tid, sid, targs);
+                //     let (ltys, _) = lower_datatype(tid, sid, targs, cxt);
+                //     let lty = ltys[idx];
+                //     panic!("Got {:?}", lty);
+                // }
                 let (ltys, _) = lower_datatype(tid, sid, targs, cxt);
                 let lty = ltys[idx];
                 let product = cxt.ifcase(idx, x, lty);
@@ -1423,14 +1447,19 @@ impl Pat {
                 let cont = args
                     .iter()
                     .enumerate()
-                    .rfold(cont.clone(), |cont, (i, pat)| {
+                    .rfold(cont.clone(), |cont, (i, (v, pat))| {
                         let x = cxt.builder.project(product, i);
-                        PatCont::Pat {
+                        let cont = PatCont::Pat {
                             x,
                             pat,
                             cont: Box::new(cont),
-                            rest_lvl,
+                            rest_size,
                             rest: Box::new(rest.clone()),
+                        };
+                        // Add the shadow variable first
+                        match v {
+                            Some((name, ty)) => PatCont::Var(x, *name, ty, Box::new(cont)),
+                            None => cont,
                         }
                     });
                 let yes = cont.lower(ty.clone(), cxt);
@@ -1438,7 +1467,7 @@ impl Pat {
                 cxt.otherwise(yes);
 
                 let lty = ty.clone().lower(Val::Type, cxt);
-                cxt.trunc_locals(rest_lvl);
+                cxt.trunc_locals(rest_size);
                 let no = rest.lower(ty, cxt);
 
                 cxt.endif(no, lty)
@@ -1448,7 +1477,7 @@ impl Pat {
                     x,
                     pat: b,
                     cont: Box::new(cont.clone()),
-                    rest_lvl,
+                    rest_size,
                     rest: Box::new(rest.clone()),
                 };
                 a.lower(x, cont, cxt.mcxt.size, &rest, ty, cxt)

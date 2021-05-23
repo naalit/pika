@@ -179,6 +179,16 @@ fn test_newtype() {
         .success();
 }
 
+#[test]
+fn test_stress_gc() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/stress_gc.pk"])
+        .assert()
+        .stdout("233\n")
+        .success();
+}
+
 // Tests for type errors
 
 #[test]
