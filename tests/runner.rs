@@ -189,6 +189,15 @@ fn test_stress_gc() {
         .success();
 }
 
+#[test]
+fn test_do_meta() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/do_meta.pk"])
+        .assert()
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

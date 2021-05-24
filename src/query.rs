@@ -165,23 +165,29 @@ impl Cxt {
 pub enum RecSolution {
     Defined(PreDefId, u16, Span, Term),
     Inferred(PreDefId, u16, Span, Term),
+    ParentLocal(DefId, u16, Span, Term),
 }
 impl RecSolution {
-    pub fn id(&self) -> PreDefId {
+    pub fn id(&self) -> Option<PreDefId> {
         match self {
-            RecSolution::Defined(id, _, _, _) | RecSolution::Inferred(id, _, _, _) => *id,
+            RecSolution::Defined(id, _, _, _) | RecSolution::Inferred(id, _, _, _) => Some(*id),
+            _ => None,
         }
     }
 
     pub fn num(&self) -> u16 {
         match self {
-            RecSolution::Defined(_, n, _, _) | RecSolution::Inferred(_, n, _, _) => *n,
+            RecSolution::Defined(_, n, _, _)
+            | RecSolution::Inferred(_, n, _, _)
+            | RecSolution::ParentLocal(_, n, _, _) => *n,
         }
     }
 
     pub fn term(&self) -> &Term {
         match self {
-            RecSolution::Defined(_, _, _, v) | RecSolution::Inferred(_, _, _, v) => v,
+            RecSolution::Defined(_, _, _, v)
+            | RecSolution::Inferred(_, _, _, v)
+            | RecSolution::ParentLocal(_, _, _, v) => v,
         }
     }
 }

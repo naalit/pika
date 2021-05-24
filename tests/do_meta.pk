@@ -1,0 +1,4 @@
+fun f x = do
+    val y = x + 1
+    x
+end

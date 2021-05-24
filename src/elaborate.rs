@@ -396,23 +396,23 @@ impl MCxt {
             Meta::Global(id, n) => self
                 .solved_globals
                 .iter()
-                .find(|s| s.id() == id && s.num() == n)
+                .find(|s| s.id() == Some(id) && s.num() == n)
                 .map(|s| s.term().clone()),
             Meta::Local(def, num) => {
                 if let MCxtType::Local(d) = self.ty {
-                    if def != d {
-                        // TODO fix metas in do blocks and make this an error again
-                        eprintln!(
-                            "warning: local meta escaped its definition: {:?} -> {:?}!",
-                            def, d
-                        );
-                        return None;
+                    if def == d {
+                        return match &self.local_metas[num as usize] {
+                            MetaEntry::Solved(v, _) => Some((**v).clone()), //.map(|x| x.inline_metas(self)),
+                            MetaEntry::Unsolved(_, _, _) => None,
+                        };
                     }
                 }
-                match &self.local_metas[num as usize] {
-                    MetaEntry::Solved(v, _) => Some((**v).clone()), //.map(|x| x.inline_metas(self)),
-                    MetaEntry::Unsolved(_, _, _) => None,
-                }
+                self.solved_globals.iter().find_map(|s| match s {
+                    RecSolution::ParentLocal(d, n, _, t) if *d == def && *n == num => {
+                        Some(t.clone())
+                    }
+                    _ => None,
+                })
             }
         }
     }
@@ -533,10 +533,14 @@ impl MCxt {
             }
             Meta::Local(def, idx) => {
                 if let MCxtType::Local(d) = self.ty {
-                    assert_eq!(def, d, "local meta escaped its definition!");
+                    if def == d {
+                        // TODO should we do anything with the span we already have in `local_metas`, where it was introduced?
+                        self.local_metas[idx as usize] = MetaEntry::Solved(Arc::new(term), span);
+                        return Ok(());
+                    }
                 }
-                // TODO should we do anything with the span we already have in `local_metas`, where it was introduced?
-                self.local_metas[idx as usize] = MetaEntry::Solved(Arc::new(term), span);
+                self.solved_globals
+                    .push(RecSolution::ParentLocal(def, idx, span, term));
             }
         }
         Ok(())
@@ -2330,6 +2334,43 @@ pub fn infer(
                     if let Ok(info) = db.elaborate_def(i) {
                         for e in &*info.effects {
                             assert!(mcxt.eff_stack.try_eff(e.clone(), db, &mut mcxt2));
+                        }
+                        for i in &*info.solved_globals {
+                            match i {
+                                RecSolution::ParentLocal(d, n, span, term)
+                                    if mcxt.ty == MCxtType::Local(*d) =>
+                                {
+                                    match &mcxt.local_metas[*n as usize] {
+                                        MetaEntry::Solved(t2, s2) => {
+                                            let t2 = (**t2).clone().evaluate(&mcxt.env(), mcxt, db);
+                                            let term = term.clone().evaluate(&mcxt.env(), mcxt, db);
+                                            if !unify(
+                                                t2.clone(),
+                                                term.clone(),
+                                                mcxt.size,
+                                                *span,
+                                                db,
+                                                &mut mcxt2,
+                                            )? {
+                                                db.report_error(
+                                                    TypeError::Unify(
+                                                        mcxt.clone(),
+                                                        Spanned::new(term, *span),
+                                                        t2,
+                                                        ReasonExpected::MustMatch(*s2),
+                                                    )
+                                                    .into_error(mcxt.cxt.file(db), db, mcxt),
+                                                );
+                                            }
+                                        }
+                                        MetaEntry::Unsolved(_, _, _) => {
+                                            mcxt.local_metas[*n as usize] =
+                                                MetaEntry::Solved(Arc::new(term.clone()), *span);
+                                        }
+                                    }
+                                }
+                                _ => mcxt.solved_globals.push(i.clone()),
+                            }
                         }
                     }
                 }
