@@ -1826,6 +1826,8 @@ fn p_unify(
         (Val::Error, _) | (_, Val::Error) => Ok(Yes),
         (Val::Type, Val::Type) => Ok(Yes),
 
+        (Val::Lit(a, _), Val::Lit(b, _)) => Ok((a == b).into()),
+
         (Val::App(h, _, v, _), Val::App(h2, _, v2, _)) if h.unify(h2, db) => {
             let mut r = Yes;
             for (a, b) in v.into_iter().zip(v2.into_iter()) {
@@ -2418,7 +2420,7 @@ pub fn infer(
         }
 
         Pre_::Dot(head, m, args) => {
-            match infer(true, head, db, mcxt).map(|(x, ty)| {
+            match infer(false, head, db, mcxt).map(|(x, ty)| {
                 (
                     x.evaluate(&mcxt.env(), mcxt, db)
                         .inline(mcxt.size, db, mcxt),

@@ -198,6 +198,15 @@ fn test_do_meta() {
         .success();
 }
 
+#[test]
+fn test_const_arith() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["build", "tests/const_arith.pk"])
+        .assert()
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

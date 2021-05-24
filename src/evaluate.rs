@@ -282,6 +282,21 @@ impl Val {
                             }
                         }
                     }
+                } else if sp.len() == 1 {
+                    match (h, &sp[0], &elim) {
+                        (Var::Builtin(Builtin::BinOp(op)), Elim::App(_, a), Elim::App(_, b)) => {
+                            if let Some(v) = op.eval(a, b) {
+                                v
+                            } else {
+                                sp.push(elim);
+                                Val::App(h, hty, sp, g)
+                            }
+                        }
+                        _ => {
+                            sp.push(elim);
+                            Val::App(h, hty, sp, g)
+                        }
+                    }
                 } else {
                     sp.push(elim);
                     Val::App(h, hty, sp, g)
@@ -296,21 +311,6 @@ impl Val {
                     e, v
                 ),
             },
-            // TODO operators
-            // Val::App(Var::Builtin(b), hty, mut sp, _) if sp.len() == 1 => {
-            //     match b {
-            //         Builtin::BinOp(op) => {
-            //             if let Some(v) = op.eval(&sp[0].1, &x) {
-            //                 v
-            //             } else {
-            //                 sp.push(elim);
-            //                 // Throw away the old Glued, since that could have been resolved already
-            //                 Val::App(Var::Builtin(b), hty, sp, Glued::new())
-            //             }
-            //         }
-            //         _ => unreachable!(),
-            //     }
-            // }
         }
     }
 
