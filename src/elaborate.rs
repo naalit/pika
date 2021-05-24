@@ -106,12 +106,6 @@ impl Term {
                     .collect::<Result<_, _>>()
                     .map(|v| Term::Case(x, ty, cases, v, rty))
             }
-            Term::If(mut cond, mut yes, mut no) => {
-                *cond = cond.check_solution(meta.clone(), ren, lfrom, lto, names)?;
-                *yes = yes.check_solution(meta.clone(), ren, lfrom, lto, names)?;
-                *no = no.check_solution(meta, ren, lfrom, lto, names)?;
-                Ok(Term::If(cond, yes, no))
-            }
             Term::Do(v) => v
                 .into_iter()
                 .map(|(id, term)| {
@@ -474,7 +468,7 @@ impl MCxt {
             .zip(std::iter::successors(Some(self.size.next_lvl()), |lvl| {
                 Some(lvl.inc())
             }))
-            .map(|((_, x), to_lvl)| match x.unarc() {
+            .map(|(e, to_lvl)| match e.assert_app().1.unarc() {
                 Val::App(Var::Local(from_lvl), _, sp, _) if sp.is_empty() => {
                     Ok((*from_lvl, to_lvl))
                 }
@@ -491,7 +485,7 @@ impl MCxt {
             .zip(std::iter::successors(Some(self.size), |size| {
                 Some(size.inc())
             }))
-            .map(|((_, v), l)| match v.unarc() {
+            .map(|(e, l)| match e.assert_app().1.unarc() {
                 Val::App(Var::Local(_), ty, sp, _) if sp.is_empty() => {
                     let mut names = Names::new(self.cxt, db);
                     while names.size() != l {
@@ -1794,6 +1788,22 @@ impl UnifyMode {
     }
 }
 
+fn p_unify_elim(
+    mode: UnifyMode,
+    a: Elim,
+    b: Elim,
+    size: Size,
+    span: Span,
+    db: &dyn Compiler,
+    mcxt: &mut MCxt,
+) -> Result<TBool, TypeError> {
+    match (a, b) {
+        (Elim::App(i, a), Elim::App(j, b)) if i == j => p_unify(mode, a, b, size, span, db, mcxt),
+
+        _ => Ok(No),
+    }
+}
+
 fn p_unify(
     mode: UnifyMode,
     a: Val,
@@ -1814,9 +1824,8 @@ fn p_unify(
 
         (Val::App(h, _, v, _), Val::App(h2, _, v2, _)) if h.unify(h2, db) => {
             let mut r = Yes;
-            for ((i, a), (i2, b)) in v.into_iter().zip(v2.into_iter()) {
-                assert_eq!(i, i2);
-                r = r & p_unify(mode, a, b, size, span, db, mcxt)?;
+            for (a, b) in v.into_iter().zip(v2.into_iter()) {
+                r = r & p_unify_elim(mode, a, b, size, span, db, mcxt)?;
             }
             Ok(r)
         }
@@ -1838,7 +1847,7 @@ fn p_unify(
             p_unify(
                 mode,
                 cl.vquote(size, mcxt, db),
-                t.app(icit, Val::local(size.next_lvl(), ty), mcxt, db),
+                t.app(Elim::App(icit, Val::local(size.next_lvl(), ty)), mcxt, db),
                 size.inc(),
                 span,
                 db,
@@ -1917,9 +1926,7 @@ fn p_unify(
                 Some(v) => {
                     let v = sp
                         .into_iter()
-                        .fold(v.evaluate(&mcxt.env(), mcxt, db), |f, (i, x)| {
-                            f.app(i, x, mcxt, db)
-                        });
+                        .fold(v.evaluate(&mcxt.env(), mcxt, db), |f, e| f.app(e, mcxt, db));
                     p_unify(mode, v, t, size, span, db, mcxt)
                 }
                 None => {
@@ -2143,7 +2150,11 @@ pub fn infer(
                 Box::new(Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type))),
             );
             Ok((
-                Term::If(Box::new(a), Box::new(b), Box::new(false_t)),
+                a.make_if(
+                    b,
+                    false_t,
+                    Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type)),
+                ),
                 Val::builtin(Builtin::Bool, Val::Type),
             ))
         }
@@ -2169,7 +2180,11 @@ pub fn infer(
                 Box::new(Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type))),
             );
             Ok((
-                Term::If(Box::new(a), Box::new(true_t), Box::new(b)),
+                a.make_if(
+                    true_t,
+                    b,
+                    Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type)),
+                ),
                 Val::builtin(Builtin::Bool, Val::Type),
             ))
         }
@@ -2185,7 +2200,8 @@ pub fn infer(
             let yspan = yes.span();
             let (yes, ty) = infer(insert, yes, db, mcxt)?;
             let no = check(no, &ty, ReasonExpected::MustMatch(yspan), db, mcxt)?;
-            Ok((Term::If(Box::new(cond), Box::new(yes), Box::new(no)), ty))
+            let tty = ty.clone().quote(mcxt.size, mcxt, db);
+            Ok((cond.make_if(yes, no, tty), ty))
         }
 
         Pre_::Var(name) => {
@@ -2777,7 +2793,8 @@ pub fn check(
             )?;
             let yes = check(yes, &ty, reason.clone(), db, mcxt)?;
             let no = check(no, &ty, reason, db, mcxt)?;
-            Ok(Term::If(Box::new(cond), Box::new(yes), Box::new(no)))
+            let tty = ty.clone().quote(mcxt.size, mcxt, db);
+            Ok(cond.make_if(yes, no, tty))
         }
 
         _ => {

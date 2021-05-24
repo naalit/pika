@@ -447,8 +447,6 @@ pub enum Term {
     Case(Box<Term>, Box<Ty>, Vec<(Pat, Term)>, Vec<Term>, Box<Ty>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
-    /// If(cond, then, else)
-    If(Box<Term>, Box<Term>, Box<Term>),
     /// do A; B; () end
     Do(Vec<(DefId, Term)>),
     /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
@@ -456,6 +454,16 @@ pub enum Term {
 }
 
 impl Term {
+    pub fn make_if(self, yes: Term, no: Term, rty: Term) -> Term {
+        Term::Case(
+            Box::new(self),
+            Box::new(Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type))),
+            vec![(Pat::Bool(true), yes), (Pat::Bool(false), no)],
+            Vec::new(),
+            Box::new(rty),
+        )
+    }
+
     pub fn ty(&self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         match self {
             Term::Type => Term::Type,
@@ -485,7 +493,6 @@ impl Term {
             },
             Term::Case(_, _, _, _, ty) => (**ty).clone(),
             Term::Lit(_, b) => Term::Var(Var::Builtin(*b), Box::new(Term::Type)),
-            Term::If(_, a, _) => a.ty(at, mcxt, db),
             Term::Do(v) => match v.last() {
                 Some((_, x)) => x.ty(at, mcxt, db),
                 None => Term::Var(Var::Builtin(Builtin::UnitType), Box::new(Term::Type)),
@@ -761,18 +768,6 @@ impl Term {
                     .chain(Doc::keyword("end"))
                     .prec(Prec::Term)
             }
-            Term::If(cond, yes, no) => Doc::keyword("if")
-                .space()
-                .chain(cond.pretty(db, names))
-                .line()
-                .chain(Doc::keyword("then"))
-                .space()
-                .chain(yes.pretty(db, names))
-                .line()
-                .chain(Doc::keyword("else"))
-                .space()
-                .chain(no.pretty(db, names))
-                .prec(Prec::Term),
             Term::Do(sc) => {
                 let mut doc = Doc::keyword("do");
                 let mut i = 0;
@@ -1012,7 +1007,31 @@ impl<T: PartialEq> Var<T> {
     }
 }
 
-pub type Spine = Vec<(Icit, Val)>;
+/// An eliminator is something that can be waiting on a neutral value: either an application to an argument, or a case-of.
+/// A neutral value has a chain of eliminators which are applied one by one when it's resolved.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Elim {
+    App(Icit, Val),
+    /// Case(env, scrutinee_ty, branches, effects, ret_ty)
+    Case(Env, Box<Term>, Vec<(Pat, Term)>, Vec<Term>, Box<Term>),
+}
+impl Elim {
+    pub fn into_app(self) -> Option<(Icit, Val)> {
+        match self {
+            Elim::App(i, v) => Some((i, v)),
+            _ => None,
+        }
+    }
+
+    pub fn assert_app(&self) -> (Icit, &Val) {
+        match self {
+            Elim::App(i, v) => (*i, v),
+            _ => panic!("Called assert_app() on {:?}", self),
+        }
+    }
+}
+
+pub type Spine = Vec<Elim>;
 
 /// A `Glued` represents what a `Val::App` evaluates to.
 /// Each `Val::App` has a `Glued` associated with it, which lazily inlines and beta-reduces the value.
@@ -1063,44 +1082,36 @@ impl Glued {
         // } else
         {
             // drop(guard);
-            match h {
+            let h = match h {
                 // Check the mcxt's local constraints
                 Var::Local(lvl) => {
                     let val = mcxt.local_val(lvl)?.clone();
-                    let val = sp
-                        .into_owned()
-                        .into_iter()
-                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                     // We don't cache this, because we might use this value outside of the local scope
                     Some(val)
                 }
                 // A datatype is already fully evaluated
                 Var::Type(_, _) => None,
                 Var::Cons(_) => None,
-                Var::Builtin(Builtin::BinOp(op)) => {
-                    let sp = sp.into_owned();
-                    if sp.len() != 2 {
-                        None
-                    } else {
-                        let a = sp[0].1.clone().inline(at, db, mcxt);
-                        let b = sp[1].1.clone().inline(at, db, mcxt);
-                        if let Some(v) = op.eval(&a, &b) {
-                            Some(v)
-                        } else {
-                            None
-                        }
-                    }
-                }
+                // Var::Builtin(Builtin::BinOp(op)) => {
+                //     let sp = sp.into_owned();
+                //     if sp.len() != 2 {
+                //         None
+                //     } else {
+                //         let a = sp[0].1.clone().inline(at, db, mcxt);
+                //         let b = sp[1].1.clone().inline(at, db, mcxt);
+                //         if let Some(v) = op.eval(&a, &b) {
+                //             Some(v)
+                //         } else {
+                //             None
+                //         }
+                //     }
+                // }
                 Var::Builtin(_) => None,
                 Var::Rec(rec) => {
                     let def = mcxt.cxt.lookup_rec(rec, db)?;
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
                     let val = val.evaluate(&Env::new(at), mcxt, db);
-                    let val = sp
-                        .into_owned()
-                        .into_iter()
-                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                     // let val = Val::Arc(Arc::new(val));
                     // *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
@@ -1109,30 +1120,23 @@ impl Glued {
                     let val = db.elaborate_def(def).ok()?.term;
                     let val = (*val).clone();
                     let val = val.evaluate(&Env::new(at), mcxt, db);
-                    let val = sp
-                        .into_owned()
-                        .into_iter()
-                        .fold(val, |f, (i, x)| f.app(i, x, mcxt, db));
                     // let val = Val::Arc(Arc::new(val));
                     // *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
                 }
                 Var::Meta(m) => {
                     if let Some(term) = mcxt.get_meta(m) {
-                        let val = sp
-                            .into_owned()
-                            .into_iter()
-                            .fold(term.evaluate(&Env::new(at), mcxt, db), |f, (i, x)| {
-                                f.app(i, x, mcxt, db)
-                            });
-                        // let val = Val::Arc(Arc::new(val));
-                        // *self.0.write().unwrap() = Some(val.clone());
-                        Some(val)
+                        Some(term.evaluate(&Env::new(at), mcxt, db))
                     } else {
                         None
                     }
                 }
-            }
+            }?;
+            Some(
+                sp.into_owned()
+                    .into_iter()
+                    .fold(h, |h, e| h.app(e, mcxt, db)),
+            )
         }
     }
 }
@@ -1161,7 +1165,8 @@ pub enum Val {
     Fun(Box<VTy>, Box<VTy>, Vec<Val>),
     /// The Builtin is the type - it can only be a builtin integer type
     Lit(Literal, Builtin),
-    Lazy(Box<Lazy>),
+    /// do A; B; () end
+    Do(Env, Vec<(DefId, Term)>),
     Error,
 }
 impl Val {

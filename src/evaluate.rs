@@ -44,47 +44,14 @@ impl Term {
             Term::App(icit, f, x) => {
                 let f = f.evaluate(env, mcxt, db);
                 let x = x.evaluate(env, mcxt, db);
-                f.app(icit, x, mcxt, db)
+                f.app(Elim::App(icit, x), mcxt, db)
             }
             Term::Case(x, ty, cases, effs, rty) => {
                 let x = x.evaluate(env, mcxt, db);
-                for (pat, body) in &cases {
-                    use crate::pattern::MatchResult::*;
-                    match pat.match_with(&x, env.clone(), mcxt, db) {
-                        Yes(env) => return body.clone().evaluate(&env, mcxt, db),
-                        No => continue,
-                        Maybe => {
-                            return Val::Lazy(Box::new(Lazy {
-                                env: env.clone(),
-                                term: Term::Case(
-                                    Box::new(x.quote(env.size, mcxt, db)),
-                                    ty,
-                                    cases,
-                                    effs,
-                                    rty,
-                                ),
-                            }))
-                        }
-                    }
-                }
-                unreachable!()
+                x.app(Elim::Case(env.clone(), ty, cases, effs, rty), mcxt, db)
             }
             Term::Error => Val::Error,
-            Term::If(cond, yes, no) => {
-                match cond.evaluate(env, mcxt, db).inline(env.size, db, mcxt) {
-                    Val::App(Var::Builtin(Builtin::True), _, _, _) => yes.evaluate(env, mcxt, db),
-                    Val::App(Var::Builtin(Builtin::False), _, _, _) => no.evaluate(env, mcxt, db),
-                    cond => Val::Lazy(Box::new(Lazy {
-                        env: env.clone(),
-                        term: Term::If(Box::new(cond.quote(env.size, mcxt, db)), yes, no),
-                    })),
-                }
-            }
-            // TODO: eventually we'll want to actually evaluate do blocks when necessary
-            term @ Term::Do(_) => Val::Lazy(Box::new(Lazy {
-                env: env.clone(),
-                term,
-            })),
+            Term::Do(v) => Val::Do(env.clone(), v),
         }
     }
 
@@ -177,19 +144,6 @@ impl Term {
                     .collect();
                 Term::Case(x, ty, cases, effs, rty)
             }
-            Term::If(mut cond, mut yes, mut no) => match cond
-                .evaluate(env, mcxt, db)
-                .inline(env.size, db, mcxt)
-            {
-                Val::App(Var::Builtin(Builtin::True), _, _, _) => yes.eval_quote(env, at, mcxt, db),
-                Val::App(Var::Builtin(Builtin::False), _, _, _) => no.eval_quote(env, at, mcxt, db),
-                vcond => {
-                    *cond = vcond.quote(at, mcxt, db);
-                    *yes = yes.eval_quote(env, at, mcxt, db);
-                    *no = no.eval_quote(env, at, mcxt, db);
-                    Term::If(cond, yes, no)
-                }
-            },
             Term::Error => Term::Error,
             Term::Do(v) => Term::Do(
                 v.into_iter()
@@ -211,11 +165,6 @@ impl Val {
                     Val::App(h, hty, sp, g)
                 }
             }
-            // Avoid infinite recursion
-            Val::Lazy(cl) => match cl.evaluate(mcxt, db) {
-                Val::Lazy(cl) => Val::Lazy(cl),
-                v => v.inline(at, db, mcxt),
-            },
             Val::Arc(v) => IntoOwned::<Val>::into_owned(v).inline(at, db, mcxt),
             x => x,
         }
@@ -290,14 +239,20 @@ impl Val {
                 Val::Fun(a, b, effs)
             }
             Val::Error => Val::Error,
-
-            Val::Lazy(mut cl) => match (*cl).clone().evaluate(mcxt, db) {
-                v @ Val::Lazy(_) => v,
-                v => {
-                    cl.term = v.force(at, db, mcxt).quote(at, mcxt, db);
-                    Val::Lazy(cl)
-                }
-            },
+            Val::Do(env, v) => {
+                let v = v
+                    .into_iter()
+                    .map(|(d, x)| {
+                        (
+                            d,
+                            x.evaluate(&env, mcxt, db)
+                                .force(env.size, db, mcxt)
+                                .quote(env.size, mcxt, db),
+                        )
+                    })
+                    .collect();
+                Val::Do(env, v)
+            }
             Val::Clos(t, i, mut cl, effs) => {
                 cl.ty = cl.ty.force(at, db, mcxt);
                 cl.term = (*cl)
@@ -312,37 +267,50 @@ impl Val {
     }
 
     /// Returns the result of applying `x` to `self`, beta-reducing if necessary.
-    pub fn app(self, icit: Icit, x: Val, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+    pub fn app(self, elim: Elim, mcxt: &MCxt, db: &dyn Compiler) -> Val {
         match self {
-            Val::App(Var::Builtin(b), hty, mut sp, _) if sp.len() == 1 => {
-                match b {
-                    Builtin::BinOp(op) => {
-                        if let Some(v) = op.eval(&sp[0].1, &x) {
-                            v
-                        } else {
-                            sp.push((icit, x));
-                            // Throw away the old Glued, since that could have been resolved already
-                            Val::App(Var::Builtin(b), hty, sp, Glued::new())
+            Val::App(h, hty, mut sp, g) => {
+                if sp.is_empty() {
+                    match elim.elim(Val::App(h, hty, sp, g), mcxt, db) {
+                        Ok(v) => v,
+                        Err((v, e)) => {
+                            if let Val::App(h, hty, mut sp, g) = v {
+                                sp.push(e);
+                                Val::App(h, hty, sp, g)
+                            } else {
+                                unreachable!()
+                            }
                         }
                     }
-                    _ => unreachable!(),
+                } else {
+                    sp.push(elim);
+                    Val::App(h, hty, sp, g)
                 }
             }
-            Val::App(h, hty, mut sp, _) => {
-                sp.push((icit, x));
-                // Throw away the old Glued, since that could have been resolved already
-                Val::App(h, hty, sp, Glued::new())
-            }
-            Val::Clos(Lam, _, cl, _) => cl.apply(x, mcxt, db),
-            Val::Lazy(mut l) => {
-                let size = l.env_size();
-                let x = x.quote(size, mcxt, db);
-                l.term = Term::App(icit, Box::new(l.term), Box::new(x));
-                Val::Lazy(l)
-            }
             Val::Error => Val::Error,
-            Val::Arc(a) => IntoOwned::<Val>::into_owned(a).app(icit, x, mcxt, db),
-            _ => unreachable!(),
+            Val::Arc(a) => IntoOwned::<Val>::into_owned(a).app(elim, mcxt, db),
+            x => match elim.elim(x, mcxt, db) {
+                Ok(v) => v,
+                Err((v, e)) => panic!(
+                    "Error during evaluation: couldn't apply eliminator {:?} to value {:?}",
+                    e, v
+                ),
+            },
+            // TODO operators
+            // Val::App(Var::Builtin(b), hty, mut sp, _) if sp.len() == 1 => {
+            //     match b {
+            //         Builtin::BinOp(op) => {
+            //             if let Some(v) = op.eval(&sp[0].1, &x) {
+            //                 v
+            //             } else {
+            //                 sp.push(elim);
+            //                 // Throw away the old Glued, since that could have been resolved already
+            //                 Val::App(Var::Builtin(b), hty, sp, Glued::new())
+            //             }
+            //         }
+            //         _ => unreachable!(),
+            //     }
+            // }
         }
     }
 
@@ -368,11 +336,14 @@ impl Val {
                     Var::Cons(id) => Term::Var(Var::Cons(id), Box::new(hty.clone())),
                     Var::Builtin(b) => Term::Var(Var::Builtin(b), Box::new(hty.clone())),
                 };
-                sp.into_iter().fold(h, |f, (icit, x)| {
-                    Term::App(icit, Box::new(f), Box::new(x.quote(at, mcxt, db)))
-                })
+                sp.into_iter()
+                    .fold(h, |head, elim| elim.quote(head, at, mcxt, db))
             }
-            Val::Lazy(cl) => cl.quote(at, mcxt, db),
+            Val::Do(mut env, v) => Term::Do(
+                v.into_iter()
+                    .map(|(d, t)| (d, t.eval_quote(&mut env, at, mcxt, db)))
+                    .collect(),
+            ),
             Val::Clos(t, icit, cl, effs) => Term::Clos(
                 t,
                 cl.name,
@@ -462,17 +433,19 @@ impl Val {
                 };
                 let sp = sp
                     .into_iter()
-                    .map(|(i, x)| (i, x.inline_metas(at, mcxt, db)))
+                    .map(|e| e.inline_metas(at, mcxt, db))
                     .collect();
                 *ty = ty.inline_metas(at, mcxt, db);
                 // Reset the Glued in case it has metas inside
                 Val::App(h, ty, sp, Glued::new())
             }
-            Val::Lazy(mut cl) => {
-                let cl_size = cl.env_size();
-                cl.env.inline_metas(mcxt, db);
-                cl.term = cl.term.inline_metas(mcxt, cl_size, db);
-                Val::Lazy(cl)
+            Val::Do(env, v) => {
+                let size = env.size;
+                let v = v
+                    .into_iter()
+                    .map(|(d, t)| (d, t.inline_metas(mcxt, size, db)))
+                    .collect();
+                Val::Do(env, v)
             }
             Val::Clos(t, i, mut cl, effs) => {
                 let cl_size = cl.env_size();
@@ -496,6 +469,89 @@ impl Val {
             }
             Val::Error => Val::Error,
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).inline_metas(at, mcxt, db),
+        }
+    }
+}
+
+impl Elim {
+    pub fn elim(self, head: Val, mcxt: &MCxt, db: &dyn Compiler) -> Result<Val, (Val, Elim)> {
+        match self {
+            Elim::App(i, x) => match head {
+                Val::Clos(_arg_ty, j, cl, effs) => {
+                    assert!(effs.is_empty(), "TODO: effects in evaluator");
+                    assert_eq!(i, j);
+                    Ok(cl.apply(x, mcxt, db))
+                }
+                _ => Err((head, Elim::App(i, x))),
+            },
+            Elim::Case(env, xty, cases, effs, rty) => {
+                for (pat, body) in &cases {
+                    use crate::pattern::MatchResult::*;
+                    match pat.match_with(&head, env.clone(), mcxt, db) {
+                        Yes(env) => return Ok(body.clone().evaluate(&env, mcxt, db)),
+                        No => continue,
+                        Maybe => return Err((head, Elim::Case(env, xty, cases, effs, rty))),
+                    }
+                }
+                unreachable!()
+            }
+        }
+    }
+
+    pub fn inline_metas(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Self {
+        match self {
+            Elim::App(i, x) => Elim::App(i, x.inline_metas(at, mcxt, db)),
+            Elim::Case(mut env, mut hty, branches, effs, mut ret_ty) => {
+                let env_size = env.size;
+                env.inline_metas(mcxt, db);
+                let branches = branches
+                    .into_iter()
+                    .map(|(pat, term)| {
+                        let mut env = Env::new(env_size);
+                        let mut at = env_size;
+                        (
+                            pat.eval_quote(&mut env, &mut at, mcxt, db),
+                            term.eval_quote(&mut env, at, mcxt, db),
+                        )
+                    })
+                    .collect();
+                *hty = hty.inline_metas(mcxt, env_size, db);
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.inline_metas(mcxt, env_size, db))
+                    .collect();
+                *ret_ty = ret_ty.inline_metas(mcxt, env_size, db);
+                Elim::Case(env, hty, branches, effs, ret_ty)
+            }
+        }
+    }
+
+    pub fn quote(self, head: Term, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+        match self {
+            Elim::App(i, x) => {
+                let x = x.quote(at, mcxt, db);
+                Term::App(i, Box::new(head), Box::new(x))
+            }
+            Elim::Case(mut env, mut hty, branches, effs, mut ret_ty) => {
+                *hty = hty.eval_quote(&mut env, at, mcxt, db);
+                let branches = branches
+                    .into_iter()
+                    .map(|(pat, term)| {
+                        let mut env = env.clone();
+                        let mut at = at;
+                        (
+                            pat.eval_quote(&mut env, &mut at, mcxt, db),
+                            term.eval_quote(&mut env, at, mcxt, db),
+                        )
+                    })
+                    .collect();
+                let effs = effs
+                    .into_iter()
+                    .map(|x| x.eval_quote(&mut env, at, mcxt, db))
+                    .collect();
+                *ret_ty = ret_ty.eval_quote(&mut env, at, mcxt, db);
+                Term::Case(Box::new(head), hty, branches, effs, ret_ty)
+            }
         }
     }
 }

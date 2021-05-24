@@ -506,12 +506,18 @@ impl Val {
         // If this is a datatype applied to all its arguments, inline the sum type
         // That way Durin knows the type when calling ifcase
         let (tid, sid, targs) = match self {
-            Val::App(Var::Type(tid, sid), _, sp, _) => {
-                (tid, sid, sp.into_iter().map(|(_, v)| v).collect())
-            }
+            Val::App(Var::Type(tid, sid), _, sp, _) => (
+                tid,
+                sid,
+                sp.into_iter().map(|e| e.into_app().unwrap().1).collect(),
+            ),
             Val::App(Var::Top(tid), hty, sp, g) => {
                 if let Some(&(x, y)) = cxt.scope_ids.get(&cxt.db.lookup_intern_def(tid).0) {
-                    (x, y, sp.into_iter().map(|(_, v)| v).collect())
+                    (
+                        x,
+                        y,
+                        sp.into_iter().map(|e| e.into_app().unwrap().1).collect(),
+                    )
                 } else {
                     return Val::App(Var::Top(tid), hty, sp, g)
                         .quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)
@@ -520,7 +526,11 @@ impl Val {
             }
             Val::App(Var::Rec(id), hty, sp, g) => {
                 if let Some(&(x, y)) = cxt.scope_ids.get(&id) {
-                    (x, y, sp.into_iter().map(|(_, v)| v).collect())
+                    (
+                        x,
+                        y,
+                        sp.into_iter().map(|e| e.into_app().unwrap().1).collect(),
+                    )
                 } else {
                     return Val::App(Var::Rec(id), hty, sp, g)
                         .quote(cxt.mcxt.size, &cxt.mcxt, cxt.db)
@@ -591,7 +601,7 @@ fn lower_datatype(
                             match tty {
                                 Val::Clos(Pi, i, cl, _) => {
                                     let from = cl.ty.clone();
-                                    ty_args.push((
+                                    ty_args.push(Elim::App(
                                         i,
                                         Val::local(cxt.mcxt.size.next_lvl(), from.clone()),
                                     ));
@@ -952,7 +962,9 @@ impl Term {
                     };
 
                     let targs: Vec<_> = match ty {
-                        Val::App(_, _, sp, _) => sp.into_iter().map(|(_i, x)| x).collect(),
+                        Val::App(_, _, sp, _) => {
+                            sp.into_iter().map(|e| e.into_app().unwrap().1).collect()
+                        }
 
                         _ => unreachable!(),
                     };
@@ -1172,17 +1184,6 @@ impl Term {
             }
             Term::Error => panic!("type errors should have been caught by now!"),
             Term::Case(x, xty, cases, effs, _) => lower_case(x, xty, cases, effs, ty, cxt),
-            Term::If(cond, yes, no) => {
-                let cond = cond.lower(Val::builtin(Builtin::Bool, Val::Type), cxt);
-                cxt.if_expr(cond);
-
-                let yes = yes.lower(ty.clone(), cxt);
-                cxt.otherwise(yes);
-
-                let no = no.lower(ty.clone(), cxt);
-                let lty = ty.lower(Val::Type, cxt);
-                cxt.endif(no, lty)
-            }
         }
     }
 }
@@ -1407,13 +1408,17 @@ impl Pat {
                     .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db)
                     .unarc()
                 {
-                    Val::App(Var::Type(tid, sid), _, sp, _) => {
-                        (*tid, *sid, sp.iter().map(|(_, v)| v.clone()).collect())
-                    }
+                    Val::App(Var::Type(tid, sid), _, sp, _) => (
+                        *tid,
+                        *sid,
+                        sp.iter().map(|e| e.assert_app().1.clone()).collect(),
+                    ),
                     Val::App(Var::Rec(id), _, sp, _) => cxt
                         .scope_ids
                         .get(id)
-                        .map(|&(x, y)| (x, y, sp.iter().map(|(_, v)| v.clone()).collect()))
+                        .map(|&(x, y)| {
+                            (x, y, sp.iter().map(|e| e.assert_app().1.clone()).collect())
+                        })
                         .expect("Datatypes should be lowered before their constructors"),
                     x => unreachable!("{:?}", x),
                 };

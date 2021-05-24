@@ -545,7 +545,11 @@ impl Pat {
                 Val::App(Var::Cons(id2), _, sp, _) => {
                     if *id == id2 {
                         let mut any_maybe = false;
-                        for ((v, i), (_, val)) in v.iter().zip(&sp) {
+                        for ((v, i), elim) in v.iter().zip(&sp) {
+                            let val = match elim {
+                                Elim::App(_, v) => v,
+                                _ => unreachable!(),
+                            };
                             let mut e2 = env.clone();
                             if let Some(_) = v {
                                 e2.push(Some(val.clone()));
