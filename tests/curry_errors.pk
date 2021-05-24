@@ -7,5 +7,5 @@ val just_right : I32 = plus 1 2
 # This shouldn't give us an argument error, just a could not match error
 val none : I32 = plus
 
-fun inc x = x + 1
+fun inc x : I32 = x + 1
 val argument_singular = inc 2 3

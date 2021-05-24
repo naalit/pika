@@ -796,16 +796,19 @@ impl BinOp {
 }
 
 impl Builtin {
-    fn lower(self, cxt: &mut LCxt) -> ir::Val {
+    fn lower(self, ty: &VTy, cxt: &mut LCxt) -> ir::Val {
         match self {
             Builtin::I32 => cxt.builder.cons(ir::Constant::IntType(ir::Width::W32)),
             Builtin::I64 => cxt.builder.cons(ir::Constant::IntType(ir::Width::W64)),
             // Bool translates to i1
             Builtin::Bool => cxt.builder.cons(ir::Constant::IntType(ir::Width::W1)),
             Builtin::BinOp(op) => {
-                let i32_ty = cxt.builder.cons(ir::Constant::IntType(ir::Width::W32));
-                let a = cxt.builder.push_fun([(None, i32_ty)]);
-                let b = cxt.builder.push_fun([(None, i32_ty)]);
+                let ity = match ty {
+                    Val::Fun(ity, _, _) => (**ity).clone().lower(Val::Type, cxt),
+                    _ => unreachable!(),
+                };
+                let a = cxt.builder.push_fun([(None, ity)]);
+                let b = cxt.builder.push_fun([(None, ity)]);
                 let val = cxt.builder.binop(op.lower(), a[0], b[0]);
                 let f = cxt.builder.pop_fun(val);
                 cxt.builder.pop_fun(f)
@@ -847,7 +850,7 @@ impl Term {
                 cxt,
             ),
             Term::Var(v, _) => match v {
-                Var::Builtin(b) => b.lower(cxt),
+                Var::Builtin(b) => b.lower(&ty, cxt),
                 Var::Local(i) => *cxt.locals.get(*i),
                 Var::Top(i) => {
                     let (i, _) = cxt.db.lookup_intern_def(*i);
@@ -1118,9 +1121,15 @@ impl Term {
             Term::App(_icit, f, x) => {
                 // Uncurry binops when possible
                 if let Term::App(_, f2, y) = &**f {
-                    if let Term::Var(Var::Builtin(Builtin::BinOp(op)), _) = &**f2 {
-                        let x = x.lower(Val::builtin(Builtin::I32, Val::Type), cxt);
-                        let y = y.lower(Val::builtin(Builtin::I32, Val::Type), cxt);
+                    if let Term::Var(Var::Builtin(Builtin::BinOp(op)), fty) = &**f2 {
+                        let ity = match &**fty {
+                            Term::Fun(ity, _, _) => {
+                                (**ity).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db)
+                            }
+                            _ => unreachable!(),
+                        };
+                        let x = x.lower(ity.clone(), cxt);
+                        let y = y.lower(ity, cxt);
                         return cxt.builder.binop(op.lower(), y, x);
                     }
                 }

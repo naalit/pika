@@ -61,6 +61,23 @@ pub enum BinOp {
     PipeR,  // |>
 }
 impl BinOp {
+    pub fn returns_arg_ty(self) -> bool {
+        matches!(
+            self,
+            BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::Exp
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitShl
+                | BinOp::BitShr
+        )
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             BinOp::Add => "+",
@@ -112,6 +129,15 @@ impl BinOp {
             ),
             // TODO: `(<<): [t] [P: t -> Type] (f : (x : t) -> P x) (x : t) -> P x`
             PipeL | PipeR => todo!("pipes"),
+        }
+    }
+
+    pub fn ret_ty(self) -> Option<Val> {
+        match self {
+            BinOp::Eq | BinOp::NEq | BinOp::Lt | BinOp::Gt | BinOp::Leq | BinOp::Geq => {
+                Some(Val::builtin(Builtin::Bool, Val::Type))
+            }
+            _ => None,
         }
     }
 }

@@ -8,10 +8,11 @@ val pi2 = (a: Type) ((b: a) -> a) -> a
 
 val pi4 = (a b c: Type) -> a
 
+fun the t x : t = x
 val lam = () => ()
 # () is only allowed as the last argument in a lambda right now, otherwise it's ambiguous with application
 # val lam2 = () a b => a + b
-val lam3 = a b () => a + b
+val lam3 = a b () => the I32 (a + b)
 
 # I'm not 100% sure if this should be allowed? It is right now
 val multiline : (a: _) -> a -> a -> a = (x : Type)

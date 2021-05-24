@@ -20,7 +20,7 @@ fun pred (n : Nat) : Nat = fst (n (Pair Nat Nat) (p => case p of
         Pair.New _a b => Pair.New b (suc b)
     end) (Pair.New zero zero))
 
-fun nat_to_int (n : Nat) : I32 = n _ (x => x + 1) 0
+fun nat_to_int (n : Nat) : I32 = n I32 (x => x + 1) 0
 fun int_to_nat (i : I32) : Nat = if i == 0 then zero else suc (int_to_nat (i - 1))
 
 fun fib (i : Nat) : Nat with IO = if iszero (pred i) then one else add (fib (pred i)) (fib (pred (pred i)))

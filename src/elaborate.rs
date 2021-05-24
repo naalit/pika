@@ -2126,13 +2126,58 @@ pub fn infer(
         Pre_::Lit(_) => Err(TypeError::UntypedLiteral(pre.span())),
 
         Pre_::BinOp(op, a, b) => {
-            let f = Term::Var(
-                Var::Builtin(Builtin::BinOp(**op)),
-                Box::new(op.ty().quote(mcxt.size, mcxt, db)),
+            let (va, aty) = infer(true, a, db, mcxt)?;
+            // Check b against the type and inline metas first, to allow:
+            // a : ?0, b : I32 --> `a + b` which solves ?0 to I32
+            let b = check(b, &aty, ReasonExpected::MustMatch(a.span()), db, mcxt)?;
+            let aty = aty.inline_metas(mcxt.size, mcxt, db);
+            let ity = match &aty {
+                Val::App(Var::Builtin(b), _, _, _) => match *b {
+                    Builtin::I32 => Term::Var(Var::Builtin(Builtin::I32), Box::new(Term::Type)),
+                    Builtin::I64 => Term::Var(Var::Builtin(Builtin::I64), Box::new(Term::Type)),
+                    _ => {
+                        return Err(TypeError::NotIntType(
+                            a.span(),
+                            aty,
+                            ReasonExpected::ArgOf(
+                                op.span(),
+                                Val::builtin(Builtin::BinOp(**op), Val::Type),
+                            ),
+                        ))
+                    }
+                },
+                _ => {
+                    return Err(TypeError::NotIntType(
+                        a.span(),
+                        aty,
+                        ReasonExpected::ArgOf(
+                            op.span(),
+                            Val::builtin(Builtin::BinOp(**op), Val::Type),
+                        ),
+                    ))
+                }
+            };
+            // The return type could be different from `ity`, e.g. `==`
+            let vrty = op.ret_ty();
+            let rty = vrty
+                .clone()
+                .map(|x| x.quote(mcxt.size, mcxt, db))
+                .unwrap_or_else(|| ity.clone());
+            let vrty = vrty.unwrap_or_else(|| ity.clone().evaluate(&mcxt.env(), mcxt, db));
+            let fty = Term::Fun(
+                Box::new(ity.clone()),
+                Box::new(Term::Fun(Box::new(ity.clone()), Box::new(rty), Vec::new())),
+                Vec::new(),
             );
-            let (f, fty) = infer_app(f, op.ty(), op.span(), Icit::Expl, a, db, mcxt)?;
-            let fspan = Span(a.span().0, op.span().1);
-            infer_app(f, fty, fspan, Icit::Expl, b, db, mcxt)
+            let f = Term::Var(Var::Builtin(Builtin::BinOp(**op)), Box::new(fty));
+            Ok((
+                Term::App(
+                    Icit::Expl,
+                    Box::new(Term::App(Icit::Expl, Box::new(f), Box::new(va))),
+                    Box::new(b),
+                ),
+                vrty,
+            ))
         }
 
         // a and b ==> if a then b else False
@@ -2783,6 +2828,54 @@ pub fn check(
                 Box::new(ty),
                 Box::new(body),
                 effs,
+            ))
+        }
+
+        // If it's an op like `+` or `*`, the arguments will have the same type as the return type
+        // But make sure to fall through to `infer` if it's something like `!=`
+        (Pre_::BinOp(op, a, b), _) if op.returns_arg_ty() => {
+            let ity = match ty {
+                Val::App(Var::Builtin(b), _, _, _) => match *b {
+                    Builtin::I32 => Term::Var(Var::Builtin(Builtin::I32), Box::new(Term::Type)),
+                    Builtin::I64 => Term::Var(Var::Builtin(Builtin::I64), Box::new(Term::Type)),
+                    _ => {
+                        return Err(TypeError::NotIntType(
+                            a.span(),
+                            ty.clone(),
+                            ReasonExpected::ArgOf(
+                                op.span(),
+                                Val::builtin(Builtin::BinOp(**op), Val::Type),
+                            ),
+                        ))
+                    }
+                },
+                _ => {
+                    return Err(TypeError::NotIntType(
+                        a.span(),
+                        ty.clone(),
+                        ReasonExpected::ArgOf(
+                            op.span(),
+                            Val::builtin(Builtin::BinOp(**op), Val::Type),
+                        ),
+                    ))
+                }
+            };
+            let a = check(a, ty, reason.clone(), db, mcxt)?;
+            let b = check(b, ty, reason, db, mcxt)?;
+            let fty = Term::Fun(
+                Box::new(ity.clone()),
+                Box::new(Term::Fun(
+                    Box::new(ity.clone()),
+                    Box::new(ity.clone()),
+                    Vec::new(),
+                )),
+                Vec::new(),
+            );
+            let f = Term::Var(Var::Builtin(Builtin::BinOp(**op)), Box::new(fty));
+            Ok(Term::App(
+                Icit::Expl,
+                Box::new(Term::App(Icit::Expl, Box::new(f), Box::new(a))),
+                Box::new(b),
             ))
         }
 
