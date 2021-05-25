@@ -36,6 +36,7 @@ pub enum Literal {
     /// This should always be negative.
     Negative(i64),
     Float(u64),
+    String(Name),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -96,6 +97,7 @@ pub enum Tok<'i> {
     // Tokens with a payload
     Lit(Literal),
     Name(&'i str),
+    String(&'i str),
 
     // Other tokens
     Question,  // ?
@@ -135,6 +137,7 @@ pub enum NestType {
     Curly,
     /// Anything that ends with `end`
     Block,
+    String,
 }
 
 pub struct Lexer<'i> {
@@ -470,6 +473,25 @@ impl<'i> Lexer<'i> {
             '\\' => self.tok(Tok::Backslash),
             ';' => self.tok(Tok::Newline),
 
+            '"' => {
+                self.next();
+                let start = self.pos;
+                loop {
+                    match self.next() {
+                        Some('"') => {
+                            break self.tok_in_place(Tok::String(&self.input[start..self.pos]))
+                        }
+                        Some(_) => (),
+                        None => {
+                            break Err(Spanned::new(
+                                LexError::MissingTerminator(NestType::String),
+                                self.span(),
+                            ))
+                        }
+                    }
+                }
+            }
+
             // This is called after `try_lex_binop()`, so if we get a '-' it must be a number
             x if x.is_numeric() || x == '-' => self.lex_number(),
             x if x.is_alphabetic() || x == '_' => self.lex_name(),
@@ -551,6 +573,7 @@ impl fmt::Display for LexError {
                     NestType::Curly => "'}'",
                     NestType::Paren => "')'",
                     NestType::Square => "']'",
+                    NestType::String => "\"",
                 }
             ),
             LexError::UnexpectedTerminator(t) => write!(
@@ -561,12 +584,14 @@ impl fmt::Display for LexError {
                     NestType::Curly => "closing '}'",
                     NestType::Paren => "closing ')'",
                     NestType::Square => "closing ']'",
+                    NestType::String => "\"",
                 },
                 match t {
                     NestType::Block => "outside of a block (like a `do` or `struct`)",
                     NestType::Curly => "without an opening '{'",
                     NestType::Paren => "without an opening '('",
                     NestType::Square => "without an opening '['",
+                    NestType::String => "without an opening \"",
                 }
             ),
             LexError::Other(s) => write!(f, "{}", s),
@@ -626,6 +651,7 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::RPipe => "'|>'",
             Tok::Lit(_) => "literal",
             Tok::Name(_) => "name",
+            Tok::String(_) => "string literal",
             Tok::Question => "'?'",
             Tok::At => "'@'",
             Tok::POpen => "'('",

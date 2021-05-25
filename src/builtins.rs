@@ -6,6 +6,7 @@ pub enum Builtin {
     I64,
     F32,
     F64,
+    String,
     BinOp(BinOp),
     Bool,
     True,
@@ -32,6 +33,7 @@ impl Builtin {
             Builtin::Eff => "Eff",
             Builtin::IO => "IO",
             Builtin::Print => "print",
+            Builtin::String => "String",
         }
     }
 
@@ -45,6 +47,7 @@ impl Builtin {
             | Builtin::I64
             | Builtin::F32
             | Builtin::F64
+            | Builtin::String
             | Builtin::Bool
             | Builtin::UnitType
             | Builtin::Eff => Val::Type,
@@ -67,7 +70,9 @@ impl Builtin {
 
 pub fn define_builtins<T: ?Sized + Interner>(cxt: Cxt, db: &T) -> Cxt {
     use Builtin::*;
-    let list = vec![I32, I64, F32, F64, Bool, True, False, Eff, IO, Print];
+    let list = vec![
+        I32, I64, F32, F64, String, Bool, True, False, Eff, IO, Print,
+    ];
 
     let mut cxt = cxt;
     for b in list {

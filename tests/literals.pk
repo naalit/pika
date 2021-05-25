@@ -4,3 +4,5 @@ val c : I32 = 0xC
 val d : I32 = 0b101
 fun e x : F32 = 127.92 + x * 2
 val q : I32 = -3
+val s : String = "a b c"
+val s2 = "b c d"

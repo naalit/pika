@@ -1668,7 +1668,7 @@ impl TypeError {
                 Doc::start("Invalid literal for type ")
                     .add(t.name())
                     .add(": value ")
-                    .chain(l.pretty()),
+                    .chain(l.pretty(db)),
                 span,
                 Doc::start("Does not fit in type ")
                     .add(t.name()),
@@ -2134,6 +2134,10 @@ pub fn infer(
             Val::builtin(Builtin::UnitType, Val::Type),
         )),
 
+        Pre_::Lit(Literal::String(n)) => Ok((
+            Term::Lit(Literal::String(*n), Builtin::String),
+            Val::builtin(Builtin::String, Val::Type),
+        )),
         Pre_::Lit(_) => Err(TypeError::UntypedLiteral(pre.span())),
 
         Pre_::BinOp(op, a, b) => {
@@ -2894,51 +2898,59 @@ pub fn check(
             ))
         }
 
-        (Pre_::Lit(l), _) => match ty.clone().inline(mcxt.size, db, mcxt) {
-            Val::App(Var::Builtin(b @ Builtin::I32), _, _, _) => {
-                match l {
-                    Literal::Positive(i) => {
-                        if *i > i32::MAX as u64 {
-                            return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+        (Pre_::Lit(l), _)
+            if matches!(
+                l,
+                Literal::Positive(_) | Literal::Negative(_) | Literal::Float(_)
+            ) =>
+        {
+            match ty.clone().inline(mcxt.size, db, mcxt) {
+                Val::App(Var::Builtin(b @ Builtin::I32), _, _, _) => {
+                    match l {
+                        Literal::Positive(i) => {
+                            if *i > i32::MAX as u64 {
+                                return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+                            }
                         }
-                    }
-                    Literal::Negative(i) => {
-                        if *i < i32::MIN as i64 {
-                            return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+                        Literal::Negative(i) => {
+                            if *i < i32::MIN as i64 {
+                                return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+                            }
                         }
+                        _ => return Err(TypeError::InvalidLiteral(pre.span(), *l, b)),
                     }
-                    Literal::Float(_) => return Err(TypeError::InvalidLiteral(pre.span(), *l, b)),
+                    Ok(Term::Lit(*l, b))
                 }
-                Ok(Term::Lit(*l, b))
-            }
-            Val::App(Var::Builtin(b @ Builtin::I64), _, _, _) => {
-                match l {
-                    Literal::Positive(i) => {
-                        if *i > i64::MAX as u64 {
-                            return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+                Val::App(Var::Builtin(b @ Builtin::I64), _, _, _) => {
+                    match l {
+                        Literal::Positive(i) => {
+                            if *i > i64::MAX as u64 {
+                                return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+                            }
                         }
+                        Literal::Negative(_) => (),
+                        _ => return Err(TypeError::InvalidLiteral(pre.span(), *l, b)),
                     }
-                    Literal::Negative(_) => (),
-                    Literal::Float(_) => return Err(TypeError::InvalidLiteral(pre.span(), *l, b)),
+                    Ok(Term::Lit(*l, b))
                 }
-                Ok(Term::Lit(*l, b))
+                Val::App(Var::Builtin(b @ Builtin::F32), _, _, _)
+                | Val::App(Var::Builtin(b @ Builtin::F64), _, _, _) => {
+                    let l = match l {
+                        Literal::Float(_) => *l,
+                        Literal::Positive(i) => Literal::Float((*i as f64).to_bits()),
+                        Literal::Negative(i) => Literal::Float((*i as f64).to_bits()),
+                        _ => return Err(TypeError::InvalidLiteral(pre.span(), *l, b)),
+                    };
+                    Ok(Term::Lit(l, b))
+                }
+                Val::App(Var::Meta(_), _, _, _) => Err(TypeError::UntypedLiteral(pre.span())),
+                ty => Err(TypeError::NotIntType(
+                    pre.span(),
+                    ty.inline_metas(mcxt.size, mcxt, db),
+                    reason,
+                )),
             }
-            Val::App(Var::Builtin(b @ Builtin::F32), _, _, _)
-            | Val::App(Var::Builtin(b @ Builtin::F64), _, _, _) => {
-                let l = match l {
-                    Literal::Float(_) => *l,
-                    Literal::Positive(i) => Literal::Float((*i as f64).to_bits()),
-                    Literal::Negative(i) => Literal::Float((*i as f64).to_bits()),
-                };
-                Ok(Term::Lit(l, b))
-            }
-            Val::App(Var::Meta(_), _, _, _) => Err(TypeError::UntypedLiteral(pre.span())),
-            ty => Err(TypeError::NotIntType(
-                pre.span(),
-                ty.inline_metas(mcxt.size, mcxt, db),
-                reason,
-            )),
-        },
+        }
 
         (Pre_::Case(is_catch, x, cases), _) => {
             let xspan = x.span();

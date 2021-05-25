@@ -1,7 +1,6 @@
 use crate::common::*;
 use crate::elaborate::*;
 use crate::term::*;
-use bit_set::BitSet;
 use durin::ir::{Signed, Width};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -17,7 +16,7 @@ pub enum Pat {
     EffRet(Box<Pat>),
 }
 
-#[derive(Clone, Eq, PartialEq, Hash, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Cov {
     /// We covered everything, there's nothing left
     All,
@@ -26,7 +25,7 @@ pub enum Cov {
     /// We *did* cover these constructors
     Cons(Vec<(DefId, Vec<Cov>)>),
     /// We *did* cover these literals
-    Lit(BitSet),
+    Lit(HashSet<Literal>),
     /// we *did* cover this Bool
     Bool(bool),
     Eff(Box<Cov>, Vec<(Val, Cov)>),
@@ -46,7 +45,7 @@ impl Cov {
             (Cov::Bool(x), Cov::Bool(y)) if x != y => Cov::All,
             (Cov::Bool(x), Cov::Bool(_)) => Cov::Bool(x),
             (Cov::Lit(mut a), Cov::Lit(b)) => {
-                a.union_with(&b);
+                a.extend(b);
                 Cov::Lit(a)
             }
             (Cov::Cons(mut v), Cov::Cons(v2)) => {
@@ -375,7 +374,7 @@ impl Pat {
                 v.iter().map(|(_, x)| x.cov(mcxt, db)).collect(),
             )]),
             Pat::Or(x, y) => x.cov(mcxt, db).or(y.cov(mcxt, db), mcxt, db),
-            Pat::Lit(l, _, _) => Cov::Lit(std::iter::once(l.to_usize()).collect()),
+            Pat::Lit(l, _, _) => Cov::Lit(std::iter::once(*l).collect()),
             Pat::Bool(b) => Cov::Bool(*b),
             Pat::Eff(e, p, k) => {
                 assert_eq!(k.cov(mcxt, db), Cov::All);
@@ -427,7 +426,7 @@ impl Pat {
                 .add('|')
                 .space()
                 .chain(y.pretty(db, names)),
-            Pat::Lit(x, _, _) => x.pretty(),
+            Pat::Lit(x, _, _) => x.pretty(db),
             Pat::Bool(b) => Doc::start(match b {
                 true => "True",
                 false => "False",

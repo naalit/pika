@@ -12,9 +12,9 @@ salsa = "*"
 codespan-reporting = "*"
 lazy_static = "*"
 pretty = { version = "*", features = ["termcolor"] }
-durin = { git = "https://github.com/tolziplohu/durin" }
+# durin = { git = "https://github.com/tolziplohu/durin" }
+durin = { path = "../durin" }
 smallvec = "*"
 assert_cmd = "*"
 predicates = "*"
-bit-set = "*"
 rustyline = "*"

@@ -7,20 +7,12 @@ use crate::elaborate::MCxt;
 use crate::pattern::Pat;
 
 impl Literal {
-    pub fn pretty(self) -> Doc {
+    pub fn pretty(self, db: &dyn Compiler) -> Doc {
         match self {
             Literal::Positive(i) => Doc::start(i).style(Style::Literal),
             Literal::Negative(i) => Doc::start(i).style(Style::Literal),
             Literal::Float(i) => Doc::start(f64::from_bits(i)).style(Style::Literal),
-        }
-    }
-
-    pub fn to_usize(self) -> usize {
-        // TODO: BitSet stores literals as usize, so this only works on 64-bit, TODO 32-bit support
-        match self {
-            Literal::Positive(i) => i as usize,
-            Literal::Negative(i) => i as usize,
-            Literal::Float(i) => i as usize,
+            Literal::String(n) => Doc::start('"').add(n.get(db).escape_debug()).add('"'),
         }
     }
 }
@@ -675,7 +667,7 @@ impl Term {
                 },
                 Var::Builtin(b) => b.pretty(),
             },
-            Term::Lit(l, _) => l.pretty(),
+            Term::Lit(l, _) => l.pretty(db),
             Term::Clos(Lam, n, i, _ty, t, _effs) => {
                 let n = names.disamb(*n, db);
                 {

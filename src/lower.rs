@@ -844,6 +844,7 @@ impl Builtin {
             Builtin::F64 => cxt
                 .builder
                 .cons(ir::Constant::FloatType(ir::FloatType::F64)),
+            Builtin::String => cxt.builder.cons(ir::Constant::StringTy),
             // Bool translates to i1
             Builtin::Bool => cxt.builder.cons(ir::Constant::IntType(ir::Width::W1)),
             Builtin::BinOp(op) => {
@@ -886,6 +887,8 @@ impl Term {
                 match t {
                     Builtin::I32 | Builtin::F32 => ir::Width::W32,
                     Builtin::I64 | Builtin::F64 => ir::Width::W64,
+                    // The width isn't used, so it doesn't matter
+                    Builtin::String => ir::Width::W8,
                     _ => unreachable!(),
                 },
                 cxt,
@@ -1395,6 +1398,7 @@ impl Literal {
                 ir::Width::W64 => Float::F64(i),
                 _ => unreachable!(),
             })),
+            Literal::String(n) => cxt.builder.cons(ir::Constant::String(n.get(cxt.db))),
         }
     }
 }
