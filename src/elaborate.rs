@@ -1484,6 +1484,7 @@ pub enum TypeError {
     Unify(MCxt, Spanned<VTy>, VTy, ReasonExpected),
     NotIntType(Span, VTy, ReasonExpected),
     UntypedLiteral(Span),
+    InvalidLiteral(Span, Literal, Builtin),
     MetaScope(Span, Var<Lvl>, Name),
     MetaOccurs(Span, Var<Lvl>),
     MetaSpine(Span, Var<Lvl>, Val),
@@ -1661,6 +1662,16 @@ impl TypeError {
                     .add(" or ")
                     .chain(Doc::start("I64").style(Style::None))
                     .style(Style::Error),
+            ),
+            TypeError::InvalidLiteral(span, l, t) => Error::new(
+                file,
+                Doc::start("Invalid literal for type ")
+                    .add(t.name())
+                    .add(": value ")
+                    .chain(l.pretty()),
+                span,
+                Doc::start("Does not fit in type ")
+                    .add(t.name()),
             ),
             TypeError::EffNotAllowed(span, eff, mut stack) => {
                 let base = Error::new(
@@ -2135,6 +2146,8 @@ pub fn infer(
                 Val::App(Var::Builtin(b), _, _, _) => match *b {
                     Builtin::I32 => Term::Var(Var::Builtin(Builtin::I32), Box::new(Term::Type)),
                     Builtin::I64 => Term::Var(Var::Builtin(Builtin::I64), Box::new(Term::Type)),
+                    Builtin::F32 => Term::Var(Var::Builtin(Builtin::F32), Box::new(Term::Type)),
+                    Builtin::F64 => Term::Var(Var::Builtin(Builtin::F64), Box::new(Term::Type)),
                     _ => {
                         return Err(TypeError::NotIntType(
                             a.span(),
@@ -2838,6 +2851,8 @@ pub fn check(
                 Val::App(Var::Builtin(b), _, _, _) => match *b {
                     Builtin::I32 => Term::Var(Var::Builtin(Builtin::I32), Box::new(Term::Type)),
                     Builtin::I64 => Term::Var(Var::Builtin(Builtin::I64), Box::new(Term::Type)),
+                    Builtin::F32 => Term::Var(Var::Builtin(Builtin::F32), Box::new(Term::Type)),
+                    Builtin::F64 => Term::Var(Var::Builtin(Builtin::F64), Box::new(Term::Type)),
                     _ => {
                         return Err(TypeError::NotIntType(
                             a.span(),
@@ -2880,8 +2895,42 @@ pub fn check(
         }
 
         (Pre_::Lit(l), _) => match ty.clone().inline(mcxt.size, db, mcxt) {
-            Val::App(Var::Builtin(b), _, _, _) if matches!(b, Builtin::I32 | Builtin::I64) => {
+            Val::App(Var::Builtin(b @ Builtin::I32), _, _, _) => {
+                match l {
+                    Literal::Positive(i) => {
+                        if *i > i32::MAX as u64 {
+                            return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+                        }
+                    }
+                    Literal::Negative(i) => {
+                        if *i < i32::MIN as i64 {
+                            return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+                        }
+                    }
+                    Literal::Float(_) => return Err(TypeError::InvalidLiteral(pre.span(), *l, b)),
+                }
                 Ok(Term::Lit(*l, b))
+            }
+            Val::App(Var::Builtin(b @ Builtin::I64), _, _, _) => {
+                match l {
+                    Literal::Positive(i) => {
+                        if *i > i64::MAX as u64 {
+                            return Err(TypeError::InvalidLiteral(pre.span(), *l, b));
+                        }
+                    }
+                    Literal::Negative(_) => (),
+                    Literal::Float(_) => return Err(TypeError::InvalidLiteral(pre.span(), *l, b)),
+                }
+                Ok(Term::Lit(*l, b))
+            }
+            Val::App(Var::Builtin(b @ Builtin::F32), _, _, _)
+            | Val::App(Var::Builtin(b @ Builtin::F64), _, _, _) => {
+                let l = match l {
+                    Literal::Float(_) => *l,
+                    Literal::Positive(i) => Literal::Float((*i as f64).to_bits()),
+                    Literal::Negative(i) => Literal::Float((*i as f64).to_bits()),
+                };
+                Ok(Term::Lit(l, b))
             }
             Val::App(Var::Meta(_), _, _, _) => Err(TypeError::UntypedLiteral(pre.span())),
             ty => Err(TypeError::NotIntType(

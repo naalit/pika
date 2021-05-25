@@ -4,8 +4,8 @@ use crate::elaborate::{MCxt, MCxtType};
 use crate::error::FileId;
 use crate::term::*;
 use crate::{common::*, pattern::Pat};
-use durin::builder::*;
 use durin::ir;
+use durin::{builder::*, ir::Float};
 
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -772,25 +772,63 @@ fn lower_datatype(
 impl BinOp {
     fn lower(self) -> ir::BinOp {
         match self {
-            BinOp::Add => ir::BinOp::IAdd,
-            BinOp::Sub => ir::BinOp::ISub,
-            BinOp::Mul => ir::BinOp::IMul,
-            BinOp::Div => ir::BinOp::IDiv,
-            BinOp::Exp => ir::BinOp::IExp,
-            BinOp::BitAnd => ir::BinOp::IAnd,
-            BinOp::BitOr => ir::BinOp::IOr,
-            BinOp::BitXor => ir::BinOp::IXor,
-            BinOp::BitShl => ir::BinOp::IShl,
-            BinOp::BitShr => ir::BinOp::IShr,
+            BinOp::Add => ir::BinOp::Add,
+            BinOp::Sub => ir::BinOp::Sub,
+            BinOp::Mul => ir::BinOp::Mul,
+            BinOp::Div => ir::BinOp::Div,
+            BinOp::Exp => ir::BinOp::Pow,
+            BinOp::Mod => ir::BinOp::Mod,
+            BinOp::BitAnd => ir::BinOp::And,
+            BinOp::BitOr => ir::BinOp::Or,
+            BinOp::BitXor => ir::BinOp::Xor,
+            BinOp::BitShl => ir::BinOp::Shl,
+            BinOp::BitShr => ir::BinOp::Shr,
 
-            BinOp::Eq => ir::BinOp::IEq,
-            BinOp::NEq => ir::BinOp::INEq,
-            BinOp::Lt => ir::BinOp::ILt,
-            BinOp::Gt => ir::BinOp::IGt,
-            BinOp::Leq => ir::BinOp::ILeq,
-            BinOp::Geq => ir::BinOp::IGeq,
+            BinOp::Eq => ir::BinOp::Eq,
+            BinOp::NEq => ir::BinOp::NEq,
+            BinOp::Lt => ir::BinOp::Lt,
+            BinOp::Gt => ir::BinOp::Gt,
+            BinOp::Leq => ir::BinOp::Leq,
+            BinOp::Geq => ir::BinOp::Geq,
 
             _ => todo!("lower pipes"),
+        }
+    }
+}
+
+impl Val {
+    pub fn binop_ty(&self, cxt: &mut LCxt) -> (ir::Val, bool) {
+        match self {
+            Val::Fun(ity, _, _) => {
+                let signed = match &**ity {
+                    Val::App(Var::Builtin(Builtin::I32), _, _, _)
+                    | Val::App(Var::Builtin(Builtin::I64), _, _, _) => true,
+                    _ => unreachable!(),
+                };
+                ((**ity).clone().lower(Val::Type, cxt), signed)
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Term {
+    pub fn binop_ty_val(&self, cxt: &mut LCxt) -> (Val, bool) {
+        match self {
+            Term::Fun(ity, _, _) => {
+                let signed = match &**ity {
+                    Term::Var(Var::Builtin(Builtin::I32), _)
+                    | Term::Var(Var::Builtin(Builtin::I64), _)
+                    | Term::Var(Var::Builtin(Builtin::F32), _)
+                    | Term::Var(Var::Builtin(Builtin::F64), _) => true,
+                    _ => unreachable!(),
+                };
+                (
+                    (**ity).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db),
+                    signed,
+                )
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -800,16 +838,19 @@ impl Builtin {
         match self {
             Builtin::I32 => cxt.builder.cons(ir::Constant::IntType(ir::Width::W32)),
             Builtin::I64 => cxt.builder.cons(ir::Constant::IntType(ir::Width::W64)),
+            Builtin::F32 => cxt
+                .builder
+                .cons(ir::Constant::FloatType(ir::FloatType::F32)),
+            Builtin::F64 => cxt
+                .builder
+                .cons(ir::Constant::FloatType(ir::FloatType::F64)),
             // Bool translates to i1
             Builtin::Bool => cxt.builder.cons(ir::Constant::IntType(ir::Width::W1)),
             Builtin::BinOp(op) => {
-                let ity = match ty {
-                    Val::Fun(ity, _, _) => (**ity).clone().lower(Val::Type, cxt),
-                    _ => unreachable!(),
-                };
+                let (ity, signed) = ty.binop_ty(cxt);
                 let a = cxt.builder.push_fun([(None, ity)]);
                 let b = cxt.builder.push_fun([(None, ity)]);
-                let val = cxt.builder.binop(op.lower(), a[0], b[0]);
+                let val = cxt.builder.binop(op.lower(), signed, a[0], b[0]);
                 let f = cxt.builder.pop_fun(val);
                 cxt.builder.pop_fun(f)
             }
@@ -843,8 +884,8 @@ impl Term {
             Term::Type => cxt.builder.cons(ir::Constant::TypeType),
             Term::Lit(x, t) => x.lower(
                 match t {
-                    Builtin::I32 => ir::Width::W32,
-                    Builtin::I64 => ir::Width::W64,
+                    Builtin::I32 | Builtin::F32 => ir::Width::W32,
+                    Builtin::I64 | Builtin::F64 => ir::Width::W64,
                     _ => unreachable!(),
                 },
                 cxt,
@@ -1122,15 +1163,10 @@ impl Term {
                 // Uncurry binops when possible
                 if let Term::App(_, f2, y) = &**f {
                     if let Term::Var(Var::Builtin(Builtin::BinOp(op)), fty) = &**f2 {
-                        let ity = match &**fty {
-                            Term::Fun(ity, _, _) => {
-                                (**ity).clone().evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db)
-                            }
-                            _ => unreachable!(),
-                        };
+                        let (ity, signed) = fty.binop_ty_val(cxt);
                         let x = x.lower(ity.clone(), cxt);
                         let y = y.lower(ity, cxt);
-                        return cxt.builder.binop(op.lower(), y, x);
+                        return cxt.builder.binop(op.lower(), signed, y, x);
                     }
                 }
 
@@ -1354,6 +1390,11 @@ impl Literal {
         match self {
             Literal::Positive(i) => cxt.builder.cons(ir::Constant::Int(w, i as i64)),
             Literal::Negative(i) => cxt.builder.cons(ir::Constant::Int(w, i)),
+            Literal::Float(i) => cxt.builder.cons(ir::Constant::Float(match w {
+                ir::Width::W32 => Float::F32((f64::from_bits(i) as f32).to_bits()),
+                ir::Width::W64 => Float::F64(i),
+                _ => unreachable!(),
+            })),
         }
     }
 }
@@ -1378,9 +1419,9 @@ impl Pat {
                 );
                 cont.lower(ty, cxt)
             }
-            Pat::Lit(l, w) => {
+            Pat::Lit(l, w, signed) => {
                 let l = l.lower(*w, cxt);
-                let eq = cxt.builder.binop(ir::BinOp::IEq, l, x);
+                let eq = cxt.builder.binop(ir::BinOp::Eq, *signed, l, x);
                 cxt.if_expr(eq);
 
                 let yes = cont.lower(ty.clone(), cxt);
@@ -1397,7 +1438,7 @@ impl Pat {
                 let l = cxt
                     .builder
                     .cons(ir::Constant::Int(ir::Width::W1, *b as i64));
-                let eq = cxt.builder.binop(ir::BinOp::IEq, l, x);
+                let eq = cxt.builder.binop(ir::BinOp::Eq, false, l, x);
                 cxt.if_expr(eq);
 
                 let yes = cont.lower(ty.clone(), cxt);

@@ -11,6 +11,7 @@ impl Literal {
         match self {
             Literal::Positive(i) => Doc::start(i).style(Style::Literal),
             Literal::Negative(i) => Doc::start(i).style(Style::Literal),
+            Literal::Float(i) => Doc::start(f64::from_bits(i)).style(Style::Literal),
         }
     }
 
@@ -19,6 +20,7 @@ impl Literal {
         match self {
             Literal::Positive(i) => i as usize,
             Literal::Negative(i) => i as usize,
+            Literal::Float(i) => i as usize,
         }
     }
 }

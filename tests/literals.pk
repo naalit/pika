@@ -1,0 +1,6 @@
+val a : I64 = 10_000_000_000
+val b : I32 = 0x3_A2
+val c : I32 = 0xC
+val d : I32 = 0b101
+fun e x : F32 = 127.92 + x * 2
+val q : I32 = -3

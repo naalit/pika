@@ -4,6 +4,8 @@ use crate::common::*;
 pub enum Builtin {
     I32,
     I64,
+    F32,
+    F64,
     BinOp(BinOp),
     Bool,
     True,
@@ -19,6 +21,8 @@ impl Builtin {
         match self {
             Builtin::I32 => "I32",
             Builtin::I64 => "I64",
+            Builtin::F32 => "F32",
+            Builtin::F64 => "F64",
             Builtin::Bool => "Bool",
             Builtin::BinOp(b) => b.name(),
             Builtin::True => "True",
@@ -37,9 +41,13 @@ impl Builtin {
 
     pub fn ty(self) -> Val {
         match self {
-            Builtin::I32 | Builtin::I64 | Builtin::Bool | Builtin::UnitType | Builtin::Eff => {
-                Val::Type
-            }
+            Builtin::I32
+            | Builtin::I64
+            | Builtin::F32
+            | Builtin::F64
+            | Builtin::Bool
+            | Builtin::UnitType
+            | Builtin::Eff => Val::Type,
             Builtin::True | Builtin::False => Val::builtin(Builtin::Bool, Val::Type),
             Builtin::Unit => Val::builtin(Builtin::UnitType, Val::Type),
             Builtin::BinOp(b) => b.ty(),
@@ -59,7 +67,7 @@ impl Builtin {
 
 pub fn define_builtins<T: ?Sized + Interner>(cxt: Cxt, db: &T) -> Cxt {
     use Builtin::*;
-    let list = vec![I32, I64, Bool, True, False, Eff, IO, Print];
+    let list = vec![I32, I64, F32, F64, Bool, True, False, Eff, IO, Print];
 
     let mut cxt = cxt;
     for b in list {

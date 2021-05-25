@@ -2,7 +2,7 @@ use crate::common::*;
 use crate::elaborate::*;
 use crate::term::*;
 use bit_set::BitSet;
-use durin::ir::Width;
+use durin::ir::{Signed, Width};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Pat {
@@ -10,7 +10,7 @@ pub enum Pat {
     Var(Name, Box<Ty>),
     Cons(DefId, Box<Ty>, Vec<(Option<(Name, Ty)>, Pat)>),
     Or(Box<Pat>, Box<Pat>),
-    Lit(Literal, Width),
+    Lit(Literal, Width, Signed),
     Bool(bool),
     /// eff p k :: E
     Eff(Box<Term>, Box<Pat>, Box<Pat>),
@@ -375,7 +375,7 @@ impl Pat {
                 v.iter().map(|(_, x)| x.cov(mcxt, db)).collect(),
             )]),
             Pat::Or(x, y) => x.cov(mcxt, db).or(y.cov(mcxt, db), mcxt, db),
-            Pat::Lit(l, _) => Cov::Lit(std::iter::once(l.to_usize()).collect()),
+            Pat::Lit(l, _, _) => Cov::Lit(std::iter::once(l.to_usize()).collect()),
             Pat::Bool(b) => Cov::Bool(*b),
             Pat::Eff(e, p, k) => {
                 assert_eq!(k.cov(mcxt, db), Cov::All);
@@ -427,7 +427,7 @@ impl Pat {
                 .add('|')
                 .space()
                 .chain(y.pretty(db, names)),
-            Pat::Lit(x, _) => x.pretty(),
+            Pat::Lit(x, _, _) => x.pretty(),
             Pat::Bool(b) => Doc::start(match b {
                 true => "True",
                 false => "False",
@@ -447,7 +447,7 @@ impl Pat {
 
     pub fn add_names(&self, size: Size, names: &mut Names) -> Size {
         match self {
-            Pat::Any | Pat::Lit(_, _) | Pat::Bool(_) => size,
+            Pat::Any | Pat::Lit(_, _, _) | Pat::Bool(_) => size,
             Pat::Var(n, _) => {
                 names.add(*n);
                 size.inc()
@@ -510,7 +510,7 @@ impl Pat {
                 *y = y.eval_quote(env, at, mcxt, db);
                 Pat::Or(x, y)
             }
-            Pat::Lit(x, w) => Pat::Lit(x, w),
+            Pat::Lit(x, w, s) => Pat::Lit(x, w, s),
             Pat::Bool(x) => Pat::Bool(x),
             Pat::Eff(mut e, mut p, mut k) => {
                 *e = e.eval_quote(env, *at, mcxt, db);
@@ -571,7 +571,7 @@ impl Pat {
                 }
                 _ => Maybe,
             },
-            Pat::Lit(x, _) => match val.unarc() {
+            Pat::Lit(x, _, _) => match val.unarc() {
                 Val::Lit(l, _) => {
                     if l == x {
                         Yes(env)
@@ -752,8 +752,8 @@ pub fn elab_pat(
         }
         Pre_::Lit(l) => match ty {
             Val::App(Var::Builtin(b), _, _, _) => match b {
-                Builtin::I32 => Ok(Pat::Lit(*l, Width::W32)),
-                Builtin::I64 => Ok(Pat::Lit(*l, Width::W64)),
+                Builtin::I32 => Ok(Pat::Lit(*l, Width::W32, true)),
+                Builtin::I64 => Ok(Pat::Lit(*l, Width::W64, true)),
                 _ => Err(TypeError::InvalidPatternBecause(Box::new(
                     TypeError::NotIntType(
                         pre.span(),

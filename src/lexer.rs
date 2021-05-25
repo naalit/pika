@@ -35,6 +35,7 @@ pub enum Literal {
     Positive(u64),
     /// This should always be negative.
     Negative(i64),
+    Float(u64),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -226,25 +227,62 @@ impl<'i> Lexer<'i> {
     }
 
     fn lex_number(&mut self) -> LexResult<'i> {
+        let mut buf = String::new();
         let neg = self.peek() == Some('-');
         if neg {
-            self.next();
+            buf.push(self.next().unwrap());
         }
+        let mut base = 10;
+        if self.peek() == Some('0') {
+            buf.push(self.next().unwrap());
+            match self.peek() {
+                Some('x') => {
+                    self.next();
+                    base = 16;
+                }
+                Some('b') => {
+                    self.next();
+                    base = 2;
+                }
+                _ => (),
+            }
+        }
+        let mut float = false;
         while let Some(next) = self.peek() {
-            if next.is_numeric() {
+            if next.is_digit(base) {
+                buf.push(next);
+                self.next();
+            } else if next == '_' {
+                self.next();
+            } else if next.is_alphanumeric() {
+                return Err(Spanned::new(
+                    LexError::InvalidLiteral(format!("Invalid digit for int literal: {}", next)),
+                    Span(self.pos, self.pos + 1),
+                ));
+            } else if next == '.' {
+                float = true;
+                buf.push(next);
                 self.next();
             } else {
                 break;
             }
         }
-        self.tok_in_place(Tok::Lit(if neg {
-            Literal::Negative(i64::from_str(self.slice()).map_err(|e| {
+        self.tok_in_place(Tok::Lit(if float {
+            Literal::Float(
+                f64::from_str(&buf)
+                    .map_err(|e| {
+                        Spanned::new(LexError::InvalidLiteral(e.to_string()), self.span())
+                    })?
+                    .to_bits(),
+            )
+        } else if neg {
+            Literal::Negative(i64::from_str_radix(&buf, base).map_err(|e| {
                 // TODO when `ParseIntError::kind()` gets stabilized (or Pika switches to nightly Rust) make custom error messages
                 Spanned::new(LexError::InvalidLiteral(e.to_string()), self.span())
             })?)
         } else {
             Literal::Positive(
-                u64::from_str(self.slice()).map_err(|e| {
+                u64::from_str_radix(&buf, base).map_err(|e| {
                     Spanned::new(LexError::InvalidLiteral(e.to_string()), self.span())
                 })?,
             )
