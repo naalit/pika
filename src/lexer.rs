@@ -479,7 +479,7 @@ impl<'i> Lexer<'i> {
                 loop {
                     match self.next() {
                         Some('"') => {
-                            break self.tok_in_place(Tok::String(&self.input[start..self.pos]))
+                            break self.tok_in_place(Tok::String(&self.input[start..self.pos - 1]))
                         }
                         Some(_) => (),
                         None => {

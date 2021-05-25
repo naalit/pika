@@ -6,3 +6,8 @@ fun e x : F32 = 127.92 + x * 2
 val q : I32 = -3
 val s : String = "a b c"
 val s2 = "b c d"
+
+fun main () with IO = do
+    puts "val: "
+    print 3
+end

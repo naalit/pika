@@ -16,6 +16,7 @@ pub enum Builtin {
     Eff,
     IO,
     Print,
+    Puts,
 }
 impl Builtin {
     pub fn name(self) -> &'static str {
@@ -34,6 +35,7 @@ impl Builtin {
             Builtin::IO => "IO",
             Builtin::Print => "print",
             Builtin::String => "String",
+            Builtin::Puts => "puts",
         }
     }
 
@@ -64,6 +66,15 @@ impl Builtin {
                     Val::builtin(Builtin::Eff, Val::Type),
                 )],
             ),
+            // puts : String -> () with IO
+            Builtin::Puts => Val::Fun(
+                Box::new(Val::builtin(Builtin::String, Val::Type)),
+                Box::new(Val::builtin(Builtin::UnitType, Val::Type)),
+                vec![Val::builtin(
+                    Builtin::IO,
+                    Val::builtin(Builtin::Eff, Val::Type),
+                )],
+            ),
         }
     }
 }
@@ -71,7 +82,7 @@ impl Builtin {
 pub fn define_builtins<T: ?Sized + Interner>(cxt: Cxt, db: &T) -> Cxt {
     use Builtin::*;
     let list = vec![
-        I32, I64, F32, F64, String, Bool, True, False, Eff, IO, Print,
+        I32, I64, F32, F64, String, Bool, True, False, Eff, IO, Print, Puts,
     ];
 
     let mut cxt = cxt;

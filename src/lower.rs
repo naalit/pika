@@ -875,6 +875,16 @@ impl Builtin {
                 let r = cxt.builder.extern_call(extern_fun, x);
                 cxt.builder.pop_fun(r)
             }
+            Builtin::Puts => {
+                let str_ty = cxt.builder.cons(ir::Constant::StringTy);
+                let void_ty = cxt.builder.prod_type(vec![]);
+                let extern_fun =
+                    cxt.builder
+                        .extern_declare("print_str".into(), &[str_ty] as &_, void_ty);
+                let x = cxt.builder.push_fun([(None, str_ty)]);
+                let r = cxt.builder.extern_call(extern_fun, x);
+                cxt.builder.pop_fun(r)
+            }
         }
     }
 }

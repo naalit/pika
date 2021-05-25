@@ -981,7 +981,7 @@ impl<'i> Parser<'i> {
             match self.peek("_") {
                 Ok(Tok::Name(_)) | Ok(Tok::Lit(_)) | Ok(Tok::POpen) | Ok(Tok::Struct)
                 | Ok(Tok::Sig) | Ok(Tok::TypeType) | Ok(Tok::Case) | Ok(Tok::Catch)
-                | Ok(Tok::COpen) | Ok(Tok::Do) | Ok(Tok::If) => {
+                | Ok(Tok::COpen) | Ok(Tok::Do) | Ok(Tok::If) | Ok(Tok::String(_)) => {
                     let x = self.atom()?;
                     let span = Span(f.span().0, x.span().1);
                     f = Spanned::new(Pre_::App(Icit::Expl, f, x), span);
