@@ -39,7 +39,7 @@ pub enum Literal {
     String(Name),
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Tok<'i> {
     // Keywords
     Fun,
@@ -97,7 +97,7 @@ pub enum Tok<'i> {
     // Tokens with a payload
     Lit(Literal),
     Name(&'i str),
-    String(&'i str),
+    String(String),
 
     // Other tokens
     Question,  // ?
@@ -115,11 +115,11 @@ pub enum Tok<'i> {
 impl<'i> Tok<'i> {
     /// Returns true if we should completely ignore newlines before this token.
     /// Currently only true for '=>', '->', '=' and ':'.
-    fn is_special_binop(self) -> bool {
+    fn is_special_binop(&self) -> bool {
         matches!(self, Tok::Equals | Tok::Colon | Tok::WideArrow | Tok::Arrow)
     }
 
-    pub fn closes_type(self) -> Option<NestType> {
+    pub fn closes_type(&self) -> Option<NestType> {
         match self {
             Tok::SClose => Some(NestType::Square),
             Tok::PClose => Some(NestType::Paren),
@@ -475,13 +475,37 @@ impl<'i> Lexer<'i> {
 
             '"' => {
                 self.next();
-                let start = self.pos;
+                let mut buf = String::new();
                 loop {
                     match self.next() {
-                        Some('"') => {
-                            break self.tok_in_place(Tok::String(&self.input[start..self.pos - 1]))
+                        Some('"') => break self.tok_in_place(Tok::String(buf)),
+                        Some('\\') => {
+                            // Escape
+                            match self.next() {
+                                Some('\\') => {
+                                    buf.push('\\');
+                                }
+                                Some('n') => {
+                                    buf.push('\n');
+                                }
+                                Some('t') => {
+                                    buf.push('\t');
+                                }
+                                Some(c) => {
+                                    break Err(Spanned::new(
+                                        LexError::Other(format!("Invalid escape '\\{}'", c)),
+                                        Span(self.pos - 2, self.pos),
+                                    ))
+                                }
+                                None => {
+                                    break Err(Spanned::new(
+                                        LexError::MissingTerminator(NestType::String),
+                                        self.span(),
+                                    ))
+                                }
+                            }
                         }
-                        Some(_) => (),
+                        Some(c) => buf.push(c),
                         None => {
                             break Err(Spanned::new(
                                 LexError::MissingTerminator(NestType::String),

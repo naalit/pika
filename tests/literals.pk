@@ -8,6 +8,6 @@ val s : String = "a b c"
 val s2 = "b c d"
 
 fun main () with IO = do
-    puts "val: "
+    puts "a line\nvalue: "
     print 3
 end

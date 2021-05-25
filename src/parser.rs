@@ -34,15 +34,15 @@ impl<'i> Parser<'i> {
         if self.pending_err.is_some() {
             return None;
         }
-        match self.buf {
-            Some(t) => Some(t),
+        match &self.buf {
+            Some(t) => Some(t.clone()),
             None => {
                 match self.lexer.next() {
                     Some(Ok(t)) => self.buf = Some(t),
                     Some(Err(e)) => self.pending_err = Some(e),
                     None => (),
                 }
-                self.buf
+                self.buf.clone()
             }
         }
     }
@@ -123,7 +123,10 @@ impl<'i> Parser<'i> {
     fn expect(&mut self, tok: Tok<'i>) -> PResult<()> {
         let span = self.span();
         let t = self.next();
-        if t != Some(tok) {
+        if let Some(e) = self.pending_err.clone() {
+            return Err(e);
+        }
+        if t.as_ref() != Some(&tok) {
             if let Some(ty) = tok.closes_type() {
                 Err(Spanned::new(LexError::MissingTerminator(ty), span))
             } else if let Some(t) = t {
@@ -861,7 +864,7 @@ impl<'i> Parser<'i> {
                 // If we can, resolve the last operator
                 while let Some(op2) = ops.last().cloned() {
                     let prec2 = op2.binop_prec().unwrap();
-                    if prec2 > prec || (prec2 == prec && op.associates_with(op2)) {
+                    if prec2 > prec || (prec2 == prec && op.associates_with(&op2)) {
                         ops.pop().unwrap();
                         resolve_op(&mut terms, op2);
                     // Arrows are right associative, so resolve the last one first in stack order
@@ -1324,7 +1327,7 @@ impl PartialOrd for Prec {
 impl<'i> Tok<'i> {
     /// Whether this token can end an argument list.
     /// True for arrows, and things that can come after `fun` or constructor arguments.
-    fn ends_args(self) -> bool {
+    fn ends_args(&self) -> bool {
         matches!(
             self,
             Tok::WideArrow
@@ -1342,7 +1345,7 @@ impl<'i> Tok<'i> {
 
     /// Whether this token and another token can be used together left-associatively in expressions like `a + b - c`.
     /// Arithmetic operators return `true` if `other` has the same precedence; otherwise, most return `false`.
-    fn associates_with(self, other: Tok<'i>) -> bool {
+    fn associates_with(&self, other: &Tok<'i>) -> bool {
         // Arithmetic operators associate with each other if they have the same precedence
         if let Some(p) = self.binop_prec().and_then(|x| x.arith_prec()) {
             if p > Prec::COMP_PREC {
@@ -1374,7 +1377,7 @@ impl<'i> Tok<'i> {
     }
 
     /// If this token is a binary operator, returns its precedence group; otherwise, returns `None`.
-    fn binop_prec(self) -> Option<Prec> {
+    fn binop_prec(&self) -> Option<Prec> {
         Some(match self {
             Tok::And | Tok::Or => Prec::Logic,
             Tok::Arrow => Prec::Arrow,
