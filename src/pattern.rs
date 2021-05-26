@@ -641,7 +641,17 @@ pub fn elab_case(
 
     let mut first = true;
     for (pat, body) in cases {
-        let pat = elab_pat(false, pat, &val_ty, &veffs, vspan, reason.clone(), mcxt, db)?;
+        let pat = elab_pat(
+            false,
+            pat,
+            &val_ty,
+            &veffs,
+            vspan,
+            reason.clone(),
+            ret_ty.as_ref().map(|x| &x.0),
+            mcxt,
+            db,
+        )?;
         // If it doesn't already handle effects, wrap it in an `EffRet` pattern
         let pat = match pat {
             pat @ Pat::Eff(_, _, _) => pat,
@@ -714,6 +724,7 @@ pub fn elab_pat(
     effs: &[Val],
     vspan: Span,
     reason: ReasonExpected,
+    body_ret_ty: Option<&VTy>,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
 ) -> Result<Pat, TypeError> {
@@ -729,14 +740,29 @@ pub fn elab_pat(
                 mcxt.define(db.intern_name("_".into()), NameInfo::Local(Val::Type), db);
                 let (var, vty) = mcxt.last_local(db).unwrap();
                 let ret_ty = Val::App(var, Box::new(vty), Vec::new(), Glued::new());
-                let p = elab_pat(true, p, &ret_ty, effs, vspan, reason.clone(), mcxt, db)?;
+                let p = elab_pat(
+                    true,
+                    p,
+                    &ret_ty,
+                    effs,
+                    vspan,
+                    reason.clone(),
+                    body_ret_ty,
+                    mcxt,
+                    db,
+                )?;
                 let k = elab_pat(
                     true,
                     k,
-                    &Val::Fun(Box::new(ret_ty), Box::new(ty.clone()), effs.to_vec()),
+                    &Val::Fun(
+                        Box::new(ret_ty),
+                        Box::new(body_ret_ty.unwrap().clone()),
+                        Vec::new(),
+                    ),
                     &[],
                     vspan,
                     reason,
+                    body_ret_ty,
                     mcxt,
                     db,
                 )?;
@@ -806,6 +832,7 @@ pub fn elab_pat(
                                     effs,
                                     vspan,
                                     reason,
+                                    body_ret_ty,
                                     mcxt,
                                     db,
                                 );
@@ -885,7 +912,18 @@ pub fn elab_pat(
             }
             let (head, spine) = sep(pre);
 
-            elab_pat_app(in_eff, head, spine, ty, effs, vspan, reason, mcxt, db)
+            elab_pat_app(
+                in_eff,
+                head,
+                spine,
+                ty,
+                effs,
+                vspan,
+                reason,
+                body_ret_ty,
+                mcxt,
+                db,
+            )
         }
         Pre_::Dot(head, member, spine) => elab_pat_app(
             in_eff,
@@ -895,17 +933,28 @@ pub fn elab_pat(
             effs,
             vspan,
             reason,
+            body_ret_ty,
             mcxt,
             db,
         ),
         Pre_::OrPat(x, y) => {
             let size_before = mcxt.size;
             // Use &[] for effs because we don't allow effect patterns in or patterns, for now
-            let x = elab_pat(in_eff, x, ty, &[], vspan, reason.clone(), mcxt, db)?;
+            let x = elab_pat(
+                in_eff,
+                x,
+                ty,
+                &[],
+                vspan,
+                reason.clone(),
+                body_ret_ty,
+                mcxt,
+                db,
+            )?;
             if mcxt.size != size_before {
                 todo!("error: for now we don't support capturing inside or-patterns")
             }
-            let y = elab_pat(in_eff, y, ty, &[], vspan, reason, mcxt, db)?;
+            let y = elab_pat(in_eff, y, ty, &[], vspan, reason, body_ret_ty, mcxt, db)?;
             if mcxt.size != size_before {
                 todo!("error: for now we don't support capturing inside or-patterns")
             }
@@ -924,6 +973,7 @@ fn elab_pat_app(
     effs: &[Val],
     vspan: Span,
     reason: ReasonExpected,
+    body_ret_ty: Option<&VTy>,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
 ) -> Result<Pat, TypeError> {
@@ -1012,7 +1062,17 @@ fn elab_pat_app(
                 mcxt.define(cl.name, NameInfo::Local(cl.ty.clone()), db);
                 let v = Some((cl.name, cl.ty.clone().quote(before_size, mcxt, db)));
 
-                let pat = elab_pat(in_eff, pat, &cl.ty, &[], vspan, reason.clone(), mcxt, db)?;
+                let pat = elab_pat(
+                    in_eff,
+                    pat,
+                    &cl.ty,
+                    &[],
+                    vspan,
+                    reason.clone(),
+                    body_ret_ty,
+                    mcxt,
+                    db,
+                )?;
                 pspine.push((v, pat));
                 ty = cl.vquote(before_size, mcxt, db);
                 if !effs.is_empty() {
@@ -1024,7 +1084,17 @@ fn elab_pat_app(
             }
             Val::Fun(from, to, mut effs) if i == Icit::Expl => {
                 // No shadow variable needed, since it's not a pi
-                let pat = elab_pat(in_eff, pat, &from, &[], vspan, reason.clone(), mcxt, db)?;
+                let pat = elab_pat(
+                    in_eff,
+                    pat,
+                    &from,
+                    &[],
+                    vspan,
+                    reason.clone(),
+                    body_ret_ty,
+                    mcxt,
+                    db,
+                )?;
                 pspine.push((None, pat));
                 ty = *to;
                 if !effs.is_empty() {

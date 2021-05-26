@@ -190,6 +190,16 @@ fn test_stress_gc() {
 }
 
 #[test]
+fn test_choice() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/choice.pk"])
+        .assert()
+        .stdout("34\n")
+        .success();
+}
+
+#[test]
 fn test_do_meta() {
     Command::cargo_bin("pika")
         .unwrap()

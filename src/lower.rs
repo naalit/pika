@@ -192,114 +192,39 @@ impl<'db> LCxt<'db> {
     }
 }
 
-/// Effects example:
-/// ```durin
-/// val Console_eff = ({} | { I32 });
-/// # The thing passed to this is created by a `catch-of` construct
-/// val ContTy_Console_inner = fun (Console_eff, fun(Any));
+/// Effects example vDeep:
+/// ```pika
+/// eff Console of
+///     Read () : I32
+///     Print I32 : ()
+/// end
 ///
-/// # We generally store a `**continuation`
-/// # When a new `**continuation` is passed, we do `*old = Redirect(*new);`
-/// # Then, when calling the continuation, we collapse them so it's amortized O(1) instead of O(number of catches).
-/// val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
+/// fun other () = catch Print 3 of
+///     () => ()
+///     eff (Print i) k => k ()
+///     eff (Read ()) k => k 12
+/// end
 ///
-/// # This is the logic to collapse the `**continuation` and then call the newest one
-/// fun runcont_Console (x : Console_eff, ret : fun(Any), k : ref ContTy_Console) = refget k r2;
-/// fun r2 (k2 : ref (ContTy_Console_inner | ContTy_Console)) = refget k2 r3;
-/// fun r3 (k3 : (ContTy_Console_inner | ContTy_Console)) = ifcase 0 k3 rF r4;
-/// fun r4 () = ifcase 1 k3 r5 unreachable;
-/// fun r5 (k4 : ContTy_Console) = refset k k4 r6;
-/// fun r6 () = runcont_Console x ret k;
-/// fun rF (kF : fun (Console_eff, fun(Any))) = kF x ret;
+/// # -->
 ///
-/// # A function that uses effects
-/// fun Console_Print (i : I32, k_eff : ref ContTy_Console, k_ret : fun({})) = runcont_Console (Console_eff:1 { i }) k_ret k_eff;
+/// val Console = ({} | { I32 });
 ///
-/// # An example of an effect continuation, with type `ContTy_Console_inner`
-/// # Here the pattern matching on the effect is in `fun catch_rest (eff : Console_eff, k : fun(Any, ref ContTy_Console, fun(Any)))`
-/// fun cont_Console (x : Console_eff, k : fun(Any)) = catch_rest (x, cont_wrapper);
+/// fun Print (x : I32, kPrint : fun 2, kRet : fun 1) = kPrint (Console:1 {x}) Print2;
+/// fun Print2 (_ : {}) = kRet {};
 ///
-/// # We need to wrap the continuation in a function that sets the old `**continuation` appropriately
-/// # `last_k_eff` and `last_k_ret` are the effect and return continuations generated for this `catch`
-/// fun cont_wrapper (val : Any, k_eff : ref ContTy_Console, k_ret : fun(Any)) = refget last_k_eff c2;
-/// # It's possible they didn't collapse it last time, so do it now
-/// fun c2 (k2 : ref (ContTy_Console_inner | ContTy_Console)) = refget k2 c3;
-/// fun c3 (k3 : (ContTy_Console_inner | ContTy_Console)) = ifcase 1 k3 c4 cF;
-/// # If we get to c4, it's been redirected and not collapsed, so do that now
-/// fun c4 (k4 : ContTy_Console) = refset k k4 c5;
-//// # Loop back and do it again
-/// fun c5 () = refget k_eff c2;
-/// # We're done collapsing, so we can set it to the new continuation
-/// fun cF () = refget k_eff cF2;
-/// fun cF2 (k_eff2 : ContTy_Console) = refset k2 (_:1 k_eff2) cF3;
-/// # Do the same thing for the return continuation, then call cL
-/// fun cF3 = ...
-/// # Last, call the original one-argument continuation we were passed
-/// fun cL = k val;
+/// fun other (_ : {}, kRet : fun 1) = refnew fun 1 o2;
+//  fun o2 (r : ref fun 1) = refset r kRet o3;
+//  fun o3 () = Print 3 oP oR;
+/// fun oP (x : Console, k : fun 2) = ifcase 0 x oP0 oP_;
+/// fun oP0 (_ : {}) = k 12 kRet;
+/// fun oP_ () = ifcase 1 x oP1 unreachable;
+/// fun oP1 (i : { I32 }) = k {} kRet;
+/// fun oR (_ : {}) = refget r oR2;
+//  fun oR2 (f : fun 1) = f {};
 /// ```
 impl<'db> LCxt<'db> {
-    /// The logic shared by `runcont_Console` and `cont_wrapper` above, which collapses the `**continuation` and returns its value of type `ContTy_Console_inner`
-    fn collapse_continuation(&mut self, k: ir::Val) -> ir::Val {
-        let any_ty = self.builder.cons(ir::Constant::TypeType);
-
-        // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-        let kty_inner = self.builder.fun_type(2);
-
-        // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
-        let kty = {
-            let kty = self.builder.reserve(None);
-            let sum_ty = self.builder.sum_type(&[kty_inner, kty] as &_);
-            let vty = self.builder.ref_type(sum_ty);
-            self.builder.redirect(kty, vty);
-            kty
-        };
-
-        // fun r0 () = refget k r2;
-        let (r0, _) = self.builder.push_frame(vec![]);
-        let k2 = self.builder.refget(k);
-
-        // fun r2 (k2 : ref (ContTy_Console_inner | ContTy_Console)) = refget k2 r3;
-        let k3 = self.builder.refget(k2);
-
-        // fun r3 (k3 : (ContTy_Console_inner | ContTy_Console)) = ifcase 0 k3 rF r4;
-        let k_f = self.builder.ifcase(0, k3, kty_inner);
-        self.builder.otherwise(&[k_f] as &_);
-
-        // fun r4 () = ifcase 1 k3 r5 unreachable;
-        let k4 = self.builder.ifcase(1, k3, kty);
-
-        // fun r5 (k4 : ContTy_Console) = refset k k4 r6;
-        self.builder.refset(k, k4);
-
-        // fun r6 () = r0;
-        self.builder.call_raw(r0, &[] as &_);
-
-        // The `unreachable` instruction in the above ifcase
-        self.builder.otherwise(&[] as &_);
-        self.builder.unreachable(any_ty);
-        self.builder.endif(&[] as &_);
-
-        // fun rF (kF : fun (Console_eff, fun(Any))) = <the rest of the program>;
-        self.builder.endif(&[(k_f, kty_inner)] as &_)[0]
-    }
-
-    fn raise_effect(&mut self, k: ir::Val, eff_val: ir::Val, ret_ty: ir::Val) -> ir::Val {
-        let k = self.collapse_continuation(k);
-        self.builder.call(k, &[eff_val] as &_, ret_ty)
-    }
-
-    fn eff_cont_ty(&mut self, name: impl Into<String>) -> ir::Val {
-        // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-        let kty_inner = self.builder.fun_type(2);
-
-        // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
-        let kty = self.builder.reserve(Some(name.into()));
-        let sum_ty = self.builder.sum_type(&[kty_inner, kty] as &_);
-        let vty = self.builder.ref_type(sum_ty);
-        self.builder.redirect(kty, vty);
-
-        // ref ContTy_Console
-        self.builder.ref_type(kty)
+    fn raise_effect(&mut self, eff_cont: ir::Val, eff_val: ir::Val, ret_ty: ir::Val) -> ir::Val {
+        self.builder.call(eff_cont, &[eff_val] as &[_], ret_ty)
     }
 
     fn catch(
@@ -311,164 +236,68 @@ impl<'db> LCxt<'db> {
         mut do_eff: impl FnMut(&mut Self, usize, ir::Val, ir::Val) -> ir::Val,
         do_pure: impl FnOnce(&mut Self, ir::Val) -> ir::Val,
     ) -> ir::Val {
-        let any_ty = self.builder.cons(ir::Constant::TypeType);
+        // There are four types of continuation used here, so here are some consistent names:
+        // 1. *Effect continuations* are the things that are called directly by raising an effect.
+        //    They contain the body of one of the `eff` branches of the `catch`.
+        // 2. The *pure continuation* is called when the term finishes and returns a value.
+        //    It contains the non-`eff` branches of the `catch`.
+        // 3. The continuation created by raising and passed to the effect continuation,
+        //    the only one reified in Pika code, is the *resume continuation*.
+        // 4. When they're done, the effect continuations and the pure continuation both
+        //    have to call another continuation, since they don't know where to return their value to.
+        //    That continuation is called the *return continuation*, and it's inside a `ref`
+        //    which is updated with the function return continuation of the resume continuation.
 
-        // We need to wrap the continuation in a function that sets the old `**continuation` appropriately
-        // `old_conts` are the continuations we're making to pass to `term`, but the code here is part of the continuation wrapper,
-        // which runs after `term` has raised an effect and we have new continuations, so from that perspective they're old
-        let mut old_conts = Vec::new();
-        // let mut old_cont_inners = Vec::new();
-        let mut ktys = Vec::new();
-        let mut etys = Vec::new();
-        let mut offset_start = 100000;
+        let ret_cont_ty = self.builder.fun_type(1);
+        let ret_cont = self.builder.refnew(ret_cont_ty);
+        let ret_cont_start = self.builder.reserve(None);
+        self.builder.refset(ret_cont, ret_cont_start);
+
+        let mut conts = Vec::new();
         for (i, eff) in effs.iter().enumerate() {
-            if matches!(eff, Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
-                offset_start = i;
-                continue;
-            }
             let leff = eff
                 .clone()
                 .lower(Val::builtin(Builtin::Eff, Val::Type), self);
+            let args = [(None, leff), (None, self.builder.fun_type(1))];
+            let v = self.builder.push_fun_raw(args);
+            let eff_val = v[0];
+            let resume = v[1];
 
-            // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-            let kty_inner = self.builder.fun_type(2);
-
-            // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
-            let kty = self.builder.reserve(None);
-            let sum_ty = self.builder.sum_type(&[kty_inner, kty] as &_);
-            let vty = self.builder.ref_type(sum_ty);
-            self.builder.redirect(kty, vty);
-
-            let cont = self.builder.refnew(kty);
-            let kty = self.builder.ref_type(kty);
-
-            old_conts.push(cont);
-            etys.push(leff);
-            ktys.push(kty);
-        }
-
-        // Define the pure continuation
-        let pure_cont_ty = self.builder.fun_type(1);
-        let pure_cont_inner = self.builder.reserve(None);
-        let pure_cont = self.builder.refnew(pure_cont_ty);
-        self.builder.refset(pure_cont, pure_cont_inner);
-
-        // Start defining `cont_wrapper` by updating the effect continuations
-        let args: Vec<_> = std::iter::once((None, any_ty))
-            .chain(ktys.iter().copied().map(|x| (None, x)))
-            .chain(std::iter::once((None, pure_cont_ty)))
-            .collect();
-        let new_conts = self.builder.push_fun_raw(&*args);
-        for (&old, &new) in old_conts.iter().zip(new_conts.iter().skip(1)) {
-            // Make sure it's collapsed so we're updating the newest **continuation
-            self.collapse_continuation(old);
-            // Now update it: `**old = Redirect(new)`
-            let old = self.builder.refget(old);
-            let sum_ty = {
-                // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-                let kty_inner = self.builder.fun_type(2);
-
-                // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
-                let kty = self.builder.reserve(None);
-                let sum_ty = self.builder.sum_type(&[kty_inner, kty] as &_);
-                let vty = self.builder.ref_type(sum_ty);
-                self.builder.redirect(kty, vty);
-
-                sum_ty
+            let resume_wrapper = {
+                let any_ty = self.builder.ref_type(ret_cont_ty);
+                let args = [(None, any_ty), (None, self.builder.fun_type(1))];
+                let v = self.builder.push_fun_raw(args);
+                let val = v[0];
+                let new_ret_cont = v[1];
+                self.builder.refset(ret_cont, new_ret_cont);
+                self.builder.pop_fun_raw(resume, &[val] as &[_])
             };
-            let new = self.builder.refget(new);
-            let sum = self.builder.inject_sum(sum_ty, 1, new);
-            self.builder.refset(old, sum);
+
+            let ret_cont = self.builder.refget(ret_cont);
+            let val = do_eff(self, i, eff_val, resume_wrapper);
+
+            let econt = self.builder.pop_fun_raw(ret_cont, &[val] as &[_]);
+            conts.push((eff.clone(), econt));
         }
 
-        // We also need to update the pure continuation, but no collapsing is necessary
-        self.builder.refset(pure_cont, *new_conts.last().unwrap());
-
-        // The raw one-argument continuation, passed to `cont_wrapper_wrapper`
-        let cont_inner = self.builder.reserve(Some("cont_inner".into()));
-        let cont_wrapper = self.builder.pop_fun_raw(cont_inner, &new_conts[0..1]);
-        let cont_wrapper_ty = self.builder.type_of(cont_wrapper);
-        let cont_wrapper_wrapper = {
-            let afun_ty = self.builder.fun_type(1);
-            let inner = self.builder.push_fun(&[(None, afun_ty)] as &_);
-            self.builder.redirect(cont_inner, inner[0]);
-            self.builder.pop_fun(cont_wrapper)
+        let pure_cont = {
+            let lpure_ty = pure_ty.clone().lower(Val::Type, self);
+            let v = self.builder.push_fun_raw([(None, lpure_ty)]);
+            let pure_val = v[0];
+            let pure_ret = do_pure(self, pure_val);
+            let ret_cont = self.builder.refget(ret_cont);
+            self.builder.pop_fun_raw(ret_cont, &[pure_ret] as &[_])
         };
 
-        // Define the return continuation
-        // This is where we'll pass the result of `eff()` or `pure()`
-        // Right now it's empty, but we'll redirect it to a `push_frame()` call at the end
-        // It has type `fun(ret_ty)`
-        // This is different than `self.rcont`, which will point to `pure()`
-        let ret_cont = self.builder.reserve(None);
-
-        // Now define the actual effect continuations, which inject to `eff_sum_ty` and pass it to `eff_cont`
-        for (i, (&old_ptr, eff)) in old_conts.iter().zip(etys).enumerate() {
-            let i = if i >= offset_start { i + 1 } else { i };
-
-            let afun_ty = self.builder.fun_type(1);
-            let args = self
-                .builder
-                .push_fun_raw(&[(None, eff), (None, afun_ty)] as &_);
-
-            let cont_wrapper = self
-                .builder
-                .call(cont_wrapper_wrapper, &args[1..], cont_wrapper_ty);
-
-            let ret = do_eff(self, i, args[0], cont_wrapper);
-            let fun = self.builder.pop_fun_raw(ret_cont, &[ret] as &_);
-
-            // val ContTy_Console_inner = fun (Console_eff, fun(Any));
-            let kty_inner = self.builder.fun_type(2);
-
-            // val ContTy_Console = ref (ContTy_Console_inner | ContTy_Console);
-            let kty = self.builder.reserve(None);
-            let sum_ty = self.builder.sum_type(&[kty_inner, kty] as &_);
-            let vty = self.builder.ref_type(sum_ty);
-            self.builder.redirect(kty, vty);
-
-            let cont = self.builder.inject_sum(sum_ty, 0, fun);
-            let cont_ptr = self.builder.refnew(sum_ty);
-            self.builder.refset(cont_ptr, cont);
-            self.builder.refset(old_ptr, cont_ptr);
+        for (val, cont) in conts {
+            self.eff(val, cont);
         }
 
-        // Now we need to define the pure continuation, to be run if no effects occur
-        // It has type `fun(pure_ty)`
-        {
-            let args = self.builder.push_fun_raw(&[(None, ret_ty)] as &_);
-            let ret = do_pure(self, args[0]);
-            let fun = self.builder.pop_fun_raw(ret_cont, &[ret] as &_);
-            self.builder.redirect(pure_cont_inner, fun);
-        };
-
-        // All the continuations are defined, now set the required state and lower `term`
-        self.mcxt.eff_stack.push_scope(false, Span::empty());
-        for (old, eff) in old_conts.into_iter().zip(effs) {
-            let i = self.mcxt.eff_stack.len();
-            if i >= self.eff_conts.len() {
-                self.eff_conts.push(old);
-            } else {
-                self.eff_conts[i] = old;
-            }
-            self.mcxt.eff_stack.push_eff(eff.clone());
-        }
-        let old_rcont = self.rcont;
-        self.rcont = Some(pure_cont);
-
-        // Lower `term` with type `pure_ty`
-        let ret = term.lower(pure_ty, self);
-        // Then call `*rcont` with the result
-        let rcont = self.builder.refget(pure_cont);
-        self.builder.call_raw(rcont, &[ret] as &_);
-
-        // Reset the state and return the value passed to `ret_cont`
-        self.mcxt.eff_stack.pop_scope();
-        self.rcont = old_rcont;
-
-        let (frame, args) = self.builder.push_frame(vec![(ret, ret_ty)]);
-        self.builder.redirect(ret_cont, frame);
-        args[0]
+        let pure_val = term.lower(pure_ty, self);
+        self.builder.call_raw(pure_cont, &[pure_val] as &[_]);
+        let (cont, v) = self.builder.push_frame(vec![(ret_cont_start, ret_ty)]);
+        self.builder.redirect(ret_cont_start, cont);
+        v[0]
     }
 }
 
@@ -971,19 +800,16 @@ impl Term {
                                     let eff = effs.pop().unwrap();
 
                                     let ename = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
-                                    let cont_ty = cxt.eff_cont_ty(&ename);
+                                    let cont_ty = cxt.builder.fun_type(2);
 
                                     ty = eff;
-                                    // The function takes a continuation for each effect, plus two return continuations
-                                    // The first one is for returning to the outermost `catch` and isn't manually called, just passed around
-                                    // (except in the implementation of `catch`)
-                                    // The second one is the normal return continuation, which this function will call when it's done
+                                    // The function takes a continuation for each effect, plus a return continuation
                                     let p = cxt.builder.push_fun([
                                         (None, lty),
                                         (Some(format!("$cont.{}", ename)), cont_ty),
                                     ]);
                                     cxt.local(name, p[0], from);
-                                    funs.push((p[0], ty.clone().lower(Val::Type, cxt), false));
+                                    funs.push((p[0], ty.clone().lower(Val::Type, cxt), true));
                                     break Some(p[1]);
                                 }
                             }
@@ -999,13 +825,10 @@ impl Term {
                                     let eff = effs.pop().unwrap();
 
                                     let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
-                                    let cont_ty = cxt.eff_cont_ty(&name);
+                                    let cont_ty = cxt.builder.fun_type(2);
 
                                     ty = eff;
-                                    // The function takes a continuation for each effect, plus two return continuations
-                                    // The first one is for returning to the outermost `catch` and isn't manually called, just passed around
-                                    // (except in the implementation of `catch`)
-                                    // The second one is the normal return continuation, which this function will call when it's done
+                                    // The function takes a continuation for each effect, plus a return continuation
                                     let p = cxt.builder.push_fun([
                                         (None, from),
                                         (Some(format!("$cont.{}", name)), cont_ty),
@@ -1144,18 +967,15 @@ impl Term {
                 let mut effs = Vec::new();
 
                 if !effs_.is_empty() {
-                    // The function takes a continuation for each effect, plus two return continuations
-                    // The first one is for returning to the outermost `catch` and isn't manually called, just passed around
-                    // (except in the implementation of `catch`)
-                    // The second one is the normal return continuation, which this function will call when it's done
+                    // The function takes a continuation for each effect, plus a return continuation
                     for eff in effs_ {
                         if matches!(eff, Val::App(Var::Builtin(Builtin::IO), _, _, _)) {
                             continue;
                         }
                         let name = eff.pretty(cxt.db, &cxt.mcxt).raw_string();
-                        let cont_ty = cxt.eff_cont_ty(&name);
+                        let cont_ty = cxt.builder.fun_type(2);
                         effs.push(eff);
-                        params.push((Some(format!("$cont.{}", name)), cont_ty))
+                        params.push((Some(format!("$cont.{}", name)), cont_ty));
                     }
                 }
 
@@ -1190,13 +1010,9 @@ impl Term {
                     .clone()
                     .evaluate(&cxt.mcxt.env(), &cxt.mcxt, cxt.db)
                     .inline(cxt.mcxt.size, cxt.db, &cxt.mcxt);
-                let (xty, rty, effs) = match fty.unarc() {
-                    Val::Clos(Pi, _, cl, effs) => (
-                        cl.ty.clone(),
-                        cl.clone().vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db),
-                        effs.clone(),
-                    ),
-                    Val::Fun(x, y, effs) => ((**x).clone(), (**y).unarc().clone(), effs.clone()),
+                let (xty, effs) = match fty.unarc() {
+                    Val::Clos(Pi, _, cl, effs) => (cl.ty.clone(), effs.clone()),
+                    Val::Fun(x, _, effs) => ((**x).clone(), effs.clone()),
                     _ => unreachable!(),
                 };
                 let f = f.lower(fty, cxt);
@@ -1223,10 +1039,7 @@ impl Term {
                         args.push(cxt.eff_conts[i]);
                     }
 
-                    // If the call raised an effect, the location of the catch to return to changed
-                    // So store the updated effect and return continuations in the context
-                    let rty = rty.lower(Val::Type, cxt);
-                    cxt.builder.call(f, args, rty)
+                    cxt.builder.call(f, args, ret_ty)
                 }
             }
             Term::Fun(_, _, effs) | Term::Clos(Pi, _, _, _, _, effs) => {

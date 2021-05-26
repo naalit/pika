@@ -2568,7 +2568,23 @@ pub fn infer(
             let (x, x_ty, x_effs) = if *is_catch {
                 mcxt.eff_stack.push_scope(true, xspan);
                 let (x, x_ty) = infer(true, x, db, mcxt)?;
-                let x_effs = mcxt.eff_stack.pop_scope();
+                let mut x_effs = mcxt.eff_stack.pop_scope();
+                let before_len = x_effs.len();
+                x_effs.retain(|x| !matches!(x, Val::App(Var::Builtin(Builtin::IO), _, _, _)));
+                if x_effs.len() != before_len {
+                    // It had IO
+                    if !mcxt.eff_stack.clone().try_eff(
+                        Val::builtin(Builtin::IO, Val::builtin(Builtin::Eff, Val::Type)),
+                        db,
+                        mcxt,
+                    ) {
+                        return Err(TypeError::EffNotAllowed(
+                            pre.span(),
+                            Val::builtin(Builtin::IO, Val::builtin(Builtin::Eff, Val::Type)),
+                            mcxt.eff_stack.clone(),
+                        ));
+                    }
+                }
                 (x, x_ty, x_effs)
             } else {
                 let (x, x_ty) = infer(true, x, db, mcxt)?;
@@ -2957,7 +2973,23 @@ pub fn check(
             let (x, x_ty, x_effs) = if *is_catch {
                 mcxt.eff_stack.push_scope(true, xspan);
                 let (x, x_ty) = infer(true, x, db, mcxt)?;
-                let x_effs = mcxt.eff_stack.pop_scope();
+                let mut x_effs = mcxt.eff_stack.pop_scope();
+                let before_len = x_effs.len();
+                x_effs.retain(|x| !matches!(x, Val::App(Var::Builtin(Builtin::IO), _, _, _)));
+                if x_effs.len() != before_len {
+                    // It had IO
+                    if !mcxt.eff_stack.clone().try_eff(
+                        Val::builtin(Builtin::IO, Val::builtin(Builtin::Eff, Val::Type)),
+                        db,
+                        mcxt,
+                    ) {
+                        return Err(TypeError::EffNotAllowed(
+                            pre.span(),
+                            Val::builtin(Builtin::IO, Val::builtin(Builtin::Eff, Val::Type)),
+                            mcxt.eff_stack.clone(),
+                        ));
+                    }
+                }
                 (x, x_ty, x_effs)
             } else {
                 let (x, x_ty) = infer(true, x, db, mcxt)?;

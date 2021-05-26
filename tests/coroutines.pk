@@ -12,25 +12,27 @@ fun generator () with Yield I32 = do
 end
 
 type Coroutine a of
-    Go (() -> () with Yield a)
+    Go a (() -> Coroutine a)
     Stop
 where
+    fun new [a] (gen : () -> () with Yield a) : Coroutine a = catch gen () of
+        () => Stop
+        eff (Yield.Y x) k => Go x k
+    end
+
     ## Steps the coroutine, and if it yields a value, calls `run` on it. Otherwise it's done, and this function does nothing.
     ## Returns the new coroutine.
     fun step [a] (run : a -> () with IO) (x : Coroutine a) : Coroutine a with IO = case x of
-        Go k => catch k () of
-            () => Stop
-            eff (Yield.Y x) k => do
-                run x
-                Go k
-            end
-        end
         Stop => Stop
+        Go a k => do
+            run a
+            k ()
+        end
     end
 end
 
 fun main () with IO = do
-    val k = Coroutine.Go generator
+    val k = Coroutine.new generator
     print 0
     val k = Coroutine.step print k
     print 2

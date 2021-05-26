@@ -27,8 +27,8 @@ end
 fun main () : () = do
   fun handle (f : () -> () with Console) : () = catch f () of
     () => ()
-    eff (Console.Print _) k => handle k
-    eff (Console.Read ()) k => handle (() => k 12)
+    eff (Console.Print _) k => k ()
+    eff (Console.Read ()) k => k 12
   end
 
   handle (() => greet True)

@@ -12,7 +12,7 @@ fun handle (f : () -> () with Console) : () with IO = catch f () of
     () => ()
     eff (Console.Print i) k => do
         print i
-        handle k
+        k ()
     end
 end
 
@@ -21,20 +21,22 @@ eff Yield a of
 end
 
 type Coroutine a of
-    Go (() -> () with Yield a)
+    Go a (() -> Coroutine a)
     Stop
 where
+    fun new [a] (gen : () -> () with Yield a) : Coroutine a = catch gen () of
+        () => Stop
+        eff (Yield.Y x) k => Go x k
+    end
+
     ## Steps the coroutine, and if it yields a value, calls `run` on it. Otherwise it's done, and this function does nothing.
     ## Returns the new coroutine.
     fun step [a] (run : a -> () with IO) (x : Coroutine a) : Coroutine a with IO = case x of
-        Go k => catch k () of
-            () => Stop
-            eff (Yield.Y x) k => do
-                run x
-                Go k
-            end
-        end
         Stop => Stop
+        Go a k => do
+            run a
+            k ()
+        end
     end
 end
 
@@ -50,7 +52,7 @@ fun main () with IO = do
     # First instantiate it with Console, and print it out
     handle (() => poly [Console] (i => Console.Print (i - 2)))
     # Then make it a coroutine, and print out the resultls again
-    val k = Coroutine.Go [I32] (() => poly (Yield.Y))
+    val k = Coroutine.new [I32] (() => poly (Yield.Y))
     val k = Coroutine.step print k
     val k = Coroutine.step print k
     val k = Coroutine.step print k

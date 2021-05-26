@@ -19,14 +19,13 @@ end
 # 3
 # 5
 fun main () : () with IO = do
-    fun handle (f : () -> I32 with Console) (acc : I32) : I32 with IO = catch f () of
-        x => x
-        eff (Console.Print i) k => do
+    val handler : I32 -> I32 with IO = catch producer () of
+        x => _ => x
+        eff (Console.Print i) k => acc => do
             print i
-            handle k acc
+            k () acc
         end
-        eff (Console.Read ()) k => handle (() => k acc) (acc + 1)
+        eff (Console.Read ()) k => acc => k acc (acc + 1)
     end
-    val x = handle producer 2
-    print x
+    print (handler 2)
 end
