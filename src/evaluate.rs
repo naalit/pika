@@ -50,7 +50,6 @@ impl Term {
                 let x = x.evaluate(env, mcxt, db);
                 x.app(Elim::Case(env.clone(), ty, cases, effs, rty), mcxt, db)
             }
-            Term::Error => Val::Error,
             Term::Do(v) => Val::Do(env.clone(), v),
         }
     }
@@ -107,7 +106,6 @@ impl Term {
                         env.pop();
                         b
                     }
-                    Term::Error => Term::Error,
                     _ => {
                         // No beta reduction necessary
                         *x = x.eval_quote(env, at, mcxt, db);
@@ -144,7 +142,6 @@ impl Term {
                     .collect();
                 Term::Case(x, ty, cases, effs, rty)
             }
-            Term::Error => Term::Error,
             Term::Do(v) => Term::Do(
                 v.into_iter()
                     .map(|(id, term)| (id, term.eval_quote(env, at, mcxt, db)))
@@ -238,7 +235,6 @@ impl Val {
                 let effs = effs.into_iter().map(|x| x.force(at, db, mcxt)).collect();
                 Val::Fun(a, b, effs)
             }
-            Val::Error => Val::Error,
             Val::Do(env, v) => {
                 let v = v
                     .into_iter()
@@ -302,7 +298,6 @@ impl Val {
                     Val::App(h, hty, sp, g)
                 }
             }
-            Val::Error => Val::Error,
             Val::Arc(a) => IntoOwned::<Val>::into_owned(a).app(elim, mcxt, db),
             x => match elim.elim(x, mcxt, db) {
                 Ok(v) => v,
@@ -319,8 +314,7 @@ impl Val {
             Val::Type => Term::Type,
             Val::Lit(x, t) => Term::Lit(x, t),
             Val::App(h, hty, sp, g) => {
-                // Inline the type to expose the Pi or Fun
-                let hty = hty.inline_args(sp.len(), at, db, mcxt).quote(at, mcxt, db);
+                let hty = hty.quote(at, mcxt, db);
                 let h = match h {
                     Var::Local(l) => match g.resolve(h, &sp, at, db, mcxt) {
                         Some(v) => return v.quote(at, mcxt, db),
@@ -357,7 +351,6 @@ impl Val {
                 Box::new(to.quote(at, mcxt, db)),
                 effs.into_iter().map(|x| x.quote(at, mcxt, db)).collect(),
             ),
-            Val::Error => Term::Error,
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).quote(at, mcxt, db),
         }
     }
@@ -467,7 +460,6 @@ impl Val {
                     .collect();
                 Val::Fun(from, to, effs)
             }
-            Val::Error => Val::Error,
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).inline_metas(at, mcxt, db),
         }
     }

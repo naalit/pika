@@ -812,18 +812,18 @@ impl<'i> Parser<'i> {
         // The shunting-yard algorithm
         // Except, we don't handle parentheses here - we call `app()` for operands,
         // and that handles paretheses and calls `binop()` recursively.
-        let mut ops: Vec<Tok<'i>> = Vec::new();
+        let mut ops: Vec<Spanned<Tok<'i>>> = Vec::new();
 
         /// Helper function that takes two terms off the stack and combines them with the given operator
-        fn resolve_op(terms: &mut Vec<Pre>, op: Tok) {
+        fn resolve_op(terms: &mut Vec<Pre>, op: Spanned<Tok>) {
             let b = terms.pop().unwrap();
             let a = terms.pop().unwrap();
 
             // Inner and outer spans
-            let span = Span(a.span().1, b.span().0);
+            let span = op.span();
             let vspan = Span(a.span().0, b.span().1);
 
-            let v = match op {
+            let v = match *op {
                 Tok::And => Pre_::And(a, b),
                 Tok::Or => Pre_::Or(a, b),
                 // If we're resolving it already, we know it doesn't have a `with` clause
@@ -848,7 +848,7 @@ impl<'i> Parser<'i> {
                 Tok::Comma => todo!(","),
                 Tok::LPipe => todo!("pipes"),
                 Tok::RPipe => todo!("pipes"),
-                _ => panic!("Couldn't resolve {}", op),
+                _ => panic!("Couldn't resolve {}", *op),
             };
             terms.push(Spanned::new(v, vspan));
         }
@@ -874,14 +874,15 @@ impl<'i> Parser<'i> {
                         // TODO add span of other operator
                         return self.err(format!(
                             "mixing operators {} and {} is ambiguous: try adding parentheses",
-                            op, op2
+                            op, *op2
                         ));
                     }
                 }
 
                 // Push the operator and the next operand onto the stack
+                let span = self.span();
                 self.next();
-                ops.push(op);
+                ops.push(Spanned::new(op, span));
 
                 terms.push(self.app()?);
             } else {
@@ -891,7 +892,7 @@ impl<'i> Parser<'i> {
                         // So resolve all remaining operators until we get to an arrow
                         let mut found = false;
                         while let Some(op2) = ops.pop() {
-                            if let Tok::Arrow = op2 {
+                            if let Tok::Arrow = *op2 {
                                 let b = terms.pop().unwrap();
                                 let a = terms.pop().unwrap();
                                 let span = Span(a.span().1, b.span().0);

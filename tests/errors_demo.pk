@@ -4,6 +4,11 @@ type MyType has_no_type of
   WrongReturnType : Bool
 end
 
+fun depends_on_error [a] (x : MyType a) = case x of
+  # This type error shouldn't actually show up because it depends on WrongReturnType
+  WrongReturnType => () + 12
+end
+
 fun inexhaustive (x : Bool) = case x of
   True => False
 end

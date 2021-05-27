@@ -469,8 +469,6 @@ pub enum Term {
     Lit(Literal, Builtin),
     /// do A; B; () end
     Do(Vec<(DefId, Term)>),
-    /// There was a type error somewhere, and we already reported it, so we want to continue as much as we can.
-    Error,
 }
 
 impl Term {
@@ -517,7 +515,6 @@ impl Term {
                 Some((_, x)) => x.ty(at, mcxt, db),
                 None => Term::Var(Var::Builtin(Builtin::UnitType), Box::new(Term::Type)),
             },
-            Term::Error => Term::Error,
         }
     }
 
@@ -764,7 +761,6 @@ impl Term {
                     Icit::Expl => x.pretty(db, names).nest(Prec::Atom),
                 })
                 .prec(Prec::App),
-            Term::Error => Doc::start("<error>"),
             Term::Case(x, _, cases, effs, _) => {
                 Doc::keyword(if effs.is_empty() { "case" } else { "catch" })
                     .space()
@@ -1187,7 +1183,6 @@ pub enum Val {
     Lit(Literal, Builtin),
     /// do A; B; () end
     Do(Env, Vec<(DefId, Term)>),
-    Error,
 }
 impl Val {
     pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {

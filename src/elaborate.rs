@@ -76,7 +76,6 @@ impl Term {
                 *b = b.check_solution(meta, ren, lfrom, lto, names)?;
                 Ok(Term::App(i, a, b))
             }
-            Term::Error => Ok(Term::Error),
             Term::Type => Ok(Term::Type),
             Term::Lit(x, t) => Ok(Term::Lit(x, t)),
             Term::Case(mut x, mut ty, cases, effs, mut rty) => {
@@ -613,7 +612,7 @@ impl Var<Lvl> {
             Var::Meta(m) => m.pretty(mcxt, db),
 
             Var::Local(l) => Doc::start("constrained value of local ")
-                .chain(Val::local(l, Val::Error).pretty(db, mcxt)),
+                .chain(Val::local(l, Val::Type).pretty(db, mcxt)),
 
             _ => unreachable!(),
         }
@@ -664,13 +663,13 @@ impl Meta {
 }
 
 impl PreDef {
-    /// Extracts the type given. If no type is given, returns a meta; if it doesn't typecheck, reports errors to the database and returns None.
+    /// Extracts the type given. If no type is given, returns a meta; if it doesn't typecheck, returns None and doesn't report the errors as they'll be caught in elaborate_def().
     pub fn given_type(&self, id: PreDefId, cxt: Cxt, db: &dyn Compiler) -> Option<VTy> {
         let mut mcxt = MCxt::new(cxt, MCxtType::Global(id), db);
         match self {
             PreDef::Fun(_, args, rty, _, effs) | PreDef::FunDec(_, args, rty, effs) => {
                 let mut rargs = Vec::new();
-                elab_args(args, &mut rargs, cxt.file(db), &mut mcxt, db);
+                elab_args(args, &mut rargs, &mut mcxt, db).ok()?;
 
                 // TODO what to do with inferred effects?
                 let effs: Result<_, _> = effs
@@ -718,17 +717,14 @@ impl PreDef {
                                 .0,
                         )
                     }
-                    Err(e) => {
-                        db.report_error(e.into_error(cxt.file(db), db, &mcxt));
-                        None
-                    }
+                    Err(_) => None,
                 }
             }
             PreDef::Type {
                 is_eff, ty_args, ..
             } => {
                 let mut rargs = Vec::new();
-                elab_args(ty_args, &mut rargs, cxt.file(db), &mut mcxt, db);
+                elab_args(ty_args, &mut rargs, &mut mcxt, db).ok()?;
                 let mut l = mcxt.size;
                 let ty_rty = if *is_eff {
                     Val::builtin(Builtin::Eff, Val::Type)
@@ -764,10 +760,7 @@ impl PreDef {
             PreDef::ValDec(_, ty) | PreDef::Val(_, ty, _) | PreDef::Impl(_, ty, _) => {
                 match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
                     Ok(ty) => Some(ty.evaluate(&mcxt.env(), &mcxt, db)),
-                    Err(e) => {
-                        db.report_error(e.into_error(cxt.file(db), db, &mcxt));
-                        None
-                    }
+                    Err(_) => None,
                 }
             }
             PreDef::Cons(_, ty) => Some(ty.clone()),
@@ -792,19 +785,19 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     match check(val, &ty, ReasonExpected::Given(tyspan), db, &mut mcxt) {
                         Ok(val) => Ok((val, ty)),
                         Err(e) => {
-                            db.report_error(e.into_error(file, db, &mcxt));
-                            Err(DefError::ElabError(def))
+                            db.maybe_report_error(e.into_error(file, db, &mcxt));
+                            Err(DefError::ElabError)
                         }
                     }
                 }
                 Err(e) => {
-                    db.report_error(e.into_error(file, db, &mcxt));
+                    db.maybe_report_error(e.into_error(file, db, &mcxt));
                     // The given type is invalid, but we can still try to infer the type
                     match infer(true, val, db, &mut mcxt) {
                         Ok(x) => Ok(x),
                         Err(e) => {
-                            db.report_error(e.into_error(file, db, &mcxt));
-                            Err(DefError::ElabError(def))
+                            db.maybe_report_error(e.into_error(file, db, &mcxt));
+                            Err(DefError::ElabError)
                         }
                     }
                 }
@@ -813,7 +806,10 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         PreDef::Fun(_, args, body_ty, body, effs) => {
             // First, add the arguments to the environment
             let mut targs = Vec::new();
-            elab_args(args, &mut targs, file, &mut mcxt, db);
+            elab_args(args, &mut targs, &mut mcxt, db).map_err(|e| {
+                db.maybe_report_error(e.into_error(file, db, &mcxt));
+                DefError::ElabError
+            })?;
 
             // Then elaborate and evaluate the given return type
             let tyspan = body_ty.span();
@@ -826,9 +822,9 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             ) {
                 Ok(x) => x,
                 Err(e) => {
-                    db.report_error(e.into_error(file, db, &mcxt));
+                    db.maybe_report_error(e.into_error(file, db, &mcxt));
                     // TODO make a meta? or just call `infer()`?
-                    Term::Error
+                    return Err(DefError::ElabError);
                 }
             };
             let vty = body_ty.evaluate(&mcxt.env(), &mcxt, db);
@@ -853,8 +849,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             {
                 Ok(x) => x,
                 Err(e) => {
-                    db.report_error(e.into_error(file, db, &mcxt));
-                    return Err(DefError::ElabError(def));
+                    db.maybe_report_error(e.into_error(file, db, &mcxt));
+                    return Err(DefError::ElabError);
                 }
             };
             // And last, check the function body against the return type
@@ -869,8 +865,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             ) {
                 Ok(x) => x,
                 Err(e) => {
-                    db.report_error(e.into_error(file, db, &mcxt));
-                    return Err(DefError::ElabError(def));
+                    db.maybe_report_error(e.into_error(file, db, &mcxt));
+                    return Err(DefError::ElabError);
                 }
             };
 
@@ -952,7 +948,10 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 
             // Evaluate the argument types and collect them up
             let mut targs = Vec::new();
-            elab_args(ty_args, &mut targs, file, &mut mcxt, db);
+            elab_args(ty_args, &mut targs, &mut mcxt, db).map_err(|e| {
+                db.maybe_report_error(e.into_error(file, db, &mcxt));
+                DefError::ElabError
+            })?;
 
             // Create the type of the datatype we're defining (e.g. `Option : Type -> Type`)
             // We have to do this now, so that the constructors can use the type
@@ -1052,8 +1051,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                     {
                         Ok(x) => x,
                         Err(e) => {
-                            db.report_error(e.into_error(file, db, &mcxt));
-                            Term::Error
+                            db.maybe_report_error(e.into_error(file, db, &mcxt));
+                            return Err(DefError::ElabError);
                         }
                     };
                     let vty = ty.evaluate(&mcxt.env(), &mcxt, db);
@@ -1129,13 +1128,12 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                                         .style(Style::Error),
                                 );
                                 db.report_error(e);
-                                (Term::Error, None)
+                                return Err(DefError::ElabError);
                             }
                         },
                         Err(e) => {
-                            db.report_error(e.into_error(file, db, &mcxt));
-                            // TODO make a meta? or just call `infer()`?
-                            (Term::Error, None)
+                            db.maybe_report_error(e.into_error(file, db, &mcxt));
+                            return Err(DefError::ElabError);
                         }
                     }
                 // If they didn't provide a return type, use the type constructor applied to all args
@@ -1292,8 +1290,8 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         }
         PreDef::Expr(e) => match infer(true, e, db, &mut mcxt) {
             Err(e) => {
-                db.report_error(e.into_error(file, db, &mcxt));
-                Err(DefError::ElabError(def))
+                db.maybe_report_error(e.into_error(file, db, &mcxt));
+                Err(DefError::ElabError)
             }
             Ok(stuff) => Ok(stuff),
         },
@@ -1312,7 +1310,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         }
         PreDef::ValDec(_, ty) => {
             if let Err(e) = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-                db.report_error(e.into_error(file, db, &mcxt));
+                db.maybe_report_error(e.into_error(file, db, &mcxt));
             }
             Err(DefError::NoValue)
         }
@@ -1357,7 +1355,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         }
         Err(()) => {
             // We don't want the term with local metas in it getting out
-            Err(DefError::ElabError(def))
+            Err(DefError::ElabError)
         }
     };
 
@@ -1391,26 +1389,20 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
 }
 
 /// Elaborates and evaluates the argument types, adding the arguments to the context and storing them in `rargs`.
-/// Any type errors will be reported to the database.
+/// Stops at the first type error.
 fn elab_args(
     args: &[(Name, Icit, Pre)],
     rargs: &mut Vec<(Name, Icit, VTy)>,
-    file: FileId,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
-) {
+) -> Result<(), TypeError> {
     for (name, icit, ty) in args {
-        let ty = match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt) {
-            Ok(x) => x,
-            Err(e) => {
-                db.report_error(e.into_error(file, db, mcxt));
-                Term::Error
-            }
-        };
+        let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
         let vty = ty.evaluate(&mcxt.env(), mcxt, db);
         rargs.push((*name, *icit, vty.clone()));
         mcxt.define(*name, NameInfo::Local(vty), db);
     }
+    Ok(())
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1499,10 +1491,22 @@ pub enum TypeError {
     /// No catchable effects for `catch` expression. If the `bool` is true, then IO was included.
     WrongCatchType(Span, bool),
     EffPatternType(Span, Span, Val, Vec<Val>),
+    BinOpType(Span, VTy, Span),
+    Sentinel,
 }
 impl TypeError {
-    fn into_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Error {
-        match self {
+    fn into_error(self, file: FileId, db: &dyn Compiler, mcxt: &MCxt) -> Option<Error> {
+        Some(match self {
+            TypeError::Sentinel => return None,
+            TypeError::BinOpType(vspan, vty, opspan) => Error::new(
+                file,
+                Doc::start("Expected number in operand to binary operator, but got type ")
+                    .chain(vty.pretty(db, mcxt).style(Style::None))
+                    .style(Style::Bold),
+                vspan,
+                "expected number here"
+            )
+            .with_label(file, opspan, "in operand of this operator"),
             TypeError::NotFound(n) => Error::new(
                 file,
                 format!("Name not found in scope: '{}'", n.get(db)),
@@ -1632,7 +1636,7 @@ impl TypeError {
                     .style(Style::Error),
             ),
             TypeError::InvalidPatternBecause(e) => {
-                let mut e = e.into_error(file, db, mcxt);
+                let mut e = e.into_error(file, db, mcxt)?;
                 let message = format!("Invalid pattern: {}", e.message());
                 *e.message() = message;
                 e
@@ -1788,7 +1792,7 @@ impl TypeError {
                     .chain(Doc::intersperse(effs.iter().map(|e| e.pretty(db, mcxt).style(Style::None)), Doc::start(',').line()).group())
                     .style(Style::Note),
             ),
-        }
+        })
     }
 }
 
@@ -1834,7 +1838,6 @@ fn p_unify(
             p_unify(mode, a, b, size, span, db, mcxt)
         }
 
-        (Val::Error, _) | (_, Val::Error) => Ok(Yes),
         (Val::Type, Val::Type) => Ok(Yes),
 
         (Val::Lit(a, _), Val::Lit(b, _)) => Ok((a == b).into()),
@@ -2152,27 +2155,9 @@ pub fn infer(
                     Builtin::I64 => Term::Var(Var::Builtin(Builtin::I64), Box::new(Term::Type)),
                     Builtin::F32 => Term::Var(Var::Builtin(Builtin::F32), Box::new(Term::Type)),
                     Builtin::F64 => Term::Var(Var::Builtin(Builtin::F64), Box::new(Term::Type)),
-                    _ => {
-                        return Err(TypeError::NotIntType(
-                            a.span(),
-                            aty,
-                            ReasonExpected::ArgOf(
-                                op.span(),
-                                Val::builtin(Builtin::BinOp(**op), Val::Type),
-                            ),
-                        ))
-                    }
+                    _ => return Err(TypeError::BinOpType(a.span(), aty, op.span())),
                 },
-                _ => {
-                    return Err(TypeError::NotIntType(
-                        a.span(),
-                        aty,
-                        ReasonExpected::ArgOf(
-                            op.span(),
-                            Val::builtin(Builtin::BinOp(**op), Val::Type),
-                        ),
-                    ))
-                }
+                _ => return Err(TypeError::BinOpType(a.span(), aty, op.span())),
             };
             // The return type could be different from `ity`, e.g. `==`
             let vrty = op.ret_ty();
@@ -2289,11 +2274,7 @@ pub fn infer(
                     ty,
                 )),
                 // If something else had a type error, try to keep going anyway and maybe catch more
-                Err(DefError::ElabError(_def)) => Ok((
-                    Term::Error,
-                    // TODO pros/cons of using a meta here?
-                    Val::Error,
-                )),
+                Err(DefError::ElabError) => Err(TypeError::Sentinel),
                 Err(DefError::NoValue) => Err(TypeError::NotFound(pre.copy_span(*name))),
             }?;
             Ok(insert_metas(insert, term, ty, pre.span(), mcxt, db))
@@ -2416,7 +2397,7 @@ pub fn infer(
                                                 db,
                                                 &mut mcxt2,
                                             )? {
-                                                db.report_error(
+                                                db.maybe_report_error(
                                                     TypeError::Unify(
                                                         mcxt.clone(),
                                                         Spanned::new(term, *span),
@@ -2443,15 +2424,15 @@ pub fn infer(
             let mut ret_ty = None;
             let mut state = mcxt.state();
             if let Some(&last) = block.last() {
-                let (pre, state2) = db.lookup_intern_def(last);
+                let (pre_id, state2) = db.lookup_intern_def(last);
                 state = state2;
                 // If it's not an expression, don't return anything
-                if let PreDef::Expr(_) = &**db.lookup_intern_predef(pre) {
+                if let PreDef::Expr(_) = &**db.lookup_intern_predef(pre_id) {
                     if let Ok(info) = db.elaborate_def(last) {
                         ret_ty = Some((*info.typ).clone());
                     } else {
                         // If there was a type error inside the block, we'll leave it, we don't want a cascade of errors
-                        ret_ty = Some(Val::Error);
+                        return Err(TypeError::Sentinel);
                     }
                 }
             }
@@ -2489,7 +2470,6 @@ pub fn infer(
                     ty,
                 )
             })? {
-                (_, Val::Error) => Ok((Term::Error, Val::Error)),
                 (Val::App(Var::Builtin(Builtin::Bool), _, _, _), _) => {
                     let tbool = Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type));
                     let vbool = Val::builtin(Builtin::Bool, Val::Type);
@@ -2542,7 +2522,7 @@ pub fn infer(
                                             insert_metas(insert, f, fty, fspan, mcxt, db)
                                         });
                                 }
-                                Err(_) => return Ok((Term::Error, Val::Error)),
+                                Err(_) => return Err(TypeError::Sentinel),
                             }
                         }
                     }
@@ -2671,8 +2651,6 @@ fn infer_app(
             }
             Ok((Term::App(icit, Box::new(f), Box::new(x)), to))
         }
-        // The type was already Error, so we'll leave it there, not introduce a meta
-        Val::Error => Ok((Term::Error, Val::Error)),
         _ => {
             if let (Icit::Expl, Term::Var(Var::Type(_, sid), _)) =
                 (icit, f.head().clone().inline_top(db))
@@ -2715,7 +2693,7 @@ fn infer_app(
 
                                 return infer_app(f2, fty, fspan, icit, x, db, mcxt);
                             }
-                            Err(_) => return Ok((Term::Error, Val::Error)),
+                            Err(_) => return Err(TypeError::Sentinel),
                         }
                     }
                 }
@@ -2873,27 +2851,9 @@ pub fn check(
                     Builtin::I64 => Term::Var(Var::Builtin(Builtin::I64), Box::new(Term::Type)),
                     Builtin::F32 => Term::Var(Var::Builtin(Builtin::F32), Box::new(Term::Type)),
                     Builtin::F64 => Term::Var(Var::Builtin(Builtin::F64), Box::new(Term::Type)),
-                    _ => {
-                        return Err(TypeError::NotIntType(
-                            a.span(),
-                            ty.clone(),
-                            ReasonExpected::ArgOf(
-                                op.span(),
-                                Val::builtin(Builtin::BinOp(**op), Val::Type),
-                            ),
-                        ))
-                    }
+                    _ => return Err(TypeError::BinOpType(a.span(), ty.clone(), op.span())),
                 },
-                _ => {
-                    return Err(TypeError::NotIntType(
-                        a.span(),
-                        ty.clone(),
-                        ReasonExpected::ArgOf(
-                            op.span(),
-                            Val::builtin(Builtin::BinOp(**op), Val::Type),
-                        ),
-                    ))
-                }
+                _ => return Err(TypeError::BinOpType(a.span(), ty.clone(), op.span())),
             };
             let a = check(a, ty, reason.clone(), db, mcxt)?;
             let b = check(b, ty, reason, db, mcxt)?;

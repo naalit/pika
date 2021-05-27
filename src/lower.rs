@@ -192,7 +192,7 @@ impl<'db> LCxt<'db> {
     }
 }
 
-/// Effects example vDeep:
+/// Effects example:
 /// ```pika
 /// eff Console of
 ///     Read () : I32
@@ -1053,7 +1053,6 @@ impl Term {
                 }
                 cxt.builder.fun_type(nargs)
             }
-            Term::Error => panic!("type errors should have been caught by now!"),
             Term::Case(x, xty, cases, effs, _) => lower_case(x, xty, cases, effs, ty, cxt),
         }
     }

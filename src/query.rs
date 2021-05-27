@@ -92,6 +92,11 @@ impl Cxt {
                         return Ok((Var::Top(id), (*db.def_type(id)?).clone()));
                     }
                 }
+                NameInfo::Error => {
+                    if name == sym {
+                        return Err(DefError::ElabError);
+                    }
+                }
                 NameInfo::Local(ty) => {
                     if name == sym {
                         return Ok((Var::Local(ix), ty));
@@ -124,6 +129,7 @@ impl Cxt {
                         return Some(id);
                     }
                 }
+                NameInfo::Error => (),
                 NameInfo::Rec(id, _) => {
                     if id == rec {
                         return None;
@@ -198,6 +204,7 @@ pub enum NameInfo {
     Local(VTy),
     Rec(PreDefId, VTy),
     Other(Var<Ix>, VTy),
+    Error,
 }
 
 /// One cell of the context linked list.
@@ -252,6 +259,11 @@ pub trait Interner: salsa::Database {
 
 pub trait CompilerExt: Interner {
     fn report_error(&self, error: Error);
+    fn maybe_report_error(&self, error: Option<Error>) {
+        if let Some(error) = error {
+            self.report_error(error)
+        }
+    }
 
     fn num_errors(&self) -> usize;
 
@@ -262,7 +274,7 @@ pub trait CompilerExt: Interner {
 pub enum DefError {
     /// This happens when we can't find a variable, or we try to get the value of a definition that doesn't have one, like a declaration.
     NoValue,
-    ElabError(DefId),
+    ElabError,
 }
 
 #[salsa::query_group(CompilerDatabase)]
@@ -317,7 +329,7 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) ->
                     if let Some(ty) = def.given_type(id, state.cxt, db) {
                         state.define(name, NameInfo::Rec(id, ty), db);
                     } else {
-                        state.define(name, NameInfo::Rec(id, Val::Error), db);
+                        state.define(name, NameInfo::Error, db);
                     }
                 }
                 temp.push((name, id));
