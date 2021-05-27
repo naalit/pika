@@ -2993,7 +2993,52 @@ pub fn check(
                 }
             }
 
-            let (term, i_ty) = infer(true, pre, db, mcxt)?;
+            let (term, mut i_ty) = infer(true, pre, db, mcxt)?;
+
+            match (ty, &mut i_ty) {
+                (Val::Fun(_, _, effs), Val::Fun(_, _, effs2))
+                | (Val::Clos(Pi, _, _, effs), Val::Fun(_, _, effs2))
+                | (Val::Fun(_, _, effs), Val::Clos(Pi, _, _, effs2))
+                | (Val::Clos(Pi, _, _, effs), Val::Clos(Pi, _, _, effs2))
+                    if effs.len() < effs2.len() =>
+                {
+                    // Capture ambient effects - implicit effect polymorphism
+                    let mut effs3 = Vec::new();
+                    let mut tcxt = mcxt.clone();
+                    for e in effs2.take() {
+                        let mut found = false;
+                        for i in effs {
+                            if unify(
+                                e.clone(),
+                                i.clone(),
+                                tcxt.size,
+                                Span::empty(),
+                                db,
+                                &mut tcxt,
+                            )
+                            .unwrap_or(false)
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if found {
+                            effs3.push(e);
+                        } else {
+                            if !mcxt.eff_stack.clone().try_eff(e.clone(), db, mcxt) {
+                                return Err(TypeError::EffNotAllowed(
+                                    pre.span(),
+                                    e,
+                                    mcxt.eff_stack.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    *effs2 = effs3;
+                }
+                (_, _) => (),
+            };
+
             // TODO should we take `ty` by value?
             if !unify(ty.clone(), i_ty.clone(), mcxt.size, pre.span(), db, mcxt)? {
                 // Use an arity error if we got a function type but don't expect one

@@ -1,0 +1,21 @@
+# Implicit effect polymorphism, like Frank's ambient effects
+type Option a of
+    Some a
+    None
+where
+    fun map [a b] (f : a -> b) (self : Option a) : Option b = case self of
+        Some a => Some (f a)
+        None => None
+    end
+end
+
+# Should print:
+# 12
+# 0
+fun main () with IO = do
+    val a : Option I32 = Option.Some [I32] 12
+    val b : Option I32 = Option.None
+    Option.map print a
+    Option.map print b
+    print 0
+end

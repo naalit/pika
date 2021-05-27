@@ -200,6 +200,16 @@ fn test_choice() {
 }
 
 #[test]
+fn test_ambient() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/ambient.pk"])
+        .assert()
+        .stdout("12\n0\n")
+        .success();
+}
+
+#[test]
 fn test_do_meta() {
     Command::cargo_bin("pika")
         .unwrap()
