@@ -1,0 +1,23 @@
+val Vec3 = sig
+    val x : I32
+    val y : I32
+    val z : I32
+end
+
+val up : Vec3 = struct
+    val x : I32 = 0
+    val y : I32 = 1
+    val z : I32 = 0
+end
+
+fun print_vec3 (v : Vec3) with IO = do
+    puts "{\n\t"
+    print (v.x)
+    puts "\t"
+    print (v.y)
+    puts "\t"
+    print (v.z)
+    puts "}\n"
+end
+
+fun main () with IO = print_vec3 up

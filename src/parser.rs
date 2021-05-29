@@ -182,13 +182,13 @@ impl<'i> Parser<'i> {
                 match self.peek("=")? {
                     Tok::Equals => {
                         self.next();
+                        let body = self.term()?;
+
+                        Ok(PreDef::Val(name, ty, body).into())
                     }
-                    t => return self.unexpected(t, "="),
+                    Tok::Newline => Ok(PreDef::ValDec(name, ty).into()),
+                    t => self.unexpected(t, "="),
                 }
-
-                let body = self.term()?;
-
-                Ok(PreDef::Val(name, ty, body).into())
             }
             Tok::Fun => {
                 // Consume the `fun`
@@ -218,12 +218,17 @@ impl<'i> Parser<'i> {
 
                 let effs = self.maybe_effs_list()?;
 
-                self.expect(Tok::Equals)?;
+                match self.peek("=")? {
+                    Tok::Equals => {
+                        self.next();
+                        let body = self.term()?;
 
-                let body = self.term()?;
-
-                // TODO: do we ever infer effects? Maybe if no return type is given?
-                Ok(PreDef::Fun(name, args, ty, body, Some(effs)).into())
+                        // TODO: do we ever infer effects? Maybe if no return type is given?
+                        Ok(PreDef::Fun(name, args, ty, body, Some(effs)).into())
+                    }
+                    Tok::Newline => Ok(PreDef::FunDec(name, args, ty, Some(effs)).into()),
+                    t => self.unexpected(t, "="),
+                }
             }
             Tok::Type | Tok::Eff => {
                 // Consume the `type` or `eff`
@@ -1082,9 +1087,9 @@ impl<'i> Parser<'i> {
                 self.next();
                 Ok(Spanned::new(Pre_::Type, span))
             }
-            Tok::Do => {
+            Tok::Do | Tok::Struct | Tok::Sig => {
                 let start = self.span().0;
-                self.next();
+                let tok = self.next();
                 self.newline();
 
                 let mut v = Vec::new();
@@ -1102,7 +1107,15 @@ impl<'i> Parser<'i> {
                 let end = self.span().1;
                 self.expect(Tok::End)?;
 
-                Ok(Spanned::new(Pre_::Do(v), Span(start, end)))
+                Ok(Spanned::new(
+                    match tok.unwrap() {
+                        Tok::Do => Pre_::Do(v),
+                        Tok::Struct => Pre_::Struct(v),
+                        Tok::Sig => Pre_::Sig(v),
+                        _ => unreachable!(),
+                    },
+                    Span(start, end),
+                ))
             }
             Tok::If => {
                 let start = self.span().0;

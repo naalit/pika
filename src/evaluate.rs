@@ -51,6 +51,18 @@ impl Term {
                 x.app(Elim::Case(env.clone(), ty, cases, effs, rty), mcxt, db)
             }
             Term::Do(v) => Val::Do(env.clone(), v),
+            Term::Struct(k, v) => Val::Struct(
+                match k {
+                    StructKind::Struct(t) => {
+                        StructKind::Struct(Box::new(t.evaluate(env, mcxt, db)))
+                    }
+                    StructKind::Sig => StructKind::Sig,
+                },
+                v.into_iter()
+                    .map(|(n, t)| (n, t.evaluate(env, mcxt, db)))
+                    .collect(),
+            ),
+            Term::Dot(x, m) => x.evaluate(env, mcxt, db).app(Elim::Dot(m), mcxt, db),
         }
     }
 
@@ -147,6 +159,21 @@ impl Term {
                     .map(|(id, term)| (id, term.eval_quote(env, at, mcxt, db)))
                     .collect(),
             ),
+            Term::Struct(k, v) => Term::Struct(
+                match k {
+                    StructKind::Struct(t) => {
+                        StructKind::Struct(Box::new(t.eval_quote(env, at, mcxt, db)))
+                    }
+                    StructKind::Sig => StructKind::Sig,
+                },
+                v.into_iter()
+                    .map(|(n, t)| (n, t.eval_quote(env, at, mcxt, db)))
+                    .collect(),
+            ),
+            Term::Dot(mut x, m) => {
+                *x = x.eval_quote(env, at, mcxt, db);
+                Term::Dot(x, m)
+            }
         }
     }
 }
@@ -249,6 +276,15 @@ impl Val {
                     .collect();
                 Val::Do(env, v)
             }
+            Val::Struct(k, v) => Val::Struct(
+                match k {
+                    StructKind::Struct(t) => StructKind::Struct(Box::new(t.force(at, db, mcxt))),
+                    StructKind::Sig => StructKind::Sig,
+                },
+                v.into_iter()
+                    .map(|(n, t)| (n, t.force(at, db, mcxt)))
+                    .collect(),
+            ),
             Val::Clos(t, i, mut cl, effs) => {
                 cl.ty = cl.ty.force(at, db, mcxt);
                 cl.term = (*cl)
@@ -336,6 +372,15 @@ impl Val {
             Val::Do(mut env, v) => Term::Do(
                 v.into_iter()
                     .map(|(d, t)| (d, t.eval_quote(&mut env, at, mcxt, db)))
+                    .collect(),
+            ),
+            Val::Struct(k, v) => Term::Struct(
+                match k {
+                    StructKind::Struct(t) => StructKind::Struct(Box::new(t.quote(at, mcxt, db))),
+                    StructKind::Sig => StructKind::Sig,
+                },
+                v.into_iter()
+                    .map(|(n, t)| (n, t.quote(at, mcxt, db)))
                     .collect(),
             ),
             Val::Clos(t, icit, cl, effs) => Term::Clos(
@@ -440,6 +485,17 @@ impl Val {
                     .collect();
                 Val::Do(env, v)
             }
+            Val::Struct(k, v) => Val::Struct(
+                match k {
+                    StructKind::Struct(t) => {
+                        StructKind::Struct(Box::new(t.inline_metas(at, mcxt, db)))
+                    }
+                    StructKind::Sig => StructKind::Sig,
+                },
+                v.into_iter()
+                    .map(|(n, t)| (n, t.inline_metas(at, mcxt, db)))
+                    .collect(),
+            ),
             Val::Clos(t, i, mut cl, effs) => {
                 let cl_size = cl.env_size();
                 cl.env.inline_metas(mcxt, db);
@@ -487,6 +543,14 @@ impl Elim {
                 }
                 unreachable!()
             }
+            Elim::Dot(m) => match head {
+                Val::Struct(StructKind::Struct(_), v) => v
+                    .into_iter()
+                    .find(|(n, _)| m == *n)
+                    .map(|(_, x)| Ok(x))
+                    .unwrap(),
+                _ => Err((head, Elim::Dot(m))),
+            },
         }
     }
 
@@ -515,6 +579,7 @@ impl Elim {
                 *ret_ty = ret_ty.inline_metas(mcxt, env_size, db);
                 Elim::Case(env, hty, branches, effs, ret_ty)
             }
+            Elim::Dot(m) => Elim::Dot(m),
         }
     }
 
@@ -544,6 +609,7 @@ impl Elim {
                 *ret_ty = ret_ty.eval_quote(&mut env, at, mcxt, db);
                 Term::Case(Box::new(head), hty, branches, effs, ret_ty)
             }
+            Elim::Dot(m) => Term::Dot(Box::new(head), m),
         }
     }
 }

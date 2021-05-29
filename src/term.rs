@@ -154,7 +154,6 @@ pub enum Pre_ {
     Fun(PreTy, PreTy, Vec<Pre>),
     App(Icit, Pre, Pre),
     Do(Vec<PreDefAn>),
-    Struct(Vec<PreDefAn>),
     Hole(MetaSource),
     /// Dot(a, b, [c, d]) = a.b c d
     Dot(Pre, SName, Vec<(Icit, Pre)>),
@@ -169,6 +168,9 @@ pub enum Pre_ {
     BinOp(Spanned<BinOp>, Pre, Pre),
     /// If(cond, then, else)
     If(Pre, Pre, Pre),
+    Sig(Vec<PreDefAn>),
+    Struct(Vec<PreDefAn>),
+    StructShort(Vec<(Name, Option<Pre>)>),
 }
 
 /// What can go inside of `@[whatever]`; currently, attributes are only used for benchmarking and user-defined attributes don't exist.
@@ -453,6 +455,12 @@ We need the head type for all applications, to see what effects to pass.
 
 */
 
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum StructKind<Ty> {
+    Struct(Box<Ty>),
+    Sig,
+}
+
 pub type Ty = Term;
 /// The core syntax. This uses `Ix`, De Bruijn indices.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -469,6 +477,8 @@ pub enum Term {
     Lit(Literal, Builtin),
     /// do A; B; () end
     Do(Vec<(DefId, Term)>),
+    Struct(StructKind<Term>, Vec<(Name, Term)>),
+    Dot(Box<Term>, Name),
 }
 
 impl Term {
@@ -514,6 +524,16 @@ impl Term {
             Term::Do(v) => match v.last() {
                 Some((_, x)) => x.ty(at, mcxt, db),
                 None => Term::Var(Var::Builtin(Builtin::UnitType), Box::new(Term::Type)),
+            },
+            Term::Struct(StructKind::Sig, _) => Term::Type,
+            Term::Struct(StructKind::Struct(t), _) => (**t).clone(),
+            Term::Dot(x, m) => match x.ty(at, mcxt, db).inline_top(db) {
+                Term::Struct(StructKind::Sig, v) => v
+                    .into_iter()
+                    .find(|(n, _x)| n == m)
+                    .map(|(_n, x)| x)
+                    .unwrap(),
+                _ => unreachable!(),
             },
         }
     }
@@ -818,6 +838,35 @@ impl Term {
                     .chain(Doc::keyword("end"))
                     .prec(Prec::Atom)
             }
+            Term::Struct(kind, v) => {
+                let mut doc = match kind {
+                    StructKind::Struct(_) => Doc::keyword("struct"),
+                    StructKind::Sig => Doc::keyword("sig"),
+                };
+                let mut i = 0;
+                for (name, term) in v {
+                    let name = names.disamb(*name, db);
+                    doc = doc.hardline().chain(
+                        Doc::keyword("val")
+                            .space()
+                            .add(name.get(db))
+                            .space()
+                            .add("=")
+                            .space()
+                            .chain(term.pretty(db, names)),
+                    );
+                    names.add(name);
+                    i += 1;
+                }
+                for _ in 0..i {
+                    names.remove();
+                }
+                doc.indent()
+                    .line()
+                    .chain(Doc::keyword("end"))
+                    .prec(Prec::Atom)
+            }
+            Term::Dot(x, m) => x.pretty(db, names).nest(Prec::Atom).add('.').add(m.get(db)),
         }
     }
 }
@@ -1030,6 +1079,7 @@ pub enum Elim {
     App(Icit, Val),
     /// Case(env, scrutinee_ty, branches, effects, ret_ty)
     Case(Env, Box<Term>, Vec<(Pat, Term)>, Vec<Term>, Box<Term>),
+    Dot(Name),
 }
 impl Elim {
     pub fn into_app(self) -> Option<(Icit, Val)> {
@@ -1183,6 +1233,7 @@ pub enum Val {
     Lit(Literal, Builtin),
     /// do A; B; () end
     Do(Env, Vec<(DefId, Term)>),
+    Struct(StructKind<Val>, Vec<(Name, Val)>),
 }
 impl Val {
     pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {

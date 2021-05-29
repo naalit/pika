@@ -210,6 +210,23 @@ fn test_ambient() {
 }
 
 #[test]
+fn test_structs() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/structs.pk"])
+        .assert()
+        .stdout(
+            "{
+\t0
+\t1
+\t0
+}
+",
+        )
+        .success();
+}
+
+#[test]
 fn test_do_meta() {
     Command::cargo_bin("pika")
         .unwrap()

@@ -113,6 +113,28 @@ impl Term {
                 })
                 .collect::<Result<_, _>>()
                 .map(Term::Do),
+            Term::Struct(k, v) => Ok(Term::Struct(
+                match k {
+                    StructKind::Struct(t) => StructKind::Struct(Box::new(t.check_solution(
+                        meta.clone(),
+                        ren,
+                        lfrom,
+                        lto,
+                        names,
+                    )?)),
+                    StructKind::Sig => StructKind::Sig,
+                },
+                v.into_iter()
+                    .map(|(n, t)| {
+                        t.check_solution(meta.clone(), ren, lfrom, lto, names)
+                            .map(|t| (n, t))
+                    })
+                    .collect::<Result<_, _>>()?,
+            )),
+            Term::Dot(mut x, m) => {
+                *x = x.check_solution(meta, ren, lfrom, lto, names)?;
+                Ok(Term::Dot(x, m))
+            }
         }
     }
 }
@@ -126,6 +148,7 @@ pub struct CxtState {
     pub size: Size,
     pub local_constraints: HashMap<Lvl, Val>,
     pub eff_stack: EffStack,
+    pub is_sig: bool,
 }
 /// Implemented manually only because HashMap doesn't implement Hash.
 /// It should be the same as a hypothetical derived implementation.
@@ -148,6 +171,7 @@ impl CxtState {
             size: cxt.size(db),
             local_constraints: Default::default(),
             eff_stack: Default::default(),
+            is_sig: false,
         }
     }
 
@@ -253,6 +277,7 @@ impl MCxt {
             size: self.size,
             local_constraints: self.local_constraints.clone(),
             eff_stack: self.eff_stack.clone(),
+            is_sig: false,
         }
     }
     pub fn set_state(&mut self, state: CxtState) {
@@ -261,6 +286,7 @@ impl MCxt {
             size,
             local_constraints,
             eff_stack,
+            is_sig: _,
         } = state;
         self.cxt = cxt;
         self.size = size;
@@ -287,6 +313,7 @@ impl MCxt {
             size,
             local_constraints,
             eff_stack,
+            is_sig: _,
         } = state;
         MCxt {
             cxt,
@@ -605,6 +632,66 @@ impl MCxt {
             panic!("Don't call check_locals() on a global MCxt!")
         }
     }
+
+    pub fn elab_block(
+        &mut self,
+        v: Vec<PreDefAn>,
+        is_sig: bool,
+        db: &dyn Compiler,
+    ) -> Result<Vec<DefId>, TypeError> {
+        let mut state = self.state();
+        state.is_sig = is_sig;
+        let block = crate::query::intern_block(v, db, state);
+        // Make sure any type errors get reported
+        {
+            let mut mcxt2 = self.clone();
+            for &i in &block {
+                if let Ok(info) = db.elaborate_def(i) {
+                    for e in &*info.effects {
+                        assert!(self.eff_stack.try_eff(e.clone(), db, &mut mcxt2));
+                    }
+                    for i in &*info.solved_globals {
+                        match i {
+                            RecSolution::ParentLocal(d, n, span, term)
+                                if self.ty == MCxtType::Local(*d) =>
+                            {
+                                match &self.local_metas[*n as usize] {
+                                    MetaEntry::Solved(t2, s2) => {
+                                        let t2 = (**t2).clone().evaluate(&self.env(), self, db);
+                                        let term = term.clone().evaluate(&self.env(), self, db);
+                                        if !unify(
+                                            t2.clone(),
+                                            term.clone(),
+                                            self.size,
+                                            *span,
+                                            db,
+                                            &mut mcxt2,
+                                        )? {
+                                            db.maybe_report_error(
+                                                TypeError::Unify(
+                                                    self.clone(),
+                                                    Spanned::new(term, *span),
+                                                    t2,
+                                                    ReasonExpected::MustMatch(*s2),
+                                                )
+                                                .into_error(self.cxt.file(db), db, self),
+                                            );
+                                        }
+                                    }
+                                    MetaEntry::Unsolved(_, _, _) => {
+                                        self.local_metas[*n as usize] =
+                                            MetaEntry::Solved(Arc::new(term.clone()), *span);
+                                    }
+                                }
+                            }
+                            _ => self.solved_globals.push(i.clone()),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(block)
+    }
 }
 impl Var<Lvl> {
     fn pretty_meta(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
@@ -775,8 +862,50 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
     let predef = db.lookup_intern_predef(predef_id);
     let cxt = state.cxt;
     let file = cxt.file(db);
+    let is_sig = state.is_sig;
     let mut mcxt = MCxt::from_state(state, MCxtType::Local(def));
     let (term, ty): (Term, VTy) = match &**predef {
+        PreDef::FunDec(_, _from, _to, _effs) => {
+            // TODO: When function declarations are actually used, change this so they're dependent.
+            todo!("function declarations")
+            // for (_, _, from) in from {
+            //     if let Err(e) = check(from, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+            //         db.report_error(e.into_error(file, db, &mcxt));
+            //     }
+            // }
+            // if let Err(e) = check(to, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+            //     db.report_error(e.into_error(file, db, &mcxt));
+            // }
+            // Err(DefError::NoValue)
+        }
+        PreDef::ValDec(name, ty) => {
+            if !is_sig {
+                db.report_error(Error::new(
+                    file,
+                    "Declarations are only allowed in record signatures",
+                    name.span(),
+                    "try adding a body with =",
+                ));
+                return Err(DefError::ElabError);
+            }
+            match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
+                Ok(t) => Ok((t, Val::Type)),
+                Err(e) => {
+                    db.maybe_report_error(e.into_error(file, db, &mcxt));
+                    Err(DefError::ElabError)
+                }
+            }
+        }
+        _ if is_sig => {
+            db.report_error(Error::new(
+                file,
+                "Only declarations are allowed in record signatures",
+                predef.span(),
+                "regular definitions aren't allowed here",
+            ));
+            return Err(DefError::ElabError);
+        }
+
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
             let tyspan = ty.span();
             match check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
@@ -1295,25 +1424,6 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             }
             Ok(stuff) => Ok(stuff),
         },
-        PreDef::FunDec(_, _from, _to, _effs) => {
-            // TODO: When function declarations are actually used, change this so they're dependent.
-            todo!("function declarations")
-            // for (_, _, from) in from {
-            //     if let Err(e) = check(from, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-            //         db.report_error(e.into_error(file, db, &mcxt));
-            //     }
-            // }
-            // if let Err(e) = check(to, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-            //     db.report_error(e.into_error(file, db, &mcxt));
-            // }
-            // Err(DefError::NoValue)
-        }
-        PreDef::ValDec(_, ty) => {
-            if let Err(e) = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, &mut mcxt) {
-                db.maybe_report_error(e.into_error(file, db, &mcxt));
-            }
-            Err(DefError::NoValue)
-        }
     }?;
     // mcxt.solved_globals
     //     .push(RecSolution::Defined(predef_id, 0, predef.span(), ty.clone()));
@@ -1850,6 +1960,22 @@ fn p_unify(
             Ok(r)
         }
 
+        (Val::Struct(k, v), Val::Struct(k2, v2)) => {
+            match (k, k2) {
+                (StructKind::Struct(_), StructKind::Struct(_)) => (),
+                (StructKind::Sig, StructKind::Sig) => (),
+                _ => return Ok(No),
+            }
+            let mut r = Yes;
+            for ((n, a), (n2, b)) in v.into_iter().zip(v2.into_iter()) {
+                if n != n2 {
+                    return Ok(No);
+                }
+                r = r & p_unify(mode, a, b, size, span, db, mcxt)?;
+            }
+            Ok(r)
+        }
+
         // Since our terms are locally nameless (we're using De Bruijn levels), we automatically get alpha equivalence.
         (Val::Clos(Lam, _, cl, _), Val::Clos(Lam, _, cl2, _)) => p_unify(
             mode,
@@ -2371,56 +2497,9 @@ pub fn infer(
 
         Pre_::Do(v) => {
             // We store the whole block in Salsa, then query the last expression
-            let mut block = crate::query::intern_block(v.clone(), db, mcxt.state());
-            // Make sure any type errors get reported
-            {
-                let mut mcxt2 = mcxt.clone();
-                for &i in &block {
-                    if let Ok(info) = db.elaborate_def(i) {
-                        for e in &*info.effects {
-                            assert!(mcxt.eff_stack.try_eff(e.clone(), db, &mut mcxt2));
-                        }
-                        for i in &*info.solved_globals {
-                            match i {
-                                RecSolution::ParentLocal(d, n, span, term)
-                                    if mcxt.ty == MCxtType::Local(*d) =>
-                                {
-                                    match &mcxt.local_metas[*n as usize] {
-                                        MetaEntry::Solved(t2, s2) => {
-                                            let t2 = (**t2).clone().evaluate(&mcxt.env(), mcxt, db);
-                                            let term = term.clone().evaluate(&mcxt.env(), mcxt, db);
-                                            if !unify(
-                                                t2.clone(),
-                                                term.clone(),
-                                                mcxt.size,
-                                                *span,
-                                                db,
-                                                &mut mcxt2,
-                                            )? {
-                                                db.maybe_report_error(
-                                                    TypeError::Unify(
-                                                        mcxt.clone(),
-                                                        Spanned::new(term, *span),
-                                                        t2,
-                                                        ReasonExpected::MustMatch(*s2),
-                                                    )
-                                                    .into_error(mcxt.cxt.file(db), db, mcxt),
-                                                );
-                                            }
-                                        }
-                                        MetaEntry::Unsolved(_, _, _) => {
-                                            mcxt.local_metas[*n as usize] =
-                                                MetaEntry::Solved(Arc::new(term.clone()), *span);
-                                        }
-                                    }
-                                }
-                                _ => mcxt.solved_globals.push(i.clone()),
-                            }
-                        }
-                    }
-                }
-            }
-            // Now query the last expression again
+            let mut block = mcxt.elab_block(v.clone(), false, db)?;
+
+            // Now query the last expression
             let mut ret_ty = None;
             let mut state = mcxt.state();
             if let Some(&last) = block.last() {
@@ -2454,7 +2533,37 @@ pub fn infer(
             Ok((Term::Do(block), ret_ty))
         }
 
-        Pre_::Struct(_) => todo!("elaborate struct"),
+        Pre_::Sig(v) => {
+            let block = mcxt.elab_block(v.clone(), true, db)?;
+            let struct_block: Vec<_> = block
+                .into_iter()
+                .filter_map(|id| {
+                    let info = db.elaborate_def(id).ok()?;
+                    let (pre, _) = db.lookup_intern_def(id);
+                    let name = db.lookup_intern_predef(pre).name().unwrap();
+                    Some((name, (*info.term).clone()))
+                })
+                .collect();
+            Ok((Term::Struct(StructKind::Sig, struct_block), Val::Type))
+        }
+        Pre_::Struct(v) => {
+            let block = mcxt.elab_block(v.clone(), false, db)?;
+            let (struct_block, sig_block) = block
+                .into_iter()
+                .filter_map(|id| {
+                    let info = db.elaborate_def(id).ok()?;
+                    let (pre, _) = db.lookup_intern_def(id);
+                    let name = db.lookup_intern_predef(pre).name().unwrap();
+                    let ty = (*info.typ).clone().quote(mcxt.size, mcxt, db);
+                    Some(((name, (*info.term).clone()), (name, ty)))
+                })
+                .unzip();
+            let ty = Term::Struct(StructKind::Sig, sig_block);
+            let term = Term::Struct(StructKind::Struct(Box::new(ty.clone())), struct_block);
+            let vty = ty.evaluate(&mcxt.env(), mcxt, db);
+            Ok((term, vty))
+        }
+        Pre_::StructShort(_) => todo!("elaborate short-form struct"),
 
         Pre_::Hole(source) => {
             let ty = mcxt.new_meta(None, pre.span(), MetaSource::HoleType, Term::Type, db);
@@ -2463,14 +2572,18 @@ pub fn infer(
         }
 
         Pre_::Dot(head, m, args) => {
-            match infer(false, head, db, mcxt).map(|(x, ty)| {
-                (
-                    x.evaluate(&mcxt.env(), mcxt, db)
-                        .inline(mcxt.size, db, mcxt),
-                    ty,
-                )
-            })? {
-                (Val::App(Var::Builtin(Builtin::Bool), _, _, _), _) => {
+            match infer(false, head, db, mcxt)
+                .map(|(x, ty)| (x.inline_top(db), ty.inline(mcxt.size, db, mcxt)))?
+            {
+                (s, Val::Struct(StructKind::Sig, v)) => match v.iter().find(|&&(n, _)| n == **m) {
+                    Some((_, ty)) => Ok((Term::Dot(Box::new(s), **m), ty.clone())),
+                    None => Err(TypeError::MemberNotFound(
+                        Span(head.span().0, m.span().1),
+                        ScopeType::Struct,
+                        **m,
+                    )),
+                },
+                (Term::Var(Var::Builtin(Builtin::Bool), _), _) => {
                     let tbool = Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type));
                     let vbool = Val::builtin(Builtin::Bool, Val::Type);
                     match &*db.lookup_intern_name(**m) {
@@ -2489,7 +2602,7 @@ pub fn infer(
                         )),
                     }
                 }
-                (Val::App(Var::Type(id, scope), _, sp, _), _) if sp.is_empty() => {
+                (Term::Var(Var::Type(id, scope), _), _) => {
                     let scope = db.lookup_intern_scope(scope);
                     for &(n, v) in scope.iter().rev() {
                         if n == **m {
