@@ -1,0 +1,3 @@
+fun get_number () : I32 = 3
+
+fun print_number (x : I32) : () with IO = print x

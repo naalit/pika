@@ -466,13 +466,6 @@ pub enum Meta {
     Local(DefId, u16),
 }
 
-/*
-Problem: `(if a then b else c) d`
-We can turn that into `Lazy(App(If(...), d))`, but then we need the head type.
-We need the head type for all applications, to see what effects to pass.
-
-*/
-
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum StructKind<Ty> {
     Struct(Box<Ty>),
@@ -700,6 +693,12 @@ impl Term {
                         .add(""),
                     Meta::Local(def, id) => Doc::start("?").add(def.num()).add(".").add(id),
                 },
+                Var::File(f) => Doc::start({
+                    use std::path::Path;
+                    let files = crate::error::FILES.read().unwrap();
+                    let path: &Path = files.get(*f).unwrap().name().as_ref();
+                    path.file_stem().unwrap().to_str().unwrap().to_owned()
+                }),
                 Var::Builtin(b) => b.pretty(),
             },
             Term::Lit(l, _) => l.pretty(db),
@@ -1026,6 +1025,7 @@ pub enum Var<Local> {
     Local(Local),
     Top(DefId),
     Rec(PreDefId),
+    File(FileId),
     Meta(Meta),
     /// Datatypes are identified by their DefId as well, since they all have one and they're distinct.
     /// A `Type(id)` is the same as a `Top(id)`, except that it can't be inlined.
@@ -1043,6 +1043,7 @@ impl Var<Ix> {
             Var::Meta(m) => Var::Meta(m),
             Var::Type(i, s) => Var::Type(i, s),
             Var::Cons(i) => Var::Cons(i),
+            Var::File(f) => Var::File(f),
             Var::Builtin(b) => Var::Builtin(b),
         }
     }
@@ -1056,6 +1057,7 @@ impl Var<Lvl> {
             Var::Meta(m) => Var::Meta(m),
             Var::Type(i, s) => Var::Type(i, s),
             Var::Cons(i) => Var::Cons(i),
+            Var::File(f) => Var::File(f),
             Var::Builtin(b) => Var::Builtin(b),
         }
     }
@@ -1176,6 +1178,7 @@ impl Glued {
                 // A datatype is already fully evaluated
                 Var::Type(_, _) => None,
                 Var::Cons(_) => None,
+                Var::File(_) => None,
                 // Var::Builtin(Builtin::BinOp(op)) => {
                 //     let sp = sp.into_owned();
                 //     if sp.len() != 2 {
@@ -1339,6 +1342,10 @@ impl Val {
 
     pub fn cons(id: DefId, ty: VTy) -> Val {
         Val::App(Var::Cons(id), Box::new(ty), Vec::new(), Glued::new())
+    }
+
+    pub fn file(id: FileId, ty: VTy) -> Val {
+        Val::App(Var::File(id), Box::new(ty), Vec::new(), Glued::new())
     }
 
     pub fn meta(meta: Meta, ty: VTy) -> Val {

@@ -372,15 +372,17 @@ impl Val {
     }
 }
 
-pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
+pub fn durin(db: &dyn Compiler, files: impl IntoIterator<Item = FileId>) -> ir::Module {
     let mut mcxt = ModCxt::new(db);
-    for &def in &*db.top_level(file) {
-        if let Ok(info) = db.elaborate_def(def) {
-            mcxt.local(def, |lcxt| {
-                let val = info.term.as_ref().unwrap().lower(lcxt);
-                lower_children(def, lcxt);
-                val
-            });
+    for file in files {
+        for &def in &*db.top_level(file) {
+            if let Ok(info) = db.elaborate_def(def) {
+                mcxt.local(def, |lcxt| {
+                    let val = info.term.as_ref().unwrap().lower(lcxt);
+                    lower_children(def, lcxt);
+                    val
+                });
+            }
         }
     }
     mcxt.finish()
@@ -712,6 +714,25 @@ impl Term {
                 cxt,
             ),
             Term::Var(v, ty) => match v {
+                Var::File(id) => {
+                    let mut prod = Vec::new();
+                    let mut tys = Vec::new();
+                    for &i in &*cxt.db.top_level(*id) {
+                        let ty = cxt.db.elaborate_def(i).unwrap().typ;
+                        let (i, _) = cxt.db.lookup_intern_def(i);
+                        let pre = cxt.db.lookup_intern_predef(i);
+                        prod.push((pre.name().unwrap(), cxt.get_or_reserve(i)));
+                        tys.push((pre.name().unwrap(), (*ty).clone().lower(cxt)));
+                    }
+
+                    prod.sort_by_key(|(n, _)| n.get(cxt.db));
+                    let prod: SmallVec<_> = prod.into_iter().map(|(_, x)| x).collect();
+                    tys.sort_by_key(|(n, _)| n.get(cxt.db));
+                    let tys: SmallVec<_> = tys.into_iter().map(|(_, x)| x).collect();
+
+                    let ty = cxt.builder.prod_type(tys);
+                    cxt.builder.product(ty, prod)
+                }
                 Var::Builtin(b) => b.lower(&ty, cxt),
                 Var::Local(i) => *cxt.locals.get(*i),
                 Var::Top(i) => {
@@ -719,7 +740,7 @@ impl Term {
                     cxt.get_or_reserve(i)
                 }
                 Var::Rec(i) => cxt.get_or_reserve(*i),
-                Var::Meta(_) => panic!("unsolved meta passed to lower()"),
+                Var::Meta(_) => panic!("Found unsolved metavariable during lowering: right now we don't allow inferred types on boundaries between files!"),
                 Var::Type(tid, sid) => {
                     let (pre, _) = cxt.db.lookup_intern_def(*tid);
                     cxt.scope_ids.insert(pre, (*tid, *sid));
@@ -1422,6 +1443,7 @@ mod tests {
             .unwrap()
             .add("file_name".into(), buf.clone());
         db.set_file_source(id, buf);
+        db.set_input_files(vec![id]);
         let mut mcxt = ModCxt::new(&db);
         for &def in &*db.top_level(id) {
             if let Ok(info) = db.elaborate_def(def) {

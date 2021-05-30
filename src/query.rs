@@ -282,6 +282,13 @@ pub trait Compiler: CompilerExt + Interner {
     #[salsa::input]
     fn file_source(&self, file: FileId) -> String;
 
+    #[salsa::input]
+    fn input_files(&self) -> Vec<FileId>;
+
+    fn parsed(&self, file: FileId) -> Option<Arc<Vec<PreDefAn>>>;
+
+    fn file_type(&self, file: FileId) -> Option<Arc<Val>>;
+
     /// Returns a list of the interned defs
     fn top_level(&self, file: FileId) -> Arc<Vec<DefId>>;
 
@@ -294,20 +301,63 @@ fn def_type(db: &dyn Compiler, def: DefId) -> Result<Arc<VTy>, DefError> {
     db.elaborate_def(def).map(|ElabInfo { typ, .. }| typ)
 }
 
-fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
+fn parsed(db: &dyn Compiler, file: FileId) -> Option<Arc<Vec<PreDefAn>>> {
     use crate::parser::Parser;
 
     let source = db.file_source(file);
-
     let mut parser = Parser::new(db, crate::lexer::Lexer::new(&source));
-    let cxt = Cxt::new(file, db);
-    let state = CxtState::new(cxt, db);
     match parser.defs() {
-        Ok(v) => Arc::new(intern_block(v, db, state)),
+        Ok(v) => Some(Arc::new(v)),
         Err(e) => {
             db.report_error(e.into_error(file));
-            Arc::new(Vec::new())
+            None
         }
+    }
+}
+
+fn file_type(db: &dyn Compiler, file: FileId) -> Option<Arc<Val>> {
+    let mut cxt = Cxt::new(file, db);
+    let v = db.parsed(file)?;
+    let mut rv = Vec::new();
+    for d in &*v {
+        // The DefId doesn't actually matter
+        let id = db.intern_predef(Arc::new(d.clone()));
+        let d = db.lookup_intern_predef(id);
+        match d.given_type(id, cxt, db) {
+            Some(ty) => {
+                let id = db.intern_def(id, CxtState::new(cxt, db));
+                rv.push((id, d.name().unwrap(), ty))
+            }
+            None => cxt = cxt.define(d.name().unwrap(), NameInfo::Error, db),
+        }
+    }
+    Some(Arc::new(Val::Struct(StructKind::Sig, rv)))
+}
+
+fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
+    let mut cxt = Cxt::new(file, db);
+
+    for other_file in db.input_files() {
+        if other_file != file {
+            let name = {
+                use std::path::Path;
+                let files = crate::error::FILES.read().unwrap();
+                let path: &Path = files.get(other_file).unwrap().name().as_ref();
+                path.file_stem().unwrap().to_str().unwrap().to_owned()
+            };
+            let name = db.intern_name(name);
+            let info = match db.file_type(other_file) {
+                Some(ty) => NameInfo::Other(Var::File(other_file), Val::Arc(ty)),
+                None => NameInfo::Error,
+            };
+            cxt = cxt.define(name, info, db);
+        }
+    }
+
+    let state = CxtState::new(cxt, db);
+    match db.parsed(file) {
+        Some(v) => Arc::new(intern_block((*v).clone(), db, state)),
+        None => Arc::new(Vec::new()),
     }
 }
 
@@ -415,11 +465,13 @@ impl CompilerExt for Database {
 }
 
 impl Database {
-    pub fn check_all(&self, file: FileId) {
-        // TODO: get meta solutions from each elaborate_def() and make sure they match
-        for def in &*self.top_level(file) {
-            // They already reported any errors to the database, so we ignore them here
-            let _ = self.elaborate_def(*def);
+    pub fn check_all(&self) {
+        for file in self.input_files() {
+            // TODO: get meta solutions from each elaborate_def() and make sure they match
+            for def in &*self.top_level(file) {
+                // They already reported any errors to the database, so we ignore them here
+                let _ = self.elaborate_def(*def);
+            }
         }
     }
 }

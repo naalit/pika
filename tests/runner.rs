@@ -244,6 +244,16 @@ fn test_const_arith() {
         .success();
 }
 
+#[test]
+fn test_multifile() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/multifile/a.pk", "tests/multifile/b.pk"])
+        .assert()
+        .stdout("3\n")
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

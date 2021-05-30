@@ -1,0 +1,1 @@
+fun main () with IO = a.print_number (a.get_number ())

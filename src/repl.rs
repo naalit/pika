@@ -163,8 +163,9 @@ pub fn run_repl() {
                 FILES.write().unwrap().set_source(file, buf.clone());
 
                 db.set_file_source(file, buf.clone());
+                db.set_input_files(vec![file]);
 
-                db.check_all(file);
+                db.check_all();
                 if db.num_errors() == 0 {
                     let mut started_yet = last_seen.is_none();
                     let defs = db.top_level(file);

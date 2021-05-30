@@ -14,6 +14,7 @@ impl Term {
             Term::Var(Var::Top(def), ty) => Val::top(def, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Rec(id), ty) => Val::rec(id, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Cons(id), ty) => Val::cons(id, ty.evaluate(env, mcxt, db)),
+            Term::Var(Var::File(id), ty) => Val::file(id, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Builtin(b), ty) => Val::builtin(b, ty.evaluate(env, mcxt, db)),
             Term::Var(Var::Meta(meta), ty) => match mcxt.get_meta(meta) {
                 Some(v) => v.evaluate(env, mcxt, db),
@@ -364,6 +365,7 @@ impl Val {
                     Var::Rec(id) => Term::Var(Var::Rec(id), Box::new(hty.clone())),
                     Var::Type(id, scope) => Term::Var(Var::Type(id, scope), Box::new(hty.clone())),
                     Var::Cons(id) => Term::Var(Var::Cons(id), Box::new(hty.clone())),
+                    Var::File(id) => Term::Var(Var::File(id), Box::new(hty.clone())),
                     Var::Builtin(b) => Term::Var(Var::Builtin(b), Box::new(hty.clone())),
                 };
                 sp.into_iter()

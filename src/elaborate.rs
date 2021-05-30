@@ -2706,7 +2706,22 @@ pub fn infer(
             {
                 (s, Val::Struct(StructKind::Sig, v)) => match v.iter().find(|&&(_, n, _)| n == **m)
                 {
-                    Some((_, _, ty)) => Ok((Term::Dot(Box::new(s), **m), ty.clone())),
+                    Some((_, _, ty)) => args
+                        .iter()
+                        .try_fold(
+                            (
+                                Term::Dot(Box::new(s), **m),
+                                ty.clone(),
+                                Span(head.span().0, m.span().1),
+                            ),
+                            |(f, fty, fspan), (i, x)| {
+                                let (f, fty) =
+                                    insert_metas(*i == Icit::Expl, f, fty, fspan, mcxt, db);
+                                let (f, fty) = infer_app(f, fty, fspan, *i, x, db, mcxt)?;
+                                Ok((f, fty, Span(fspan.0, x.span().1)))
+                            },
+                        )
+                        .map(|(f, fty, fspan)| insert_metas(insert, f, fty, fspan, mcxt, db)),
                     None => Err(TypeError::MemberNotFound(
                         Span(head.span().0, m.span().1),
                         ScopeType::Struct,
