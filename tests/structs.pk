@@ -10,6 +10,16 @@ val up : Vec3 = struct
     val z = 0
 end
 
+# A test of dependent records i.e. sigma types
+val Any = sig
+    val T : Type
+    val x : T
+end
+val three : Any = struct
+    val T = I32
+    val x = 3
+end
+
 fun print_vec3 (v : Vec3) with IO = do
     puts "{\n\t"
     print (v.x)

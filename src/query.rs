@@ -225,7 +225,7 @@ pub enum MaybeEntry {
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub struct ElabInfo {
-    pub term: Arc<Term>,
+    pub term: Option<Arc<Term>>,
     pub typ: Arc<VTy>,
     pub solved_globals: Arc<Vec<RecSolution>>,
     /// Only used for definitions in the associated namespace of a datatype
@@ -311,11 +311,19 @@ fn top_level(db: &dyn Compiler, file: FileId) -> Arc<Vec<DefId>> {
     }
 }
 
-pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) -> Vec<DefId> {
+pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, state: CxtState) -> Vec<DefId> {
+    intern_block_with(v.into_iter().map(|x| (x, None)), db, state)
+}
+
+pub fn intern_block_with(
+    v: impl IntoIterator<Item = (PreDefAn, Option<(DefId, Ty)>)>,
+    db: &dyn Compiler,
+    mut state: CxtState,
+) -> Vec<DefId> {
     let mut rv = Vec::new();
     // This stores unordered definitions (types and functions) between local variables
     let mut temp = Vec::new();
-    for def in v {
+    for (def, old_id) in v {
         if !def.ordered() {
             let name = def.name();
             let def = Arc::new(def);
@@ -327,16 +335,21 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) ->
                     state.define(name, NameInfo::Error, db);
                 }
             }
-            temp.push((name, id));
+            temp.push((name, id, old_id));
         } else {
             // Process `temp` first
-            for (name, pre) in temp.drain(0..) {
+            for (name, pre, old_id) in temp.drain(0..) {
                 let id = db.intern_def(pre, state.clone());
                 if let Some(name) = name {
                     // Define it for real now
                     state.define(name, NameInfo::Def(id), db);
                 }
                 rv.push(id);
+                if let Some((old_id, ty)) = old_id {
+                    state
+                        .local_defs
+                        .push((old_id, Term::Var(Var::Top(id), Box::new(ty))));
+                }
             }
 
             // Then add this one
@@ -347,16 +360,26 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) ->
                 state.define(name, NameInfo::Def(id), db);
             }
             rv.push(id);
+            if let Some((old_id, ty)) = old_id {
+                state
+                    .local_defs
+                    .push((old_id, Term::Var(Var::Top(id), Box::new(ty))));
+            }
         }
     }
     // If anything is left in `temp`, clear it out
-    for (name, pre) in temp {
+    for (name, pre, old_id) in temp {
         let id = db.intern_def(pre, state.clone());
         if let Some(name) = name {
             // Define it for real now
             state.define(name, NameInfo::Def(id), db);
         }
         rv.push(id);
+        if let Some((old_id, ty)) = old_id {
+            state
+                .local_defs
+                .push((old_id, Term::Var(Var::Top(id), Box::new(ty))));
+        }
     }
     rv
 }

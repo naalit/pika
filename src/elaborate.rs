@@ -125,9 +125,9 @@ impl Term {
                     StructKind::Sig => StructKind::Sig,
                 },
                 v.into_iter()
-                    .map(|(n, t)| {
+                    .map(|(d, n, t)| {
                         t.check_solution(meta.clone(), ren, lfrom, lto, names)
-                            .map(|t| (n, t))
+                            .map(|t| (d, n, t))
                     })
                     .collect::<Result<_, _>>()?,
             )),
@@ -149,6 +149,7 @@ pub struct CxtState {
     pub local_constraints: HashMap<Lvl, Val>,
     pub eff_stack: EffStack,
     pub is_sig: bool,
+    pub local_defs: Vec<(DefId, Term)>,
 }
 /// Implemented manually only because HashMap doesn't implement Hash.
 /// It should be the same as a hypothetical derived implementation.
@@ -170,6 +171,7 @@ impl CxtState {
             cxt,
             size: cxt.size(db),
             local_constraints: Default::default(),
+            local_defs: Default::default(),
             eff_stack: Default::default(),
             is_sig: false,
         }
@@ -267,6 +269,7 @@ pub struct MCxt {
     is_sig: bool,
     ty: MCxtType,
     local_metas: Vec<MetaEntry>,
+    local_defs: Vec<(DefId, Term)>,
     local_constraints: HashMap<Lvl, Val>,
     solved_globals: Vec<RecSolution>,
     children: Vec<DefId>,
@@ -277,6 +280,7 @@ impl MCxt {
             cxt: self.cxt,
             size: self.size,
             local_constraints: self.local_constraints.clone(),
+            local_defs: self.local_defs.clone(),
             eff_stack: self.eff_stack.clone(),
             is_sig: false,
         }
@@ -286,12 +290,14 @@ impl MCxt {
             cxt,
             size,
             local_constraints,
+            local_defs,
             eff_stack,
             is_sig,
         } = state;
         self.cxt = cxt;
         self.size = size;
         self.local_constraints = local_constraints;
+        self.local_defs = local_defs;
         self.eff_stack = eff_stack;
         self.is_sig = is_sig;
     }
@@ -303,6 +309,7 @@ impl MCxt {
             eff_stack: Default::default(),
             ty,
             local_metas: Vec::new(),
+            local_defs: Vec::new(),
             local_constraints: HashMap::new(),
             solved_globals: Vec::new(),
             children: Vec::new(),
@@ -315,6 +322,7 @@ impl MCxt {
             cxt,
             size,
             local_constraints,
+            local_defs,
             eff_stack,
             is_sig,
         } = state;
@@ -325,6 +333,7 @@ impl MCxt {
             ty,
             local_metas: Vec::new(),
             local_constraints,
+            local_defs,
             solved_globals: Vec::new(),
             children: Vec::new(),
             is_sig,
@@ -637,15 +646,39 @@ impl MCxt {
         }
     }
 
+    pub fn def_term(&self, def: DefId, db: &dyn Compiler) -> Option<Term> {
+        if let Some(t) = self
+            .local_defs
+            .iter()
+            .find(|(d, _)| *d == def)
+            .map(|(_, t)| t)
+        {
+            return Some(t.clone());
+        }
+        match db.elaborate_def(def) {
+            Ok(info) => info.term.map(|x| (*x).clone()),
+            Err(_) => None,
+        }
+    }
+
     pub fn elab_block(
         &mut self,
         v: Vec<PreDefAn>,
         is_sig: bool,
         db: &dyn Compiler,
     ) -> Result<Vec<DefId>, TypeError> {
+        self.elab_block_with(v.into_iter().map(|x| (x, None)), is_sig, db)
+    }
+
+    pub fn elab_block_with(
+        &mut self,
+        v: impl IntoIterator<Item = (PreDefAn, Option<(DefId, Term)>)>,
+        is_sig: bool,
+        db: &dyn Compiler,
+    ) -> Result<Vec<DefId>, TypeError> {
         let mut state = self.state();
         state.is_sig = is_sig;
-        let block = crate::query::intern_block(v, db, state);
+        let block = crate::query::intern_block_with(v, db, state);
         // Make sure any type errors get reported
         {
             let mut mcxt2 = self.clone();
@@ -884,7 +917,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
     //     .push(RecSolution::Defined(predef_id, 0, predef.span(), ty.clone()));
     let ret = match mcxt.check_locals(db) {
         Ok(()) => {
-            let term = term.inline_metas(&mcxt, cxt.size(db), db);
+            let term = term.map(|x| x.inline_metas(&mcxt, cxt.size(db), db));
             let ty = ty.inline_metas(cxt.size(db), &mcxt, db);
 
             // Print out the type and value of each definition
@@ -911,7 +944,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             };
 
             Ok(ElabInfo {
-                term: Arc::new(term),
+                term: term.map(Arc::new),
                 typ: Arc::new(ty),
                 solved_globals: Arc::new(mcxt.solved_globals),
                 children: Arc::new(mcxt.children),
@@ -935,7 +968,11 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
         }
         if predef.attributes.contains(&Attribute::Normalize) {
             let mcxt = MCxt::new(cxt, MCxtType::Local(def), db);
-            let term = (*ret.term).clone();
+            let term = (**ret
+                .term
+                .as_ref()
+                .expect("@[normalize] not allowed on declarations!"))
+            .clone();
 
             let n_start = Instant::now();
             let _ = term
@@ -958,7 +995,7 @@ fn infer_def(
     id: DefId,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
-) -> Result<(Term, VTy), TypeError> {
+) -> Result<(Option<Term>, VTy), TypeError> {
     match def {
         PreDef::Typed(def, ty, reason) => {
             let term = check_def(def, id, ty, reason.clone(), mcxt, db)?;
@@ -982,7 +1019,8 @@ fn infer_def(
                 return Err(TypeError::IllegalDec(name.span(), true));
             }
             let t = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
-            Ok((t, Val::Type))
+            let t = t.evaluate(&mcxt.env(), mcxt, db);
+            Ok((None, t))
         }
         _ if mcxt.is_sig => {
             return Err(TypeError::IllegalDec(def.span(), false));
@@ -993,7 +1031,7 @@ fn infer_def(
             let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let ty = ty.evaluate(&mcxt.env(), &mcxt, db);
             let val = check(val, &ty, ReasonExpected::Given(tyspan), db, mcxt)?;
-            Ok((val, ty))
+            Ok((Some(val), ty))
             // TODO multiple TypeErrors?
             // Err(e) => {
             //     db.maybe_report_error(e.into_error(file, db, &mcxt));
@@ -1052,29 +1090,31 @@ fn infer_def(
                 .map(|x| x.clone().quote(mcxt.size.dec(), &mcxt, db))
                 .collect();
             Ok((
-                targs
-                    .iter()
-                    .rfold(
-                        (body, mcxt.size, effs_t),
-                        |(body, mut size, effs), (name, icit, ty)| {
-                            // We need to quote the type of this argument, so decrease the size to
-                            // remove this argument from the context, since its own type can't use it
-                            size = size.dec();
-                            (
-                                Term::Clos(
-                                    Lam,
-                                    *name,
-                                    *icit,
-                                    Box::new(ty.clone().quote(size, &mcxt, db)),
-                                    Box::new(body),
-                                    effs,
-                                ),
-                                size,
-                                Vec::new(),
-                            )
-                        },
-                    )
-                    .0,
+                Some(
+                    targs
+                        .iter()
+                        .rfold(
+                            (body, mcxt.size, effs_t),
+                            |(body, mut size, effs), (name, icit, ty)| {
+                                // We need to quote the type of this argument, so decrease the size to
+                                // remove this argument from the context, since its own type can't use it
+                                size = size.dec();
+                                (
+                                    Term::Clos(
+                                        Lam,
+                                        *name,
+                                        *icit,
+                                        Box::new(ty.clone().quote(size, &mcxt, db)),
+                                        Box::new(body),
+                                        effs,
+                                    ),
+                                    size,
+                                    Vec::new(),
+                                )
+                            },
+                        )
+                        .0,
+                ),
                 targs
                     .into_iter()
                     .rfold(
@@ -1104,10 +1144,10 @@ fn infer_def(
         PreDef::Cons(_name, ty) => {
             // We don't have to do anything since the type was already determined when elaborating the type definition
             Ok((
-                Term::Var(
+                Some(Term::Var(
                     Var::Cons(id),
                     Box::new(ty.clone().quote(mcxt.size, &mcxt, db)),
-                ),
+                )),
                 ty.clone(),
             ))
         }
@@ -1444,14 +1484,14 @@ fn infer_def(
             let scope = db.intern_scope(Arc::new(scope));
 
             Ok((
-                Term::Var(
+                Some(Term::Var(
                     Var::Type(id, scope),
                     Box::new(ty_ty.clone().quote(mcxt.size, &mcxt, db)),
-                ),
+                )),
                 ty_ty,
             ))
         }
-        PreDef::Expr(e) => infer(true, e, db, mcxt),
+        PreDef::Expr(e) => infer(true, e, db, mcxt).map(|(x, t)| (Some(x), t)),
     }
 }
 
@@ -1462,19 +1502,19 @@ fn check_def(
     reason: ReasonExpected,
     mcxt: &mut MCxt,
     db: &dyn Compiler,
-) -> Result<Term, TypeError> {
+) -> Result<Option<Term>, TypeError> {
     match def {
         PreDef::Val(_, ty2, val) | PreDef::Impl(_, ty2, val) => {
             let ty2 = check(ty2, &Val::Type, ReasonExpected::UsedAsType, db, mcxt)?;
             let ty2 = ty2.evaluate(&mcxt.env(), &mcxt, db);
             try_unify(ty, &ty2, None, def.span(), reason.clone(), mcxt, db)?;
             let val = check(val, ty, reason, db, mcxt)?;
-            Ok(val)
+            Ok(Some(val))
         }
         // TODO functions
         _ => {
             let (term, i_ty) = infer_def(def, id, mcxt, db)?;
-            try_unify(ty, &i_ty, Some(&term), def.span(), reason, mcxt, db)?;
+            try_unify(ty, &i_ty, term.as_ref(), def.span(), reason, mcxt, db)?;
             Ok(term)
         }
     }
@@ -2001,7 +2041,7 @@ fn p_unify(
                 _ => return Ok(No),
             }
             let mut r = Yes;
-            for ((n, a), (n2, b)) in v.into_iter().zip(v2.into_iter()) {
+            for ((_, n, a), (_, n2, b)) in v.into_iter().zip(v2.into_iter()) {
                 if n != n2 {
                     return Ok(No);
                 }
@@ -2562,7 +2602,7 @@ pub fn infer(
             };
             let block = block
                 .into_iter()
-                .filter_map(|id| Some((id, (*db.elaborate_def(id).ok()?.term).clone())))
+                .filter_map(|id| Some((id, mcxt.def_term(id, db)?.clone())))
                 .collect();
             Ok((Term::Do(block), ret_ty))
         }
@@ -2575,7 +2615,7 @@ pub fn infer(
                     let info = db.elaborate_def(id).ok()?;
                     let (pre, _) = db.lookup_intern_def(id);
                     let name = db.lookup_intern_predef(pre).name().unwrap();
-                    Some((name, (*info.term).clone()))
+                    Some((id, name, (*info.typ).clone().quote(mcxt.size, mcxt, db)))
                 })
                 .collect();
             Ok((Term::Struct(StructKind::Sig, struct_block), Val::Type))
@@ -2589,7 +2629,7 @@ pub fn infer(
                     let (pre, _) = db.lookup_intern_def(id);
                     let name = db.lookup_intern_predef(pre).name().unwrap();
                     let ty = (*info.typ).clone().quote(mcxt.size, mcxt, db);
-                    Some(((name, (*info.term).clone()), (name, ty)))
+                    Some(((id, name, (*info.term?).clone()), (id, name, ty)))
                 })
                 .unzip();
             let ty = Term::Struct(StructKind::Sig, sig_block);
@@ -2607,10 +2647,11 @@ pub fn infer(
 
         Pre_::Dot(head, m, args) => {
             match infer(false, head, db, mcxt)
-                .map(|(x, ty)| (x.inline_top(db), ty.inline(mcxt.size, db, mcxt)))?
+                .map(|(x, ty)| (x.inline_top(mcxt, db), ty.inline(mcxt.size, db, mcxt)))?
             {
-                (s, Val::Struct(StructKind::Sig, v)) => match v.iter().find(|&&(n, _)| n == **m) {
-                    Some((_, ty)) => Ok((Term::Dot(Box::new(s), **m), ty.clone())),
+                (s, Val::Struct(StructKind::Sig, v)) => match v.iter().find(|&&(_, n, _)| n == **m)
+                {
+                    Some((_, _, ty)) => Ok((Term::Dot(Box::new(s), **m), ty.clone())),
                     None => Err(TypeError::MemberNotFound(
                         Span(head.span().0, m.span().1),
                         ScopeType::Struct,
@@ -2800,7 +2841,7 @@ fn infer_app(
         }
         _ => {
             if let (Icit::Expl, Term::Var(Var::Type(_, sid), _)) =
-                (icit, f.head().clone().inline_top(db))
+                (icit, f.head().clone().inline_top(mcxt, db))
             {
                 let scope = db.lookup_intern_scope(sid);
                 let m = db.intern_name(String::new());
@@ -3149,10 +3190,10 @@ pub fn check(
                 db.report_error(err);
                 return Err(TypeError::Sentinel);
             }
-            let block = mcxt.elab_block(
+            let block = mcxt.elab_block_with(
                 v.iter()
                     .zip(v2)
-                    .map(|(d, (n, ty))| {
+                    .map(|(d, (def2, n, ty))| {
                         if d.name() != Some(*n) {
                             db.report_error(
                                 Error::new(
@@ -3171,9 +3212,9 @@ pub fn check(
                             );
                             return Err(TypeError::Sentinel);
                         }
-                        Ok(PreDef::Typed(Box::new(d.clone()), ty.clone(), reason.clone()).into())
+                        Ok((PreDef::Typed(Box::new(d.clone()), ty.clone(), reason.clone()).into(), Some((*def2, ty.clone().quote(mcxt.size, mcxt, db)))))
                     })
-                    .collect::<Result<_, _>>()?,
+                    .collect::<Result<Vec<_>, _>>()?,
                 false,
                 db,
             )?;
@@ -3184,7 +3225,7 @@ pub fn check(
                     let (pre, _) = db.lookup_intern_def(id);
                     let name = db.lookup_intern_predef(pre).name().unwrap();
                     let ty = (*info.typ).clone().quote(mcxt.size, mcxt, db);
-                    Some(((name, (*info.term).clone()), (name, ty)))
+                    Some(((id, name, (*info.term?).clone()), (id, name, ty)))
                 })
                 .unzip();
             let ty = Term::Struct(StructKind::Sig, sig_block);

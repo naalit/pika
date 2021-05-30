@@ -59,7 +59,7 @@ impl Term {
                     StructKind::Sig => StructKind::Sig,
                 },
                 v.into_iter()
-                    .map(|(n, t)| (n, t.evaluate(env, mcxt, db)))
+                    .map(|(d, n, t)| (d, n, t.evaluate(env, mcxt, db)))
                     .collect(),
             ),
             Term::Dot(x, m) => x.evaluate(env, mcxt, db).app(Elim::Dot(m), mcxt, db),
@@ -167,7 +167,7 @@ impl Term {
                     StructKind::Sig => StructKind::Sig,
                 },
                 v.into_iter()
-                    .map(|(n, t)| (n, t.eval_quote(env, at, mcxt, db)))
+                    .map(|(d, n, t)| (d, n, t.eval_quote(env, at, mcxt, db)))
                     .collect(),
             ),
             Term::Dot(mut x, m) => {
@@ -282,7 +282,7 @@ impl Val {
                     StructKind::Sig => StructKind::Sig,
                 },
                 v.into_iter()
-                    .map(|(n, t)| (n, t.force(at, db, mcxt)))
+                    .map(|(d, n, t)| (d, n, t.force(at, db, mcxt)))
                     .collect(),
             ),
             Val::Clos(t, i, mut cl, effs) => {
@@ -380,7 +380,7 @@ impl Val {
                     StructKind::Sig => StructKind::Sig,
                 },
                 v.into_iter()
-                    .map(|(n, t)| (n, t.quote(at, mcxt, db)))
+                    .map(|(d, n, t)| (d, n, t.quote(at, mcxt, db)))
                     .collect(),
             ),
             Val::Clos(t, icit, cl, effs) => Term::Clos(
@@ -437,11 +437,11 @@ impl BinOp {
 
 impl Term {
     /// If self is a Var::Top, inline it, and call inline_top on the result.
-    pub fn inline_top(self, db: &dyn Compiler) -> Term {
+    pub fn inline_top(self, mcxt: &MCxt, db: &dyn Compiler) -> Term {
         match self {
             Term::Var(Var::Top(id), _) => {
-                if let Ok(info) = db.elaborate_def(id) {
-                    (*info.term).clone().inline_top(db)
+                if let Some(t) = mcxt.def_term(id, db) {
+                    t.inline_top(mcxt, db)
                 } else {
                     self
                 }
@@ -493,7 +493,7 @@ impl Val {
                     StructKind::Sig => StructKind::Sig,
                 },
                 v.into_iter()
-                    .map(|(n, t)| (n, t.inline_metas(at, mcxt, db)))
+                    .map(|(d, n, t)| (d, n, t.inline_metas(at, mcxt, db)))
                     .collect(),
             ),
             Val::Clos(t, i, mut cl, effs) => {
@@ -546,8 +546,8 @@ impl Elim {
             Elim::Dot(m) => match head {
                 Val::Struct(StructKind::Struct(_), v) => v
                     .into_iter()
-                    .find(|(n, _)| m == *n)
-                    .map(|(_, x)| Ok(x))
+                    .find(|(_, n, _)| m == *n)
+                    .map(|(_, _, x)| Ok(x))
                     .unwrap(),
                 _ => Err((head, Elim::Dot(m))),
             },

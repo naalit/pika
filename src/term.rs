@@ -495,7 +495,7 @@ pub enum Term {
     Lit(Literal, Builtin),
     /// do A; B; () end
     Do(Vec<(DefId, Term)>),
-    Struct(StructKind<Term>, Vec<(Name, Term)>),
+    Struct(StructKind<Term>, Vec<(DefId, Name, Term)>),
     Dot(Box<Term>, Name),
 }
 
@@ -524,7 +524,7 @@ impl Term {
             ),
             Term::Clos(Pi, _, _, _, _, _) => Term::Type,
             Term::Fun(_, _, _) => Term::Type,
-            Term::App(_, f, x) => match f.ty(at, mcxt, db).inline_top(db) {
+            Term::App(_, f, x) => match f.ty(at, mcxt, db).inline_top(mcxt, db) {
                 Term::Fun(_, to, _) => *to,
                 Term::Clos(Pi, _, _, _, to, _) => {
                     // Peel off one Pi to get the type of the next `f`.
@@ -545,11 +545,11 @@ impl Term {
             },
             Term::Struct(StructKind::Sig, _) => Term::Type,
             Term::Struct(StructKind::Struct(t), _) => (**t).clone(),
-            Term::Dot(x, m) => match x.ty(at, mcxt, db).inline_top(db) {
+            Term::Dot(x, m) => match x.ty(at, mcxt, db).inline_top(mcxt, db) {
                 Term::Struct(StructKind::Sig, v) => v
                     .into_iter()
-                    .find(|(n, _x)| n == m)
-                    .map(|(_n, x)| x)
+                    .find(|(_, n, _)| n == m)
+                    .map(|(_, _, x)| x)
                     .unwrap(),
                 _ => unreachable!(),
             },
@@ -862,7 +862,7 @@ impl Term {
                     StructKind::Sig => Doc::keyword("sig"),
                 };
                 let mut i = 0;
-                for (name, term) in v {
+                for (_, name, term) in v {
                     let name = names.disamb(*name, db);
                     doc = doc.hardline().chain(
                         Doc::keyword("val")
@@ -1193,16 +1193,14 @@ impl Glued {
                 Var::Builtin(_) => None,
                 Var::Rec(rec) => {
                     let def = mcxt.cxt.lookup_rec(rec, db)?;
-                    let val = db.elaborate_def(def).ok()?.term;
-                    let val = (*val).clone();
+                    let val = mcxt.def_term(def, db)?;
                     let val = val.evaluate(&Env::new(at), mcxt, db);
                     // let val = Val::Arc(Arc::new(val));
                     // *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
                 }
                 Var::Top(def) => {
-                    let val = db.elaborate_def(def).ok()?.term;
-                    let val = (*val).clone();
+                    let val = mcxt.def_term(def, db)?;
                     let val = val.evaluate(&Env::new(at), mcxt, db);
                     // let val = Val::Arc(Arc::new(val));
                     // *self.0.write().unwrap() = Some(val.clone());
@@ -1251,7 +1249,7 @@ pub enum Val {
     Lit(Literal, Builtin),
     /// do A; B; () end
     Do(Env, Vec<(DefId, Term)>),
-    Struct(StructKind<Val>, Vec<(Name, Val)>),
+    Struct(StructKind<Val>, Vec<(DefId, Name, Val)>),
 }
 impl Val {
     pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {

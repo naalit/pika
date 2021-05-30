@@ -190,7 +190,7 @@ pub fn run_repl() {
                                 crate::elaborate::MCxtType::Local(i),
                             );
                             let info = db.elaborate_def(i).unwrap();
-                            let val = (*info.term)
+                            let val = (*info.term.unwrap())
                                 .clone()
                                 .evaluate(&mcxt.env(), &mcxt, &db)
                                 .force(mcxt.size, &db, &mcxt);

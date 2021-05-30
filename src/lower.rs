@@ -377,7 +377,7 @@ pub fn durin(db: &dyn Compiler, file: FileId) -> ir::Module {
     for &def in &*db.top_level(file) {
         if let Ok(info) = db.elaborate_def(def) {
             mcxt.local(def, |lcxt| {
-                let val = info.term.lower(lcxt);
+                let val = info.term.as_ref().unwrap().lower(lcxt);
                 lower_children(def, lcxt);
                 val
             });
@@ -394,7 +394,7 @@ fn lower_children(def: DefId, cxt: &mut LCxt) {
     while let Some(def) = stack.pop() {
         if let Ok(info) = cxt.db.elaborate_def(def) {
             let (pre_id, _state) = cxt.db.lookup_intern_def(def);
-            let val = info.term.lower(cxt);
+            let val = info.term.as_ref().unwrap().lower(cxt);
             let val2 = cxt.get_or_reserve(pre_id);
             cxt.builder.redirect(val2, val);
 
@@ -415,7 +415,7 @@ fn lower_datatype(
         .iter()
         .filter_map(|&(_name, id)| {
             let info = cxt.db.elaborate_def(id).ok()?;
-            match &*info.term {
+            match &**info.term.as_ref().unwrap() {
                 Term::Var(Var::Cons(cid), _) if id == *cid => {
                     let mut cty: Val = info.typ.into_owned();
                     let solutions = {
@@ -836,7 +836,7 @@ impl Term {
                         .iter()
                         .filter_map(|&(_name, id)| {
                             let info = cxt.db.elaborate_def(id).ok()?;
-                            match &*info.term {
+                            match &**info.term.as_ref().unwrap() {
                                 Term::Var(Var::Cons(cid), _) if id == *cid => Some(id),
                                 _ => None,
                             }
@@ -920,11 +920,34 @@ impl Term {
             }
             Term::Struct(StructKind::Struct(t), v) => {
                 let t = t.lower(cxt);
-                let v: SmallVec<_> = v.iter().map(|(_, x)| x.lower(cxt)).collect();
-                cxt.builder.product(t, v)
+
+                let mut prod = Vec::new();
+                // Declare all the terms first
+                for (id, _, _term) in v {
+                    let (pre_id, _state) = cxt.db.lookup_intern_def(*id);
+                    let predef = cxt.db.lookup_intern_predef(pre_id);
+                    let v = cxt
+                        .builder
+                        .reserve(predef.name().map(|n| cxt.db.lookup_intern_name(n)));
+                    cxt.defs.insert(pre_id, v);
+                }
+                // Now lower them all
+                for (id, _, term) in v {
+                    let (pre_id, _state) = cxt.db.lookup_intern_def(*id);
+
+                    let val = term.lower(cxt);
+
+                    let val2 = cxt.get_or_reserve(pre_id);
+                    cxt.builder.redirect(val2, val);
+                    prod.push(val);
+
+                    lower_children(*id, cxt);
+                }
+
+                cxt.builder.product(t, prod)
             }
             Term::Struct(StructKind::Sig, v) => {
-                let v: SmallVec<_> = v.iter().map(|(_, x)| x.lower(cxt)).collect();
+                let v: SmallVec<_> = v.iter().map(|(_, _, x)| x.lower(cxt)).collect();
                 cxt.builder.prod_type(v)
             }
             // \x.f x
@@ -971,11 +994,11 @@ impl Term {
             }
             Term::Dot(x, m) => {
                 let xty = x.ty(cxt.mcxt.size, &cxt.mcxt, cxt.db);
-                let i = match xty.inline_top(cxt.db) {
+                let i = match xty.inline_top(&cxt.mcxt, cxt.db) {
                     Term::Struct(StructKind::Sig, v) => v
                         .into_iter()
                         .enumerate()
-                        .find(|(_, (n, _))| n == m)
+                        .find(|(_, (_, n, _))| n == m)
                         .map(|(i, _)| i)
                         .unwrap(),
                     _ => unreachable!(),
@@ -1310,7 +1333,7 @@ impl Pat {
                     .iter()
                     .filter_map(|&(_name, id)| {
                         let info = cxt.db.elaborate_def(id).ok()?;
-                        match &*info.term {
+                        match &**info.term.as_ref().unwrap() {
                             Term::Var(Var::Cons(cid), _) if id == *cid => Some(id),
                             _ => None,
                         }
@@ -1396,7 +1419,7 @@ mod tests {
         let mut mcxt = ModCxt::new(&db);
         for &def in &*db.top_level(id) {
             if let Ok(info) = db.elaborate_def(def) {
-                mcxt.local(def, |lcxt| info.term.lower(lcxt));
+                mcxt.local(def, |lcxt| info.term.as_ref().unwrap().lower(lcxt));
             }
         }
         println!("module: {}", mcxt.module.emit());

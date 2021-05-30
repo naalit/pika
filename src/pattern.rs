@@ -121,7 +121,7 @@ impl Cov {
                     .iter()
                     .filter_map(|&(_name, id)| {
                         let info = db.elaborate_def(id).ok()?;
-                        match &*info.term {
+                        match &**info.term.as_ref().unwrap() {
                             Term::Var(Var::Cons(cid), _) if id == *cid => {
                                 let mut size = mcxt.size;
                                 let cty = IntoOwned::<Val>::into_owned(info.typ)
@@ -141,6 +141,8 @@ impl Cov {
                                     println!(
                                         "Skipping constructor {}",
                                         info.term
+                                            .as_ref()
+                                            .unwrap()
                                             .pretty(db, &mut Names::new(mcxt.cxt, db))
                                             .ansi_string()
                                     );
@@ -276,7 +278,7 @@ impl Cov {
                     .iter()
                     .filter_map(|&(_name, id)| {
                         let info = db.elaborate_def(id).ok()?;
-                        match &*info.term {
+                        match &**info.term.as_ref().unwrap() {
                             Term::Var(Var::Cons(cid), _) if id == *cid => {
                                 let cty = info.typ.into_owned();
                                 if let Ok(cty) = UnifyRetType::no_effects(cty, &ty, &mut mcxt, db)
@@ -289,6 +291,8 @@ impl Cov {
                                     println!(
                                         "Skipping constructor {}",
                                         info.term
+                                            .as_ref()
+                                            .unwrap()
                                             .pretty(db, &mut Names::new(mcxt.cxt, db))
                                             .ansi_string()
                                     );
@@ -819,10 +823,10 @@ pub fn elab_pat(
         }
         Pre_::Var(n) => {
             if let Ok((Var::Top(id), _)) = mcxt.lookup(*n, db) {
-                if let Ok(info) = db.elaborate_def(id) {
-                    match &*info.term {
+                if let Some(term) = mcxt.def_term(id, db) {
+                    match term {
                         Term::Var(Var::Cons(id2), _) | Term::Var(Var::Type(id2, _), _) => {
-                            if id == *id2 {
+                            if id == id2 {
                                 // This is a constructor
                                 return elab_pat_app(
                                     in_eff,
@@ -983,7 +987,7 @@ fn elab_pat_app(
     );
 
     let (term, fty) = infer(false, head, db, mcxt)?;
-    let (id, fty) = match term.inline_top(db) {
+    let (id, fty) = match term.inline_top(mcxt, db) {
         Term::Var(Var::Cons(id), _) => (id, fty),
         Term::Var(Var::Type(_, sid), _) => {
             let scope = db.lookup_intern_scope(sid);
