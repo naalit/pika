@@ -8,6 +8,7 @@ Commands:
     build       Compile files but don't run them
     run         Compile files and run the resulting executable
     check       Perform typechecking but don't compile to machine code
+    repl        Run the interactive Read-Evaluate-Print-Loop
 
 Flags:
     -h, --help  Show this help message
@@ -18,6 +19,7 @@ pub enum Command {
     Check,
     Build,
     Run,
+    Repl,
 }
 impl Command {
     fn parse(s: &str) -> Option<Self> {
@@ -25,6 +27,7 @@ impl Command {
             "check" => Some(Command::Check),
             "build" => Some(Command::Build),
             "run" => Some(Command::Run),
+            "repl" => Some(Command::Repl),
             _ => None,
         }
     }
@@ -115,7 +118,7 @@ impl Config {
         }
 
         Config {
-            command: command.unwrap_or(Command::Run),
+            command: command.unwrap_or(Command::Repl),
             files,
             output,
             opt_level,
@@ -191,6 +194,7 @@ impl Config {
                     args.command = Some(cmd);
                 } else {
                     eprintln!("Unrecognized command '{}', interpreting it as a file name and defaulting to 'check'; specify a command before input file names", i);
+                    args.command = Some(Command::Check);
                     args.files.push(i.into());
                     error = true;
                 }

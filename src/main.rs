@@ -32,6 +32,10 @@ extern "C" {
 
 fn main() {
     let config = Config::from_cmd_args();
+    if config.command == Command::Repl {
+        repl::run_repl();
+        return;
+    }
     if config.files.is_empty() {
         Doc::start("error")
             .style(Style::BoldRed)

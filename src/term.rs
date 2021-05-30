@@ -1179,20 +1179,21 @@ impl Glued {
                 Var::Type(_, _) => None,
                 Var::Cons(_) => None,
                 Var::File(_) => None,
-                // Var::Builtin(Builtin::BinOp(op)) => {
-                //     let sp = sp.into_owned();
-                //     if sp.len() != 2 {
-                //         None
-                //     } else {
-                //         let a = sp[0].1.clone().inline(at, db, mcxt);
-                //         let b = sp[1].1.clone().inline(at, db, mcxt);
-                //         if let Some(v) = op.eval(&a, &b) {
-                //             Some(v)
-                //         } else {
-                //             None
-                //         }
-                //     }
-                // }
+                Var::Builtin(Builtin::BinOp(op)) => {
+                    let mut sp = sp.into_owned();
+                    if sp.len() == 2 {
+                        if let Elim::App(Icit::Expl, b) = sp.pop().unwrap() {
+                            if let Elim::App(Icit::Expl, a) = sp.pop().unwrap() {
+                                let a = a.inline(at, db, mcxt);
+                                let b = b.inline(at, db, mcxt);
+                                if let Some(v) = op.eval(&a, &b) {
+                                    return Some(v);
+                                }
+                            }
+                        }
+                    }
+                    return None;
+                }
                 Var::Builtin(_) => None,
                 Var::Rec(rec) => {
                     let def = mcxt.cxt.lookup_rec(rec, db)?;

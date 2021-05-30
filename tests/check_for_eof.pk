@@ -1,0 +1,2 @@
+# Make sure the parser doesn't just stop at an unrecognized token
+$

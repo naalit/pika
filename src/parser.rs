@@ -101,7 +101,11 @@ impl<'i> Parser<'i> {
             v.push(self.def()?);
             had_newline = self.newline();
         }
-        Ok(v)
+        if let Some(err) = self.pending_err.take() {
+            Err(err)
+        } else {
+            Ok(v)
+        }
     }
 
     /// Consume one or more newlines or semicolons, returning whether any were consumed.

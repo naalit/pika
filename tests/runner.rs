@@ -257,6 +257,15 @@ fn test_multifile() {
 // Tests for type errors
 
 #[test]
+fn test_check_for_eof() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["check", "tests/check_for_eof.pk"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn test_eff_not_allowed() {
     Command::cargo_bin("pika")
         .unwrap()
