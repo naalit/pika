@@ -2,9 +2,9 @@
 //! - `Pre` or presyntax is what we get from the parser.
 //! - `Term` or core syntax is what we get after elaborating (name resolution, type checking, etc.).
 //! - `Val` is a value, where beta reduction and associated substitution has been performed.
-use crate::common::*;
 use crate::elaborate::MCxt;
 use crate::pattern::Pat;
+use crate::{common::*, elaborate::ReasonExpected};
 
 impl Literal {
     pub fn pretty(self, db: &dyn Compiler) -> Doc {
@@ -288,8 +288,24 @@ pub enum PreDef {
 
     /// Pre-typed term, used for data constructors.
     Cons(SName, VTy),
+
+    /// PreDefAn with added type, used when type-checking structs
+    Typed(Box<PreDefAn>, VTy, ReasonExpected),
 }
 impl PreDef {
+    pub fn ordered(&self) -> bool {
+        match self {
+            PreDef::Fun(_, _, _, _, _)
+            | PreDef::Type { .. }
+            | PreDef::FunDec(_, _, _, _)
+            | PreDef::ValDec(_, _) => false,
+            PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) | PreDef::Cons(_, _) => {
+                true
+            }
+            PreDef::Typed(x, _, _) => x.ordered(),
+        }
+    }
+
     pub fn name(&self) -> Option<Name> {
         match self {
             PreDef::Fun(n, _, _, _, _)
@@ -300,6 +316,7 @@ impl PreDef {
             | PreDef::ValDec(n, _) => Some(**n),
             PreDef::Impl(n, _, _) => n.as_ref().map(|x| **x),
             PreDef::Expr(_) => None,
+            PreDef::Typed(d, _, _) => d.name(),
         }
     }
 
@@ -315,6 +332,7 @@ impl PreDef {
             PreDef::Impl(Some(n), _, _) => n.span(),
             PreDef::Impl(None, _, t) => t.span(),
             PreDef::Expr(t) => t.span(),
+            PreDef::Typed(d, _, _) => d.span(),
         }
     }
 }

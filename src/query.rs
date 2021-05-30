@@ -316,45 +316,37 @@ pub fn intern_block(v: Vec<PreDefAn>, db: &dyn Compiler, mut state: CxtState) ->
     // This stores unordered definitions (types and functions) between local variables
     let mut temp = Vec::new();
     for def in v {
-        match &*def {
-            // Unordered
-            PreDef::Fun(_, _, _, _, _)
-            | PreDef::Type { .. }
-            | PreDef::FunDec(_, _, _, _)
-            | PreDef::ValDec(_, _) => {
-                let name = def.name();
-                let def = Arc::new(def);
-                let id = db.intern_predef(def.clone());
-                if let Some(name) = name {
-                    if let Some(ty) = def.given_type(id, state.cxt, db) {
-                        state.define(name, NameInfo::Rec(id, ty), db);
-                    } else {
-                        state.define(name, NameInfo::Error, db);
-                    }
+        if !def.ordered() {
+            let name = def.name();
+            let def = Arc::new(def);
+            let id = db.intern_predef(def.clone());
+            if let Some(name) = name {
+                if let Some(ty) = def.given_type(id, state.cxt, db) {
+                    state.define(name, NameInfo::Rec(id, ty), db);
+                } else {
+                    state.define(name, NameInfo::Error, db);
                 }
-                temp.push((name, id));
             }
-            // Ordered
-            PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) | PreDef::Cons(_, _) => {
-                // Process `temp` first
-                for (name, pre) in temp.drain(0..) {
-                    let id = db.intern_def(pre, state.clone());
-                    if let Some(name) = name {
-                        // Define it for real now
-                        state.define(name, NameInfo::Def(id), db);
-                    }
-                    rv.push(id);
-                }
-
-                // Then add this one
-                let name = def.name();
-                let pre = db.intern_predef(Arc::new(def));
+            temp.push((name, id));
+        } else {
+            // Process `temp` first
+            for (name, pre) in temp.drain(0..) {
                 let id = db.intern_def(pre, state.clone());
                 if let Some(name) = name {
+                    // Define it for real now
                     state.define(name, NameInfo::Def(id), db);
                 }
                 rv.push(id);
             }
+
+            // Then add this one
+            let name = def.name();
+            let pre = db.intern_predef(Arc::new(def));
+            let id = db.intern_def(pre, state.clone());
+            if let Some(name) = name {
+                state.define(name, NameInfo::Def(id), db);
+            }
+            rv.push(id);
         }
     }
     // If anything is left in `temp`, clear it out

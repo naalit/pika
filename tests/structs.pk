@@ -5,9 +5,9 @@ val Vec3 = sig
 end
 
 val up : Vec3 = struct
-    val x : I32 = 0
-    val y : I32 = 1
-    val z : I32 = 0
+    val x = 0
+    val y = 1
+    val z = 0
 end
 
 fun print_vec3 (v : Vec3) with IO = do
