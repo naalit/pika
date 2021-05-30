@@ -932,22 +932,26 @@ impl Term {
                     cxt.defs.insert(pre_id, v);
                 }
                 // Now lower them all
-                for (id, _, term) in v {
+                for (id, n, term) in v {
                     let (pre_id, _state) = cxt.db.lookup_intern_def(*id);
 
                     let val = term.lower(cxt);
 
                     let val2 = cxt.get_or_reserve(pre_id);
                     cxt.builder.redirect(val2, val);
-                    prod.push(val);
+                    prod.push((*n, val));
 
                     lower_children(*id, cxt);
                 }
+                prod.sort_by_key(|(n, _)| n.get(cxt.db));
+                let prod: SmallVec<_> = prod.into_iter().map(|(_, x)| x).collect();
 
                 cxt.builder.product(t, prod)
             }
             Term::Struct(StructKind::Sig, v) => {
-                let v: SmallVec<_> = v.iter().map(|(_, _, x)| x.lower(cxt)).collect();
+                let mut v: Vec<_> = v.iter().map(|(_, n, x)| (*n, x.lower(cxt))).collect();
+                v.sort_by_key(|(n, _)| n.get(cxt.db));
+                let v: SmallVec<_> = v.into_iter().map(|(_, x)| x).collect();
                 cxt.builder.prod_type(v)
             }
             // \x.f x
@@ -995,12 +999,14 @@ impl Term {
             Term::Dot(x, m) => {
                 let xty = x.ty(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                 let i = match xty.inline_top(&cxt.mcxt, cxt.db) {
-                    Term::Struct(StructKind::Sig, v) => v
-                        .into_iter()
-                        .enumerate()
-                        .find(|(_, (_, n, _))| n == m)
-                        .map(|(i, _)| i)
-                        .unwrap(),
+                    Term::Struct(StructKind::Sig, mut v) => {
+                        v.sort_by_key(|(_, n, _)| n.get(cxt.db));
+                        v.into_iter()
+                            .enumerate()
+                            .find(|(_, (_, n, _))| n == m)
+                            .map(|(i, _)| i)
+                            .unwrap()
+                    }
                     _ => unreachable!(),
                 };
                 let x = x.lower(cxt);

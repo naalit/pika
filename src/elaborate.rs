@@ -650,6 +650,7 @@ impl MCxt {
         if let Some(t) = self
             .local_defs
             .iter()
+            .rev()
             .find(|(d, _)| *d == def)
             .map(|(_, t)| t)
         {
@@ -2034,19 +2035,33 @@ fn p_unify(
             Ok(r)
         }
 
-        (Val::Struct(k, v), Val::Struct(k2, v2)) => {
-            match (k, k2) {
+        (Val::Struct(k, v), Val::Struct(k2, mut v2)) => {
+            if v.len() != v2.len() {
+                return Ok(No);
+            }
+            match (&k, k2) {
                 (StructKind::Struct(_), StructKind::Struct(_)) => (),
                 (StructKind::Sig, StructKind::Sig) => (),
                 _ => return Ok(No),
             }
+            let before_defs = mcxt.local_defs.clone();
             let mut r = Yes;
-            for ((_, n, a), (_, n2, b)) in v.into_iter().zip(v2.into_iter()) {
-                if n != n2 {
-                    return Ok(No);
+            for (d1, n, a) in v.into_iter() {
+                if let Some((i, _)) = v2.iter().enumerate().find(|(_, (_, n2, _))| *n2 == n) {
+                    let (d2, _, b) = v2.remove(i);
+                    r = r & p_unify(mode, a, b.clone(), size, span, db, mcxt)?;
+                    let ty = match k {
+                        StructKind::Sig => b.quote(size, mcxt, db),
+                        StructKind::Struct(_) => b.quote(size, mcxt, db).ty(size, mcxt, db),
+                    };
+                    mcxt.local_defs
+                        .push((d1, Term::Var(Var::Top(d2), Box::new(ty))));
+                } else {
+                    r = No;
+                    break;
                 }
-                r = r & p_unify(mode, a, b, size, span, db, mcxt)?;
             }
+            mcxt.local_defs = before_defs;
             Ok(r)
         }
 
@@ -2609,12 +2624,32 @@ pub fn infer(
 
         Pre_::Sig(v) => {
             let block = mcxt.elab_block(v.clone(), true, db)?;
+            let mut names = HashMap::new();
             let struct_block: Vec<_> = block
                 .into_iter()
                 .filter_map(|id| {
                     let info = db.elaborate_def(id).ok()?;
                     let (pre, _) = db.lookup_intern_def(id);
-                    let name = db.lookup_intern_predef(pre).name().unwrap();
+                    let pre = db.lookup_intern_predef(pre);
+                    let name = pre.name().unwrap();
+                    let span = pre.span();
+                    if let Some(&span2) = names.get(&name) {
+                        db.report_error(
+                            Error::new(
+                                mcxt.cxt.file(db),
+                                format!("Duplicate name {} in structure signature", name.get(db)),
+                                span,
+                                "redefined here",
+                            )
+                            .with_label(
+                                mcxt.cxt.file(db),
+                                span2,
+                                "first definition is here",
+                            ),
+                        );
+                        return None;
+                    }
+                    names.insert(name, span);
                     Some((id, name, (*info.typ).clone().quote(mcxt.size, mcxt, db)))
                 })
                 .collect();
@@ -2622,12 +2657,32 @@ pub fn infer(
         }
         Pre_::Struct(v) => {
             let block = mcxt.elab_block(v.clone(), false, db)?;
+            let mut names = HashMap::new();
             let (struct_block, sig_block) = block
                 .into_iter()
                 .filter_map(|id| {
                     let info = db.elaborate_def(id).ok()?;
                     let (pre, _) = db.lookup_intern_def(id);
-                    let name = db.lookup_intern_predef(pre).name().unwrap();
+                    let pre = db.lookup_intern_predef(pre);
+                    let name = pre.name().unwrap();
+                    let span = pre.span();
+                    if let Some(&span2) = names.get(&name) {
+                        db.report_error(
+                            Error::new(
+                                mcxt.cxt.file(db),
+                                format!("Duplicate name {} in structure", name.get(db)),
+                                span,
+                                "redefined here",
+                            )
+                            .with_label(
+                                mcxt.cxt.file(db),
+                                span2,
+                                "first definition is here",
+                            ),
+                        );
+                        return None;
+                    }
+                    names.insert(name, span);
                     let ty = (*info.typ).clone().quote(mcxt.size, mcxt, db);
                     Some(((id, name, (*info.term?).clone()), (id, name, ty)))
                 })
@@ -3174,45 +3229,68 @@ pub fn check(
             Ok(cond.make_if(yes, no, tty))
         }
 
-        (Pre_::Struct(v), Val::Struct(StructKind::Sig, v2)) => {
-            if v.len() != v2.len() {
+        (Pre_::Struct(v), Val::Struct(StructKind::Sig, tys)) => {
+            if v.len() != tys.len() {
                 let err = Error::new(
                     mcxt.cxt.file(db),
                     format!(
-                        "Wrong number of record members, got {}, expected {} because of type",
+                        "Wrong number of structure members, got {}, expected {} because of type",
                         v.len(),
-                        v2.len(),
+                        tys.len(),
                     ),
                     pre.span(),
-                    format!("expected {} record members here", v2.len()),
+                    format!("expected {} structure members here", tys.len()),
                 );
                 let err = reason.add(err, mcxt.cxt.file(db), db, mcxt);
                 db.report_error(err);
                 return Err(TypeError::Sentinel);
             }
+            let mut names = HashMap::new();
             let block = mcxt.elab_block_with(
                 v.iter()
-                    .zip(v2)
-                    .map(|(d, (def2, n, ty))| {
-                        if d.name() != Some(*n) {
+                    .map(|d| {
+                        let name = d.name().unwrap();
+                        let span = d.span();
+                        let (def2, _, ty) =
+                            tys.iter().find(|&&(_, n, _)| n == name).ok_or_else(|| {
+                                let err = Error::new(
+                                    mcxt.cxt.file(db),
+                                    Doc::start("Could not find structure member ")
+                                        .add(name.get(db))
+                                        .add(" in expected type ")
+                                        .chain(ty.pretty(db, mcxt).style(Style::None))
+                                        .style(Style::Bold),
+                                    d.span(),
+                                    "unrecognized member",
+                                );
+                                let err = reason.clone().add(err, mcxt.cxt.file(db), db, mcxt);
+                                db.report_error(err);
+                                TypeError::Sentinel
+                            })?;
+                        if let Some(&span2) = names.get(&name) {
                             db.report_error(
                                 Error::new(
                                     mcxt.cxt.file(db),
                                     format!(
-                                        "Wrong name of record member, got {}, expected {} because of type",
-                                        d.name().unwrap().get(db),
-                                        n.get(db),
+                                        "Duplicate name {} in structure signature",
+                                        name.get(db)
                                     ),
-                                    pre.span(),
-                                    "wrong name",
+                                    span,
+                                    "redefined here",
                                 )
-                                .with_note(
-                                    "currently out-of-order record definitions aren't allowed",
+                                .with_label(
+                                    mcxt.cxt.file(db),
+                                    span2,
+                                    "first definition is here",
                                 ),
                             );
                             return Err(TypeError::Sentinel);
                         }
-                        Ok((PreDef::Typed(Box::new(d.clone()), ty.clone(), reason.clone()).into(), Some((*def2, ty.clone().quote(mcxt.size, mcxt, db)))))
+                        names.insert(name, span);
+                        Ok((
+                            PreDef::Typed(Box::new(d.clone()), ty.clone(), reason.clone()).into(),
+                            Some((*def2, ty.clone().quote(mcxt.size, mcxt, db))),
+                        ))
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 false,

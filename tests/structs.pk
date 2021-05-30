@@ -5,10 +5,18 @@ val Vec3 = sig
 end
 
 val up : Vec3 = struct
-    val x = 0
     val y = 1
     val z = 0
+    val x = 0
 end
+
+# Making sure unification ignores order
+val AlsoVec3 = sig
+    val x : I32
+    val z : I32
+    val y : I32
+end
+val q : AlsoVec3 = up
 
 # A test of dependent records i.e. sigma types
 val Any = sig
@@ -19,6 +27,12 @@ val three : Any = struct
     val T = I32
     val x = 3
 end
+# Making sure unification works with dependent records
+val AlsoAny = sig
+    val T : Type
+    val x : T
+end
+val also_three : AlsoAny = three
 
 fun print_vec3 (v : Vec3) with IO = do
     puts "{\n\t"
