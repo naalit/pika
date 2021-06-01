@@ -42,7 +42,7 @@ impl Term {
                     },
                     // The type of something can't depend on its own value
                     // TODO a different error for this case? Is this even possible?
-                    Var::Rec(id) if matches!(*meta, Var::Meta(Meta::Global(id2, _)) if id2 == id) =>
+                    Var::Rec(id) if matches!(*meta, Var::Meta(Meta::Global(id2, _, _)) if id2 == id) =>
                     {
                         eprintln!("type depends on value: {:?}", meta);
                         Err(TypeError::MetaOccurs(meta.span(), *meta))
@@ -448,12 +448,12 @@ impl MCxt {
     /// Looks up the solution to the given meta, if one exists.
     pub fn get_meta(&self, meta: Meta) -> Option<Term> {
         match meta {
-            Meta::Global(id, n) => self
+            Meta::Global(id, n, _) => self
                 .solved_globals
                 .iter()
                 .find(|s| s.id() == Some(id) && s.num() == n)
                 .map(|s| s.term().clone()),
-            Meta::Local(def, num) => {
+            Meta::Local(def, num, _) => {
                 if let MCxtType::Local(d) = self.ty {
                     if def == d {
                         return match &self.local_metas[num as usize] {
@@ -474,12 +474,12 @@ impl MCxt {
 
     pub fn meta_span(&self, meta: Meta) -> Option<FileSpan> {
         match meta {
-            Meta::Global(id, n) => self
+            Meta::Global(id, n, _) => self
                 .solved_globals
                 .iter()
                 .find(|s| s.id() == Some(id) && s.num() == n)
                 .map(|s| s.span().clone()),
-            Meta::Local(def, num) => {
+            Meta::Local(def, num, _) => {
                 if let MCxtType::Local(d) = self.ty {
                     if def == d {
                         return match &self.local_metas[num as usize] {
@@ -606,11 +606,11 @@ impl MCxt {
         // Now add it to the solved metas
         let span = FileSpan::new(self.cxt.file(db), span);
         match meta {
-            Meta::Global(id, n) => {
+            Meta::Global(id, n, source) => {
                 self.solved_globals
-                    .push(RecSolution::Global(id, n, span, term));
+                    .push(RecSolution::Global(id, n, span, term, source));
             }
-            Meta::Local(def, idx) => {
+            Meta::Local(def, idx, _) => {
                 if let MCxtType::Local(d) = self.ty {
                     if def == d {
                         // TODO should we do anything with the span we already have in `local_metas`, where it was introduced?
@@ -643,6 +643,7 @@ impl MCxt {
                     .len()
                     .try_into()
                     .expect("Only 65535 metas allowed per definition"),
+                source,
             ),
             MCxtType::Global(def) => Meta::Global(
                 def,
@@ -650,6 +651,7 @@ impl MCxt {
                     .len()
                     .try_into()
                     .expect("Only 65535 metas allowed per definition"),
+                source,
             ),
             MCxtType::Universal => panic!("a Universal MCxt can't create a meta!"),
         };
@@ -668,11 +670,11 @@ impl MCxt {
             for (i, entry) in self.local_metas.iter().enumerate() {
                 match entry {
                     MetaEntry::Solved(_, _) => (),
-                    MetaEntry::Unsolved(_, span, _) => {
+                    MetaEntry::Unsolved(_, span, source) => {
                         db.report_error(Error::new(
                             self.cxt.file(db),
                             Doc::start("Could not find solution for ")
-                                .chain(Meta::Local(def, i as u16).pretty(self, db))
+                                .chain(Meta::Local(def, i as u16, *source).pretty(db))
                                 .style(Style::Bold),
                             *span,
                             "search started here",
@@ -775,7 +777,7 @@ impl MCxt {
 impl Var<Lvl> {
     fn pretty_meta(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
         match self {
-            Var::Meta(m) => m.pretty(mcxt, db),
+            Var::Meta(m) => m.pretty(db),
 
             Var::Local(l) => Doc::start("constrained value of local ")
                 .chain(Val::local(l, Val::Type).pretty(db, mcxt)),
@@ -812,25 +814,16 @@ impl PreDef {
     }
 }
 impl Meta {
-    pub fn pretty(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
+    pub fn pretty(self, db: &dyn Compiler) -> Doc {
         match self {
-            Meta::Local(id, n) if mcxt.ty == MCxtType::Local(id) => {
-                match &mcxt.local_metas[n as usize] {
-                    MetaEntry::Solved(_, _) => panic!("meta already solved"),
-                    MetaEntry::Unsolved(_, _, source) => match source {
-                        MetaSource::ImplicitParam(n) => {
-                            Doc::start("implicit parameter '").add(n.get(db)).add("'")
-                        }
-                        MetaSource::LocalType(n) => Doc::start("type of '").add(n.get(db)).add("'"),
-                        MetaSource::Hole => Doc::start("hole"),
-                        MetaSource::HoleType => Doc::start("type of hole"),
-                    },
+            Meta::Local(_, _, source) | Meta::Global(_, _, source) => match source {
+                MetaSource::ImplicitParam(n) => {
+                    Doc::start("implicit parameter '").add(n.get(db)).add("'")
                 }
-            }
-            Meta::Global(id, _) => db.lookup_intern_predef(id).describe(db),
-            Meta::Local(id, _) => db
-                .lookup_intern_predef(db.lookup_intern_def(id).0)
-                .describe(db),
+                MetaSource::LocalType(n) => Doc::start("type of '").add(n.get(db)).add("'"),
+                MetaSource::Hole => Doc::start("hole"),
+                MetaSource::HoleType => Doc::start("type of hole"),
+            },
         }
     }
 }

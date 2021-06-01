@@ -169,32 +169,32 @@ impl Cxt {
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum RecSolution {
-    Global(PreDefId, u16, FileSpan, Term),
+    Global(PreDefId, u16, FileSpan, Term, MetaSource),
     ParentLocal(DefId, u16, FileSpan, Term),
 }
 impl RecSolution {
     pub fn id(&self) -> Option<PreDefId> {
         match self {
-            RecSolution::Global(id, _, _, _) => Some(*id),
+            RecSolution::Global(id, _, _, _, _) => Some(*id),
             _ => None,
         }
     }
 
     pub fn num(&self) -> u16 {
         match self {
-            RecSolution::Global(_, n, _, _) | RecSolution::ParentLocal(_, n, _, _) => *n,
+            RecSolution::Global(_, n, _, _, _) | RecSolution::ParentLocal(_, n, _, _) => *n,
         }
     }
 
     pub fn term(&self) -> &Term {
         match self {
-            RecSolution::Global(_, _, _, v) | RecSolution::ParentLocal(_, _, _, v) => v,
+            RecSolution::Global(_, _, _, v, _) | RecSolution::ParentLocal(_, _, _, v) => v,
         }
     }
 
     pub fn span(&self) -> FileSpan {
         match self {
-            RecSolution::Global(_, _, s, _) | RecSolution::ParentLocal(_, _, s, _) => *s,
+            RecSolution::Global(_, _, s, _, _) | RecSolution::ParentLocal(_, _, s, _) => *s,
         }
     }
 }
@@ -479,8 +479,8 @@ fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
                 let info: ElabInfo = info;
                 for i in &*info.solved_globals {
                     match i {
-                        RecSolution::Global(id, m, span, term) => {
-                            if let Some(term2) = mcxt.get_meta(Meta::Global(*id, *m)) {
+                        RecSolution::Global(id, m, span, term, source) => {
+                            if let Some(term2) = mcxt.get_meta(Meta::Global(*id, *m, *source)) {
                                 let val = term.clone().evaluate(&mcxt.env(), &mcxt, db);
                                 let val2 = term2.clone().evaluate(&mcxt.env(), &mcxt, db);
                                 if !crate::elaborate::unify(
@@ -488,12 +488,13 @@ fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
                                 )
                                 .unwrap_or(false)
                                 {
-                                    let span2 = mcxt.meta_span(Meta::Global(*id, *m)).unwrap();
+                                    let span2 =
+                                        mcxt.meta_span(Meta::Global(*id, *m, *source)).unwrap();
                                     db.report_error(
                                         Error::new(
                                             span.file,
                                             Doc::start("Could not match types: ")
-                                                .chain(Meta::Global(*id, *m).pretty(&mcxt, db))
+                                                .chain(Meta::Global(*id, *m, *source).pretty(db))
                                                 .add(" inferred as type ")
                                                 .chain(
                                                     term.pretty(db, &mut Names::new(mcxt.cxt, db)),

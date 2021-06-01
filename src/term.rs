@@ -460,10 +460,10 @@ impl Size {
 pub enum Meta {
     /// A meta representing part of the type of a definition that doesn't have one yet, used for (mutual) recursion.
     /// It can be solved and used by any definition.
-    Global(PreDefId, u16),
+    Global(PreDefId, u16, MetaSource),
     /// The local meta index is a u16 so that this type fits in a word.
     /// So no more than 65535 metas are allowed per definition, which is probably fine.
-    Local(DefId, u16),
+    Local(DefId, u16, MetaSource),
 }
 impl Meta {
     /// If we're unifying `self` and `b`, and this returns true, `self` should be solved to `b`.
@@ -476,21 +476,21 @@ impl Meta {
         };
         match (self, b) {
             // In general, solve later metas first if they're from the same definition
-            (Meta::Local(i, n), Meta::Local(i2, n2)) if i == i2 => n > n2,
-            (Meta::Global(i, n), Meta::Global(i2, n2)) if i == i2 => n > n2,
+            (Meta::Local(i, n, _), Meta::Local(i2, n2, _)) if i == i2 => n > n2,
+            (Meta::Global(i, n, _), Meta::Global(i2, n2, _)) if i == i2 => n > n2,
 
             // If one is from the definition we're currently in, solve that one first
             // We don't want it leaking
-            (Meta::Local(i, _), _) if local_def == Some(i) => true,
-            (_, Meta::Local(i, _)) if local_def == Some(i) => false,
-            (Meta::Global(i, _), _) if local_pre == Some(i) => true,
-            (_, Meta::Global(i, _)) if local_pre == Some(i) => false,
+            (Meta::Local(i, _, _), _) if local_def == Some(i) => true,
+            (_, Meta::Local(i, _, _)) if local_def == Some(i) => false,
+            (Meta::Global(i, _, _), _) if local_pre == Some(i) => true,
+            (_, Meta::Global(i, _, _)) if local_pre == Some(i) => false,
 
             // Otherwise, solve locals before globals, and later definitions before earlier ones
-            (Meta::Local(i, _), Meta::Local(i2, _)) => i2 > i,
-            (Meta::Global(i, _), Meta::Global(i2, _)) => i2 > i,
-            (Meta::Local(_, _), Meta::Global(_, _)) => true,
-            (Meta::Global(_, _), Meta::Local(_, _)) => false,
+            (Meta::Local(i, _, _), Meta::Local(i2, _, _)) => i2 > i,
+            (Meta::Global(i, _, _), Meta::Global(i2, _, _)) => i2 > i,
+            (Meta::Local(_, _, _), Meta::Global(_, _, _)) => true,
+            (Meta::Global(_, _, _), Meta::Local(_, _, _)) => false,
         }
     }
 }
@@ -715,12 +715,12 @@ impl Term {
                 ),
                 Var::Rec(id) => Doc::start(db.lookup_intern_predef(*id).name().unwrap().get(db)),
                 Var::Meta(m) => match m {
-                    Meta::Global(id, i) => Doc::start("?:")
+                    Meta::Global(id, i, _) => Doc::start("?:")
                         .add(db.lookup_intern_predef(*id).name().unwrap().get(db))
                         .add(":")
                         .add(i)
                         .add(""),
-                    Meta::Local(def, id) => Doc::start("?").add(def.num()).add(".").add(id),
+                    Meta::Local(def, id, _) => Doc::start("?").add(def.num()).add(".").add(id),
                 },
                 Var::File(f) => Doc::start({
                     use std::path::Path;
