@@ -191,6 +191,7 @@ impl CxtState {
 pub enum MCxtType {
     Local(DefId),
     Global(PreDefId),
+    Universal,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Eq, Hash)]
@@ -267,11 +268,11 @@ pub struct MCxt {
     pub size: Size,
     pub eff_stack: EffStack,
     is_sig: bool,
-    ty: MCxtType,
+    pub ty: MCxtType,
     local_metas: Vec<MetaEntry>,
     local_defs: Vec<(DefId, Term)>,
     local_constraints: HashMap<Lvl, Val>,
-    solved_globals: Vec<RecSolution>,
+    pub solved_globals: Vec<RecSolution>,
     children: Vec<DefId>,
 }
 impl MCxt {
@@ -308,6 +309,21 @@ impl MCxt {
             size: cxt.size(db),
             eff_stack: Default::default(),
             ty,
+            local_metas: Vec::new(),
+            local_defs: Vec::new(),
+            local_constraints: HashMap::new(),
+            solved_globals: Vec::new(),
+            children: Vec::new(),
+            is_sig: false,
+        }
+    }
+
+    pub fn empty_universal(db: &dyn Compiler) -> Self {
+        MCxt {
+            cxt: Cxt::new(0, db),
+            size: Size::zero(),
+            eff_stack: Default::default(),
+            ty: MCxtType::Universal,
             local_metas: Vec::new(),
             local_defs: Vec::new(),
             local_constraints: HashMap::new(),
@@ -498,13 +514,14 @@ impl MCxt {
         meta: Meta,
         spine: &Spine,
         val: Val,
+        size: Size,
         db: &dyn Compiler,
     ) -> Result<(), TypeError> {
         // The value can only use variables that we're passing to the meta
         let mut meta_scope = spine
             .iter()
             // Each argument is another lambda we're going to wrap it in
-            .zip(std::iter::successors(Some(self.size.next_lvl()), |lvl| {
+            .zip(std::iter::successors(Some(size.next_lvl()), |lvl| {
                 Some(lvl.inc())
             }))
             .map(|(e, to_lvl)| match e.assert_app().1.unarc() {
@@ -514,16 +531,14 @@ impl MCxt {
                 x => Err(TypeError::MetaSpine(span, Var::Meta(meta), x.clone())),
             })
             .collect::<Result<Rename, _>>()?;
-        let term = val.quote(self.size, &self, db);
+        let term = val.quote(size, &self, db);
         // The level it will be at after we wrap it in lambdas
-        let to_lvl = (0..spine.len()).fold(self.size, |x, _| x.inc());
+        let to_lvl = (0..spine.len()).fold(size, |x, _| x.inc());
 
         // Get the type of each argument
         let tys: Vec<Ty> = spine
             .iter()
-            .zip(std::iter::successors(Some(self.size), |size| {
-                Some(size.inc())
-            }))
+            .zip(std::iter::successors(Some(size), |size| Some(size.inc())))
             .map(|(e, l)| match e.assert_app().1.unarc() {
                 Val::App(Var::Local(_), ty, sp, _) if sp.is_empty() => {
                     let mut names = Names::new(self.cxt, db);
@@ -546,7 +561,7 @@ impl MCxt {
         let term = term.check_solution(
             Spanned::new(Var::Meta(meta), span),
             &mut meta_scope,
-            self.size,
+            size,
             to_lvl,
             &mut Names::new(self.cxt, db),
         )?;
@@ -568,7 +583,7 @@ impl MCxt {
         match meta {
             Meta::Global(id, n) => {
                 self.solved_globals
-                    .push(RecSolution::Inferred(id, n, span, term));
+                    .push(RecSolution::Global(id, n, span, term));
             }
             Meta::Local(def, idx) => {
                 if let MCxtType::Local(d) = self.ty {
@@ -611,6 +626,7 @@ impl MCxt {
                     .try_into()
                     .expect("Only 65535 metas allowed per definition"),
             ),
+            MCxtType::Universal => panic!("a Universal MCxt can't create a meta!"),
         };
         self.local_metas
             .push(MetaEntry::Unsolved(name, span, source));
@@ -771,20 +787,25 @@ impl PreDef {
     }
 }
 impl Meta {
-    fn pretty(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
+    pub fn pretty(self, mcxt: &MCxt, db: &dyn Compiler) -> Doc {
         match self {
+            Meta::Local(id, n) if mcxt.ty == MCxtType::Local(id) => {
+                match &mcxt.local_metas[n as usize] {
+                    MetaEntry::Solved(_, _) => panic!("meta already solved"),
+                    MetaEntry::Unsolved(_, _, source) => match source {
+                        MetaSource::ImplicitParam(n) => {
+                            Doc::start("implicit parameter '").add(n.get(db)).add("'")
+                        }
+                        MetaSource::LocalType(n) => Doc::start("type of '").add(n.get(db)).add("'"),
+                        MetaSource::Hole => Doc::start("hole"),
+                        MetaSource::HoleType => Doc::start("type of hole"),
+                    },
+                }
+            }
             Meta::Global(id, _) => db.lookup_intern_predef(id).describe(db),
-            Meta::Local(_, n) => match &mcxt.local_metas[n as usize] {
-                MetaEntry::Solved(_, _) => panic!("meta already solved"),
-                MetaEntry::Unsolved(_, _, source) => match source {
-                    MetaSource::ImplicitParam(n) => {
-                        Doc::start("implicit parameter '").add(n.get(db)).add("'")
-                    }
-                    MetaSource::LocalType(n) => Doc::start("type of '").add(n.get(db)).add("'"),
-                    MetaSource::Hole => Doc::start("hole"),
-                    MetaSource::HoleType => Doc::start("type of hole"),
-                },
-            },
+            Meta::Local(id, _) => db
+                .lookup_intern_predef(db.lookup_intern_def(id).0)
+                .describe(db),
         }
     }
 }
@@ -913,6 +934,36 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             return Err(DefError::ElabError);
         }
     };
+
+    if let Some(given_ty) = predef.given_type(predef_id, cxt, db) {
+        if !unify(
+            ty.clone(),
+            given_ty.clone(),
+            mcxt.size,
+            predef.span(),
+            db,
+            &mut mcxt,
+        )
+        .unwrap_or_else(|e| {
+            db.maybe_report_error(e.into_error(file, db, &mcxt));
+            true
+        }) {
+            db.report_error(
+                Error::new(
+                    file,
+                    Doc::start("Could not match type of ")
+                        .chain(predef.describe(db))
+                        .add(": expected type ")
+                        .debug(given_ty)
+                        .add(" but got type ")
+                        .chain(ty.pretty(db, &mcxt)),
+                    predef.span(),
+                    "defined here",
+                )
+                .with_note("this is probably a compiler error"),
+            );
+        }
+    }
 
     // mcxt.solved_globals
     //     .push(RecSolution::Defined(predef_id, 0, predef.span(), ty.clone()));
@@ -1746,7 +1797,7 @@ impl TypeError {
                 file,
                 Doc::start("Solution for ")
                     .chain(m.pretty_meta(mcxt, db))
-                    .add(" would be recursive")
+                    .add(" depends on itself")
                     .style(Style::Bold),
                 s,
                 "solution found here",
@@ -2144,7 +2195,9 @@ fn p_unify(
         // Solve metas
 
         // Make sure order doesn't matter - switch sides if the second one is higher
-        (Val::App(Var::Meta(m), mty, s, g), Val::App(Var::Meta(m2), mty2, s2, g2)) if m2 > m => {
+        (Val::App(Var::Meta(m), mty, s, g), Val::App(Var::Meta(m2), mty2, s2, g2))
+            if m2.higher_priority(m, mcxt, db) =>
+        {
             p_unify(
                 mode,
                 Val::App(Var::Meta(m2), mty2, s2, g2),
@@ -2165,7 +2218,7 @@ fn p_unify(
                     p_unify(mode, v, t, size, span, db, mcxt)
                 }
                 None => {
-                    mcxt.solve(span, m, &sp, t, db)?;
+                    mcxt.solve(span, m, &sp, t, size, db)?;
                     Ok(Yes)
                 }
             }

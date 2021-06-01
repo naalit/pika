@@ -1,0 +1,5 @@
+fun b () = f Type
+
+fun c () = f "twelve"
+
+fun f a : I32 = a

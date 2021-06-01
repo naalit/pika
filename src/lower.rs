@@ -374,12 +374,15 @@ impl Val {
 
 pub fn durin(db: &dyn Compiler, files: impl IntoIterator<Item = FileId>) -> ir::Module {
     let mut mcxt = ModCxt::new(db);
+    let mut solved_globals = db.check_all();
     for file in files {
         for &def in &*db.top_level(file) {
             if let Ok(info) = db.elaborate_def(def) {
                 mcxt.local(def, |lcxt| {
+                    std::mem::swap(&mut solved_globals, &mut lcxt.mcxt.solved_globals);
                     let val = info.term.as_ref().unwrap().lower(lcxt);
                     lower_children(def, lcxt);
+                    std::mem::swap(&mut solved_globals, &mut lcxt.mcxt.solved_globals);
                     val
                 });
             }
@@ -740,7 +743,10 @@ impl Term {
                     cxt.get_or_reserve(i)
                 }
                 Var::Rec(i) => cxt.get_or_reserve(*i),
-                Var::Meta(_) => panic!("Found unsolved metavariable during lowering: right now we don't allow inferred types on boundaries between files!"),
+                Var::Meta(m) => panic!(
+                    "Compiler error: Found unsolved metavariable during lowering: {:?}",
+                    m
+                ),
                 Var::Type(tid, sid) => {
                     let (pre, _) = cxt.db.lookup_intern_def(*tid);
                     cxt.scope_ids.insert(pre, (*tid, *sid));
@@ -1054,7 +1060,7 @@ impl Term {
                 let (rty, effs) = match fty.unarc() {
                     Val::Clos(Pi, _, cl, effs) => (
                         {
-                            let rty = cl.clone().vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
+                            let rty = (**cl).clone().vquote(cxt.mcxt.size, &cxt.mcxt, cxt.db);
                             cxt.local(cl.name, x, cl.ty.clone());
                             let rty = rty.lower(cxt);
                             cxt.pop_local();

@@ -2,7 +2,7 @@
 //! - `Pre` or presyntax is what we get from the parser.
 //! - `Term` or core syntax is what we get after elaborating (name resolution, type checking, etc.).
 //! - `Val` is a value, where beta reduction and associated substitution has been performed.
-use crate::elaborate::MCxt;
+use crate::elaborate::{MCxt, MCxtType};
 use crate::pattern::Pat;
 use crate::{common::*, elaborate::ReasonExpected};
 
@@ -456,7 +456,7 @@ impl Size {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Ord, PartialOrd)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Meta {
     /// A meta representing part of the type of a definition that doesn't have one yet, used for (mutual) recursion.
     /// It can be solved and used by any definition.
@@ -464,6 +464,35 @@ pub enum Meta {
     /// The local meta index is a u16 so that this type fits in a word.
     /// So no more than 65535 metas are allowed per definition, which is probably fine.
     Local(DefId, u16),
+}
+impl Meta {
+    /// If we're unifying `self` and `b`, and this returns true, `self` should be solved to `b`.
+    /// If it returns false, `b` should be solved to `self`.
+    pub fn higher_priority(self, b: Meta, mcxt: &MCxt, db: &dyn Compiler) -> bool {
+        let (local_def, local_pre) = match mcxt.ty {
+            MCxtType::Local(i) => (Some(i), Some(db.lookup_intern_def(i).0)),
+            MCxtType::Global(i) => (None, Some(i)),
+            MCxtType::Universal => (None, None),
+        };
+        match (self, b) {
+            // In general, solve later metas first if they're from the same definition
+            (Meta::Local(i, n), Meta::Local(i2, n2)) if i == i2 => n > n2,
+            (Meta::Global(i, n), Meta::Global(i2, n2)) if i == i2 => n > n2,
+
+            // If one is from the definition we're currently in, solve that one first
+            // We don't want it leaking
+            (Meta::Local(i, _), _) if local_def == Some(i) => true,
+            (_, Meta::Local(i, _)) if local_def == Some(i) => false,
+            (Meta::Global(i, _), _) if local_pre == Some(i) => true,
+            (_, Meta::Global(i, _)) if local_pre == Some(i) => false,
+
+            // Otherwise, solve locals before globals, and later definitions before earlier ones
+            (Meta::Local(i, _), Meta::Local(i2, _)) => i2 > i,
+            (Meta::Global(i, _), Meta::Global(i2, _)) => i2 > i,
+            (Meta::Local(_, _), Meta::Global(_, _)) => true,
+            (Meta::Global(_, _), Meta::Local(_, _)) => false,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

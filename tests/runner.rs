@@ -257,6 +257,15 @@ fn test_multifile() {
 // Tests for type errors
 
 #[test]
+fn test_conflicting_metas() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["check", "tests/conflicting_metas.pk"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn test_check_for_eof() {
     Command::cargo_bin("pika")
         .unwrap()

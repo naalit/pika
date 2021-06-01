@@ -169,31 +169,26 @@ impl Cxt {
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum RecSolution {
-    Defined(PreDefId, u16, Span, Term),
-    Inferred(PreDefId, u16, Span, Term),
+    Global(PreDefId, u16, Span, Term),
     ParentLocal(DefId, u16, Span, Term),
 }
 impl RecSolution {
     pub fn id(&self) -> Option<PreDefId> {
         match self {
-            RecSolution::Defined(id, _, _, _) | RecSolution::Inferred(id, _, _, _) => Some(*id),
+            RecSolution::Global(id, _, _, _) => Some(*id),
             _ => None,
         }
     }
 
     pub fn num(&self) -> u16 {
         match self {
-            RecSolution::Defined(_, n, _, _)
-            | RecSolution::Inferred(_, n, _, _)
-            | RecSolution::ParentLocal(_, n, _, _) => *n,
+            RecSolution::Global(_, n, _, _) | RecSolution::ParentLocal(_, n, _, _) => *n,
         }
     }
 
     pub fn term(&self) -> &Term {
         match self {
-            RecSolution::Defined(_, _, _, v)
-            | RecSolution::Inferred(_, _, _, v)
-            | RecSolution::ParentLocal(_, _, _, v) => v,
+            RecSolution::Global(_, _, _, v) | RecSolution::ParentLocal(_, _, _, v) => v,
         }
     }
 }
@@ -295,6 +290,8 @@ pub trait Compiler: CompilerExt + Interner {
     fn elaborate_def(&self, def: DefId) -> Result<ElabInfo, DefError>;
 
     fn def_type(&self, def: DefId) -> Result<Arc<VTy>, DefError>;
+
+    fn check_all(&self) -> Vec<RecSolution>;
 }
 
 fn def_type(db: &dyn Compiler, def: DefId) -> Result<Arc<VTy>, DefError> {
@@ -464,14 +461,50 @@ impl CompilerExt for Database {
     }
 }
 
-impl Database {
-    pub fn check_all(&self) {
-        for file in self.input_files() {
-            // TODO: get meta solutions from each elaborate_def() and make sure they match
-            for def in &*self.top_level(file) {
-                // They already reported any errors to the database, so we ignore them here
-                let _ = self.elaborate_def(*def);
+fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
+    use crate::pretty::Doc;
+
+    let mut mcxt = MCxt::empty_universal(db);
+    for file in db.input_files() {
+        // Get meta solutions from each elaborate_def() and make sure they match
+        for def in &*db.top_level(file) {
+            // They already reported any errors to the database, so we ignore them here
+            if let Ok(info) = db.elaborate_def(*def) {
+                let info: ElabInfo = info;
+                for i in &*info.solved_globals {
+                    match i {
+                        RecSolution::Global(id, m, span, term) => {
+                            if let Some(term2) = mcxt.get_meta(Meta::Global(*id, *m)) {
+                                let val = term.clone().evaluate(&mcxt.env(), &mcxt, db);
+                                let val2 = term2.clone().evaluate(&mcxt.env(), &mcxt, db);
+                                if !crate::elaborate::unify(
+                                    val, val2, mcxt.size, *span, db, &mut mcxt,
+                                )
+                                .unwrap_or(false)
+                                {
+                                    // TODO include previous span (which may be in another file)
+                                    db.report_error(Error::new(
+                                        file,
+                                        Doc::start("Could not match types: ")
+                                            .chain(Meta::Global(*id, *m).pretty(&mcxt, db))
+                                            .add(" inferred as type ")
+                                            .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)))
+                                            .add(" but previously found to be type ")
+                                            .chain(term2.pretty(db, &mut Names::new(mcxt.cxt, db))),
+                                        *span,
+                                        "type inferred here",
+                                    ));
+                                }
+                            } else {
+                                mcxt.solved_globals.push(i.clone());
+                            }
+                        }
+                        RecSolution::ParentLocal(_, _, _, _) => (),
+                    }
+                }
             }
         }
     }
+
+    mcxt.solved_globals
 }
