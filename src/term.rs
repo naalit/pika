@@ -421,9 +421,9 @@ impl Size {
         Size(0)
     }
 
-    pub fn apply_meta(self, v: Var<Ix>, ret_ty: Ty, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+    pub fn apply_meta(self, v: Var<Ix>, ret_ty: Ty, mcxt: &MCxt) -> Term {
         let ty = (0..self.0)
-            .map(|i| (mcxt.local_ty(Ix(i), db), mcxt.local_name(Ix(i), db)))
+            .map(|i| (mcxt.local_ty(Ix(i)), mcxt.local_name(Ix(i))))
             .fold((ret_ty, self), |(to, l), (from, name)| {
                 (
                     // `ret_ty` is at level `self`, so the innermost local type is one less than that
@@ -431,7 +431,7 @@ impl Size {
                         Pi,
                         name,
                         Icit::Expl,
-                        Box::new(from.quote(l.dec(), mcxt, db)),
+                        Box::new(from.quote(l.dec(), mcxt)),
                         Box::new(to),
                         Vec::new(),
                     ),
@@ -442,14 +442,14 @@ impl Size {
             })
             .0;
         // Because Terms use indices, the type here refers to its own parameters instead of locals in the outer context
-        let t = Term::Var(v, Box::new(ty.clone()));
+        let t = Term::Var(v, Box::new(ty));
         // Now visit them from outermost to innermost
         (0..self.0)
             .rev()
             .map(|i| {
                 Term::Var(
                     Var::Local(Ix(i)),
-                    Box::new(mcxt.local_ty(Ix(i), db).quote(self, mcxt, db)),
+                    Box::new(mcxt.local_ty(Ix(i)).quote(self, mcxt)),
                 )
             })
             .fold(t, |f, x| Term::App(Icit::Expl, Box::new(f), Box::new(x)))
@@ -468,9 +468,9 @@ pub enum Meta {
 impl Meta {
     /// If we're unifying `self` and `b`, and this returns true, `self` should be solved to `b`.
     /// If it returns false, `b` should be solved to `self`.
-    pub fn higher_priority(self, b: Meta, mcxt: &MCxt, db: &dyn Compiler) -> bool {
+    pub fn higher_priority(self, b: Meta, mcxt: &MCxt) -> bool {
         let (local_def, local_pre) = match mcxt.ty {
-            MCxtType::Local(i) => (Some(i), Some(db.lookup_intern_def(i).0)),
+            MCxtType::Local(i) => (Some(i), Some(mcxt.db.lookup_intern_def(i).0)),
             MCxtType::Global(i) => (None, Some(i)),
             MCxtType::Universal => (None, None),
         };
@@ -491,6 +491,12 @@ impl Meta {
             (Meta::Global(i, _, _), Meta::Global(i2, _, _)) => i2 > i,
             (Meta::Local(_, _, _), Meta::Global(_, _, _)) => true,
             (Meta::Global(_, _, _), Meta::Local(_, _, _)) => false,
+        }
+    }
+
+    pub fn source(self) -> MetaSource {
+        match self {
+            Meta::Global(_, _, source) | Meta::Local(_, _, source) => source,
         }
     }
 }
@@ -532,7 +538,7 @@ impl Term {
         )
     }
 
-    pub fn ty(&self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+    pub fn ty(&self, at: Size, mcxt: &MCxt) -> Term {
         match self {
             Term::Type => Term::Type,
             Term::Var(_, t) => (**t).clone(),
@@ -541,33 +547,33 @@ impl Term {
                 *n,
                 *i,
                 aty.clone(),
-                Box::new(body.ty(at.inc(), mcxt, db)),
+                Box::new(body.ty(at.inc(), mcxt)),
                 effs.clone(),
             ),
             Term::Clos(Pi, _, _, _, _, _) => Term::Type,
             Term::Fun(_, _, _) => Term::Type,
-            Term::App(_, f, x) => match f.ty(at, mcxt, db).inline_top(mcxt, db) {
+            Term::App(_, f, x) => match f.ty(at, mcxt).inline_top(mcxt) {
                 Term::Fun(_, to, _) => *to,
                 Term::Clos(Pi, _, _, _, to, _) => {
                     // Peel off one Pi to get the type of the next `f`.
                     // It's dependent, so we need to add `x` to the environment.
                     let mut env = Env::new(at);
-                    let x = (**x).clone().evaluate(&env, mcxt, db);
+                    let x = (**x).clone().evaluate(&env, mcxt);
                     env.push(Some(x));
                     // Then we evaluate-quote to so `rty` is in the context `at`.
-                    to.eval_quote(&mut env, at, mcxt, db)
+                    to.eval_quote(&mut env, at, mcxt)
                 }
                 fty => unreachable!("{:?}", fty),
             },
             Term::Case(_, _, _, _, ty) => (**ty).clone(),
             Term::Lit(_, b) => Term::Var(Var::Builtin(*b), Box::new(Term::Type)),
             Term::Do(v) => match v.last() {
-                Some((_, x)) => x.ty(at, mcxt, db),
+                Some((_, x)) => x.ty(at, mcxt),
                 None => Term::Var(Var::Builtin(Builtin::UnitType), Box::new(Term::Type)),
             },
             Term::Struct(StructKind::Sig, _) => Term::Type,
             Term::Struct(StructKind::Struct(t), _) => (**t).clone(),
-            Term::Dot(x, m) => match x.ty(at, mcxt, db).inline_top(mcxt, db) {
+            Term::Dot(x, m) => match x.ty(at, mcxt).inline_top(mcxt) {
                 Term::Struct(StructKind::Sig, v) => v
                     .into_iter()
                     .find(|(_, n, _)| n == m)
@@ -928,11 +934,9 @@ pub struct Env {
     pub size: Size,
 }
 impl Env {
-    pub fn inline_metas(&mut self, mcxt: &MCxt, db: &dyn Compiler) {
-        for i in &mut self.vals {
-            if let Some(x) = i {
-                *x = Arc::new((**x).clone().inline_metas(self.size, mcxt, db));
-            }
+    pub fn inline_metas(&mut self, mcxt: &MCxt) {
+        for x in self.vals.iter_mut().flatten() {
+            *x = Arc::new((**x).clone().inline_metas(self.size, mcxt));
         }
     }
 
@@ -954,13 +958,13 @@ impl Env {
     }
 
     /// If it's not present, returns a local variable value
-    pub fn val(&self, i: Ix, ty: Ty, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+    pub fn val(&self, i: Ix, ty: Ty, mcxt: &MCxt) -> Val {
         self.vals
             .get(i.0 as usize)
             .cloned()
             .flatten()
             .map(Val::Arc)
-            .unwrap_or_else(|| Val::local(self.size.to_lvl_(i), ty.evaluate(self, mcxt, db)))
+            .unwrap_or_else(|| Val::local(self.size.to_lvl_(i), ty.evaluate(self, mcxt)))
     }
 
     pub fn push(&mut self, v: Option<Val>) {
@@ -994,55 +998,28 @@ impl Clos {
 
     /// Quotes the closure back into a `Term`, but leaves it behind the lambda.
     /// So `at` is the number of abstractions enclosing the *lambda*, it doesn't include the lambda.
-    pub fn quote(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
+    pub fn quote(self, at: Size, mcxt: &MCxt) -> Term {
         let Clos {
             mut env, term, ty, ..
         } = self;
         env.push(Some(Val::local(at.next_lvl(), ty)));
-        term.eval_quote(&mut env, at.inc(), mcxt, db)
+        term.eval_quote(&mut env, at.inc(), mcxt)
     }
 
     /// Equivalent to `self.apply(Val::local(at.next_lvl(), cl.ty), mcxt)`.
     /// Like `quote`, `at` should not be incremented for the closure.
-    pub fn vquote(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+    pub fn vquote(self, at: Size, mcxt: &MCxt) -> Val {
         let Clos {
             mut env, term, ty, ..
         } = self;
         env.push(Some(Val::local(at.next_lvl(), ty)));
-        term.evaluate(&env, mcxt, db)
+        term.evaluate(&env, mcxt)
     }
 
-    pub fn apply(self, arg: Val, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+    pub fn apply(self, arg: Val, mcxt: &MCxt) -> Val {
         let Clos { mut env, term, .. } = self;
         env.push(Some(arg));
-        term.evaluate(&env, mcxt, db)
-    }
-}
-
-/// A term that hasn't been evaluated yet, because it's either an `if` or `case` and the scrutinee is a neutral term.
-/// It's similar to a closure, but isn't waiting on an argument, but rather variables in the environment.
-///
-/// Note that a `Lazy` is very big (contains an inline `Env` and `Term`), so storing it behind a Box is advised.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Lazy {
-    pub env: Env,
-    pub term: Term,
-}
-impl Lazy {
-    pub fn env_size(&self) -> Size {
-        self.env.size
-    }
-
-    /// Quotes the closure back into a `Term`.
-    pub fn quote(self, at: Size, mcxt: &MCxt, db: &dyn Compiler) -> Term {
-        let Lazy { mut env, term } = self;
-        term.eval_quote(&mut env, at, mcxt, db)
-    }
-
-    /// Tries to evaluate the `Lazy` again; if it can't be evaluated, this will just return another `Lazy`.
-    pub fn evaluate(self, mcxt: &MCxt, db: &dyn Compiler) -> Val {
-        let Lazy { env, term } = self;
-        term.evaluate(&env, mcxt, db)
+        term.evaluate(&env, mcxt)
     }
 }
 
@@ -1187,7 +1164,6 @@ impl Glued {
         h: Var<Lvl>,
         sp: impl IntoOwned<Spine>,
         at: Size,
-        db: &dyn Compiler,
         mcxt: &MCxt,
     ) -> Option<Val> {
         // TODO make this work
@@ -1213,8 +1189,8 @@ impl Glued {
                     if sp.len() == 2 {
                         if let Elim::App(Icit::Expl, b) = sp.pop().unwrap() {
                             if let Elim::App(Icit::Expl, a) = sp.pop().unwrap() {
-                                let a = a.inline(at, db, mcxt);
-                                let b = b.inline(at, db, mcxt);
+                                let a = a.inline(at, mcxt);
+                                let b = b.inline(at, mcxt);
                                 if let Some(v) = op.eval(&a, &b) {
                                     return Some(v);
                                 }
@@ -1225,33 +1201,25 @@ impl Glued {
                 }
                 Var::Builtin(_) => None,
                 Var::Rec(rec) => {
-                    let def = mcxt.cxt.lookup_rec(rec, db)?;
-                    let val = mcxt.def_term(def, db)?;
-                    let val = val.evaluate(&Env::new(at), mcxt, db);
+                    let def = mcxt.cxt.lookup_rec(rec, mcxt.db)?;
+                    let val = mcxt.def_term(def)?;
+                    let val = val.evaluate(&Env::new(at), mcxt);
                     // let val = Val::Arc(Arc::new(val));
                     // *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
                 }
                 Var::Top(def) => {
-                    let val = mcxt.def_term(def, db)?;
-                    let val = val.evaluate(&Env::new(at), mcxt, db);
+                    let val = mcxt.def_term(def)?;
+                    let val = val.evaluate(&Env::new(at), mcxt);
                     // let val = Val::Arc(Arc::new(val));
                     // *self.0.write().unwrap() = Some(val.clone());
                     Some(val)
                 }
-                Var::Meta(m) => {
-                    if let Some(term) = mcxt.get_meta(m) {
-                        Some(term.evaluate(&Env::new(at), mcxt, db))
-                    } else {
-                        None
-                    }
-                }
+                Var::Meta(m) => mcxt
+                    .get_meta(m)
+                    .map(|term| term.evaluate(&Env::new(at), mcxt)),
             }?;
-            Some(
-                sp.into_owned()
-                    .into_iter()
-                    .fold(h, |h, e| h.app(e, mcxt, db)),
-            )
+            Some(sp.into_owned().into_iter().fold(h, |h, e| h.app(e, mcxt)))
         }
     }
 }
@@ -1285,10 +1253,10 @@ pub enum Val {
     Struct(StructKind<Val>, Vec<(DefId, Name, Val)>),
 }
 impl Val {
-    pub fn pretty(&self, db: &dyn Compiler, mcxt: &MCxt) -> Doc {
+    pub fn pretty(&self, mcxt: &MCxt) -> Doc {
         self.clone()
-            .quote(mcxt.size, mcxt, db)
-            .pretty(db, &mut Names::new(mcxt.cxt, db))
+            .quote(mcxt.size, mcxt)
+            .pretty(mcxt.db, &mut Names::new(mcxt.cxt, mcxt.db))
     }
 
     /// Unwraps any top-level `Val::Arc`s, so you don't have to recurse to deal with that case when matching on a reference.
@@ -1301,29 +1269,26 @@ impl Val {
 
     /// Assuming this is the type of a constructor, returns either the return type or the effect type.
     /// Increments `at` as needed.
-    pub fn cons_ret_type(self, at: &mut Size, mcxt: &MCxt, db: &dyn Compiler) -> Val {
+    pub fn cons_ret_type(self, at: &mut Size, mcxt: &MCxt) -> Val {
         match self {
             // The return type is
-            Val::Fun(_, to, effs) if effs.is_empty() => to.cons_ret_type(at, mcxt, db),
+            Val::Fun(_, to, effs) if effs.is_empty() => to.cons_ret_type(at, mcxt),
             Val::Fun(_, _, mut effs) => {
                 assert_eq!(effs.len(), 1);
                 effs.pop().unwrap()
             }
-            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => {
-                cl.vquote(*at, mcxt, db).cons_ret_type(
-                    {
-                        *at = at.inc();
-                        at
-                    },
-                    mcxt,
-                    db,
-                )
-            }
+            Val::Clos(Pi, _, cl, effs) if effs.is_empty() => cl.vquote(*at, mcxt).cons_ret_type(
+                {
+                    *at = at.inc();
+                    at
+                },
+                mcxt,
+            ),
             Val::Clos(Pi, _, _, mut effs) => {
                 assert_eq!(effs.len(), 1);
                 effs.pop().unwrap()
             }
-            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).cons_ret_type(at, mcxt, db),
+            Val::Arc(x) => IntoOwned::<Val>::into_owned(x).cons_ret_type(at, mcxt),
             x => x,
         }
     }

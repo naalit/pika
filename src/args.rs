@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::{collections::VecDeque, path::PathBuf};
 
-const HELP: &'static str = "Usage:
+const HELP: &str = "Usage:
     pika [flags] command [files]
 
 Commands:
@@ -157,36 +157,36 @@ impl Config {
                         }
                     }
                 }
-            } else if i.starts_with("-") {
+            } else if i.starts_with('-') {
                 for (idx, c) in i.char_indices().skip(1) {
                     if let Some(flag) = Flag::short(c) {
                         args.flags.insert(flag);
-                    } else {
-                        if idx + 1 == i.len() {
-                            let mut val = sargs.pop_front();
-                            if let Some(opt) = Opt::short(c, &mut val) {
-                                options.push(opt);
-                            } else {
-                                eprintln!("Unrecognized short flag '{}', ignoring; use '--flag' for long flags", c);
-                                error = true;
-                                sargs.push_front(val.unwrap());
-                            }
-                        } else if idx + 2 == i.len()
-                            && i.chars().skip(idx + 1).next().unwrap().is_ascii_digit()
-                        {
-                            // Allow -O2 etc
-                            let mut val = Some(i[idx + 1..].to_string());
-                            if let Some(opt) = Opt::short(c, &mut val) {
-                                options.push(opt);
-                            } else {
-                                eprintln!("Unrecognized short flag '{}', ignoring; use '--flag' for long flags", c);
-                                error = true;
-                            }
-                            break;
+                    } else if idx + 1 == i.len() {
+                        let mut val = sargs.pop_front();
+                        if let Some(opt) = Opt::short(c, &mut val) {
+                            options.push(opt);
+                        } else {
+                            eprintln!("Unrecognized short flag '{}', ignoring; use '--flag' for long flags", c);
+                            error = true;
+                            sargs.push_front(val.unwrap());
+                        }
+                    } else if idx + 2 == i.len() && i.chars().nth(idx + 1).unwrap().is_ascii_digit()
+                    {
+                        // Allow -O2 etc
+                        let mut val = Some(i[idx + 1..].to_string());
+                        if let Some(opt) = Opt::short(c, &mut val) {
+                            options.push(opt);
                         } else {
                             eprintln!("Unrecognized short flag '{}', ignoring; use '--flag' for long flags", c);
                             error = true;
                         }
+                        break;
+                    } else {
+                        eprintln!(
+                            "Unrecognized short flag '{}', ignoring; use '--flag' for long flags",
+                            c
+                        );
+                        error = true;
                     }
                 }
             } else if args.command.is_none() {

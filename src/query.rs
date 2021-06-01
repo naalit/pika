@@ -481,10 +481,10 @@ fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
                     match i {
                         RecSolution::Global(id, m, span, term, source) => {
                             if let Some(term2) = mcxt.get_meta(Meta::Global(*id, *m, *source)) {
-                                let val = term.clone().evaluate(&mcxt.env(), &mcxt, db);
-                                let val2 = term2.clone().evaluate(&mcxt.env(), &mcxt, db);
+                                let val = term.clone().evaluate(&mcxt.env(), &mcxt);
+                                let val2 = term2.clone().evaluate(&mcxt.env(), &mcxt);
                                 if !crate::elaborate::unify(
-                                    val, val2, mcxt.size, span.span, db, &mut mcxt,
+                                    val, val2, mcxt.size, span.span, &mut mcxt,
                                 )
                                 .unwrap_or(false)
                                 {
@@ -494,7 +494,7 @@ fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
                                         Error::new(
                                             span.file,
                                             Doc::start("Could not match types: ")
-                                                .chain(Meta::Global(*id, *m, *source).pretty(db))
+                                                .chain(source.pretty(db))
                                                 .add(" inferred as type ")
                                                 .chain(
                                                     term.pretty(db, &mut Names::new(mcxt.cxt, db)),

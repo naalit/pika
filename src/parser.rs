@@ -1076,7 +1076,7 @@ impl<'i> Parser<'i> {
                 Ok(Spanned::new(Pre_::Var(*name), name.span()))
             }
             Tok::String(n) => {
-                let name = self.db.intern_name(n.to_string());
+                let name = self.db.intern_name(n);
                 let r = Ok(Spanned::new(Pre_::Lit(Literal::String(name)), self.span()));
                 self.next();
                 r

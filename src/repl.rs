@@ -189,12 +189,13 @@ pub fn run_repl() {
                             let mcxt = crate::elaborate::MCxt::from_state(
                                 state,
                                 crate::elaborate::MCxtType::Local(i),
+                                &db,
                             );
                             let info = db.elaborate_def(i).unwrap();
                             let val = (*info.term.unwrap())
                                 .clone()
-                                .evaluate(&mcxt.env(), &mcxt, &db)
-                                .force(mcxt.size, &db, &mcxt);
+                                .evaluate(&mcxt.env(), &mcxt)
+                                .force(mcxt.size, &mcxt);
                             let d = match predef.name() {
                                 Some(name) => crate::pretty::Doc::keyword("val")
                                     .space()
@@ -202,20 +203,20 @@ pub fn run_repl() {
                                     .line()
                                     .add(":")
                                     .space()
-                                    .chain(info.typ.pretty(&db, &mcxt).group())
+                                    .chain(info.typ.pretty(&mcxt).group())
                                     .line()
                                     .add("=")
                                     .space()
-                                    .chain(val.pretty(&db, &mcxt).group())
+                                    .chain(val.pretty(&mcxt).group())
                                     .group()
                                     .indent()
                                     .line(),
                                 None => val
-                                    .pretty(&db, &mcxt)
+                                    .pretty(&mcxt)
                                     .line()
                                     .add(":")
                                     .space()
-                                    .chain(info.typ.pretty(&db, &mcxt))
+                                    .chain(info.typ.pretty(&mcxt))
                                     .group()
                                     .indent()
                                     .line(),
