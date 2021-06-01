@@ -169,8 +169,8 @@ impl Cxt {
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum RecSolution {
-    Global(PreDefId, u16, Span, Term),
-    ParentLocal(DefId, u16, Span, Term),
+    Global(PreDefId, u16, FileSpan, Term),
+    ParentLocal(DefId, u16, FileSpan, Term),
 }
 impl RecSolution {
     pub fn id(&self) -> Option<PreDefId> {
@@ -189,6 +189,12 @@ impl RecSolution {
     pub fn term(&self) -> &Term {
         match self {
             RecSolution::Global(_, _, _, v) | RecSolution::ParentLocal(_, _, _, v) => v,
+        }
+    }
+
+    pub fn span(&self) -> FileSpan {
+        match self {
+            RecSolution::Global(_, _, s, _) | RecSolution::ParentLocal(_, _, s, _) => *s,
         }
     }
 }
@@ -478,22 +484,33 @@ fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
                                 let val = term.clone().evaluate(&mcxt.env(), &mcxt, db);
                                 let val2 = term2.clone().evaluate(&mcxt.env(), &mcxt, db);
                                 if !crate::elaborate::unify(
-                                    val, val2, mcxt.size, *span, db, &mut mcxt,
+                                    val, val2, mcxt.size, span.span, db, &mut mcxt,
                                 )
                                 .unwrap_or(false)
                                 {
-                                    // TODO include previous span (which may be in another file)
-                                    db.report_error(Error::new(
-                                        file,
-                                        Doc::start("Could not match types: ")
-                                            .chain(Meta::Global(*id, *m).pretty(&mcxt, db))
-                                            .add(" inferred as type ")
-                                            .chain(term.pretty(db, &mut Names::new(mcxt.cxt, db)))
-                                            .add(" but previously found to be type ")
-                                            .chain(term2.pretty(db, &mut Names::new(mcxt.cxt, db))),
-                                        *span,
-                                        "type inferred here",
-                                    ));
+                                    let span2 = mcxt.meta_span(Meta::Global(*id, *m)).unwrap();
+                                    db.report_error(
+                                        Error::new(
+                                            span.file,
+                                            Doc::start("Could not match types: ")
+                                                .chain(Meta::Global(*id, *m).pretty(&mcxt, db))
+                                                .add(" inferred as type ")
+                                                .chain(
+                                                    term.pretty(db, &mut Names::new(mcxt.cxt, db)),
+                                                )
+                                                .add(" but previously found to be type ")
+                                                .chain(
+                                                    term2.pretty(db, &mut Names::new(mcxt.cxt, db)),
+                                                ),
+                                            span.span,
+                                            "type inferred here",
+                                        )
+                                        .with_label(
+                                            span2.file,
+                                            span2.span,
+                                            "previous type found here",
+                                        ),
+                                    );
                                 }
                             } else {
                                 mcxt.solved_globals.push(i.clone());

@@ -137,6 +137,17 @@ impl<T> std::ops::DerefMut for Spanned<T> {
     }
 }
 
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
+pub struct FileSpan {
+    pub file: FileId,
+    pub span: Span,
+}
+impl FileSpan {
+    pub fn new(file: FileId, span: Span) -> Self {
+        FileSpan { file, span }
+    }
+}
+
 /// An error that can be emitted to the console, with messages and a source location
 #[derive(Debug, Clone)]
 pub struct Error(Diagnostic<usize>);

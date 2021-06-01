@@ -5,7 +5,7 @@ use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetaEntry {
-    Solved(Arc<Term>, Span),
+    Solved(Arc<Term>, FileSpan),
     Unsolved(Option<Name>, Span, MetaSource),
 }
 
@@ -472,6 +472,30 @@ impl MCxt {
         }
     }
 
+    pub fn meta_span(&self, meta: Meta) -> Option<FileSpan> {
+        match meta {
+            Meta::Global(id, n) => self
+                .solved_globals
+                .iter()
+                .find(|s| s.id() == Some(id) && s.num() == n)
+                .map(|s| s.span().clone()),
+            Meta::Local(def, num) => {
+                if let MCxtType::Local(d) = self.ty {
+                    if def == d {
+                        return match &self.local_metas[num as usize] {
+                            MetaEntry::Solved(_, s) => Some(*s),
+                            MetaEntry::Unsolved(_, _, _) => None,
+                        };
+                    }
+                }
+                self.solved_globals.iter().find_map(|s| match s {
+                    RecSolution::ParentLocal(d, n, s, _) if *d == def && *n == num => Some(*s),
+                    _ => None,
+                })
+            }
+        }
+    }
+
     /// Undoes the last call to `define()`.
     pub fn undef(&mut self, db: &dyn Compiler) {
         self.cxt = match db.lookup_cxt_entry(self.cxt) {
@@ -580,6 +604,7 @@ impl MCxt {
         });
 
         // Now add it to the solved metas
+        let span = FileSpan::new(self.cxt.file(db), span);
         match meta {
             Meta::Global(id, n) => {
                 self.solved_globals
@@ -717,16 +742,16 @@ impl MCxt {
                                             t2.clone(),
                                             term.clone(),
                                             self.size,
-                                            *span,
+                                            span.span,
                                             db,
                                             &mut mcxt2,
                                         )? {
                                             db.maybe_report_error(
                                                 TypeError::Unify(
                                                     self.clone(),
-                                                    Spanned::new(term, *span),
+                                                    Spanned::new(term, span.span),
                                                     t2,
-                                                    ReasonExpected::MustMatch(*s2),
+                                                    ReasonExpected::MustMatch(s2.span),
                                                 )
                                                 .into_error(self.cxt.file(db), db, self),
                                             );
