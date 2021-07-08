@@ -185,7 +185,7 @@ fn test_stress_gc() {
         .unwrap()
         .args(&["run", "tests/stress_gc.pk"])
         .assert()
-        .stdout("233\n")
+        .stdout("1597\n")
         .success();
 }
 

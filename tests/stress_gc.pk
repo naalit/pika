@@ -26,8 +26,9 @@ fun int_to_nat (i : I32) : Nat = if i == 0 then zero else suc (int_to_nat (i - 1
 fun fib (i : Nat) : Nat with IO = if iszero (pred i) then one else add (fib (pred i)) (fib (pred (pred i)))
 
 fun main () with IO = do
-    # Currently LLVM can't do tail calls on GC statepoints, so a number higher than 12 causes a stack overflow
-    val n : Nat = fib (int_to_nat 12)
+    # This is all tail calls, so we're limited only by heap size
+    # Large Church naturals are very large, though, so 16 is as high as we can go with the default max heap size of 256KB
+    val n : Nat = fib (int_to_nat 16)
     val i = nat_to_int n
     print i
 end

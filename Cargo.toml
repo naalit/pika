@@ -17,3 +17,6 @@ smallvec = "*"
 assert_cmd = "*"
 predicates = "*"
 rustyline = "*"
+
+[features]
+llvm-13 = ["durin/llvm-13"]

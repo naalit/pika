@@ -5,13 +5,16 @@ const HELP: &str = "Usage:
     pika [flags] command [files]
 
 Commands:
-    build       Compile files but don't run them
-    run         Compile files and run the resulting executable
-    check       Perform typechecking but don't compile to machine code
-    repl        Run the interactive Read-Evaluate-Print-Loop
+    build               Compile files but don't run them
+    run                 Compile files and run the resulting executable
+    check               Perform typechecking but don't compile to machine code
+    repl                Run the interactive Read-Evaluate-Print-Loop
 
 Flags:
-    -h, --help  Show this help message
+    -h, --help          Show this help message
+    --release           Build in release mode with optimizations
+    --emit-durin        Print out the Durin IR for the input files
+    -o, --output PATH   Place the output binary at PATH
 ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +41,7 @@ pub enum Flag {
     Help,
     EmitDurin,
     EmitLLVM,
+    Release,
 }
 impl Flag {
     fn short(c: char) -> Option<Self> {
@@ -51,6 +55,7 @@ impl Flag {
             "help" => Some(Flag::Help),
             "emit-durin" => Some(Flag::EmitDurin),
             "emit-llvm" => Some(Flag::EmitLLVM),
+            "release" => Some(Flag::Release),
             _ => None,
         }
     }
@@ -59,30 +64,17 @@ impl Flag {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Opt {
     Output(PathBuf),
-    OptLevel(u32),
 }
 impl Opt {
     fn short(c: char, val: &mut Option<String>) -> Option<Self> {
         match c {
             'o' => Some(Opt::Output(val.take().unwrap().into())),
-            'O' => Some(Opt::OptLevel(
-                val.take()
-                    .unwrap()
-                    .parse()
-                    .expect("Expected number after -O"),
-            )),
             _ => None,
         }
     }
     fn long(s: &str, val: &mut Option<String>) -> Option<Self> {
         match s {
             "output" => Some(Opt::Output(val.take().unwrap().into())),
-            "opt-level" => Some(Opt::OptLevel(
-                val.take()
-                    .unwrap()
-                    .parse()
-                    .expect("Expected number after -O"),
-            )),
             _ => None,
         }
     }
@@ -93,7 +85,6 @@ pub struct Config {
     pub command: Command,
     pub files: Vec<PathBuf>,
     pub output: Option<PathBuf>,
-    pub opt_level: u32,
     pub flags: HashSet<Flag>,
 }
 impl Config {
@@ -109,11 +100,9 @@ impl Config {
         } = args;
 
         let mut output = None;
-        let mut opt_level = 0;
         for i in options {
             match i {
                 Opt::Output(s) => output = Some(s),
-                Opt::OptLevel(i) => opt_level = i,
             }
         }
 
@@ -121,7 +110,6 @@ impl Config {
             command: command.unwrap_or(Command::Repl),
             files,
             output,
-            opt_level,
             flags,
         }
     }

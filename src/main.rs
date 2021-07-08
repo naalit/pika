@@ -100,7 +100,7 @@ fn main() {
             if let Some(parent) = out_file.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            if let Err(e) = durin.compile_and_link(&out_file) {
+            if let Err(e) = durin.compile_and_link(&out_file, config.flag(Flag::Release)) {
                 Doc::start("error")
                     .style(Style::BoldRed)
                     .add(": Compilation error: ")
