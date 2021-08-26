@@ -857,6 +857,11 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
         )),
         Pre_::Lit(_) => Err(TypeError::UntypedLiteral(pre.span())),
 
+        Pre_::Box(b, x) => {
+            let x = check(x, &Val::Type, ReasonExpected::UsedInBox, mcxt)?;
+            Ok((Term::Box(*b, Box::new(x)), Val::Type))
+        }
+
         Pre_::BinOp(op, a, b) => {
             let (va, aty) = infer(true, a, mcxt)?;
             // Check b against the type and inline metas first, to allow:

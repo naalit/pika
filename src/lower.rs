@@ -939,6 +939,11 @@ impl Term {
                     unreachable!("Empty do block in lower()!")
                 }
             }
+            Term::Box(true, _) => cxt.builder.cons(ir::Constant::BoxTy),
+            Term::Box(false, x) => {
+                let x = x.lower(cxt);
+                cxt.builder.unbox(x)
+            }
             Term::Struct(StructKind::Struct(t), v) => {
                 let t = t.lower(cxt);
 
@@ -1296,13 +1301,13 @@ impl Pat {
             Pat::Lit(l, w, signed) => {
                 let l = l.lower(*w, cxt);
                 let eq = cxt.builder.binop(ir::BinOp::Eq, *signed, l, x);
+                let lty = ty.clone().lower(cxt);
                 cxt.if_expr(eq);
 
                 let yes = cont.lower(ty.clone(), cxt);
 
                 cxt.otherwise(yes);
 
-                let lty = ty.clone().lower(cxt);
                 cxt.trunc_locals(rest_size);
                 let no = rest.lower(ty, cxt);
 
@@ -1313,13 +1318,13 @@ impl Pat {
                     .builder
                     .cons(ir::Constant::Int(ir::Width::W1, *b as i64));
                 let eq = cxt.builder.binop(ir::BinOp::Eq, false, l, x);
+                let lty = ty.clone().lower(cxt);
                 cxt.if_expr(eq);
 
                 let yes = cont.lower(ty.clone(), cxt);
 
                 cxt.otherwise(yes);
 
-                let lty = ty.clone().lower(cxt);
                 cxt.trunc_locals(rest_size);
                 let no = rest.lower(ty, cxt);
 
@@ -1343,6 +1348,7 @@ impl Pat {
                             .expect("Datatypes should be lowered before their constructors"),
                         x => unreachable!("{:?}", x),
                     };
+                let lret_ty = ty.clone().lower(cxt);
 
                 let idx = cxt
                     .db
@@ -1360,12 +1366,6 @@ impl Pat {
                     .unwrap()
                     .0;
 
-                // if x.id() == 704 {
-                //     eprintln!("{:?} -> {:?}: tid={:?}, sid={:?}, targs={:?}", cxt.mcxt.size, rest_size, tid, sid, targs);
-                //     let (ltys, _) = lower_datatype(tid, sid, targs, cxt);
-                //     let lty = ltys[idx];
-                //     panic!("Got {:?}", lty);
-                // }
                 let (ltys, _) = lower_datatype(tid, sid, targs, cxt);
                 let lty = ltys[idx];
                 let product = cxt.ifcase(idx, x, lty);
@@ -1392,11 +1392,10 @@ impl Pat {
 
                 cxt.otherwise(yes);
 
-                let lty = ty.clone().lower(cxt);
                 cxt.trunc_locals(rest_size);
                 let no = rest.lower(ty, cxt);
 
-                cxt.endif(no, lty)
+                cxt.endif(no, lret_ty)
             }
             Pat::Or(a, b) => {
                 let rest = PatCont::Pat {

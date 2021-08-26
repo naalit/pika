@@ -254,6 +254,16 @@ fn test_multifile() {
         .success();
 }
 
+#[test]
+fn test_boxing() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/boxing.pk"])
+        .assert()
+        .stdout("8\n")
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

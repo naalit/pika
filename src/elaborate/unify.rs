@@ -54,6 +54,8 @@ fn p_unify(
             Ok(r)
         }
 
+        (Val::Box(_, a), b) | (b, Val::Box(_, a)) => p_unify(mode, *a, b, size, span, mcxt),
+
         (Val::Struct(k, v), Val::Struct(k2, mut v2)) => {
             if v.len() != v2.len() {
                 return Ok(No);

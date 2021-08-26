@@ -13,6 +13,7 @@ pub enum ScopeType {
 pub enum ReasonExpected {
     UsedAsType,
     UsedInWith,
+    UsedInBox,
     IfCond,
     LogicOp,
     MustMatch(Span),
@@ -37,6 +38,10 @@ impl ReasonExpected {
                 .with_note(Doc::start("expected because it was used as a type").style(Style::Note)),
             ReasonExpected::UsedInWith => err.with_note(
                 Doc::start("expected because it was used as an effect in a `with` type")
+                    .style(Style::Note),
+            ),
+            ReasonExpected::UsedInBox => err.with_note(
+                Doc::start("help: `box` and `unbox` can only be used with types")
                     .style(Style::Note),
             ),
             ReasonExpected::IfCond => err.with_note(

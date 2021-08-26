@@ -168,6 +168,7 @@ pub enum Pre_ {
     BinOp(Spanned<BinOp>, Pre, Pre),
     /// If(cond, then, else)
     If(Pre, Pre, Pre),
+    Box(bool, Pre),
     Sig(Vec<PreDefAn>),
     Struct(Vec<PreDefAn>),
     StructShort(Vec<(Name, Option<Pre>)>),
@@ -523,6 +524,7 @@ pub enum Term {
     Lit(Literal, Builtin),
     /// do A; B; () end
     Do(Vec<(DefId, Term)>),
+    Box(bool, Box<Ty>),
     Struct(StructKind<Term>, Vec<(DefId, Name, Term)>),
     Dot(Box<Term>, Name),
 }
@@ -538,7 +540,7 @@ impl Term {
         )
     }
 
-    pub fn ty(&self, at: Size, mcxt: &MCxt) -> Term {
+    pub fn ty(&self, at: Size, mcxt: &MCxt) -> Ty {
         match self {
             Term::Type => Term::Type,
             Term::Var(_, t) => (**t).clone(),
@@ -550,7 +552,7 @@ impl Term {
                 Box::new(body.ty(at.inc(), mcxt)),
                 effs.clone(),
             ),
-            Term::Clos(Pi, _, _, _, _, _) => Term::Type,
+            Term::Clos(Pi, _, _, _, _, _) | Term::Box(_, _) => Term::Type,
             Term::Fun(_, _, _) => Term::Type,
             Term::App(_, f, x) => match f.ty(at, mcxt).inline_top(mcxt) {
                 Term::Fun(_, to, _) => *to,
@@ -890,6 +892,10 @@ impl Term {
                     .chain(Doc::keyword("end"))
                     .prec(Prec::Atom)
             }
+            Term::Box(b, x) => Doc::keyword(if *b { "box" } else { "unbox" })
+                .space()
+                .chain(x.pretty(db, names))
+                .prec(Prec::App),
             Term::Struct(kind, v) => {
                 let mut doc = match kind {
                     StructKind::Struct(_) => Doc::keyword("struct"),
@@ -1250,6 +1256,7 @@ pub enum Val {
     Lit(Literal, Builtin),
     /// do A; B; () end
     Do(Env, Vec<(DefId, Term)>),
+    Box(bool, Box<VTy>),
     Struct(StructKind<Val>, Vec<(DefId, Name, Val)>),
 }
 impl Val {

@@ -966,6 +966,20 @@ impl<'i> Parser<'i> {
 
     /// Parse an application, of the form `a`, `a b c`, `a.n`, or `a.n b c`, where `a b c` are atoms and `n` is a name.
     fn app(&mut self) -> PResult<Pre> {
+        if self.peek("_") == Ok(Tok::Box) {
+            let start = self.span().0;
+            self.next();
+            let rest = self.app()?;
+            let span = Span(start, rest.span().1);
+            return Ok(Spanned::new(Pre_::Box(true, rest), span));
+        }
+        if self.peek("_") == Ok(Tok::Unbox) {
+            let start = self.span().0;
+            self.next();
+            let rest = self.app()?;
+            let span = Span(start, rest.span().1);
+            return Ok(Spanned::new(Pre_::Box(false, rest), span));
+        }
         let f = self.atom()?;
         if let Ok(Tok::Dot) = self.peek("_") {
             self.next();
@@ -1021,7 +1035,7 @@ impl<'i> Parser<'i> {
             match self.peek("_") {
                 Ok(Tok::Name(_)) | Ok(Tok::Lit(_)) | Ok(Tok::POpen) | Ok(Tok::Struct)
                 | Ok(Tok::Sig) | Ok(Tok::TypeType) | Ok(Tok::Case) | Ok(Tok::Catch)
-                | Ok(Tok::COpen) | Ok(Tok::Do) | Ok(Tok::If) => {
+                | Ok(Tok::COpen) | Ok(Tok::Do) | Ok(Tok::If) | Ok(Tok::String(_)) => {
                     let x = self.atom()?;
                     v.push((Icit::Expl, x));
                 }

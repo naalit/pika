@@ -1,0 +1,33 @@
+type Option a of
+    Some (unbox a)
+    None
+end
+
+type List a of
+    Nil
+    Cons a (box List a)
+where
+    fun nth [a] (i : I32) (self : List a) : Option a = case self of
+        Nil => Option.None
+        Cons a rest => if i <= 0 then Option.Some a else nth (i - 1) rest
+    end
+
+    fun print_list (self : List I32) : () with IO = case self of
+        Nil => ()
+        Cons a rest => do
+            print a
+            print_list rest
+        end
+    end
+end
+
+fun range (a b : I32) : List I32 = if a >= b then List.Nil else List.Cons a (range (a + 1) b)
+
+fun main () : () with IO = do
+    val list = range 0 12
+    val eight = List.nth 8 list
+    case eight of
+        Option.Some x => print x
+        Option.None => print -1
+    end
+end

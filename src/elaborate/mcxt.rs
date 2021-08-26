@@ -615,6 +615,10 @@ impl Term {
                 })
                 .collect::<Result<_, _>>()
                 .map(Term::Do),
+            Term::Box(b, mut x) => {
+                *x = x.check_solution(meta, ren, lfrom, lto, names)?;
+                Ok(Term::Box(b, x))
+            }
             Term::Struct(k, v) => Ok(Term::Struct(
                 match k {
                     StructKind::Struct(t) => StructKind::Struct(Box::new(t.check_solution(

@@ -45,6 +45,7 @@ impl Term {
                 x.app(Elim::Case(env.clone(), ty, cases, effs, rty), mcxt)
             }
             Term::Do(v) => Val::Do(env.clone(), v),
+            Term::Box(b, x) => Val::Box(b, Box::new(x.evaluate(env, mcxt))),
             Term::Struct(k, v) => Val::Struct(
                 match k {
                     StructKind::Struct(t) => StructKind::Struct(Box::new(t.evaluate(env, mcxt))),
@@ -151,6 +152,10 @@ impl Term {
                     .map(|(id, term)| (id, term.eval_quote(env, at, mcxt)))
                     .collect(),
             ),
+            Term::Box(b, mut x) => {
+                *x = x.eval_quote(env, at, mcxt);
+                Term::Box(b, x)
+            }
             Term::Struct(k, v) => Term::Struct(
                 match k {
                     StructKind::Struct(t) => {
@@ -268,6 +273,10 @@ impl Val {
                     .collect();
                 Val::Do(env, v)
             }
+            Val::Box(b, mut x) => {
+                *x = x.force(at, mcxt);
+                Val::Box(b, x)
+            }
             Val::Struct(k, v) => Val::Struct(
                 match k {
                     StructKind::Struct(t) => StructKind::Struct(Box::new(t.force(at, mcxt))),
@@ -367,6 +376,7 @@ impl Val {
                     .map(|(d, t)| (d, t.eval_quote(&mut env, at, mcxt)))
                     .collect(),
             ),
+            Val::Box(b, x) => Term::Box(b, Box::new(x.quote(at, mcxt))),
             Val::Struct(k, v) => Term::Struct(
                 match k {
                     StructKind::Struct(t) => StructKind::Struct(Box::new(t.quote(at, mcxt))),
@@ -474,6 +484,10 @@ impl Val {
                     .map(|(d, t)| (d, t.inline_metas(mcxt, size)))
                     .collect();
                 Val::Do(env, v)
+            }
+            Val::Box(b, mut x) => {
+                *x = x.inline_metas(at, mcxt);
+                Val::Box(b, x)
             }
             Val::Struct(k, v) => Val::Struct(
                 match k {

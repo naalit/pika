@@ -66,6 +66,8 @@ pub enum Tok<'i> {
     Then,
     Else,
     Eff,
+    Box,
+    Unbox,
 
     // Symbols the lexer recognizes as a "binary operator"
     Colon,     // :
@@ -316,6 +318,8 @@ impl<'i> Lexer<'i> {
             "if" => Tok::If,
             "then" => Tok::Then,
             "else" => Tok::Else,
+            "box" => Tok::Box,
+            "unbox" => Tok::Unbox,
             // Where technically ends one block and starts another one, but we ignore that.
             "where" => Tok::Where,
             "eff" => Tok::Eff,
@@ -648,6 +652,8 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::Then => "'then'",
             Tok::Else => "'else'",
             Tok::Eff => "'eff'",
+            Tok::Box => "'box'",
+            Tok::Unbox => "'unbox'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",

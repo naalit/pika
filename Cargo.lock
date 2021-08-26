@@ -194,7 +194,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 [[package]]
 name = "durin"
 version = "0.1.0"
-source = "git+https://github.com/tolziplohu/durin#0e3ab33e0593d4396ac88155c9b95fa3e89089a4"
+source = "git+https://github.com/tolziplohu/durin#453bce09bbf61a59f32362fced846a2d2a6b6523"
 dependencies = [
  "cc",
  "either",

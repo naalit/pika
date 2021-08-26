@@ -2,13 +2,14 @@
 Pika is a small, dependently typed ML with algebraic effects and unboxed types.
 This is the rewritten version of the compiler, and the new typechecker is heavily inspired by [smalltt](https://github.com/AndrasKovacs/smalltt).
 
-Currently, Pika can compile dependently-typed lambda calculus to LLVM (through [Durin](https://github.com/tolziplohu/durin), a dependently typed optimizing intermediate language) and thus native code, but it doesn't have all its planned features implemented yet.
+Pika compiles to native code with LLVM (through [Durin](https://github.com/tolziplohu/durin), a dependently typed optimizing intermediate language).
+It doesn't have all its planned features implemented yet, but the core is there: dependent types, algebraic effects, and unboxed types all work.
 
 ### Example
 Pika doesn't have all its planned features implemented yet, but here are some that currently work.
 Look in the `tests` folder for more examples of Pika code that works today.
 For a demonstration of planned features, see `demo.pk`.
-```
+```cr
 # Syntax is similar to Standard ML, but comments use #
 # Pika doesn't have universes, so Type has type Type
 val U : Type = Type
@@ -26,45 +27,44 @@ val test2 = id [Type] Type
 
 # And you can use explicit lambdas instead of `fun`
 # Also, `_` introduces a hole filled by unification
-val id2 : [T] T -> _ = \x. x
+val id2 : [T] T -> _ = x => x
 
 # Pika has datatypes and pattern matching as well
-type Option T of
-  Some T
-  None
+# With explicit boxing and unboxing (but things are unboxed by default)
+type List T of
+  Nil
+  Cons T (box List T)
 where
-  # This is in Option's "associated namespace", as are the constructors, like `impl` in Rust.
-  # Code outside of the associated namespace needs to qualify the constructors when matching, like `Option.None`
-  fun unwrap_or [T] (self : Option T) (default : T) = case self of
-    Some x => x
-    None => default
+  # This is in List's "associated namespace", as are the constructors, like `impl` in Rust.
+  # Code outside of the associated namespace needs to qualify the constructors when matching, like `List.Nil`
+  fun len [T] (self : List T) : I32 = case self of
+    Nil => 0
+    Cons x rest => 1 + len rest
   end
 end
-val _ = Option.unwrap_or (Option.Some Type) (Type -> Type)
+val _ = List.len (List.Cons Type (List.Nil))
 
 # And algebraic effects
-# Of course, this example would be better if we had strings
 eff Console of
-  Print I32 : ()
-  Read () : I32
+  Print String : ()
+  Read () : String
 end
 
 fun greet () : () with Console = do
-  Console.Print 1
-  val name : I32 = Console.Read ()
+  Console.Print "Hello, "
+  val name : String = Console.Read ()
   Console.Print name
 end
 
-fun main () : () = do
-  fun handle (x : () with Console) : () = case x of
-    () => ()
-    eff (Console.Print _) k => handle (k ()?)
-    eff (Console.Read ()) k => handle (k 12?)
+# Now we handle the effects
+# Print out what `greet` tells us to, but make `Read` always return "Pika"
+fun main () with IO = catch greet () of
+  () => ()
+  eff (Console.Print s) k => do
+    puts s
+    k ()
   end
-
-  # ? stops effect propagation so it can be match on
-  # It's the opposite of ? in Rust
-  handle (greet ()?)
+  eff (Console.Read ()) k => k "Pika"
 end
 ```
 
