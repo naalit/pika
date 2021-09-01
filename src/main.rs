@@ -90,6 +90,8 @@ fn main() {
 
         if matches!(config.command, Command::Build | Command::Run) {
             let mut durin = crate::lower::durin(&db, files);
+            durin.optimize();
+
             if config.flag(Flag::EmitDurin) {
                 eprintln!("{}", durin.emit());
             }

@@ -264,6 +264,22 @@ fn test_boxing() {
         .success();
 }
 
+#[test]
+fn test_tictactoe() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/tictactoe.pk"])
+        .assert()
+        .stdout(
+            "
+ _ _ X
+ X O _
+ _ _ _
+",
+        )
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

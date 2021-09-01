@@ -15,9 +15,49 @@ pub struct ModCxt<'m> {
     defs: HashMap<PreDefId, ir::Val>,
     scope_ids: HashMap<PreDefId, (DefId, ScopeId)>,
     module: ir::Module,
+    entry: Option<ir::Val>,
+    state: Option<BuildState>,
 }
 impl<'m> ModCxt<'m> {
-    pub fn finish(self) -> ir::Module {
+    pub fn finish(mut self, main: Option<ir::Val>) -> ir::Module {
+        use durin::ir::{Slots, WorldExt};
+
+        if let Some(main) = main {
+            let mut is_valid = true;
+            match self.module.slots().node(main) {
+                Some(ir::Node::Fun(f)) => {
+                    is_valid &= f.params.len() == 2;
+                    is_valid &= matches!(self.module.slots().node(f.params[0]), Some(ir::Node::ProdType(v)) if v.is_empty());
+                    is_valid &= matches!(
+                        self.module.slots().node(f.params[1]),
+                        Some(ir::Node::FunType(1))
+                    );
+                }
+                _ => is_valid = false,
+            }
+            if !is_valid {
+                Doc::start("error")
+                    .style(Style::BoldRed)
+                    .add(": `main` function must have type ")
+                    .style(Style::Bold)
+                    .chain(Doc::start("() -> ()").chain(Doc::keyword("with").add("IO")))
+                    .emit();
+                std::process::exit(1);
+            }
+
+            let mut builder = Builder::new(&mut self.module, self.state);
+            let unit_ty = builder.prod_type(&[] as &_);
+            let unit = builder.product(unit_ty, &[] as &_);
+            builder.call(main, &[unit] as &_, unit_ty);
+            builder.stop();
+        } else {
+            Builder::new(&mut self.module, self.state).stop();
+        }
+        self.module
+            .world
+            .write_component()
+            .insert(self.entry.unwrap(), ir::Name("$__entry".to_string()))
+            .unwrap();
         self.module
     }
 
@@ -27,6 +67,8 @@ impl<'m> ModCxt<'m> {
             defs: HashMap::new(),
             scope_ids: HashMap::new(),
             module: ir::Module::new(),
+            entry: None,
+            state: None,
         }
     }
 
@@ -40,9 +82,13 @@ impl<'m> ModCxt<'m> {
             &mut self.defs,
             &mut self.scope_ids,
             locals,
+            self.state.clone(),
         );
+        if self.entry.is_none() {
+            self.entry = Some(lcxt.builder.state().block);
+        }
         let val = f(&mut lcxt);
-        lcxt.builder.finish();
+        self.state = Some(lcxt.builder.state());
 
         let val2 = lcxt.get_or_reserve(pre);
         self.module.redirect(val2, val);
@@ -68,8 +114,9 @@ impl<'db> LCxt<'db> {
         defs: &'db mut HashMap<PreDefId, ir::Val>,
         scope_ids: &'db mut HashMap<PreDefId, (DefId, ScopeId)>,
         locals: IVec<ir::Val>,
+        state: Option<BuildState>,
     ) -> Self {
-        let builder = Builder::new(m);
+        let builder = Builder::new(m, state);
         LCxt {
             db,
             locals,
@@ -375,6 +422,7 @@ impl Val {
 pub fn durin(db: &dyn Compiler, files: impl IntoIterator<Item = FileId>) -> ir::Module {
     let mut mcxt = ModCxt::new(db);
     let mut solved_globals = db.check_all();
+    let mut main = None;
     for file in files {
         for &def in &*db.top_level(file) {
             if let Ok(info) = db.elaborate_def(def) {
@@ -383,12 +431,26 @@ pub fn durin(db: &dyn Compiler, files: impl IntoIterator<Item = FileId>) -> ir::
                     let val = info.term.as_ref().unwrap().lower(lcxt);
                     lower_children(def, lcxt);
                     std::mem::swap(&mut solved_globals, &mut lcxt.mcxt.solved_globals);
+
+                    let (pre, _) = db.lookup_intern_def(def);
+                    let pre = db.lookup_intern_predef(pre);
+                    let name = pre.name();
+                    if name.map_or(false, |n| db.lookup_intern_name(n) == "main") {
+                        if main.is_some() {
+                            eprintln!(
+                                "Warning: more than one `main` functions, picking the first one"
+                            );
+                        } else {
+                            main = Some(val);
+                        }
+                    }
+
                     val
                 });
             }
         }
     }
-    mcxt.finish()
+    mcxt.finish(main)
 }
 
 fn lower_children(def: DefId, cxt: &mut LCxt) {
@@ -524,7 +586,7 @@ fn lower_datatype(
 
                     // Now generate the sigma type representing the constructor
                     let mut i = 0;
-                    let mut sigma = cxt.builder.sigma();
+                    let mut prod = Vec::new();
                     let mut keep = Vec::new();
                     let mut env = Env::new(cxt.mcxt.size);
                     loop {
@@ -549,13 +611,14 @@ fn lower_datatype(
                                     env.push(Some(x.clone()));
                                     // If we solved it, skip adding it to the sigma
                                     // This shouldn't be used at all
-                                    // cxt.builder.cons(ir::Constant::Unreachable)
-                                    sigma.add(from.clone().lower(cxt), &mut cxt.builder)
+                                    prod.push(from.clone().lower(cxt));
+                                    cxt.builder.cons(ir::Constant::BoxTy)
                                 } else {
                                     // It doesn't have a solution, so it remains in the product type
                                     keep.push(true);
                                     env.push(None);
-                                    sigma.add(from.clone().lower(cxt), &mut cxt.builder)
+                                    prod.push(from.clone().lower(cxt));
+                                    cxt.builder.cons(ir::Constant::BoxTy)
                                 };
 
                                 // Define the variable and go to the next level
@@ -575,7 +638,7 @@ fn lower_datatype(
                                 keep.push(true);
 
                                 // Don't add the parameter to the context, since it's not a pi
-                                sigma.add(from.clone().lower(cxt), &mut cxt.builder);
+                                prod.push(from.clone().lower(cxt));
                                 cty = *to;
                                 if !effs.is_empty() {
                                     break;
@@ -587,7 +650,7 @@ fn lower_datatype(
                     for _ in 0..i {
                         cxt.pop_local();
                     }
-                    Some((sigma.finish(&mut cxt.builder), keep))
+                    Some((cxt.builder.prod_type(prod), keep))
                 }
                 _ => None,
             }
