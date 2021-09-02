@@ -5,15 +5,11 @@ where
   fun not (b: Bool) = case b of
     True => False
     False => True
-  end
-end
 
 type Test of
   Thing Type Type
-end
 fun test (t: Test) = case t of
   Test.Thing a b => a -> b
-end
 
 type Option a of
   None
@@ -22,25 +18,19 @@ where
   fun unwrap_or [a] (self : Option a) (default : a) : a = case self of
     None => default
     Some x => x
-  end
 
   # This used to cause a bug since local constraints weren't properly applied to subpatterns
   fun test_fun (x : Option ()) = case x of
     Some () => ()
     None => ()
-  end
-end
 
 fun my_fun (x : Option Type) = Option.unwrap_or x (Type -> Type)
 
 type GADT (a: Type) of
   X : GADT ()
-end
 
 type Something a of
   C (GADT a) a
 where
   fun something [a] (x : Something a) : () = case x of
     Something.C (GADT.X) () => ()
-  end
-end

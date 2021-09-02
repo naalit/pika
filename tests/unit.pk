@@ -2,8 +2,6 @@ fun main () : () = do
   fun inc x : I32 = x + 1
   val four = inc 3
   # Implicitly returns ()
-end
 
 val q = case main () of
   () => ()
-end

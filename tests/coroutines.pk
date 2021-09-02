@@ -2,14 +2,12 @@
 # It involves changing the effect continuation each time, and should print out 0-6
 eff Yield a of
     Y a : ()
-end
 
 fun generator () with Yield I32 = do
     # TODO we shouldn't need the explicit [I32] here
     Yield.Y [I32] 1
     Yield.Y [I32] 3
     Yield.Y [I32] 5
-end
 
 type Coroutine a of
     Go a (() -> Coroutine a)
@@ -18,7 +16,6 @@ where
     fun new [a] (gen : () -> () with Yield a) : Coroutine a = catch gen () of
         () => Stop
         eff (Yield.Y x) k => Go x k
-    end
 
     ## Steps the coroutine, and if it yields a value, calls `run` on it. Otherwise it's done, and this function does nothing.
     ## Returns the new coroutine.
@@ -27,9 +24,6 @@ where
         Go a k => do
             run a
             k ()
-        end
-    end
-end
 
 fun main () with IO = do
     val k = Coroutine.new generator
@@ -42,4 +36,3 @@ fun main () with IO = do
     print 6
     # This shouldn't print anything, because the coroutine is done
     Coroutine.step print k
-end

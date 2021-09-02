@@ -8,7 +8,6 @@ type Term a of
 where
   # The constructors work without a dot here
   fun also_lit [a] (x : a) : Term a = Lit x
-end
 
 val one : Term Type = Term.TypeType
 val two : Term (Type -> Type) = Term.Fun (x => x)

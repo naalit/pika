@@ -10,4 +10,3 @@ val s2 = "b c d"
 fun main () with IO = do
     puts "a line\nvalue: "
     print 3
-end

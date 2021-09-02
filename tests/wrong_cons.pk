@@ -1,12 +1,9 @@
 type One of
   A
-end
 type Two of
   B
-end
 
 fun f (x : One) = case x of
   One.A => One.A
   # This is the wrong type!
   Two.B => One.A
-end

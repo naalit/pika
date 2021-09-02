@@ -1,4 +1,3 @@
 type Test of
   # wrong return type
   Wrong : Type
-end

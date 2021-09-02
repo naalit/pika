@@ -1,0 +1,78 @@
+fun f x : I32 = x + 2
+
+fun a
+    ()
+    : ()
+    with IO = ()
+fun b ()
+    : ()
+    with IO = ()
+fun c ()
+    : () with IO = ()
+fun d ()
+    with IO = ()
+fun e ()
+    = ()
+
+
+type Result
+    a
+    b
+of
+    Ok
+        a
+    Err b
+where
+    val seven : I32 = 7
+
+type ResultA a b = Result a b where
+    val eight : I32 = 8
+
+type ResultB a b = Result a b
+where
+    val nine : I32 = 9
+
+type ResultC a b
+    = Result a b
+where
+    val ten : I32 = 10
+
+type ResultD
+    a
+    b
+    =
+        Result
+            a
+            b
+where
+    val eleven : I32 = 11
+
+
+
+fun test (a : I32) : I32 =
+    # I'd like to put the condition on the same line as the `if`,
+    # but that requires 2 tokens of lookahead. Maybe in the future.
+    if 
+        a == 2
+        then a
+        else
+            f (2 + 3)
+
+fun test2 (a : I32) : I32 =
+    case
+        a
+    of
+        2 => a
+        _ =>
+            f (2 + 3)
+
+fun main () : () with IO =
+    do
+        print
+            f
+                2 + 3
+                    * 4
+        print
+            f
+                4 *
+                    2 + 3

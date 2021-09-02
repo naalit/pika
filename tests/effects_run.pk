@@ -2,7 +2,6 @@
 eff Console of
     Print I32 : ()
     Read () : I32
-end
 
 fun producer () : I32 with Console = do
     Console.Print 1
@@ -11,7 +10,6 @@ fun producer () : I32 with Console = do
     val y = Console.Read ()
     Console.Print y
     x + y
-end
 
 # Expected output:
 # 1
@@ -24,8 +22,6 @@ fun main () : () with IO = do
         eff (Console.Print i) k => acc => do
             print i
             k () acc
-        end
         eff (Console.Read ()) k => acc => k acc (acc + 1)
-    end
+
     print (handler 2)
-end

@@ -11,4 +11,3 @@ val z = Tagged2 y
 
 val q = case z of
     Tagged2 (Tagged _ (Int i)) => i
-end

@@ -52,7 +52,6 @@ pub enum Tok<'i> {
     Type,
     Case,
     Of,
-    End,
     /// This is uppercase `Type`. TODO make it a builtin instead of a keyword?
     TypeType,
     With,
@@ -102,6 +101,8 @@ pub enum Tok<'i> {
     String(String),
 
     // Other tokens
+    Indent,
+    Dedent,
     Question,  // ?
     At,        // @
     POpen,     // (
@@ -111,22 +112,15 @@ pub enum Tok<'i> {
     COpen,     // {
     CClose,    // }
     Newline,   // \n or ;
-    OpNewline, // "\n"+ before a binop
     Backslash, // \
 }
 impl<'i> Tok<'i> {
-    /// Returns true if we should completely ignore newlines before this token.
-    /// Currently only true for '=>', '->', '=' and ':'.
-    fn is_special_binop(&self) -> bool {
-        matches!(self, Tok::Equals | Tok::Colon | Tok::WideArrow | Tok::Arrow)
-    }
-
     pub fn closes_type(&self) -> Option<NestType> {
         match self {
             Tok::SClose => Some(NestType::Square),
             Tok::PClose => Some(NestType::Paren),
             Tok::CClose => Some(NestType::Curly),
-            Tok::End => Some(NestType::Block),
+            Tok::Dedent => Some(NestType::Block),
             _ => None,
         }
     }
@@ -137,7 +131,7 @@ pub enum NestType {
     Paren,
     Square,
     Curly,
-    /// Anything that ends with `end`
+    /// Anything delimited by indentation
     Block,
     String,
 }
@@ -145,17 +139,11 @@ pub enum NestType {
 pub struct Lexer<'i> {
     chars: Peekable<Chars<'i>>,
     input: &'i str,
-    was_binop: bool,
     tok_start: usize,
     pos: usize,
 
-    nesting: Vec<NestType>,
-
-    /// We ignore newlines before binops, so as we find newlines we add their positions to pending_newlines but don't emit them.
-    /// Then, if we hit a binop we clear pending_newlines and emit an OpNewline.
-    /// If we hit something other than a newline or binop, we put in in pending_tok and emit all the newlines as Newline, then emit pending_tok.
-    pending_newlines: VecDeque<usize>,
-    pending_tok: Option<LexResult<'i>>,
+    indent_stack: Vec<usize>,
+    pending_toks: VecDeque<LexResult<'i>>,
 }
 
 impl<'i> Lexer<'i> {
@@ -163,12 +151,10 @@ impl<'i> Lexer<'i> {
         Lexer {
             chars: input.chars().peekable(),
             input,
-            was_binop: false,
             tok_start: 0,
             pos: 0,
-            nesting: Vec::new(),
-            pending_newlines: VecDeque::new(),
-            pending_tok: None,
+            indent_stack: Vec::new(),
+            pending_toks: VecDeque::new(),
         }
     }
 
@@ -195,13 +181,7 @@ impl<'i> Lexer<'i> {
                 while self.peek().map_or(false, |x| x != '\n') {
                     self.next();
                 }
-            }
-            // Ignore newlines immediately after binops or in parens
-            else if next.is_whitespace()
-                && (self.was_binop
-                    || self.nesting.last().map_or(false, |x| *x == NestType::Paren)
-                    || next != '\n')
-            {
+            } else if next.is_whitespace() && next != '\n' {
                 self.next();
             } else {
                 break;
@@ -216,19 +196,6 @@ impl<'i> Lexer<'i> {
 
     fn tok_in_place(&self, tok: Tok<'i>) -> LexResult<'i> {
         Ok((self.tok_start, tok, self.pos))
-    }
-
-    fn nexpect(&mut self, t: NestType) -> Result<(), Spanned<LexError>> {
-        let p = self.nesting.pop();
-        match p {
-            Some(p) if p == t => Ok(()),
-            Some(p) => Err(Spanned::new(
-                LexError::MissingTerminator(p),
-                // Don't point at the current token, point at the spot where it's missing
-                Span(self.tok_start, self.tok_start),
-            )),
-            None => Err(Spanned::new(LexError::UnexpectedTerminator(t), self.span())),
-        }
     }
 
     fn lex_number(&mut self) -> LexResult<'i> {
@@ -323,26 +290,10 @@ impl<'i> Lexer<'i> {
             // Where technically ends one block and starts another one, but we ignore that.
             "where" => Tok::Where,
             "eff" => Tok::Eff,
-            "do" => {
-                self.nesting.push(NestType::Block);
-                Tok::Do
-            }
-            "struct" => {
-                self.nesting.push(NestType::Block);
-                Tok::Struct
-            }
-            "sig" => {
-                self.nesting.push(NestType::Block);
-                Tok::Sig
-            }
-            "of" => {
-                self.nesting.push(NestType::Block);
-                Tok::Of
-            }
-            "end" => {
-                self.nexpect(NestType::Block)?;
-                Tok::End
-            }
+            "do" => Tok::Do,
+            "struct" => Tok::Struct,
+            "sig" => Tok::Sig,
+            "of" => Tok::Of,
             s => Tok::Name(s),
         };
         self.tok_in_place(tok)
@@ -447,35 +398,66 @@ impl<'i> Lexer<'i> {
 
     fn lex_other(&mut self) -> LexResult<'i> {
         match self.peek().unwrap() {
-            '(' => {
-                self.nesting.push(NestType::Paren);
-                self.tok(Tok::POpen)
-            }
-            ')' => {
-                self.nexpect(NestType::Paren)?;
-                self.tok(Tok::PClose)
-            }
-            '[' => {
-                self.nesting.push(NestType::Square);
-                self.tok(Tok::SOpen)
-            }
-            ']' => {
-                self.nexpect(NestType::Square)?;
-                self.tok(Tok::SClose)
-            }
-            '{' => {
-                self.nesting.push(NestType::Curly);
-                self.tok(Tok::COpen)
-            }
-            '}' => {
-                self.nexpect(NestType::Curly)?;
-                self.tok(Tok::CClose)
-            }
+            '(' => self.tok(Tok::POpen),
+            ')' => self.tok(Tok::PClose),
+            '[' => self.tok(Tok::SOpen),
+            ']' => self.tok(Tok::SClose),
+            '{' => self.tok(Tok::COpen),
+            '}' => self.tok(Tok::CClose),
 
             '?' => self.tok(Tok::Question),
             '@' => self.tok(Tok::At),
             '\\' => self.tok(Tok::Backslash),
             ';' => self.tok(Tok::Newline),
+
+            '\n' => {
+                // We're going to emit one or more tokens which might include newline, indent, and dedent
+                // First find the next non-empty line and record its starting position
+                let mut start_pos = 0;
+                while let Some(c) = self.peek() {
+                    match c {
+                        '\n' => start_pos = 0,
+                        ' ' => start_pos += 1,
+                        x if x.is_whitespace() => {
+                            return Err(Spanned::new(
+                                LexError::Other(
+                                    "Only spaces are supported for indentation".to_string(),
+                                ),
+                                self.span(),
+                            ))
+                        }
+                        '#' => {
+                            self.skip_whitespace();
+                            continue;
+                        }
+                        _ => break,
+                    }
+                    self.next();
+                }
+                let mut i = 0;
+                while i < self.indent_stack.len() {
+                    if start_pos >= self.indent_stack[i] {
+                        start_pos -= self.indent_stack[i];
+                        i += 1;
+                    } else if start_pos == 0 {
+                        self.pending_toks.push_back(self.tok_in_place(Tok::Dedent));
+                        self.indent_stack.remove(i);
+                    } else {
+                        return Err(Spanned::new(
+                            LexError::Other("Inconsistent indentation".to_string()),
+                            self.span(),
+                        ));
+                    }
+                }
+                if start_pos > 0 {
+                    self.indent_stack.push(start_pos);
+                    self.pending_toks.push_back(self.tok_in_place(Tok::Indent));
+                } else {
+                    self.pending_toks.push_back(self.tok_in_place(Tok::Newline));
+                }
+
+                self.pending_toks.pop_front().unwrap()
+            }
 
             '"' => {
                 self.next();
@@ -532,58 +514,28 @@ impl<'i> Iterator for Lexer<'i> {
     type Item = LexResult<'i>;
 
     fn next(&mut self) -> Option<LexResult<'i>> {
-        // If we've already found a non-newline-or-binop, go through all the pending newlines, then emit the token
-        if self.pending_tok.is_some() {
-            if let Some(pos) = self.pending_newlines.pop_front() {
-                // Newlines are one character, so the span is (pos - 1, pos)
-                return Some(Ok((pos - 1, Tok::Newline, pos)));
-            } else {
-                return self.pending_tok.take();
-            }
+        if let Some(tok) = self.pending_toks.pop_front() {
+            return Some(tok);
         }
 
         self.skip_whitespace();
 
-        // Add any newlines to `pending_newlines`, don't emit them immediately
-        while self.peek() == Some('\n') {
-            self.next();
-            self.pending_newlines.push_back(self.pos);
-            self.skip_whitespace();
-        }
-
         // This is where the actual token starts
         self.tok_start = self.pos;
 
-        // If we hit a binop, emit a `OpNewline` if there's pending newlines, then emit the binop
         if let Some(binop) = self.try_lex_binop() {
-            self.was_binop = true;
-            // Ignore newlines for =>, ->, = and :, though, since precedence doesn't matter for them
-            if self.pending_newlines.is_empty()
-                || binop
-                    .as_ref()
-                    .map_or(false, |(_, t, _)| t.is_special_binop())
-            {
-                self.pending_newlines = VecDeque::new();
-                return Some(binop);
-            } else {
-                let pos = self.pending_newlines.pop_back().unwrap();
-                self.pending_newlines = VecDeque::new();
-                self.pending_tok = Some(binop);
-                return Some(Ok((pos - 1, Tok::OpNewline, pos)));
-            }
+            return Some(binop);
         }
 
         if self.peek().is_some() {
-            self.was_binop = false;
             let other = self.lex_other();
-            if let Some(pos) = self.pending_newlines.pop_front() {
-                self.pending_tok = Some(other);
-                Some(Ok((pos - 1, Tok::Newline, pos)))
-            } else {
-                Some(other)
-            }
+            Some(other)
         } else {
-            None
+            for _ in 0..self.indent_stack.len() {
+                self.pending_toks.push_back(self.tok_in_place(Tok::Dedent));
+            }
+            self.indent_stack.clear();
+            self.pending_toks.pop_front()
         }
     }
 }
@@ -597,7 +549,7 @@ impl fmt::Display for LexError {
                 f,
                 "unclosed block: expected a terminator {} here",
                 match t {
-                    NestType::Block => "'end'",
+                    NestType::Block => "dedent",
                     NestType::Curly => "'}'",
                     NestType::Paren => "')'",
                     NestType::Square => "']'",
@@ -608,7 +560,7 @@ impl fmt::Display for LexError {
                 f,
                 "unexpected {} {}",
                 match t {
-                    NestType::Block => "'end'",
+                    NestType::Block => "dedent",
                     NestType::Curly => "closing '}'",
                     NestType::Paren => "closing ')'",
                     NestType::Square => "closing ']'",
@@ -639,7 +591,6 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::Type => "'type'",
             Tok::Case => "'case'",
             Tok::Of => "'of'",
-            Tok::End => "'end'",
             Tok::TypeType => "'Type'",
             Tok::With => "'with'",
             Tok::Pure => "'pure'",
@@ -690,8 +641,9 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::SClose => "']'",
             Tok::COpen => "'{'",
             Tok::CClose => "'}'",
+            Tok::Indent => "indent",
+            Tok::Dedent => "dedent",
             Tok::Newline => "newline",
-            Tok::OpNewline => "newline_",
             Tok::Backslash => "'\\'",
         })
     }

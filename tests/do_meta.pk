@@ -1,4 +1,3 @@
 fun f x = do
     val y : I32 = x + 1
     x
-end

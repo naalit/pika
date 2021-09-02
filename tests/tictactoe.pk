@@ -1,111 +1,90 @@
 # Custom standard library
 type Option a of
-	None
-	Some a
+    None
+    Some a
 where
-	fun flatten [a] (self : Option (Option a)) : Option a = case self of
-		None => None
-		Some a => a
-	end
-end
+    fun flatten [a] (self : Option (Option a)) : Option a = case self of
+        None => None
+        Some a => a
 
 type List a of
-	Nil
-	Cons a (box List a)
+    Nil
+    Cons a (box List a)
 where
-	fun get [a] (i : I32) (self : List a) : Option a = case self of
-		Nil => Option.None
-		Cons x xs => if i == 0 then Option.Some x else get (i - 1) xs
-	end
+    fun get [a] (i : I32) (self : List a) : Option a = case self of
+        Nil => Option.None
+        Cons x xs => if i == 0 then Option.Some x else get (i - 1) xs
 
-	fun set [a] (i : I32) (new : a) (self : List a) : List a = case self of
-		Nil => Nil
-		Cons x xs => if i == 0 then Cons new xs else Cons x (set (i - 1) new xs)
-	end
+    fun set [a] (i : I32) (new : a) (self : List a) : List a = case self of
+        Nil => Nil
+        Cons x xs => if i == 0 then Cons new xs else Cons x (set (i - 1) new xs)
 
-	fun repeat [a] (len : I32) (x : a) : List a = if len == 0 then List.Nil else List.Cons x (repeat (len - 1) x)
+    fun repeat [a] (len : I32) (x : a) : List a = if len == 0 then List.Nil else List.Cons x (repeat (len - 1) x)
 
-	fun len [a] (self : List a) : I32 = case self of
-		Nil => 0
-		Cons _ rest => 1 + len rest
-	end
-end
+    fun len [a] (self : List a) : I32 = case self of
+        Nil => 0
+        Cons _ rest => 1 + len rest
 
 type Display a = sig
-	val display : a -> () with IO
-end
-val Disp = struct
-	val ForI32 = Display I32 struct
-		val display = print
-	end
-	val ForString = Display String struct
-		val display = puts
-	end
+    val display : a -> () with IO
 
-	fun ForOption [a] (d : Display a) = Display (Option a) struct
-		fun display (x : Option a) with IO = case x of
-			Option.None => puts "None"
-			Option.Some x => do
-				puts "Some "
-				case d of Display _ r => r.display x end
-				# d.display x
-			end
-		end
-	end
-end
+val Disp = struct
+    val ForI32 = Display I32 struct
+        val display = print
+    val ForString = Display String struct
+        val display = puts
+
+    fun ForOption [a] (d : Display a) = Display (Option a) struct
+        fun display (x : Option a) with IO = case x of
+            Option.None => puts "None"
+            Option.Some x => do
+                puts "Some "
+                case d of
+                    Display _ r => r.display x
+                # d.display x
 
 fun println [a] (d : Display a) (x : a) : () with IO = do
-	case d of Display _ r => r.display x end
-	puts "\n"
-end
+    case d of
+        Display _ r => r.display x
+    puts "\n"
 
 # Tic-Tac-Toe
 type Player of
-	X
-	O
+    X
+    O
 where
-	val Dsp = Display Player struct
-		fun display (x : Player) with IO = case x of
-			X => puts "X"
-			O => puts "O"
-		end
-	end
-end
+    val Dsp = Display Player struct
+        fun display (x : Player) with IO = case x of
+            X => puts "X"
+            O => puts "O"
 
 val Board = sig
-	val board : List (Option Player)
-end
+    val board : List (Option Player)
 
 fun board_set (x : I32) (y : I32) (p : Player) (board : Board) : Board = struct
-	val board = List.set (x + y * 3) (Option.Some p) (board.board)
-end
+    val board = List.set (x + y * 3) (Option.Some p) (board.board)
 
 fun init_board () : Board = struct
-	val board = List.repeat 9 (Option.None)
-end
+    val board = List.repeat 9 (Option.None)
 
 fun print_board (board : Board) : () with IO = do
-	fun range (a b : I32) (f : I32 -> () with IO) : () with IO = if a >= b then () else do
-		f a
-		range (a + 1) b f
-	end
+    fun range (a b : I32) (f : I32 -> () with IO) : () with IO = if a >= b then () else do
+        f a
+        range (a + 1) b f
 
-	range 0 3 ((y : I32) => range 0 3 ((x : I32) => do
-		if x == 0 then puts "\n" else ()
-		val p = List.get (x + y * 3) (board.board)
-		case Option.flatten p of
-			Option.None => puts " _"
-			Option.Some (Player.X) => puts " X"
-			Option.Some (Player.O) => puts " O"
-		end
-	end))
-	puts "\n"
-end
+    range 0 3 ((y : I32) => range 0 3 ((x : I32) => do
+        if x == 0 then puts "\n" else ()
+        val p = List.get (x + y * 3) (board.board)
+        case Option.flatten p of
+            Option.None => puts " _"
+            Option.Some (Player.X) => puts " X"
+            Option.Some (Player.O) => puts " O"
+    ))
+    puts "\n"
 
 fun main () with IO = do
-	val board = init_board ()
-	val board = board_set 0 1 (Player.X) board
-	val board = board_set 1 1 (Player.O) board
-	val board = board_set 2 0 (Player.X) board
-	print_board board
-end
+    val board = init_board ()
+    val board = board_set 0 1 (Player.X) board
+    val board = board_set 1 1 (Player.O) board
+    val board = board_set 2 0 (Player.X) board
+    print_board board

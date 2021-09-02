@@ -2,10 +2,8 @@
 # Also, it prints 0 first using an IO effect, which shouldn't be caught
 eff P of
     Print I32 : ()
-end
 eff R of
     Read () : I32
-end
 
 fun producer () : I32 with P, R, IO = do
     print 0
@@ -15,7 +13,6 @@ fun producer () : I32 with P, R, IO = do
     val y = R.Read ()
     P.Print y
     x + y
-end
 
 # Expected output:
 # 0
@@ -29,8 +26,5 @@ fun main () : () with IO = do
         eff (P.Print i) k => acc => do
             print i
             k () acc
-        end
         eff (R.Read ()) k => acc => k acc (acc + 1)
-    end
     print (handle 2)
-end

@@ -1,6 +1,6 @@
 eff Choice of
     Choose () : Bool
-end
+
 # Poor man's `use`
 val Choose = Choice.Choose
 
@@ -8,13 +8,10 @@ fun nondet () : I32 with Choice = do
     val a : I32 = if Choose () then 2 else 3
     val b : I32 = if Choose () then 12 else 0
     if Choose () then a + b else 0
-end
 
 fun sum_all (f : () -> I32 with Choice) : I32 = catch f () of
     i => i
     eff (Choose ()) k => k True + k False
-end
 
 fun main () with IO = do
     print (sum_all nondet)
-end

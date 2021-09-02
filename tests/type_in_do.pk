@@ -5,6 +5,5 @@ fun f (_ : ()) = do
     New
   where
     val X : I32 = 3
-  end
+
   MyType.X
-end

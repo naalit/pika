@@ -1,6 +1,5 @@
 type Eq [t] (a b : t) of
     Refl [t a] : Eq [t] a a
-end
 
 val sanity : Eq [I32] 2 2 = Eq.Refl
 val plus : Eq [I32] 2 (1 + 1) = Eq.Refl

@@ -6,8 +6,7 @@ where
     fun map [a b] (f : a -> b) (self : Option a) : Option b = case self of
         Some a => Some (f a)
         None => None
-    end
-end
+
 
 # Should print:
 # 12
@@ -18,4 +17,3 @@ fun main () with IO = do
     Option.map print a
     Option.map print b
     print 0
-end

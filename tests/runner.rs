@@ -265,6 +265,16 @@ fn test_boxing() {
 }
 
 #[test]
+fn test_indent() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/indent.pk"])
+        .assert()
+        .stdout("22\n22\n")
+        .success();
+}
+
+#[test]
 fn test_tictactoe() {
     Command::cargo_bin("pika")
         .unwrap()

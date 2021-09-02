@@ -1,24 +1,19 @@
 # This makes sure explicit effect polymorphism works
 eff Console of
     Print I32 : ()
-end
 
 fun poly [E] (f : I32 -> () with E) with E = do
     f 3
     f 4
-end
 
 fun handle (f : () -> () with Console) : () with IO = catch f () of
     () => ()
     eff (Console.Print i) k => do
         print i
         k ()
-    end
-end
 
 eff Yield a of
     Y a : ()
-end
 
 type Coroutine a of
     Go a (() -> Coroutine a)
@@ -27,7 +22,6 @@ where
     fun new [a] (gen : () -> () with Yield a) : Coroutine a = catch gen () of
         () => Stop
         eff (Yield.Y x) k => Go x k
-    end
 
     ## Steps the coroutine, and if it yields a value, calls `run` on it. Otherwise it's done, and this function does nothing.
     ## Returns the new coroutine.
@@ -36,9 +30,6 @@ where
         Go a k => do
             run a
             k ()
-        end
-    end
-end
 
 # Expected output:
 # 1
@@ -56,4 +47,3 @@ fun main () with IO = do
     val k = Coroutine.step print k
     val k = Coroutine.step print k
     val k = Coroutine.step print k
-end

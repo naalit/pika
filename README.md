@@ -40,21 +40,19 @@ where
   fun len [T] (self : List T) : I32 = case self of
     Nil => 0
     Cons x rest => 1 + len rest
-  end
-end
+  # Pika uses significant indentation for blocks
+
 val _ = List.len (List.Cons Type (List.Nil))
 
 # And algebraic effects
 eff Console of
   Print String : ()
   Read () : String
-end
 
 fun greet () : () with Console = do
   Console.Print "Hello, "
   val name : String = Console.Read ()
   Console.Print name
-end
 
 # Now we handle the effects
 # Print out what `greet` tells us to, but make `Read` always return "Pika"
@@ -63,9 +61,7 @@ fun main () with IO = catch greet () of
   eff (Console.Print s) k => do
     puts s
     k ()
-  end
   eff (Console.Read ()) k => k "Pika"
-end
 ```
 
 #### Why "Pika"?

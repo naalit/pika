@@ -15,10 +15,11 @@ val lam = () => ()
 val lam3 = a b () => the I32 (a + b)
 
 # I'm not 100% sure if this should be allowed? It is right now
-val multiline : (a: _) -> a -> a -> a = (x : Type)
-    y
-    z
-    => y
+# Well, now it isn't. That's fine too.
+# val multiline : (a: _) -> a -> a -> a = (x : Type)
+#     y
+#     z
+#     => y
 # Note that this *isn't* allowed, because it requires looking ahead past the newline
 # val not_multiline = x
 #     y => y
