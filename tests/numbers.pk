@@ -1,3 +1,7 @@
 fun f (x : I32) : I32 = case x of
   0 => 1
   y => y + 2
+
+# These are somewhat harder cases in binop type inference
+fun g (x : I32) = x + 2
+fun h (x : I32) = 2 + x

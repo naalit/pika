@@ -25,11 +25,10 @@ val y : Int -> Int = x => x + 1
 
 # Unlike other MLs or Haskell, Pika doesn't have multi-clause functions.
 # Instead, use case-of.
-# Another thing to note here is that case-of uses newlines and `end`, not | and not significant indentation.
+# Another thing to note here is that case-of uses newlines and significant indentation, not | or commas.
 fun fib (i: Int) : Int = case i of
   0 | 1 => 1
   i => fib (i - 1) + fib (i - 2)
-end
 
 # One-line functions work, of course, as does type inference.
 # This is *probably* inferred as `val square : [t] [m: Mul t t] t -> m.Output`, like Haskell would.
@@ -38,9 +37,8 @@ fun square x = x * x
 # We don't have let-in, we use do-end which works like a Rust block.
 fun fact i = do
   # We can define locals, functions, datatypes, etc. in here.
-  fun go i acc = if i <= 1
-    then acc
-    else go (i - 1) (i * acc)
+  fun go i acc =
+    if i <= 1 then acc else go (i - 1) (i * acc)
 
   # do-end is also used for running multiple expressions for side effects.
   # It's much nicer than the weird semicolons in parentheses most MLs use.
@@ -48,7 +46,6 @@ fun fact i = do
 
   # It returns the last expression.
   go i 1
-end
 
 # Typeclasses are just ML-style parametrized modules, usually passed implicitly.
 # And of course, parametrized modules are just functions, and so are parametrized ("generic") types.
@@ -56,13 +53,12 @@ fun Functor (f: Type -> Type) = sig
   # We put implicit parameters in square brackets.
   # These are both inferred to have type `Type`.
   val fmap : [a b] (a -> b) -> f a -> f b
-end
 
 # Records are structural, and types are values.
 # So, this is a type alias.
 val Q : Type = sig
   fun f (x : Int) : Int
-end
+
 # You can use curly braces as a shorthand for either a sig or struct with only `val`s
 val u : Q = { f = y }
 
@@ -79,8 +75,7 @@ where
     # We can see the constructors since we're in the associated module with them
     None => default
     Some x => x
-  end
-end
+
 # If an implicit can't be solved by unification, we look for "implicit values" of the right type.
 # Implicit values are declared with `impl`, and work like Scala 3's given instances.
 # For one to be resolved implicitly, it must be the only implicit value of that type in scope.
@@ -89,8 +84,6 @@ impl Functor Option = struct
     # Out here the constructors aren't in the global scope, so we need the dot
     Option.None => Option.None
     Option.Some x => Option.Some (f x)
-  end
-end
 
 
 # Algebraic effects
@@ -99,38 +92,36 @@ end
 # (note that the `with IO` would have been inferred if it wasn't written)
 fun f () : () with IO = do
   print "Hello, world!"
-end
+
 # We can define the IO effect like so:
 eff IO of
   Print String : ()
   # This returns a String (its continuation takes a String).
   Input () : String
-end
+
 # Effects are invoked by calling them
 fun print (s : String) : () with IO = do
   IO.Print s
-end
+
 # Since we specified the return type without a `with` clause, Pika will ensure it doesn't perform any effects
-# The `?` operator stops propagation of an effect so we can pass it to `handler` as type `r with IO`; it's the opposite of `?` in Rust.
-fun run_pure [r] (f : () -> r with IO) : r = handler (f ()?)
-fun handler [r] (x : r with IO) : r = do
-  case x of
+# We use `catch-of` with extended pattern matching to catch effects
+fun handler [r] (f : () -> r with IO) : r = do
+  catch f () of
     x => x
     # We'll ignore the output.
-    # Note that we need to use ? again on the continuation.
-    eff (IO.Print _) k => handler  (k ()?)
+    # The continuation is now `() -> r`, because these are deep effect handlers so the handler is automatically called recursively.
+    eff (IO.Print _) k => k ()
     # And we'll always input "yes"
-    eff (IO.Input ()) k = handler (k "yes"?)
-  end
-end
+    eff (IO.Input ()) k = k "yes"
+
 
 # One more thing with effects: higher-order functions are implicitly effect polymorphic, like Frank (see the paper "do be do be do").
 # This is true even when the function isn't otherwise polymorphic.
 fun apply_to_3 (f : Int -> Int) = f 3
-apply_to_3 \x. do
+apply_to_3 do x =>
     print (to_string x)
     x + 2
-  end
+
 # Again, you can specify effects on function types.
 fun run [r] (f : () -> r with IO) : r with IO = f ()
 
@@ -141,7 +132,7 @@ fun nfmtargs ret (n : U32) : Type = case n of
   0 => ret with IO
   # This requires a Display instance for t. Note that [: t] is equivalent to [_ : t]
   Suc n => [t] [: Display t] t -> nfmtargs ret n
-end
+
 fun printf (s : String) : nfmtargs () (s.count "{}") = do
   fun printf_impl buf l : nfmtargs () (l.len) = case l of
     Nil => _ffi.puts buf
@@ -150,19 +141,19 @@ fun printf (s : String) : nfmtargs () (s.count "{}") = do
       # Note that all functions are closures
       fun f x = printf_impl (x.fmt buf ++ s) l
       f
-    end
-  end
+
   # Since types have "associated modules", we use them for method resolution (no more `List.sort list`!)
-  # Since functions are curried, the "self" parameter is last.
+  # This is equivalent to `String.split s "{}"`.
   val l = s.split "{}"
-    # Note that this isn't significant indentation, just a leading dot, which is unambiguous!
+    # Significant indentation is used for operator chaining as well as grouping in expressions.
     # Also, you can give implicit parameters explicitly with square brackets.
     # Finally, the `_` introduces a hole, i.e. it asks the typechecker to fill in that parameter.
     .collect [List _]
-  printf_impl (l.head.unwrap_or "") (l.tail.unwrap_or Nil)
-end
+  # Here's significant indentation for grouping function arguments
+  printf_impl
+    l.head.unwrap_or ""
+    l.tail.unwrap_or Nil
 
 # val greet : [t] [: Display t] t -> () with IO
 fun greet s = do
   printf "Hello, {}" s
-end

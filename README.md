@@ -64,7 +64,96 @@ fun main () with IO = catch greet () of
   eff (Console.Read ()) k => k "Pika"
 ```
 
-#### Why "Pika"?
+### Significant indentation
+
+#### Why does Pika have significant indentation?
+
+Part of it is because I don't want semicolons, I want newlines to delimit statements, but I also want it to be easy to continue a statement on the next line.
+This is why Python has `\`, but that's not a good solution; and some languages use properties of the syntax so it's (somewhat) unambiguous, like Lua or JavaScript, but that's doesn't work for ML-like languages with juxtaposition as function application.
+
+Also, using `end` like Pika used to do often looks weird when indentation for things other than blocks is used, for example here where there are three dedents but only one has an `end`:
+```cr
+fun do_something x y z =
+  case find_the_thing x y z of
+    Some a => a
+    None =>
+      x + y * 2 + z * 3
+  end
+```
+
+It's also a lot nicer when passing lambdas as arguments. Compare:
+```cr
+list
+  .iter
+  .filter
+    x => x % 2 == 0 and x % 5 == 0
+  .map
+    x => x * 2 + 3
+```
+to either of the lambdas here:
+```cr
+list
+  .iter
+  # Remember, the lambda can't be on another line without a backslash!
+  .filter (x => x % 2 == 0 and x % 5 == 0)
+  # This is the special multiline lambda syntax, which mostly exists for
+  # this sort of thing, but it's still not great for this short lambda.
+  .map do x =>
+    x * 2 + 3
+  end
+```
+
+#### How does Pika's significant indentation work?
+
+Pika's significant indentation isn't quite like other languages with significant indentation.
+It's more like some of the proposals for significant indentation in Scheme, like [wisp](https://srfi.schemers.org/srfi-119/); and unlike Haskell, there aren't complex layout rules using column numbers, it's just INDENT and DEDENT tokens when the indentation goes up and down.
+It's designed so that code usually does what it looks like - indentation should never be misleading.
+
+There are generally three cases for what indentation means in Pika:
+
+1. Blocks, like `do`, `where`, `case-of`, etc., are delimited by indentation. This is simple, and works like Python:
+    ```cr
+    fun unwrap_and_print_or self default = case self of
+      Some x => do
+        print x
+        x
+      None => default
+    ```
+
+2. In expressions, indentation can be used for grouping: more-indented lines are essentially wrapped in parentheses. This is especially useful for function calls with many or very long arguments. For example:
+    ```cr
+    Map.from
+      List.zip
+        context.keys
+        List.Cons 1
+          get_list_one ()
+    # -->
+    Map.from (List.zip context.keys (List.Cons 1 (get_list_one ()))
+
+    3 + 4 *
+      5 + 6
+    # -->
+    3 + 4 * (5 + 6)
+    ```
+
+3. If the more-indented line begins with a binary operator like `+` or `.`, the previous lines are grouped. This is handy for operator chaining, especially with `.` method syntax.
+    ```cr
+    range 0 100
+      .reverse
+      .filter is_even
+      .map
+        x => x * 3
+      .collect
+
+    term_one * 0.5 + term_two * 0.3 + term_three * 0.2
+      + adj
+      * scale
+    # -->
+    ((term_one * 0.5 + term_two * 0.3 + term_three * 0.2) + adj) * scale
+    ```
+
+
+### Why "Pika"?
 Lots of languages have animal mascots, so Pika's is the pika.
 Pikas are little mammals that live on mountains, close relatives of rabbits.
 Pika the language is also small, but it isn't a close relative of any rabbits.

@@ -1,7 +1,9 @@
-//! Pika now uses a custom lexer, mostly to be more flexible about newlines.
-//! Specifically, the lexer ignores newlines before or after a binary operator token, and inside parentheses (like Python).
-//! Except, when there's a newline before an operator, it overrides the precedence so that the (last expression of the) last line is essentially inside parentheses.
-//! Also, semicolons and newlines are 100% equivalent to the *parser*, so they use the same token, but the lexer never ignores semicolons like it does newlines.
+//! Significant indentation overview:
+//! There are three tokens we can emit when we see a line break: INDENT, DEDENT, and NEWLINE.
+//! If the next non-empty line is indented more than the previous, we emit an INDENT token (and no NEWLINE).
+//! If it's the same indentation, we emit one NEWLINE token. We don't emit NEWLINEs for black lines, but we do for semicolons.
+//!   (so a semicolon is like a line break + the same indentation as the current line.)
+//! If it's a lower indentation level, we emit the appropriate number of DEDENTs and then a NEWLINE.
 
 use crate::common::*;
 use crate::error::{Span, Spanned};
@@ -11,6 +13,7 @@ use std::iter::Peekable;
 use std::str::{Chars, FromStr};
 
 /// The type lalrpop requires lexers emit
+/// We're not using lalrpop anymore, but this type still works, and it has less indirection than a `Spanned<Tok<'i>>`.
 pub type LexResult<'i> = Result<(usize, Tok<'i>, usize), Spanned<LexError>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,15 +106,16 @@ pub enum Tok<'i> {
     // Other tokens
     Indent,
     Dedent,
-    Question,  // ?
-    At,        // @
-    POpen,     // (
-    PClose,    // )
-    SOpen,     // [
-    SClose,    // ]
-    COpen,     // {
-    CClose,    // }
-    Newline,   // \n or ;
+    At,      // @
+    POpen,   // (
+    PClose,  // )
+    SOpen,   // [
+    SClose,  // ]
+    COpen,   // {
+    CClose,  // }
+    Newline, // \n or ;
+    /// Backslash is reserved but not used for anything right now
+    /// It may eventually be used as a line continuation character, at the start of the line like wisp's '.'
     Backslash, // \
 }
 impl<'i> Tok<'i> {
@@ -405,7 +409,6 @@ impl<'i> Lexer<'i> {
             '{' => self.tok(Tok::COpen),
             '}' => self.tok(Tok::CClose),
 
-            '?' => self.tok(Tok::Question),
             '@' => self.tok(Tok::At),
             '\\' => self.tok(Tok::Backslash),
             ';' => self.tok(Tok::Newline),
@@ -444,7 +447,7 @@ impl<'i> Lexer<'i> {
                         self.indent_stack.remove(i);
                     } else {
                         return Err(Spanned::new(
-                            LexError::Other("Inconsistent indentation".to_string()),
+                            LexError::Other("inconsistent indentation: dedent doesn't match any previous indentation level".to_string()),
                             self.span(),
                         ));
                     }
@@ -633,7 +636,6 @@ impl<'i> fmt::Display for Tok<'i> {
             Tok::Lit(_) => "literal",
             Tok::Name(_) => "name",
             Tok::String(_) => "string literal",
-            Tok::Question => "'?'",
             Tok::At => "'@'",
             Tok::POpen => "'('",
             Tok::PClose => "')'",

@@ -155,8 +155,7 @@ pub enum Pre_ {
     App(Icit, Pre, Pre),
     Do(Vec<PreDefAn>),
     Hole(MetaSource),
-    /// Dot(a, b, [c, d]) = a.b c d
-    Dot(Pre, SName, Vec<(Icit, Pre)>),
+    Dot(Pre, SName),
     OrPat(Pre, Pre),
     EffPat(Pre, Pre),
     /// The bool is `true` if this is actually a `catch`
@@ -1271,6 +1270,25 @@ impl Val {
         match self {
             Val::Arc(x) => x.unarc(),
             x => x,
+        }
+    }
+
+    /// Returns `false` if this top-level value might change during the elaboration of other terms, for example solving metavariables.
+    /// It only considers the top-level value: `? a b` isn't concrete, but `f ? b` and `(?, a, b)` both are.
+    pub fn is_concrete(&self) -> bool {
+        match self {
+            Val::Type => true,
+            Val::Arc(x) => x.is_concrete(),
+            Val::App(v, _, _, _) => match v {
+                Var::Local(_) | Var::Meta(_) => false,
+                _ => true,
+            },
+            Val::Clos(_, _, _, _) => true,
+            Val::Fun(_, _, _) => true,
+            Val::Lit(_, _) => true,
+            Val::Do(_, _) => false,
+            Val::Box(_, x) => x.is_concrete(),
+            Val::Struct(_, _) => true,
         }
     }
 

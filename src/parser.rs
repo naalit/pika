@@ -1072,15 +1072,13 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                             self.ops.push(Op::App(Icit::Expl));
                         }
 
-                        self.terms
-                            .push(Spanned::new(Pre_::Dot(x, name, Vec::new()), span));
+                        self.terms.push(Spanned::new(Pre_::Dot(x, name), span));
                     } else if let Some(x) = self.terms.pop() {
                         self.next();
                         let name = self.name()?;
                         let span = Span(x.span().0, name.span().1);
 
-                        self.terms
-                            .push(Spanned::new(Pre_::Dot(x, name, Vec::new()), span));
+                        self.terms.push(Spanned::new(Pre_::Dot(x, name), span));
                     } else {
                         return self.unexpected(Tok::Dot, "expression");
                     }
@@ -1215,7 +1213,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                                     let term = self.go()?;
                                     self.terms.push(term);
                                 }
-                                _ => return self.err("bad"),
+                                t => return self.unexpected(t, "expression")?,
                             }
                         }
                     } else if self.terms.len() > self.ops.len() {

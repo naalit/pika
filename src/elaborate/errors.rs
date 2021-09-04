@@ -159,7 +159,7 @@ impl TypeError {
                         .style(Style::Error),
                 ),
                 file,
-                &mcxt,
+                mcxt,
             ),
             // TODO do these two ever occur?
             TypeError::MetaScope(s, m, n) => Error::new(

@@ -306,7 +306,7 @@ impl<'db> MCxt<'db> {
                 x => Err(TypeError::MetaSpine(span, Var::Meta(meta), x.clone())),
             })
             .collect::<Result<Rename, _>>()?;
-        let term = val.quote(size, &self);
+        let term = val.quote(size, self);
         // The level it will be at after we wrap it in lambdas
         let to_lvl = (0..spine.len()).fold(size, |x, _| x.inc());
 

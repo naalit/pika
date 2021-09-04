@@ -905,10 +905,10 @@ pub fn elab_pat(
                 mcxt,
             )
         }
-        Pre_::Dot(head, member, spine) => elab_pat_app(
+        Pre_::Dot(_, _) => elab_pat_app(
             in_eff,
-            &pre.copy_span(Pre_::Dot(head.clone(), member.clone(), Vec::new())),
-            spine.iter().map(|(i, x)| (*i, x)).collect(),
+            &pre,
+            VecDeque::new(),
             ty,
             effs,
             vspan,

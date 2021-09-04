@@ -793,7 +793,7 @@ impl Term {
                     let ty = cxt.builder.prod_type(tys);
                     cxt.builder.product(ty, prod)
                 }
-                Var::Builtin(b) => b.lower(&ty, cxt),
+                Var::Builtin(b) => b.lower(ty, cxt),
                 Var::Local(i) => *cxt.locals.get(*i),
                 Var::Top(i) => {
                     let (i, _) = cxt.db.lookup_intern_def(*i);
@@ -1325,7 +1325,7 @@ impl<'a> PatCont<'a> {
                 cont,
                 rest_size,
                 rest,
-            } => pat.lower(*x, &cont, *rest_size, &rest, ty, cxt),
+            } => pat.lower(*x, cont, *rest_size, rest, ty, cxt),
         }
     }
 }

@@ -272,7 +272,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
         PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
             let tyspan = ty.span();
             let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
-            let ty = ty.evaluate(&mcxt.env(), &mcxt);
+            let ty = ty.evaluate(&mcxt.env(), mcxt);
             let val = check(val, &ty, ReasonExpected::Given(tyspan), mcxt)?;
             Ok((Some(val), ty))
             // TODO multiple TypeErrors?
@@ -296,7 +296,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
             // Then elaborate and evaluate the given return type
             let tyspan = body_ty.span();
             let body_ty = check(body_ty, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
-            let vty = body_ty.evaluate(&mcxt.env(), &mcxt);
+            let vty = body_ty.evaluate(&mcxt.env(), mcxt);
 
             let (effs, open) = match effs {
                 Some(effs) => (effs.clone(), false),
@@ -311,7 +311,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                         ReasonExpected::UsedInWith,
                         mcxt,
                     )
-                    .map(|x| x.evaluate(&mcxt.env(), &mcxt))
+                    .map(|x| x.evaluate(&mcxt.env(), mcxt))
                 })
                 .collect::<Result<_, _>>()?;
             // And last, check the function body against the return type
@@ -322,7 +322,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
             let effs_t: Vec<_> = effs
                 .iter()
                 // Decrease the size because the effects are outside the last pi type
-                .map(|x| x.clone().quote(mcxt.size.dec(), &mcxt))
+                .map(|x| x.clone().quote(mcxt.size.dec(), mcxt))
                 .collect();
             Ok((
                 Some(
@@ -339,7 +339,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                                         Lam,
                                         *name,
                                         *icit,
-                                        Box::new(ty.clone().quote(size, &mcxt)),
+                                        Box::new(ty.clone().quote(size, mcxt)),
                                         Box::new(body),
                                         effs,
                                     ),
@@ -363,7 +363,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                                         // Don't include the closure's argument in its environment
                                         env: Env::new(size.dec()),
                                         ty: from,
-                                        term: to.quote(size, &mcxt),
+                                        term: to.quote(size, mcxt),
                                         name,
                                     }),
                                     effs,
@@ -381,7 +381,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
             Ok((
                 Some(Term::Var(
                     Var::Cons(id),
-                    Box::new(ty.clone().quote(mcxt.size, &mcxt)),
+                    Box::new(ty.clone().quote(mcxt.size, mcxt)),
                 )),
                 ty.clone(),
             ))
@@ -417,7 +417,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                             Box::new(Clos {
                                 env: Env::new(l.dec()),
                                 ty: from.clone(),
-                                term: to.quote(l, &mcxt),
+                                term: to.quote(l, mcxt),
                                 name: *n,
                             }),
                             Vec::new(),
@@ -489,7 +489,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                 // Elaborate the constructor argument types
                 for (name, icit, ty) in args {
                     let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
-                    let vty = ty.evaluate(&mcxt.env(), &mcxt);
+                    let vty = ty.evaluate(&mcxt.env(), mcxt);
                     cargs.push((name, icit, vty.clone()));
                     mcxt.define(name, NameInfo::Local(vty));
                 }
@@ -512,7 +512,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                         } else {
                             mcxt.size
                         };
-                        let ty_ty = ty_ty.clone().quote(size, &mcxt);
+                        let ty_ty = ty_ty.clone().quote(size, mcxt);
                         let (f, _, _) = targs.iter().fold(
                             (
                                 Term::Var(Var::Rec(predef_id), Box::new(ty_ty.clone())),
@@ -526,7 +526,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                                         // It might use the value, so give it that
                                         let mut env = Env::new(size);
                                         env.push(Some(Val::local(size.to_lvl_(ix), t.clone())));
-                                        (*xty, rty.eval_quote(&mut env, size, &mcxt))
+                                        (*xty, rty.eval_quote(&mut env, size, mcxt))
                                     }
                                     Term::Fun(xty, rty, _) => (*xty, *rty),
                                     _ => unreachable!(),
@@ -587,7 +587,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                     // Ty a b of C [a] [b] ... : Ty a b
                     // so Ix's decrease from left to right, and start at the first implicit argument
                     // which is right after the state cxt_before stores
-                    let ty_ty = ty_ty.clone().quote(mcxt.size, &mcxt);
+                    let ty_ty = ty_ty.clone().quote(mcxt.size, mcxt);
                     (
                         targs
                             .iter()
@@ -607,7 +607,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                                                 mcxt.size.to_lvl_(ix),
                                                 t.clone(),
                                             )));
-                                            (*xty, rty.eval_quote(&mut env, mcxt.size, &mcxt))
+                                            (*xty, rty.eval_quote(&mut env, mcxt.size, mcxt))
                                         }
                                         Term::Fun(xty, rty, _) => (*xty, *rty),
                                         _ => unreachable!(),
@@ -636,7 +636,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                                 Pi,
                                 n,
                                 i,
-                                Box::new(from.quote(l.dec(), &mcxt)),
+                                Box::new(from.quote(l.dec(), mcxt)),
                                 Box::new(to),
                                 eff.into_iter().collect(),
                             ),
@@ -646,7 +646,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                     },
                 );
 
-                let full_ty = full_ty.evaluate(&Env::new(cxt_before.size), &mcxt);
+                let full_ty = full_ty.evaluate(&Env::new(cxt_before.size), mcxt);
                 // .inline_metas(&mcxt);
 
                 scope.push((cname.clone(), full_ty));
@@ -655,13 +655,13 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
             mcxt.set_state(cxt_before.clone());
 
             // Make sure to inline metas solved in constructor types
-            let ty_ty = ty_ty.inline_metas(mcxt.size, &mcxt);
+            let ty_ty = ty_ty.inline_metas(mcxt.size, mcxt);
             mcxt.undef();
             mcxt.define(**name, NameInfo::Other(Var::Rec(predef_id), ty_ty.clone()));
             let mut scope: Vec<_> = scope
                 .into_iter()
                 .map(|(cname, ty)| {
-                    let ty = ty.inline_metas(mcxt.size, &mcxt);
+                    let ty = ty.inline_metas(mcxt.size, mcxt);
                     let def_id = mcxt.db.intern_def(
                         mcxt.db
                             .intern_predef(Arc::new(PreDef::Cons(cname.clone(), ty).into())),
@@ -714,7 +714,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
             Ok((
                 Some(Term::Var(
                     Var::Type(id, scope),
-                    Box::new(ty_ty.clone().quote(mcxt.size, &mcxt)),
+                    Box::new(ty_ty.clone().quote(mcxt.size, mcxt)),
                 )),
                 ty_ty,
             ))
@@ -733,7 +733,7 @@ fn check_def(
     match def {
         PreDef::Val(_, ty2, val) | PreDef::Impl(_, ty2, val) => {
             let ty2 = check(ty2, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
-            let ty2 = ty2.evaluate(&mcxt.env(), &mcxt);
+            let ty2 = ty2.evaluate(&mcxt.env(), mcxt);
             try_unify(ty, &ty2, None, def.span(), reason.clone(), mcxt)?;
             let val = check(val, ty, reason, mcxt)?;
             Ok(Some(val))
@@ -863,7 +863,15 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
         }
 
         Pre_::BinOp(op, a, b) => {
-            let (va, aty) = infer(true, a, mcxt)?;
+            // If one side is a literal, use the type of the other side
+            let (va, aty, b) = match infer(true, a, mcxt) {
+                Ok((va, aty)) => (va, aty, b),
+                Err(TypeError::UntypedLiteral(_)) => {
+                    let (vb, bty) = infer(true, b, mcxt)?;
+                    (vb, bty, a)
+                }
+                Err(e) => return Err(e),
+            };
             // Check b against the type and inline metas first, to allow:
             // a : ?0, b : I32 --> `a + b` which solves ?0 to I32
             let b = check(b, &aty, ReasonExpected::MustMatch(a.span()), mcxt)?;
@@ -1195,27 +1203,19 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
             Ok((mcxt.new_meta(None, pre.span(), *source, ty), vty))
         }
 
-        Pre_::Dot(head, m, args) => {
+        Pre_::Dot(head, m) => {
             match infer(false, head, mcxt)
                 .map(|(x, ty)| (x.inline_top(mcxt), ty.inline(mcxt.size, mcxt)))?
             {
                 (s, Val::Struct(StructKind::Sig, v)) => match v.iter().find(|&&(_, n, _)| n == **m)
                 {
-                    Some((_, _, ty)) => args
-                        .iter()
-                        .try_fold(
-                            (
-                                Term::Dot(Box::new(s), **m),
-                                ty.clone(),
-                                Span(head.span().0, m.span().1),
-                            ),
-                            |(f, fty, fspan), (i, x)| {
-                                let (f, fty) = insert_metas(*i == Icit::Expl, f, fty, fspan, mcxt);
-                                let (f, fty) = infer_app(f, fty, fspan, *i, x, mcxt)?;
-                                Ok((f, fty, Span(fspan.0, x.span().1)))
-                            },
-                        )
-                        .map(|(f, fty, fspan)| insert_metas(insert, f, fty, fspan, mcxt)),
+                    Some((_, _, ty)) => Ok(insert_metas(
+                        insert,
+                        Term::Dot(Box::new(s), **m),
+                        ty.clone(),
+                        pre.span(),
+                        mcxt,
+                    )),
                     None => Err(TypeError::MemberNotFound(
                         Span(head.span().0, m.span().1),
                         ScopeType::Struct,
@@ -1252,26 +1252,7 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
                                         Var::Top(v),
                                         Box::new(fty.clone().quote(mcxt.size, mcxt)),
                                     );
-                                    return args
-                                        .iter()
-                                        .try_fold(
-                                            (f, fty, Span(head.span().0, m.span().1)),
-                                            |(f, fty, fspan), (i, x)| {
-                                                let (f, fty) = insert_metas(
-                                                    *i == Icit::Expl,
-                                                    f,
-                                                    fty,
-                                                    fspan,
-                                                    mcxt,
-                                                );
-                                                let (f, fty) =
-                                                    infer_app(f, fty, fspan, *i, x, mcxt)?;
-                                                Ok((f, fty, Span(fspan.0, x.span().1)))
-                                            },
-                                        )
-                                        .map(|(f, fty, fspan)| {
-                                            insert_metas(insert, f, fty, fspan, mcxt)
-                                        });
+                                    return Ok(insert_metas(insert, f, fty, pre.span(), mcxt));
                                 }
                                 Err(_) => return Err(TypeError::Sentinel),
                             }
@@ -1375,7 +1356,7 @@ fn infer_app(
         }
         Val::Fun(from, to, effs) => {
             let span = Span(fspan.0, x.span().1);
-            let x = check(x, &from, ReasonExpected::ArgOf(fspan, fty.clone()), mcxt)?;
+            let x = check(x, from, ReasonExpected::ArgOf(fspan, fty.clone()), mcxt)?;
             let to = (**to).clone();
             for eff in effs {
                 if !mcxt.eff_stack.try_eff(eff.clone(), &mut mcxt.clone()) {
@@ -1544,7 +1525,7 @@ pub fn check(
 
         // If it's an op like `+` or `*`, the arguments will have the same type as the return type
         // But make sure to fall through to `infer` if it's something like `!=`
-        (Pre_::BinOp(op, a, b), _) if op.returns_arg_ty() => {
+        (Pre_::BinOp(op, a, b), _) if op.returns_arg_ty() && ty.is_concrete() => {
             let ity = match ty {
                 Val::App(Var::Builtin(b), _, _, _) => match *b {
                     Builtin::I32 => Term::Var(Var::Builtin(Builtin::I32), Box::new(Term::Type)),
@@ -1673,8 +1654,8 @@ pub fn check(
                 ReasonExpected::IfCond,
                 mcxt,
             )?;
-            let yes = check(yes, &ty, reason.clone(), mcxt)?;
-            let no = check(no, &ty, reason, mcxt)?;
+            let yes = check(yes, ty, reason.clone(), mcxt)?;
+            let no = check(no, ty, reason, mcxt)?;
             let tty = ty.clone().quote(mcxt.size, mcxt);
             Ok(cond.make_if(yes, no, tty))
         }
