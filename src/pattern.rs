@@ -290,7 +290,7 @@ impl Cov {
                                     mcxt.set_state(state.clone());
                                     Some((id, cty))
                                 } else {
-                                    println!(
+                                    eprintln!(
                                         "Skipping constructor {}",
                                         info.term
                                             .as_ref()

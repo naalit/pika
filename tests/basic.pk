@@ -1,5 +1,3 @@
-# This is about everything that works so far!
-
 val AType = Type -> Type
 val M : Type -> AType = x y => x
 val Z : M Type Type = Type

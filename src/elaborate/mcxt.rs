@@ -460,7 +460,7 @@ impl<'db> MCxt<'db> {
     ) -> Result<Vec<DefId>, TypeError> {
         let mut state = self.state();
         state.is_sig = is_sig;
-        let block = crate::query::intern_block_with(v, self.db, state);
+        let block = InternBlock::new(v.into_iter().collect(), state).intern(self.db);
         // Make sure any type errors get reported
         {
             let mut mcxt2 = self.clone();

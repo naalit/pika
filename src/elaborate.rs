@@ -111,6 +111,7 @@ impl PreDef {
                 }
             }
             PreDef::Cons(_, ty) => Some(ty.clone()),
+            PreDef::Rec(_, _, ty) => Some(ty.clone()),
         }
     }
 }
@@ -381,6 +382,16 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
             Ok((
                 Some(Term::Var(
                     Var::Cons(id),
+                    Box::new(ty.clone().quote(mcxt.size, mcxt)),
+                )),
+                ty.clone(),
+            ))
+        }
+        PreDef::Rec(_name, id, ty) => {
+            // We don't have to do anything since the type was already determined when elaborating the type definition
+            Ok((
+                Some(Term::Var(
+                    Var::Rec(*id),
                     Box::new(ty.clone().quote(mcxt.size, mcxt)),
                 )),
                 ty.clone(),
@@ -685,25 +696,34 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
             let assoc_cxt = scope.iter().fold(assoc_cxt, |cxt, &(n, v)| {
                 cxt.define(n, NameInfo::Def(v), mcxt.db)
             });
+
+            // And they can access themselves and other members through the namespace, e.g. with method syntax
+            let intern = InternBlock::simple(namespace.clone(), CxtState::new(assoc_cxt, mcxt.db));
+            intern.intern_tys(mcxt.db, &mut scope);
+            let tscope = mcxt.db.intern_scope(Arc::new(scope.clone()));
+            let assoc_cxt = assoc_cxt.define(
+                **name,
+                NameInfo::Other(Var::Type(id, tscope), ty_ty.clone()),
+                mcxt.db,
+            );
+
             scope.extend(
                 // The associated namespace can't directly use effects
-                intern_block(
-                    namespace.clone(),
-                    mcxt.db,
-                    CxtState::new(assoc_cxt, mcxt.db),
-                )
-                .into_iter()
-                .filter_map(|id| {
-                    let (pre, _) = mcxt.db.lookup_intern_def(id);
-                    let pre = mcxt.db.lookup_intern_predef(pre);
-                    // If it doesn't have a name, we don't include it in the Vec
-                    // TODO: but then we don't elaborate it and check for errors. Does this ever happen?
-                    pre.name().map(|n| (n, id))
-                })
-                .inspect(|(_, id)| {
-                    // Report any errors
-                    let _ = mcxt.db.elaborate_def(*id);
-                }),
+                intern
+                    .with_cxt(assoc_cxt)
+                    .intern(mcxt.db)
+                    .into_iter()
+                    .filter_map(|id| {
+                        let (pre, _) = mcxt.db.lookup_intern_def(id);
+                        let pre = mcxt.db.lookup_intern_predef(pre);
+                        // If it doesn't have a name, we don't include it in the Vec
+                        // TODO: but then we don't elaborate it and check for errors. Does this ever happen?
+                        pre.name().map(|n| (n, id))
+                    })
+                    .inspect(|(_, id)| {
+                        // Report any errors
+                        let _ = mcxt.db.elaborate_def(*id);
+                    }),
             );
 
             // Add the associated namespace, including constructors, to this term's children so they'll get lowered

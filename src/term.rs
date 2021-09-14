@@ -288,6 +288,7 @@ pub enum PreDef {
 
     /// Pre-typed term, used for data constructors.
     Cons(SName, VTy),
+    Rec(SName, PreDefId, VTy),
 
     /// PreDefAn with added type, used when type-checking structs
     Typed(Box<PreDefAn>, VTy, ReasonExpected),
@@ -299,9 +300,11 @@ impl PreDef {
             | PreDef::Type { .. }
             | PreDef::FunDec(_, _, _, _)
             | PreDef::ValDec(_, _) => false,
-            PreDef::Val(_, _, _) | PreDef::Impl(_, _, _) | PreDef::Expr(_) | PreDef::Cons(_, _) => {
-                true
-            }
+            PreDef::Val(_, _, _)
+            | PreDef::Impl(_, _, _)
+            | PreDef::Expr(_)
+            | PreDef::Cons(_, _)
+            | PreDef::Rec(_, _, _) => true,
             PreDef::Typed(x, _, _) => x.ordered(),
         }
     }
@@ -313,6 +316,7 @@ impl PreDef {
             | PreDef::Type { name: n, .. }
             | PreDef::FunDec(n, _, _, _)
             | PreDef::Cons(n, _)
+            | PreDef::Rec(n, _, _)
             | PreDef::ValDec(n, _) => Some(**n),
             PreDef::Impl(n, _, _) => n.as_ref().map(|x| **x),
             PreDef::Expr(_) => None,
@@ -328,6 +332,7 @@ impl PreDef {
             | PreDef::Type { name: n, .. }
             | PreDef::FunDec(n, _, _, _)
             | PreDef::Cons(n, _)
+            | PreDef::Rec(n, _, _)
             | PreDef::ValDec(n, _) => n.span(),
             PreDef::Impl(Some(n), _, _) => n.span(),
             PreDef::Impl(None, _, t) => t.span(),
