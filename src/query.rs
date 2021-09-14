@@ -120,19 +120,24 @@ impl Cxt {
         Err(DefError::NoValue)
     }
 
-    pub fn lookup_rec(self, rec: PreDefId, db: &dyn Compiler) -> Option<DefId> {
+    pub fn lookup_rec(self, rec: PreDefId, db: &dyn Compiler) -> Option<(Var<Lvl>, Option<Val>)> {
         let mut cxt = self;
         while let MaybeEntry::Yes(CxtEntry { info, rest, .. }) = db.lookup_cxt_entry(cxt) {
             match info {
                 NameInfo::Def(id) => {
                     if db.lookup_intern_def(id).0 == rec {
-                        return Some(id);
+                        return Some((Var::Top(id), None));
                     }
                 }
                 NameInfo::Error => (),
                 NameInfo::Rec(id, _) => {
                     if id == rec {
                         return None;
+                    }
+                }
+                NameInfo::Other(Var::Type(id, sc), ty) => {
+                    if db.lookup_intern_def(id).0 == rec {
+                        return Some((Var::Type(id, sc), Some(ty)));
                     }
                 }
                 NameInfo::Local(_) | NameInfo::Other(_, _) => (),

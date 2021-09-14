@@ -191,6 +191,22 @@ impl Val {
         }
     }
 
+    /// Like `inline()`, but removes top level `Box`es as well.
+    pub fn unbox(self, at: Size, mcxt: &MCxt) -> Val {
+        match self {
+            Val::Box(_, x) => x.unbox(at, mcxt),
+            Val::App(h, hty, sp, g) => {
+                if let Some(v) = g.resolve(h, &sp, at, mcxt) {
+                    v.unbox(at, mcxt)
+                } else {
+                    Val::App(h, hty, sp, g)
+                }
+            }
+            Val::Arc(v) => IntoOwned::<Val>::into_owned(v).unbox(at, mcxt),
+            x => x,
+        }
+    }
+
     /// Inlines Apps to expose Pi or Fun nodes giving it at least `n` arguments.
     /// Panics on failure.
     pub fn inline_args(self, n: usize, at: Size, mcxt: &MCxt) -> Val {

@@ -1205,7 +1205,7 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
 
         Pre_::Dot(head, m) => {
             match infer(false, head, mcxt)
-                .map(|(x, ty)| (x.inline_top(mcxt), ty.inline(mcxt.size, mcxt)))?
+                .map(|(x, ty)| (x.inline_top(mcxt), ty.unbox(mcxt.size, mcxt)))?
             {
                 (s, Val::Struct(StructKind::Sig, v)) => match v.iter().find(|&&(_, n, _)| n == **m)
                 {
@@ -1253,6 +1253,106 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
                                         Box::new(fty.clone().quote(mcxt.size, mcxt)),
                                     );
                                     return Ok(insert_metas(insert, f, fty, pre.span(), mcxt));
+                                }
+                                Err(_) => return Err(TypeError::Sentinel),
+                            }
+                        }
+                    }
+                    Err(TypeError::MemberNotFound(
+                        Span(head.span().0, m.span().1),
+                        ScopeType::Type(
+                            mcxt.db
+                                .lookup_intern_predef(mcxt.db.lookup_intern_def(id).0)
+                                .name()
+                                .unwrap(),
+                        ),
+                        **m,
+                    ))
+                }
+                (x, Val::App(Var::Type(id, scope), b, c, d)) => {
+                    let xty = Val::App(Var::Type(id, scope), b, c, d);
+                    let scope = mcxt.db.lookup_intern_scope(scope);
+                    for &(n, v) in scope.iter().rev() {
+                        if n == **m {
+                            match mcxt.db.elaborate_def(v) {
+                                Ok(info) => {
+                                    let fty: Val = info.typ.into_owned();
+                                    let f = Term::Var(
+                                        Var::Top(v),
+                                        Box::new(fty.clone().quote(mcxt.size, mcxt)),
+                                    );
+                                    let (f, fty) = insert_metas(true, f, fty, m.span(), mcxt);
+                                    match &fty {
+                                        Val::Fun(from, to, effs) => {
+                                            if !unify(
+                                                xty.clone(),
+                                                (**from).clone(),
+                                                mcxt.size,
+                                                pre.span(),
+                                                mcxt,
+                                            )? {
+                                                return Err(TypeError::Unify(
+                                                    head.copy_span(xty),
+                                                    (**from).clone(),
+                                                    ReasonExpected::ArgOf(m.span(), fty),
+                                                ));
+                                            }
+
+                                            let to = (**to).clone();
+                                            for eff in effs {
+                                                if !mcxt
+                                                    .eff_stack
+                                                    .try_eff(eff.clone(), &mut mcxt.clone())
+                                                {
+                                                    return Err(TypeError::EffNotAllowed(
+                                                        pre.span(),
+                                                        eff.clone(),
+                                                        mcxt.eff_stack.clone(),
+                                                    ));
+                                                }
+                                            }
+                                            return Ok((
+                                                Term::App(Icit::Expl, Box::new(f), Box::new(x)),
+                                                to,
+                                            ));
+                                        }
+                                        Val::Clos(Pi, Icit::Expl, clos, effs) => {
+                                            let from = clos.ty.clone();
+                                            if !unify(
+                                                xty.clone(),
+                                                from.clone(),
+                                                mcxt.size,
+                                                pre.span(),
+                                                mcxt,
+                                            )? {
+                                                return Err(TypeError::Unify(
+                                                    head.copy_span(xty),
+                                                    from,
+                                                    ReasonExpected::ArgOf(m.span(), fty),
+                                                ));
+                                            }
+
+                                            let vx = x.clone().evaluate(&mcxt.env(), mcxt);
+                                            let to = clos.clone().apply(vx, mcxt);
+                                            for eff in effs {
+                                                if !mcxt
+                                                    .eff_stack
+                                                    .try_eff(eff.clone(), &mut mcxt.clone())
+                                                {
+                                                    return Err(TypeError::EffNotAllowed(
+                                                        pre.span(),
+                                                        eff.clone(),
+                                                        mcxt.eff_stack.clone(),
+                                                    ));
+                                                }
+                                            }
+                                            return Ok((
+                                                Term::App(Icit::Expl, Box::new(f), Box::new(x)),
+                                                to,
+                                            ));
+                                        }
+                                        _ => todo!("error for this case"),
+                                    }
                                 }
                                 Err(_) => return Err(TypeError::Sentinel),
                             }

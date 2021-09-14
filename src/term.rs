@@ -1206,12 +1206,15 @@ impl Glued {
                 }
                 Var::Builtin(_) => None,
                 Var::Rec(rec) => {
-                    let def = mcxt.cxt.lookup_rec(rec, mcxt.db)?;
-                    let val = mcxt.def_term(def)?;
-                    let val = val.evaluate(&Env::new(at), mcxt);
-                    // let val = Val::Arc(Arc::new(val));
-                    // *self.0.write().unwrap() = Some(val.clone());
-                    Some(val)
+                    let (h, hty) = mcxt.cxt.lookup_rec(rec, mcxt.db)?;
+                    match h {
+                        Var::Top(def) => {
+                            let val = mcxt.def_term(def)?;
+                            let val = val.evaluate(&Env::new(at), mcxt);
+                            Some(val)
+                        }
+                        _ => Some(Val::App(h, Box::new(hty?), Vec::new(), Glued::new())),
+                    }
                 }
                 Var::Top(def) => {
                     let val = mcxt.def_term(def)?;
