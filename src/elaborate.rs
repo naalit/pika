@@ -686,14 +686,12 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
             // They need the type of the datatype we're defining
             // They also need the constructors, so we create a temporary scope.
             // Since Var::unify doesn't compare the scope ids, it works.
-            let tscope = mcxt.db.intern_scope(Arc::new(scope.clone()));
-            let assoc_cxt = mcxt.cxt.define(
-                **name,
-                NameInfo::Other(Var::Type(id, tscope), ty_ty.clone()),
-                mcxt.db,
-            );
             // And they have access to all the constructors in `scope` at the top level
-            let assoc_cxt = scope.iter().fold(assoc_cxt, |cxt, &(n, v)| {
+
+            // First, though, we just elaborate the types of associated namespace definitions.
+            // These can use the constructors at the top level, but actually *can't* use anything through Type.m syntax
+            // because we need the type to be Rec so that nothing ends up using a scope without the types defined.
+            let assoc_cxt = scope.iter().fold(mcxt.cxt, |cxt, &(n, v)| {
                 cxt.define(n, NameInfo::Def(v), mcxt.db)
             });
 
