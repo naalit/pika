@@ -76,7 +76,7 @@ impl<'i> Parser<'i> {
         t.map(|(_, t, _)| t)
     }
 
-    fn err<T>(&mut self, msg: impl Into<String>) -> PResult<T> {
+    fn err<T, U: Into<String>>(&mut self, msg: U) -> PResult<T> {
         let span = self.lexer.span();
         PResult::Err(Spanned::new(LexError::Other(msg.into()), span))
     }
@@ -885,6 +885,7 @@ pub struct ExprParser<'p, 'i> {
     parser: &'p mut Parser<'i>,
     is_pat: bool,
     app_only: bool,
+    term_last: bool,
     names: Vec<SName>,
     terms: Vec<Pre>,
     ops: Vec<Op<'i>>,
@@ -907,6 +908,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
             parser,
             is_pat,
             app_only: false,
+            term_last: false,
             names: Vec::new(),
             terms: Vec::new(),
             ops: Vec::new(),
@@ -923,8 +925,14 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
 
     /// Helper function that takes two terms off the stack and combines them with the given operator
     fn resolve_op(&mut self, op: Op) -> PResult<()> {
-        let b = self.terms.pop().unwrap();
-        let a = self.terms.pop().unwrap();
+        let b = self.terms.pop().ok_or_else(|| {
+            self.err::<(), _>(format!("expected expression as operand to {}", op))
+                .unwrap_err()
+        })?;
+        let a = self.terms.pop().ok_or_else(|| {
+            self.err::<(), _>(format!("expected expression as operand to {}", op))
+                .unwrap_err()
+        })?;
 
         // Outer spans
         let vspan = Span(a.span().0, b.span().1);
@@ -970,7 +978,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                                         ret = Some(Pre_::If(cond, a, b));
                                         break;
                                     }
-                                    None => return self.err("expected condition after 'if'"),
+                                    None => return self.err("expected `then` in if expression"),
                                 }
                             } else {
                                 self.resolve_op(op2)?;
@@ -1028,14 +1036,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
     }
 
     fn app_next(&self) -> bool {
-        let mut nterms = self.terms.len();
-        for i in &self.ops {
-            match i {
-                Op::Tok(_) | Op::App(_) => nterms -= 1,
-                Op::If(_) => (),
-            }
-        }
-        nterms > 0
+        self.term_last
     }
 
     fn push_term(&mut self, t: Pre) -> PResult<()> {
@@ -1048,6 +1049,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
             self.ops.push(Op::App(Icit::Expl));
         }
         self.terms.push(t);
+        self.term_last = true;
         Ok(())
     }
 
@@ -1133,6 +1135,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                                 self.resolve_for(&Op::App(Icit::Impl))?;
                                 self.ops.push(Op::App(Icit::Impl));
                                 self.terms.push(term);
+                                self.term_last = true;
                             } else {
                                 self.push_term(term)?;
                             }
@@ -1159,13 +1162,19 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                     self.push_term(x)?;
                 }
                 Ok(x) if !self.app_only && x.binop_prec().is_some() => {
-                    let op = Op::Tok(Spanned::new(x, self.span()));
-                    self.next();
+                    let op = Op::Tok(Spanned::new(x.clone(), self.span()));
 
                     // If we can, resolve the last operator
                     self.resolve_for(&op)?;
 
+                    if !self.term_last {
+                        return self.unexpected(x, "expression before operator")?;
+                    }
+
+                    self.next();
+
                     self.ops.push(op);
+                    self.term_last = false;
                 }
                 Ok(Tok::With) if !self.app_only => {
                     // If we have any arrows on the stack, this goes with the top one; otherwise, we stop here
@@ -1175,7 +1184,10 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                     while let Some(op2) = self.ops.pop() {
                         if op2.binop_prec() == Prec::Arrow {
                             let b = self.terms.pop().unwrap();
-                            let a = self.terms.pop().unwrap();
+                            let a = self.terms.pop().ok_or_else(|| {
+                                self.err::<(), _>(format!("expected return type after `->`"))
+                                    .unwrap_err()
+                            })?;
                             let span = Span(a.span().1, b.span().0);
 
                             // We haven't consumed the `with` yet, so we let `maybe_effs_list()` consume it
@@ -1197,6 +1209,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                     self.resolve_names()?;
                     self.next();
                     self.ops.push(Op::If(None));
+                    self.term_last = false;
                 }
                 Ok(Tok::Then) => {
                     // Resolve all remaining operators until we get to an `if`
@@ -1207,13 +1220,18 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                             if cond_slot.is_some() {
                                 return self.err("expected `else` branch before another `then`");
                             }
-                            let cond = self.terms.pop().unwrap();
-                            // Consume the `then`
-                            self.next();
+                            let cond = self.terms.pop();
+                            if let Some(cond) = cond {
+                                // Consume the `then`
+                                self.next();
 
-                            self.ops.push(Op::If(Some(cond)));
-                            found = true;
-                            break;
+                                self.ops.push(Op::If(Some(cond)));
+                                found = true;
+                                self.term_last = false;
+                                break;
+                            } else {
+                                return self.err("expected if condition before `then`");
+                            }
                         } else {
                             self.resolve_op(op2)?;
                         }
@@ -1305,6 +1323,9 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                         // A normal operator applied to the rest
                         let x = self.recurse()?;
                         self.terms.push(x);
+                        if self.peek("") == Ok(Tok::Newline) {
+                            return self.err("expected end of expression and dedent");
+                        }
                         self.expect(Tok::Dedent)?;
                     }
                 }
