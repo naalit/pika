@@ -24,7 +24,7 @@ where
     Some () => ()
     None => ()
 
-fun my_fun (x : Option Type) = Option.unwrap_or x (Type -> Type)
+fun my_fun (x : Option Type) = x.unwrap_or (Type -> Type)
 
 type GADT (a: Type) of
   X : GADT ()

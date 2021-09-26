@@ -17,9 +17,13 @@ where
 
     fun set [a] (self : List a) (i : I32) (new : a) : List a = case self of
         Nil => Nil
-        Cons x xs => if i == 0 then Cons new xs else Cons x (xs.set (i - 1) new)
+        Cons x xs => if i == 0
+            then Cons new xs
+            else Cons x (xs.set (i - 1) new)
 
-    fun repeat [a] (len : I32) (x : a) : List a = if len == 0 then List.Nil else List.Cons x (repeat (len - 1) x)
+    fun repeat [a] (len : I32) (x : a) : List a = if len == 0
+        then List.Nil
+        else List.Cons x (repeat (len - 1) x)
 
     fun len [a] (self : List a) : I32 = case self of
         Nil => 0
@@ -73,9 +77,11 @@ where
             List.repeat 9 (Option.None)
 
     fun print (self : Board) : () with IO = do
-        fun range (a b : I32) (f : I32 -> () with IO) : () with IO = if a >= b then () else do
-            f a
-            range (a + 1) b f
+        fun range (a b : I32) (f : I32 -> () with IO) : () with IO = if a >= b
+            then ()
+            else do
+                f a
+                range (a + 1) b f
 
         range 0 3 ((y : I32) => range 0 3 ((x : I32) => do
             if x == 0 then puts "\n" else ()

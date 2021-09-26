@@ -3,7 +3,7 @@ type Option a of
     Some a
     None
 where
-    fun map [a b] (f : a -> b) (self : Option a) : Option b = case self of
+    fun map [a b] (self : Option a) (f : a -> b) : Option b = case self of
         Some a => Some (f a)
         None => None
 
@@ -14,6 +14,6 @@ where
 fun main () with IO = do
     val a : Option I32 = Option.Some [I32] 12
     val b : Option I32 = Option.None
-    Option.map print a
-    Option.map print b
+    a.map print
+    b.map print
     print 0

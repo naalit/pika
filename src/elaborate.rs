@@ -1223,24 +1223,29 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
 
         Pre_::Dot(head, m) => {
             match infer(false, head, mcxt)
-                .map(|(x, ty)| (x.inline_top(mcxt), ty.unbox(mcxt.size, mcxt)))?
+                // Most uses of `inline` are on types, where effects aren't allowed and inlining is invisible.
+                // However, in this case we're inlining a term that could be effectful and could end up in the compiled program.
+                // So we need to make sure *not* to actually use the inlined version, which is why we clone the original first.
+                // (we need to inline at all to support `Option.Some` etc through imports and aliases)
+                .map(|(x, ty)| (x.clone(), x.inline_top(mcxt), ty.unbox(mcxt.size, mcxt)))?
             {
-                (s, Val::Struct(StructKind::Sig, v)) => match v.iter().find(|&&(_, n, _)| n == **m)
-                {
-                    Some((_, _, ty)) => Ok(insert_metas(
-                        insert,
-                        Term::Dot(Box::new(s), **m),
-                        ty.clone(),
-                        pre.span(),
-                        mcxt,
-                    )),
-                    None => Err(TypeError::MemberNotFound(
-                        Span(head.span().0, m.span().1),
-                        ScopeType::Struct,
-                        **m,
-                    )),
-                },
-                (Term::Var(Var::Builtin(Builtin::Bool), _), _) => {
+                (s, _, Val::Struct(StructKind::Sig, v)) => {
+                    match v.iter().find(|&&(_, n, _)| n == **m) {
+                        Some((_, _, ty)) => Ok(insert_metas(
+                            insert,
+                            Term::Dot(Box::new(s), **m),
+                            ty.clone(),
+                            pre.span(),
+                            mcxt,
+                        )),
+                        None => Err(TypeError::MemberNotFound(
+                            Span(head.span().0, m.span().1),
+                            ScopeType::Struct,
+                            **m,
+                        )),
+                    }
+                }
+                (_, Term::Var(Var::Builtin(Builtin::Bool), _), _) => {
                     let tbool = Term::Var(Var::Builtin(Builtin::Bool), Box::new(Term::Type));
                     let vbool = Val::builtin(Builtin::Bool, Val::Type);
                     match &*mcxt.db.lookup_intern_name(**m) {
@@ -1259,7 +1264,7 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
                         )),
                     }
                 }
-                (Term::Var(Var::Type(id, scope), _), _) => {
+                (_, Term::Var(Var::Type(id, scope), _), _) => {
                     let scope = mcxt.db.lookup_intern_scope(scope);
                     for &(n, v) in scope.iter().rev() {
                         if n == **m {
@@ -1287,7 +1292,7 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
                         **m,
                     ))
                 }
-                (x, Val::App(Var::Type(id, scope), b, c, d)) => {
+                (x, _, Val::App(Var::Type(id, scope), b, c, d)) => {
                     let xty = Val::App(Var::Type(id, scope), b, c, d);
                     let scope = mcxt.db.lookup_intern_scope(scope);
                     for &(n, v) in scope.iter().rev() {
@@ -1387,7 +1392,7 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
                         **m,
                     ))
                 }
-                (_, ty) => Err(TypeError::NotStruct(Spanned::new(
+                (_, _, ty) => Err(TypeError::NotStruct(Spanned::new(
                     ty,
                     Span(head.span().0, m.span().1),
                 ))),

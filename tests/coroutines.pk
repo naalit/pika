@@ -19,7 +19,7 @@ where
 
     ## Steps the coroutine, and if it yields a value, calls `run` on it. Otherwise it's done, and this function does nothing.
     ## Returns the new coroutine.
-    fun step [a] (run : a -> () with IO) (x : Coroutine a) : Coroutine a with IO = case x of
+    fun step [a] (x : Coroutine a) (run : a -> () with IO) : Coroutine a with IO = case x of
         Stop => Stop
         Go a k => do
             run a
@@ -28,11 +28,11 @@ where
 fun main () with IO = do
     val k = Coroutine.new generator
     print 0
-    val k = Coroutine.step print k
+    val k = k.step print
     print 2
-    val k = Coroutine.step print k
+    val k = k.step print
     print 4
-    val k = Coroutine.step print k
+    val k = k.step print
     print 6
     # This shouldn't print anything, because the coroutine is done
-    Coroutine.step print k
+    k.step print
