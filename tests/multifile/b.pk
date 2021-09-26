@@ -1,1 +1,3 @@
+val the_number : I32 = 3
+
 fun main () with IO = a.print_number (a.get_number ())

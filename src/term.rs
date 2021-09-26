@@ -544,6 +544,46 @@ impl Term {
         )
     }
 
+    pub fn collect_global_metas(&self, v: &mut HashSet<(PreDefId, u16, MetaSource)>) {
+        match self {
+            Term::Type => (),
+            Term::Var(Var::Meta(Meta::Global(a, b, c)), _) => {
+                v.insert((*a, *b, *c));
+            }
+            Term::Var(_, _) => (),
+            Term::Clos(_, _, _, a, b, e) | Term::Fun(a, b, e) => {
+                a.collect_global_metas(v);
+                b.collect_global_metas(v);
+                e.iter().for_each(|x| x.collect_global_metas(v));
+            }
+            Term::App(_, a, b) => {
+                a.collect_global_metas(v);
+                b.collect_global_metas(v);
+            }
+            Term::Case(a, b, c, d, e) => {
+                a.collect_global_metas(v);
+                b.collect_global_metas(v);
+                e.collect_global_metas(v);
+                d.iter().for_each(|x| x.collect_global_metas(v));
+                c.iter().for_each(|(p, t)| {
+                    t.collect_global_metas(v);
+                    p.collect_global_metas(v);
+                });
+            }
+            Term::Lit(_, _) => (),
+            Term::Do(a) => a.iter().for_each(|(_, x)| x.collect_global_metas(v)),
+            Term::Box(_, x) => x.collect_global_metas(v),
+            Term::Struct(StructKind::Struct(a), b) => {
+                a.collect_global_metas(v);
+                b.iter().for_each(|(_, _, x)| x.collect_global_metas(v));
+            }
+            Term::Struct(StructKind::Sig, b) => {
+                b.iter().for_each(|(_, _, x)| x.collect_global_metas(v))
+            }
+            Term::Dot(a, _) => a.collect_global_metas(v),
+        }
+    }
+
     pub fn ty(&self, at: Size, mcxt: &MCxt) -> Ty {
         match self {
             Term::Type => Term::Type,
@@ -1323,6 +1363,63 @@ impl Val {
             }
             Val::Arc(x) => IntoOwned::<Val>::into_owned(x).cons_ret_type(at, mcxt),
             x => x,
+        }
+    }
+
+    pub fn collect_global_metas(&self, v: &mut HashSet<(PreDefId, u16, MetaSource)>) {
+        match self {
+            Val::Type => (),
+            Val::Arc(x) => x.collect_global_metas(v),
+            Val::App(var, t, sp, _) => {
+                t.collect_global_metas(v);
+                sp.iter().for_each(|x| match x {
+                    Elim::App(_, x) => x.collect_global_metas(v),
+                    Elim::Case(env, a, b, c, d) => {
+                        env.vals.iter().for_each(|x| {
+                            x.as_ref().map(|x| x.collect_global_metas(v)).unwrap_or(())
+                        });
+                        a.collect_global_metas(v);
+                        b.iter().for_each(|(p, t)| {
+                            p.collect_global_metas(v);
+                            t.collect_global_metas(v);
+                        });
+                        c.iter().for_each(|x| x.collect_global_metas(v));
+                        d.collect_global_metas(v);
+                    }
+                    Elim::Dot(_) => todo!(),
+                });
+                if let Var::Meta(Meta::Global(a, b, c)) = var {
+                    v.insert((*a, *b, *c));
+                }
+            }
+            Val::Clos(_, _, clos, effs) => {
+                clos.term.collect_global_metas(v);
+                clos.ty.collect_global_metas(v);
+                clos.env
+                    .vals
+                    .iter()
+                    .for_each(|x| x.as_ref().map(|x| x.collect_global_metas(v)).unwrap_or(()));
+                effs.iter().for_each(|x| x.collect_global_metas(v));
+            }
+            Val::Fun(a, b, effs) => {
+                a.collect_global_metas(v);
+                b.collect_global_metas(v);
+                effs.iter().for_each(|x| x.collect_global_metas(v));
+            }
+            Val::Lit(_, _) => (),
+            Val::Do(env, d) => {
+                env.vals
+                    .iter()
+                    .for_each(|x| x.as_ref().map(|x| x.collect_global_metas(v)).unwrap_or(()));
+                d.iter().for_each(|(_, x)| x.collect_global_metas(v));
+            }
+            Val::Box(_, x) => x.collect_global_metas(v),
+            Val::Struct(s, d) => {
+                d.iter().for_each(|(_, _, x)| x.collect_global_metas(v));
+                if let StructKind::Struct(t) = s {
+                    t.collect_global_metas(v);
+                }
+            }
         }
     }
 

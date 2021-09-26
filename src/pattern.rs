@@ -528,6 +528,32 @@ impl Pat {
         }
     }
 
+    pub fn collect_global_metas(&self, v: &mut HashSet<(PreDefId, u16, MetaSource)>) {
+        match self {
+            Pat::Any => (),
+            Pat::Var(_, t) => t.collect_global_metas(v),
+            Pat::Cons(_, a, b) => {
+                a.collect_global_metas(v);
+                b.iter().for_each(|(t, p)| {
+                    p.collect_global_metas(v);
+                    t.as_ref().map(|(_, x)| x.collect_global_metas(v));
+                });
+            }
+            Pat::Or(a, b) => {
+                a.collect_global_metas(v);
+                b.collect_global_metas(v);
+            }
+            Pat::Lit(_, _, _) => (),
+            Pat::Bool(_) => (),
+            Pat::Eff(a, b, c) => {
+                a.collect_global_metas(v);
+                b.collect_global_metas(v);
+                c.collect_global_metas(v);
+            }
+            Pat::EffRet(a) => a.collect_global_metas(v),
+        }
+    }
+
     pub fn match_with(&self, val: &Val, mut env: Env, mcxt: &MCxt) -> MatchResult {
         use MatchResult::*;
         match self {

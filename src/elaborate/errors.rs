@@ -194,7 +194,7 @@ impl TypeError {
                 s,
                 "solution depends on a non-variable",
             )
-            .with_note(Doc::start("because here it depends on a specific value, the compiler doesn't know what the solution should be for other values").style(Style::Note)),
+            .with_note(Doc::start("because here it could depend on the specific value, the compiler doesn't know what the solution should be for other values").style(Style::Note)),
             TypeError::NotStruct(ty) => Error::new(
                 file,
                 Doc::start("Value of type")

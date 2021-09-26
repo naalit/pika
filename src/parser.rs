@@ -1567,9 +1567,10 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                     self.maybe(Tok::Newline);
                     self.expect(closing)?;
 
+                    let span = Span(start, end);
+
                     // Untyped implicits `[x] => ...` can only appear at the front of lambdas, so they're not confused with passing an implicit argument
                     if icit == Icit::Impl && self.peek("_") == Ok(Tok::WideArrow) && !self.is_pat {
-                        let span = Span(start, end);
                         return Err(Spanned::new(
                             LexError::Other(
                                 "implicit parameters with an inferred type are not allowed in lambdas; please add a colon `[x:]` instead"
@@ -1578,7 +1579,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                             span,
                         ));
                     } else {
-                        return Ok(Err((args, icit, in_parens)));
+                        return Ok(Err((args, icit, in_parens.with_span(span))));
                     }
                 } else if icit == Icit::Expl {
                     if mode.yes_pi() || *mode == ArgMode::Cons {

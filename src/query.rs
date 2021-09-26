@@ -1,6 +1,8 @@
 use crate::elaborate::*;
 use crate::error::*;
+use crate::pretty::Style;
 use crate::term::*;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 macro_rules! intern_id {
@@ -513,12 +515,15 @@ fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
     use crate::pretty::Doc;
 
     let mut mcxt = MCxt::empty_universal(db);
+    let mut globals = HashSet::new();
     for file in db.input_files() {
         // Get meta solutions from each elaborate_def() and make sure they match
         for def in &*db.top_level(file) {
             // They already reported any errors to the database, so we ignore them here
             if let Ok(info) = db.elaborate_def(*def) {
                 let info: ElabInfo = info;
+                info.term.map(|x| x.collect_global_metas(&mut globals));
+                info.typ.collect_global_metas(&mut globals);
                 for i in &*info.solved_globals {
                     match i {
                         RecSolution::Global(id, m, span, term, source) => {
@@ -544,7 +549,8 @@ fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
                                                 .add(" but previously found to be type ")
                                                 .chain(
                                                     term2.pretty(db, &mut Names::new(mcxt.cxt, db)),
-                                                ),
+                                                )
+                                                .style(Style::Bold),
                                             span.span,
                                             "type inferred here",
                                         )
@@ -562,6 +568,18 @@ fn check_all(db: &dyn Compiler) -> Vec<RecSolution> {
                         RecSolution::ParentLocal(_, _, _, _) => (),
                     }
                 }
+            }
+        }
+        for (id, m, source) in globals.drain() {
+            if mcxt.get_meta(Meta::Global(id, m, source)).is_none() {
+                db.report_error(Error::new(
+                    file,
+                    Doc::start("Could not find solution for ")
+                        .chain(source.pretty(db))
+                        .style(Style::Bold),
+                    db.lookup_intern_predef(id).span(),
+                    "search started in this definition",
+                ));
             }
         }
     }
