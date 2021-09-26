@@ -50,10 +50,7 @@ where
 
 
 fun test (a : I32) : I32 =
-    # I'd like to put the condition on the same line as the `if`,
-    # but that requires 2 tokens of lookahead. Maybe in the future.
-    if 
-        a == 2
+    if a == 2
         then a
         else
             f (2 + 3)

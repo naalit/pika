@@ -135,7 +135,7 @@ impl<'i> Parser<'i> {
     }
 
     /// Consume a token, and give an error if it doesn't match the provided token.
-    fn expect(&mut self, tok: Tok<'i>) -> PResult<()> {
+    fn expect(&mut self, tok: Tok<'i>) -> PResult<Spanned<Tok<'i>>> {
         let span = self.span();
         let t = self.next();
         if let Some(e) = self.pending_err.clone() {
@@ -150,7 +150,7 @@ impl<'i> Parser<'i> {
                 self.err(format!("unexpected end of input, expected {}", tok))
             }
         } else {
-            Ok(())
+            Ok(Spanned::new(t.unwrap(), span))
         }
     }
 
@@ -554,37 +554,6 @@ impl<'i> Parser<'i> {
                     Span(start, end),
                 ))
             }
-            Tok::If => {
-                let start = self.span().0;
-                self.next();
-
-                let indent = self.maybe(Tok::Indent);
-                let cond = self.term()?;
-
-                let indent = self.indent_or_newline(indent);
-                self.expect(Tok::Then)?;
-
-                let i_body = self.maybe(Tok::Indent);
-                let yes = self.term()?;
-                if i_body {
-                    self.expect(Tok::Dedent)?;
-                }
-
-                let indent = self.indent_or_newline(indent);
-                self.expect(Tok::Else)?;
-
-                let i_body = self.maybe(Tok::Indent);
-                let no = self.term()?;
-                let end = no.span().1;
-                if i_body {
-                    self.expect(Tok::Dedent)?;
-                }
-                if indent {
-                    self.expect(Tok::Dedent)?;
-                }
-
-                Ok(Spanned::new(Pre_::If(cond, yes, no), Span(start, end)))
-            }
             Tok::Case | Tok::Catch => {
                 let start = self.span().0;
                 let is_catch = match self.next().unwrap() {
@@ -734,6 +703,8 @@ enum Prec {
     Pipe,
     /// f a b
     App,
+    /// if (not a real binop)
+    If,
 }
 impl Prec {
     /// The precedence of comparison operators, used by `Prec::Bitwise` because it has higher precedence than this and below.
@@ -754,11 +725,14 @@ impl Prec {
 }
 impl PartialOrd for Prec {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        // Application has the highest precedence
         match (self, other) {
+            // Application has the highest precedence
             (Prec::App, Prec::App) => return Some(Ordering::Equal),
             (Prec::App, _) => return Some(Ordering::Greater),
             (_, Prec::App) => return Some(Ordering::Less),
+            // And if has the lowest precedence
+            (Prec::If, _) => return Some(Ordering::Less),
+            (_, Prec::If) => return Some(Ordering::Greater),
             _ => (),
         }
         match (self.arith_prec(), other.arith_prec()) {
@@ -819,7 +793,6 @@ impl<'i> Tok<'i> {
                 | Tok::Catch
                 | Tok::COpen
                 | Tok::Do
-                | Tok::If
                 | Tok::String(_)
         )
     }
@@ -869,6 +842,7 @@ impl<'i> Tok<'i> {
             Tok::Gt | Tok::GtE | Tok::Lt | Tok::LtE | Tok::Eq | Tok::NEq => Prec::Comp,
             Tok::Comma => return None,
             Tok::LPipe | Tok::RPipe => Prec::Pipe,
+            Tok::Else => Prec::Pipe,
             _ => return None,
         })
     }
@@ -878,12 +852,14 @@ impl<'i> Tok<'i> {
 enum Op<'i> {
     Tok(Spanned<Tok<'i>>),
     App(Icit),
+    If(Option<Pre>),
 }
 impl<'i> Op<'i> {
     fn binop_prec(&self) -> Prec {
         match self {
             Op::Tok(i) => i.binop_prec().unwrap(),
             Op::App(_) => Prec::App,
+            Op::If(_) => Prec::If,
         }
     }
 
@@ -900,6 +876,7 @@ impl<'i> std::fmt::Display for Op<'i> {
         match self {
             Op::Tok(t) => write!(f, "{}", **t),
             Op::App(_) => write!(f, "application"),
+            Op::If(_) => write!(f, "if"),
         }
     }
 }
@@ -939,21 +916,13 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
     fn resolve_names(&mut self) -> PResult<()> {
         for name in self.names.split_off(0) {
             let term = Spanned::new(Pre_::Var(*name), name.span());
-            if self.terms.len() > self.ops.len() {
-                // Application operator
-
-                // If we can, resolve the last operator
-                self.resolve_for(&Op::App(Icit::Expl))?;
-
-                self.ops.push(Op::App(Icit::Expl));
-            }
-            self.terms.push(term);
+            self.push_term(term)?;
         }
         Ok(())
     }
 
     /// Helper function that takes two terms off the stack and combines them with the given operator
-    fn resolve_op(&mut self, op: Op) {
+    fn resolve_op(&mut self, op: Op) -> PResult<()> {
         let b = self.terms.pop().unwrap();
         let a = self.terms.pop().unwrap();
 
@@ -990,11 +959,36 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                     Tok::Comma => todo!(","),
                     Tok::LPipe => todo!("pipes"),
                     Tok::RPipe => todo!("pipes"),
+                    Tok::Else => {
+                        // Resolve all remaining operators until we get to an `if`
+                        self.resolve_names()?;
+                        let mut ret = None;
+                        while let Some(op2) = self.ops.pop() {
+                            if let Op::If(cond) = op2 {
+                                match cond {
+                                    Some(cond) => {
+                                        ret = Some(Pre_::If(cond, a, b));
+                                        break;
+                                    }
+                                    None => return self.err("expected condition after 'if'"),
+                                }
+                            } else {
+                                self.resolve_op(op2)?;
+                            }
+                        }
+                        // No matching `if` on the stack, so give an error
+                        match ret {
+                            Some(v) => v,
+                            None => return self.err("unexpected `else` without matching `if`"),
+                        }
+                    }
                     _ => panic!("Couldn't resolve {}", *op),
                 }
             }
+            Op::If(_) => unreachable!(),
         };
         self.terms.push(Spanned::new(v, vspan));
+        Ok(())
     }
 
     fn resolve_for(&mut self, op: &Op<'p>) -> PResult<()> {
@@ -1006,7 +1000,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
             let prec2 = op2.binop_prec();
             if prec2 > prec || (prec2 == prec && op.associates_with(&op2)) {
                 self.ops.pop().unwrap();
-                self.resolve_op(op2);
+                self.resolve_op(op2)?;
             // Arrows are right associative, so resolve the last one first in stack order
             } else if prec2 < prec || (prec == Prec::Arrow && prec2 == Prec::Arrow) {
                 break;
@@ -1024,13 +1018,37 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
     fn resolve_all(&mut self) -> PResult<()> {
         self.resolve_names()?;
         while let Some(op2) = self.ops.pop() {
-            self.resolve_op(op2);
+            self.resolve_op(op2)?;
         }
         Ok(())
     }
 
     fn recurse(&mut self) -> PResult<Pre> {
         ExprParser::new(self.parser, self.is_pat).go()
+    }
+
+    fn app_next(&self) -> bool {
+        let mut nterms = self.terms.len();
+        for i in &self.ops {
+            match i {
+                Op::Tok(_) | Op::App(_) => nterms -= 1,
+                Op::If(_) => (),
+            }
+        }
+        nterms > 0
+    }
+
+    fn push_term(&mut self, t: Pre) -> PResult<()> {
+        if self.app_next() {
+            // Application operator
+
+            // If we can, resolve the last operator
+            self.resolve_for(&Op::App(Icit::Expl))?;
+
+            self.ops.push(Op::App(Icit::Expl));
+        }
+        self.terms.push(t);
+        Ok(())
     }
 
     fn go(&mut self) -> PResult<Pre> {
@@ -1067,25 +1085,22 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                         let span = Span(x.span().0, name.span().1);
 
                         self.resolve_names()?;
-                        if self.terms.len() > self.ops.len() {
-                            self.resolve_for(&Op::App(Icit::Expl))?;
-                            self.ops.push(Op::App(Icit::Expl));
-                        }
-
-                        self.terms.push(Spanned::new(Pre_::Dot(x, name), span));
+                        self.push_term(Spanned::new(Pre_::Dot(x, name), span))?;
                     } else if let Some(x) = self.terms.pop() {
                         self.next();
                         let name = self.name()?;
                         let span = Span(x.span().0, name.span().1);
 
+                        // No need for push_term, just put it back on the stack
                         self.terms.push(Spanned::new(Pre_::Dot(x, name), span));
                     } else {
                         return self.unexpected(Tok::Dot, "expression");
                     }
                 }
                 Ok(Tok::POpen) | Ok(Tok::SOpen) => {
+                    let open_span = self.span();
                     let mut mode = ArgMode::PiOrLambda;
-                    if !self.names.is_empty() || self.terms.len() > self.ops.len() {
+                    if !self.names.is_empty() || self.app_next() {
                         mode.not_pi();
                     }
                     let args = self
@@ -1096,11 +1111,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                     match self.arg_group(&mut mode, args)? {
                         Ok(args) => {
                             let term = self.lambda_pi(args, mode)?;
-                            if self.terms.len() > self.ops.len() {
-                                self.resolve_for(&Op::App(Icit::Expl))?;
-                                self.ops.push(Op::App(Icit::Expl));
-                            }
-                            self.terms.push(term);
+                            self.push_term(term)?;
                         }
                         Err((args, icit, term)) => {
                             for (n, i, t) in args {
@@ -1109,11 +1120,22 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                                 self.names.push(n);
                             }
                             self.resolve_names()?;
-                            if self.terms.len() > self.ops.len() {
-                                self.resolve_for(&Op::App(Icit::Expl))?;
-                                self.ops.push(Op::App(icit));
+                            if icit == Icit::Impl {
+                                // Can't be an op, must be an application
+                                if !self.app_next() {
+                                    return Err(Spanned::new(
+                                        LexError::Other(
+                                            "unexpected [, expected expression".to_string(),
+                                        ),
+                                        open_span,
+                                    ));
+                                }
+                                self.resolve_for(&Op::App(Icit::Impl))?;
+                                self.ops.push(Op::App(Icit::Impl));
+                                self.terms.push(term);
+                            } else {
+                                self.push_term(term)?;
                             }
-                            self.terms.push(term);
                         }
                     }
                 }
@@ -1125,15 +1147,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                         .collect();
                     let term = self.lambda_pi(args, ArgMode::Lambda)?;
                     self.resolve_names()?;
-                    if self.terms.len() > self.ops.len() {
-                        // Application operator
-
-                        // If we can, resolve the last operator
-                        self.resolve_for(&Op::App(Icit::Expl))?;
-
-                        self.ops.push(Op::App(Icit::Expl));
-                    }
-                    self.terms.push(term);
+                    self.push_term(term)?;
                 }
                 Ok(Tok::Name(_)) => {
                     let name = self.name()?;
@@ -1142,15 +1156,7 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                 Ok(x) if x.starts_atom() => {
                     let x = self.atom()?;
                     self.resolve_names()?;
-                    if self.terms.len() > self.ops.len() {
-                        // Application operator
-
-                        // If we can, resolve the last operator
-                        self.resolve_for(&Op::App(Icit::Expl))?;
-
-                        self.ops.push(Op::App(Icit::Expl));
-                    }
-                    self.terms.push(x);
+                    self.push_term(x)?;
                 }
                 Ok(x) if !self.app_only && x.binop_prec().is_some() => {
                     let op = Op::Tok(Spanned::new(x, self.span()));
@@ -1179,12 +1185,42 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                             found = true;
                             break;
                         } else {
-                            self.resolve_op(op2);
+                            self.resolve_op(op2)?;
                         }
                     }
                     // No matching arrow on the stack, so it belongs to an outer pi and we should stop
                     if !found {
                         break;
+                    }
+                }
+                Ok(Tok::If) => {
+                    self.resolve_names()?;
+                    self.next();
+                    self.ops.push(Op::If(None));
+                }
+                Ok(Tok::Then) => {
+                    // Resolve all remaining operators until we get to an `if`
+                    self.resolve_names()?;
+                    let mut found = false;
+                    while let Some(op2) = self.ops.pop() {
+                        if let Op::If(cond_slot) = op2 {
+                            if cond_slot.is_some() {
+                                return self.err("expected `else` branch before another `then`");
+                            }
+                            let cond = self.terms.pop().unwrap();
+                            // Consume the `then`
+                            self.next();
+
+                            self.ops.push(Op::If(Some(cond)));
+                            found = true;
+                            break;
+                        } else {
+                            self.resolve_op(op2)?;
+                        }
+                    }
+                    // No matching `if` on the stack, so give an error
+                    if !found {
+                        return self.err("unexpected `then` without matching `if`");
                     }
                 }
                 Ok(Tok::Indent) if !self.app_only => {
@@ -1216,7 +1252,40 @@ impl<'p, 'i: 'p> ExprParser<'p, 'i> {
                                 t => return self.unexpected(t, "expression")?,
                             }
                         }
-                    } else if self.terms.len() > self.ops.len() {
+                    } else if next == Tok::Then {
+                        // Resolve all remaining operators until we get to an `if`
+                        self.resolve_names()?;
+                        let mut found = false;
+                        while let Some(op2) = self.ops.pop() {
+                            if let Op::If(cond_slot) = op2 {
+                                if cond_slot.is_some() {
+                                    return self
+                                        .err("expected `else` branch before another `then`");
+                                }
+                                let cond = self.terms.pop().unwrap();
+
+                                self.next();
+                                self.ops.push(Op::If(Some(cond)));
+                                found = true;
+                                break;
+                            } else {
+                                self.resolve_op(op2)?;
+                            }
+                        }
+                        // No matching `if` on the stack, so give an error
+                        if !found {
+                            return self.err("unexpected `then` without matching `if`");
+                        } else {
+                            let then_branch = self.recurse()?;
+                            self.expect(Tok::Newline)?;
+                            let op = self.expect(Tok::Else)?;
+                            let else_branch = self.recurse()?;
+                            self.expect(Tok::Dedent)?;
+                            self.terms.push(then_branch);
+                            self.terms.push(else_branch);
+                            self.resolve_op(Op::Tok(op))?;
+                        }
+                    } else if self.app_next() {
                         // We're doing an application to the rest
                         self.resolve_for(&Op::App(Icit::Expl))?;
                         self.ops.push(Op::App(Icit::Expl));

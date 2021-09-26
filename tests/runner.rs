@@ -70,8 +70,9 @@ fn test_bools() {
 fn test_fact() {
     Command::cargo_bin("pika")
         .unwrap()
-        .args(&["build", "tests/fact.pk"])
+        .args(&["run", "tests/fact.pk"])
         .assert()
+        .stdout("720\n")
         .success();
 }
 
