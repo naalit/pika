@@ -5,9 +5,79 @@ use crate::term::{ClosTy::*, Env, Ix, Lvl, Meta, MetaSource, Names, PreDefAn, Sp
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetaEntry {
     Solved(Arc<Term>, FileSpan),
-    Unsolved(Option<Name>, Span, MetaSource),
+    Unsolved(Option<Name>, VTy, Span, MetaSource, Spine),
 }
 
+#[derive(Debug, Clone, PartialEq, Default, Eq, Hash)]
+pub struct ImplStack(Vec<Vec<(Option<Name>, VTy, Val, Span)>>);
+impl ImplStack {
+    pub fn scope(&mut self) {
+        self.0.push(Vec::new());
+    }
+
+    pub fn add(&mut self, name: Option<Name>, ty: VTy, val: Val, span: Span) {
+        if self.0.is_empty() {
+            self.scope();
+        }
+        self.0.last_mut().unwrap().push((name, ty, val, span));
+    }
+}
+impl<'db> MCxt<'db> {
+    pub fn find_impl(&mut self, ty: &VTy, span: Span) -> Option<Val> {
+        for scope in self.impls.0.iter().rev() {
+            let mut found = Vec::new();
+            let mut metas = None;
+            for (iname, ity, ival, ispan) in scope {
+                let mut mcxt2 = self.clone();
+                if unify(
+                    ty.clone(),
+                    ity.clone(),
+                    self.size,
+                    Span::empty(),
+                    &mut mcxt2,
+                )
+                .unwrap_or(false)
+                {
+                    found.push((ival.clone(), iname.clone(), *ispan));
+                    // If unifying the types solved any metas, make sure to save the solutions
+                    metas = Some((mcxt2.local_metas, mcxt2.solved_globals));
+                }
+            }
+            match found.len() {
+                0 => continue,
+                1 => {
+                    let (local, global) = metas.unwrap();
+                    self.local_metas = local;
+                    self.solved_globals = global;
+                    return Some(found.pop().unwrap().0);
+                }
+                _ => {
+                    let file = self.cxt.file(self.db);
+                    let mut err = Error::new(
+                        file,
+                        "Multiple solutions found for implicit in the same scope",
+                        span,
+                        "search started here",
+                    );
+                    for (_, n, s) in found {
+                        err = err.with_label(
+                            file,
+                            s,
+                            if let Some(n) = n {
+                                format!("candidate '{}' found here", n.get(self.db))
+                            } else {
+                                "candidate found here".to_string()
+                            },
+                        );
+                    }
+                    self.db.report_error(err);
+                    return None;
+                }
+            }
+        }
+        None
+    }
+}
 /// The context used for typechecking a term.
 /// Besides storing a `Cxt` for name resolution, stores meta solutions and local constraints, and a handle to the database.
 #[derive(Clone)]
@@ -18,6 +88,7 @@ pub struct MCxt<'db> {
     pub eff_stack: EffStack,
     pub is_sig: bool,
     pub ty: MCxtType,
+    pub impls: ImplStack,
     pub local_metas: Vec<MetaEntry>,
     pub local_defs: Vec<(DefId, Term)>,
     pub local_constraints: HashMap<Lvl, Val>,
@@ -29,6 +100,7 @@ impl<'db> MCxt<'db> {
         CxtState {
             cxt: self.cxt,
             size: self.size,
+            impls: self.impls.clone(),
             local_constraints: self.local_constraints.clone(),
             local_defs: self.local_defs.clone(),
             eff_stack: self.eff_stack.clone(),
@@ -41,6 +113,7 @@ impl<'db> MCxt<'db> {
             size,
             local_constraints,
             local_defs,
+            impls,
             eff_stack,
             is_sig,
         } = state;
@@ -50,6 +123,7 @@ impl<'db> MCxt<'db> {
         self.local_defs = local_defs;
         self.eff_stack = eff_stack;
         self.is_sig = is_sig;
+        self.impls = impls;
     }
 
     pub fn new(cxt: Cxt, ty: MCxtType, db: &'db dyn Compiler) -> Self {
@@ -58,6 +132,7 @@ impl<'db> MCxt<'db> {
             cxt,
             size: cxt.size(db),
             eff_stack: Default::default(),
+            impls: Default::default(),
             ty,
             local_metas: Vec::new(),
             local_defs: Vec::new(),
@@ -75,6 +150,7 @@ impl<'db> MCxt<'db> {
             size: Size::zero(),
             eff_stack: Default::default(),
             ty: MCxtType::Universal,
+            impls: Default::default(),
             local_metas: Vec::new(),
             local_defs: Vec::new(),
             local_constraints: HashMap::new(),
@@ -91,6 +167,7 @@ impl<'db> MCxt<'db> {
             local_constraints,
             local_defs,
             eff_stack,
+            impls,
             is_sig,
         } = state;
         MCxt {
@@ -99,6 +176,7 @@ impl<'db> MCxt<'db> {
             size,
             eff_stack,
             ty,
+            impls,
             local_metas: Vec::new(),
             local_constraints,
             local_defs,
@@ -210,7 +288,7 @@ impl<'db> MCxt<'db> {
                     if def == d {
                         return match &self.local_metas[num as usize] {
                             MetaEntry::Solved(v, _) => Some((**v).clone()), //.map(|x| x.inline_metas(self)),
-                            MetaEntry::Unsolved(_, _, _) => None,
+                            MetaEntry::Unsolved(_, _, _, _, _) => None,
                         };
                     }
                 }
@@ -236,7 +314,7 @@ impl<'db> MCxt<'db> {
                     if def == d {
                         return match &self.local_metas[num as usize] {
                             MetaEntry::Solved(_, s) => Some(*s),
-                            MetaEntry::Unsolved(_, _, _) => None,
+                            MetaEntry::Unsolved(_, _, _, _, _) => None,
                         };
                     }
                 }
@@ -399,8 +477,13 @@ impl<'db> MCxt<'db> {
             ),
             MCxtType::Universal => panic!("a Universal MCxt can't create a meta!"),
         };
-        self.local_metas
-            .push(MetaEntry::Unsolved(name, span, source));
+        self.local_metas.push(MetaEntry::Unsolved(
+            name,
+            ty.clone().evaluate(&self.env(), self),
+            span,
+            source,
+            self.size.meta_spine(self),
+        ));
 
         // Apply it to all the bound variables in scope
         self.size.apply_meta(Var::Meta(meta), ty, self)
@@ -409,18 +492,39 @@ impl<'db> MCxt<'db> {
     /// Makes sure all local metas are solved.
     /// If some aren't, it reports errors to `db` and returns Err(()).
     pub fn check_locals(&mut self) -> Result<(), ()> {
-        if let MCxtType::Local(_) = self.ty {
+        if let MCxtType::Local(id) = self.ty {
             let mut ret = Ok(());
-            for entry in &self.local_metas {
-                match entry {
+            for i in 0..self.local_metas.len() {
+                match &self.local_metas[i] {
                     MetaEntry::Solved(_, _) => (),
-                    MetaEntry::Unsolved(_, span, source) => {
+                    MetaEntry::Unsolved(_, ty, span, source, spine) => {
+                        // Copy everything so we can modify `self` in `find_impl()`
+                        let (&span, &source) = (span, source);
+                        let ty = ty.clone();
+                        let spine = spine.clone();
+
+                        if let MetaSource::ImplicitParam(_) = source {
+                            if let Some(val) = self.find_impl(&ty, span) {
+                                self.solve(
+                                    span,
+                                    Meta::Local(id, i as u16, source),
+                                    &spine,
+                                    val,
+                                    self.size,
+                                )
+                                .map_err(|x| self.db.maybe_report_error(x.into_error(0, self)))?;
+                                continue;
+                            }
+                        }
+
                         self.db.report_error(Error::new(
                             self.cxt.file(self.db),
                             Doc::start("Could not find solution for ")
                                 .chain(source.pretty(self.db))
+                                .add(" of type ")
+                                .chain(ty.pretty(self).style(Style::None))
                                 .style(Style::Bold),
-                            *span,
+                            span,
                             "search started here",
                         ));
                         ret = Err(());
@@ -495,7 +599,7 @@ impl<'db> MCxt<'db> {
                                             );
                                         }
                                     }
-                                    MetaEntry::Unsolved(_, _, _) => {
+                                    MetaEntry::Unsolved(_, _, _, _, _) => {
                                         self.local_metas[*n as usize] =
                                             MetaEntry::Solved(Arc::new(term.clone()), *span);
                                     }
@@ -656,6 +760,7 @@ pub struct CxtState {
     pub eff_stack: EffStack,
     pub is_sig: bool,
     pub local_defs: Vec<(DefId, Term)>,
+    pub impls: ImplStack,
 }
 /// Implemented manually only because HashMap doesn't implement Hash.
 /// It should be the same as a hypothetical derived implementation.
@@ -679,6 +784,7 @@ impl CxtState {
             local_constraints: Default::default(),
             local_defs: Default::default(),
             eff_stack: Default::default(),
+            impls: Default::default(),
             is_sig: false,
         }
     }

@@ -432,6 +432,14 @@ impl<'i> Parser<'i> {
                 }
                 .into())
             }
+            Tok::Impl => {
+                // TODO impl with explicit name and/or type
+                self.next();
+                let term = self.term()?;
+                let ty = term.copy_span(Pre_::Hole(MetaSource::Hole));
+                self.def_end()?;
+                Ok(PreDef::Impl(None, ty, term).into())
+            }
             _ => {
                 // We don't allow lambdas in expression statements, so the multiline lambda syntax is unambiguous
                 let term = self.term()?;

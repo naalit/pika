@@ -1,0 +1,29 @@
+# Traits i.e. instance-resolved implicits
+
+type TheTrait = I32
+type Add A B R = sig
+    val add : A -> B -> R
+where
+    # TODO generate automatically
+    fun add [A B R] (self : Add A B R) = case self of
+        Add _ _ _ s => s.add
+
+fun spooky_action_at_a_distance [x : TheTrait] () with IO = case x of
+    TheTrait x => print x
+
+fun double [T] [TAdd : Add T T T] (a : T) : T = TAdd.add a a
+
+impl Add I32 I32 I32 struct
+    fun add (a b : I32) : I32 = a + b
+
+# This doesn't get confused with `Add I32 I32 I32` because the types don't match
+impl Add F32 F32 F32 struct
+    fun add (a b : F32) : F32 = a + b
+
+# This doesn't get confused with `double 7` because it's in an outer scope
+impl TheTrait 8
+
+fun main () with IO = do
+    impl TheTrait (double [I32] 7)
+
+    spooky_action_at_a_distance ()

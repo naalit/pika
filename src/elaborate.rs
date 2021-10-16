@@ -202,6 +202,7 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
                 solved_globals: Arc::new(mcxt.solved_globals),
                 children: Arc::new(mcxt.children),
                 effects: Arc::new(effects),
+                impls: Arc::new(mcxt.impls),
             })
         }
         Err(()) => {
@@ -270,24 +271,29 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
         }
         _ if mcxt.is_sig => Err(TypeError::IllegalDec(def.span(), false)),
 
-        PreDef::Val(_, ty, val) | PreDef::Impl(_, ty, val) => {
+        PreDef::Val(_, ty, val) => {
             let tyspan = ty.span();
             let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
             let ty = ty.evaluate(&mcxt.env(), mcxt);
             let val = check(val, &ty, ReasonExpected::Given(tyspan), mcxt)?;
             Ok((Some(val), ty))
-            // TODO multiple TypeErrors?
-            // Err(e) => {
-            //     mcxt.db.maybe_report_error(e.into_error(file, db, &mcxt));
-            //     // The given type is invalid, but we can still try to infer the type
-            //     match infer(true, val, db, &mut mcxt) {
-            //         Ok(x) => Ok(x),
-            //         Err(e) => {
-            //             mcxt.db.maybe_report_error(e.into_error(file, db, &mcxt));
-            //             Err(DefError::ElabError)
-            //         }
-            //     }
-            // }
+        }
+        PreDef::Impl(name, ty, val) => {
+            let tyspan = ty.span();
+            let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
+            let ty = ty.evaluate(&mcxt.env(), mcxt);
+            let val = check(val, &ty, ReasonExpected::Given(tyspan), mcxt)?;
+            let ty = ty.inline_metas(mcxt.size, mcxt);
+
+            // Add the implicit to the context. The value will be inlined at use sites, so it's a variable reference
+            mcxt.impls.add(
+                name.as_ref().map(|x| **x),
+                ty.clone(),
+                Val::top(id, ty.clone()),
+                def.span(),
+            );
+
+            Ok((Some(val), ty))
         }
         PreDef::Fun(_, args, body_ty, body, effs) => {
             // First, add the arguments to the environment

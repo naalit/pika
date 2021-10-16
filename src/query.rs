@@ -240,6 +240,7 @@ pub struct ElabInfo {
     pub children: Arc<Vec<DefId>>,
     /// Used for definitions in do blocks with open effect scopes
     pub effects: Arc<Vec<Val>>,
+    pub impls: Arc<ImplStack>,
 }
 
 #[salsa::query_group(InternerDatabase)]
@@ -416,6 +417,8 @@ impl InternBlock {
 
     pub fn intern(self, db: &dyn Compiler) -> Vec<DefId> {
         let InternBlock { block, mut state } = self;
+        state.impls.scope();
+
         let mut rv = Vec::new();
         // This stores unordered definitions (types and functions) between local variables
         let mut temp = Vec::new();
@@ -436,6 +439,10 @@ impl InternBlock {
                 // Process `temp` first
                 for (name, pre, old_id) in temp.drain(0..) {
                     let id = db.intern_def(pre, state.clone());
+                    // Thread `state.impls` through all the definitions in this scope
+                    if let Ok(info) = db.elaborate_def(id) {
+                        state.impls = (*info.impls).clone();
+                    }
                     if let Some(name) = name {
                         // Define it for real now
                         state.define(name, NameInfo::Def(id), db);
@@ -452,6 +459,9 @@ impl InternBlock {
                 let name = def.name();
                 let pre = db.intern_predef(Arc::new(def));
                 let id = db.intern_def(pre, state.clone());
+                if let Ok(info) = db.elaborate_def(id) {
+                    state.impls = (*info.impls).clone();
+                }
                 if let Some(name) = name {
                     state.define(name, NameInfo::Def(id), db);
                 }
@@ -466,6 +476,9 @@ impl InternBlock {
         // If anything is left in `temp`, clear it out
         for (name, pre, old_id) in temp {
             let id = db.intern_def(pre, state.clone());
+            if let Ok(info) = db.elaborate_def(id) {
+                state.impls = (*info.impls).clone();
+            }
             if let Some(name) = name {
                 // Define it for real now
                 state.define(name, NameInfo::Def(id), db);

@@ -459,6 +459,18 @@ impl Size {
             })
             .fold(t, |f, x| Term::App(Icit::Expl, Box::new(f), Box::new(x)))
     }
+
+    pub fn meta_spine(self, mcxt: &MCxt) -> Spine {
+        (0..self.0)
+            .rev()
+            .map(|i| {
+                Elim::App(
+                    Icit::Expl,
+                    Val::local(mcxt.size.to_lvl_(Ix(i)), mcxt.local_ty(Ix(i))),
+                )
+            })
+            .collect()
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]

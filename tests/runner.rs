@@ -291,6 +291,16 @@ fn test_tictactoe() {
         .success();
 }
 
+#[test]
+fn test_traits() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/traits.pk"])
+        .assert()
+        .stdout("14\n")
+        .success();
+}
+
 // Tests for type errors
 
 #[test]
