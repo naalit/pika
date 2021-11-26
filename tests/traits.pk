@@ -3,10 +3,6 @@
 type TheTrait = I32
 type Add A B R = sig
     val add : A -> B -> R
-where
-    # TODO generate automatically
-    fun add [A B R] (self : Add A B R) = case self of
-        Add _ _ _ s => s.add
 
 fun spooky_action_at_a_distance [x : TheTrait] () with IO = case x of
     TheTrait x => print x
@@ -27,3 +23,5 @@ fun main () with IO = do
     impl TheTrait (double [I32] 7)
 
     spooky_action_at_a_distance ()
+
+    print (Add.add _ (double [I32] 4) (double [I32] 9))

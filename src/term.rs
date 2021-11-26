@@ -289,6 +289,7 @@ pub enum PreDef {
     /// Pre-typed term, used for data constructors.
     Cons(SName, VTy),
     Rec(SName, PreDefId, VTy),
+    Term(SName, Term, VTy),
 
     /// PreDefAn with added type, used when type-checking structs
     Typed(Box<PreDefAn>, VTy, ReasonExpected),
@@ -304,6 +305,7 @@ impl PreDef {
             | PreDef::Impl(_, _, _)
             | PreDef::Expr(_)
             | PreDef::Cons(_, _)
+            | PreDef::Term(_, _, _)
             | PreDef::Rec(_, _, _) => true,
             PreDef::Typed(x, _, _) => x.ordered(),
         }
@@ -317,6 +319,7 @@ impl PreDef {
             | PreDef::FunDec(n, _, _, _)
             | PreDef::Cons(n, _)
             | PreDef::Rec(n, _, _)
+            | PreDef::Term(n, _, _)
             | PreDef::ValDec(n, _) => Some(**n),
             PreDef::Impl(n, _, _) => n.as_ref().map(|x| **x),
             PreDef::Expr(_) => None,
@@ -333,6 +336,7 @@ impl PreDef {
             | PreDef::FunDec(n, _, _, _)
             | PreDef::Cons(n, _)
             | PreDef::Rec(n, _, _)
+            | PreDef::Term(n, _, _)
             | PreDef::ValDec(n, _) => n.span(),
             PreDef::Impl(Some(n), _, _) => n.span(),
             PreDef::Impl(None, _, t) => t.span(),

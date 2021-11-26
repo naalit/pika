@@ -503,7 +503,7 @@ impl<'db> MCxt<'db> {
                         let ty = ty.clone();
                         let spine = spine.clone();
 
-                        if let MetaSource::ImplicitParam(_) = source {
+                        if matches!(source, MetaSource::ImplicitParam(_) | MetaSource::Hole) {
                             if let Some(val) = self.find_impl(&ty, span) {
                                 self.solve(
                                     span,

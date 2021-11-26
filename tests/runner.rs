@@ -297,7 +297,7 @@ fn test_traits() {
         .unwrap()
         .args(&["run", "tests/traits.pk"])
         .assert()
-        .stdout("14\n")
+        .stdout("14\n26\n")
         .success();
 }
 

@@ -112,6 +112,7 @@ impl PreDef {
             }
             PreDef::Cons(_, ty) => Some(ty.clone()),
             PreDef::Rec(_, _, ty) => Some(ty.clone()),
+            PreDef::Term(_, _, ty) => Some(ty.clone()),
         }
     }
 }
@@ -403,6 +404,10 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                 ty.clone(),
             ))
         }
+        PreDef::Term(_name, val, ty) => {
+            // We don't have to do anything since the type was already determined when elaborating the type definition
+            Ok((Some(val.clone()), ty.clone()))
+        }
         PreDef::Type {
             name,
             is_eff,
@@ -458,6 +463,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
 
             // Go through the constructors and elaborate them
             let mut seen: HashMap<Name, Span> = HashMap::new();
+            let mut inner_struct = None;
             for (cname, args, cty) in ctors.iter(mcxt.db) {
                 if let Some(&span) = seen.get(&cname) {
                     let file = mcxt.cxt.file(mcxt.db);
@@ -507,6 +513,12 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                 for (name, icit, ty) in args {
                     let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
                     let vty = ty.evaluate(&mcxt.env(), mcxt);
+                    if ctors.is_short_form() {
+                        if let Val::Struct(StructKind::Sig, v) = &vty {
+                            // add accessor function
+                            inner_struct = Some(v.clone());
+                        }
+                    }
                     cargs.push((name, icit, vty.clone()));
                     mcxt.define(name, NameInfo::Local(vty));
                 }
@@ -687,6 +699,138 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
                     (*cname, def_id)
                 })
                 .collect();
+
+            // Add accessor functions for types of the form `type _ = sig ...`
+            if let Some(v) = inner_struct {
+                for (mid, name, member_ty) in v {
+                    // T.m : [a b] T a b -> ty = x => case x of T _ _ s => s.m
+
+                    let ty_term = Term::Var(
+                        Var::Rec(predef_id),
+                        Box::new(ty_ty.clone().quote(cxt_after.size, mcxt)),
+                    );
+                    let struct_ty =
+                        Val::Struct(StructKind::Sig, vec![(mid, name, member_ty.clone())]);
+
+                    let fun_ty = {
+                        let mut term = ty_term.clone();
+                        let mut ix = Ix::zero();
+                        for (_n, i, t) in targs.iter() {
+                            let arg = Term::Var(
+                                Var::Local(ix),
+                                Box::new(t.clone().quote(cxt_after.size, mcxt)),
+                            );
+                            term = Term::App(*i, Box::new(term), Box::new(arg));
+                            ix = ix.inc();
+                        }
+                        let mut term = Term::Fun(
+                            Box::new(term),
+                            Box::new(member_ty.clone().quote(cxt_after.size, mcxt)),
+                            Vec::new(),
+                        );
+                        let mut size = cxt_after.size;
+                        for (n, _i, t) in targs.iter().rev() {
+                            term = Term::Clos(
+                                ClosTy::Pi,
+                                *n,
+                                Icit::Impl,
+                                Box::new(t.clone().quote(size, mcxt)),
+                                Box::new(term),
+                                Vec::new(),
+                            );
+                            size = size.dec();
+                        }
+                        term.evaluate(&mcxt.env(), mcxt)
+                    };
+
+                    let fun_term = {
+                        use crate::pattern::Pat;
+                        let size = cxt_after.size.inc();
+                        // The datatype applied to its type arguments inside the function
+                        let ty_term2 = {
+                            let mut term = ty_term.clone();
+                            let mut ix = Ix::zero().inc();
+                            for (_n, i, t) in targs.iter() {
+                                let arg = Term::Var(
+                                    Var::Local(ix),
+                                    Box::new(t.clone().quote(cxt_after.size, mcxt)),
+                                );
+                                term = Term::App(*i, Box::new(term), Box::new(arg));
+                                ix = ix.inc();
+                            }
+                            term
+                        };
+
+                        assert_eq!(scope.len(), 1);
+                        let mut pat_args: Vec<_> = targs
+                            .iter()
+                            .map(|(n, _i, t)| (Some((*n, t.clone().quote(size, mcxt))), Pat::Any))
+                            .collect();
+                        pat_args.push((
+                            None,
+                            Pat::Var(name, Box::new(struct_ty.clone().quote(size, mcxt))),
+                        ));
+                        let pat = Pat::Cons(scope[0].1, Box::new(ty_term2.clone()), pat_args);
+                        let body = Term::Dot(
+                            Box::new(Term::Var(
+                                Var::Local(Ix::zero()),
+                                Box::new(struct_ty.clone().quote(size, mcxt)),
+                            )),
+                            name,
+                        );
+                        let term = Term::Case(
+                            Box::new(Term::Var(
+                                Var::Local(Ix::zero()),
+                                Box::new(ty_term2.clone()),
+                            )),
+                            Box::new(ty_term2.clone()),
+                            vec![(pat, body)],
+                            Vec::new(),
+                            Box::new(member_ty.quote(size, mcxt)),
+                        );
+
+                        let mut fun = Term::Clos(
+                            ClosTy::Lam,
+                            name, // TODO better name
+                            Icit::Expl,
+                            Box::new(ty_term2.clone().eval_quote(
+                                &mut Env::new(size),
+                                cxt_after.size,
+                                mcxt,
+                            )),
+                            Box::new(term),
+                            Vec::new(),
+                        );
+                        let mut size = cxt_after.size;
+                        for (n, _i, t) in targs.iter().rev() {
+                            fun = Term::Clos(
+                                ClosTy::Lam,
+                                *n,
+                                Icit::Impl,
+                                Box::new(t.clone().quote(size, mcxt)),
+                                Box::new(fun),
+                                Vec::new(),
+                            );
+                            size = size.dec();
+                        }
+
+                        fun
+                    };
+
+                    let fun_id = mcxt.db.intern_def(
+                        mcxt.db.intern_predef(
+                            // TODO span
+                            Arc::new(
+                                PreDef::Term(Spanned::new(name, Span::empty()), fun_term, fun_ty)
+                                    .into(),
+                            ),
+                        ),
+                        mcxt.state(),
+                    );
+
+                    scope.push((name, fun_id));
+                }
+            }
 
             // Add definitions from the associated namespace
             // They need the type of the datatype we're defining

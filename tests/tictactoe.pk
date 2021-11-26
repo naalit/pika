@@ -32,9 +32,6 @@ where
 type Display a = sig
     val display : a -> () with IO
 where
-    fun display [a] (self : Display a) (x : a) with IO = case self of
-        Display _ r => r.display x
-
     val ForI32 = Display I32 struct
         val display = print
     val ForString = Display String struct
