@@ -194,7 +194,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 [[package]]
 name = "durin"
 version = "0.1.0"
-source = "git+https://github.com/tolziplohu/durin#b009d91d1532d1c87f3481bc402bac33f561bb31"
+source = "git+https://github.com/tolziplohu/durin#203bd9515a0fd78e8c02c033bf4139ad797a5e07"
 dependencies = [
  "cc",
  "either",
@@ -359,9 +359,9 @@ checksum = "a60553f9a9e039a333b4e9b20573b9e9b9c0bb3a11e201ccc48ef4283456d673"
 
 [[package]]
 name = "llvm-sys"
-version = "120.2.1"
+version = "130.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4a810627ac62b396f5fd2214ba9bbd8748d4d6efdc4d2c1c1303ea7a75763ce"
+checksum = "8a0de69eac0257a2f6c0da27b42e6a8dd21bae7b39c37caf87aee6021d79d61f"
 dependencies = [
  "cc",
  "lazy_static",
