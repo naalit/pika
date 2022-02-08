@@ -12,8 +12,8 @@ where
 # 12
 # 0
 fun main () with IO = do
-    val a : Option I32 = Option.Some [I32] 12
-    val b : Option I32 = Option.None
+    let a : Option I32 = Option.Some [I32] 12
+    let b : Option I32 = Option.None
     a.map print
     b.map print
     print 0

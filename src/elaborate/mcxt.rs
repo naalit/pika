@@ -456,8 +456,6 @@ impl<'db> MCxt<'db> {
 
     /// Creates a new meta with no solution.
     pub fn new_meta(&mut self, name: Option<Name>, span: Span, source: MetaSource, ty: Ty) -> Term {
-        use std::convert::TryInto;
-
         let meta = match self.ty {
             MCxtType::Local(def) => Meta::Local(
                 def,

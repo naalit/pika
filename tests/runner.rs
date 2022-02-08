@@ -301,6 +301,16 @@ fn test_traits() {
         .success();
 }
 
+#[test]
+fn test_let_patterns() {
+    Command::cargo_bin("pika")
+        .unwrap()
+        .args(&["run", "tests/let_patterns.pk"])
+        .assert()
+        .stdout("1\n")
+        .success();
+}
+
 // Tests for type errors
 
 #[test]

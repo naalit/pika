@@ -1,32 +1,32 @@
-val Vec3 = sig
-    val x : I32
-    val y : I32
-    val z : I32
+let Vec3 = sig
+    let x : I32
+    let y : I32
+    let z : I32
 
-val up : Vec3 = struct
-    val y = 1
-    val z = 0
-    val x = 0
+let up : Vec3 = struct
+    let y = 1
+    let z = 0
+    let x = 0
 
 # Making sure unification ignores order
-val AlsoVec3 = sig
-    val x : I32
-    val z : I32
-    val y : I32
-val q : AlsoVec3 = up
+let AlsoVec3 = sig
+    let x : I32
+    let z : I32
+    let y : I32
+let q : AlsoVec3 = up
 
 # A test of dependent records i.e. sigma types
-val Any = sig
-    val T : Type
-    val x : T
-val three : Any = struct
-    val T = I32
-    val x = 3
+let Any = sig
+    let T : Type
+    let x : T
+let three : Any = struct
+    let T = I32
+    let x = 3
 # Making sure unification works with dependent records
-val AlsoAny = sig
-    val T : Type
-    val x : T
-val also_three : AlsoAny = three
+let AlsoAny = sig
+    let T : Type
+    let x : T
+let also_three : AlsoAny = three
 
 fun print_vec3 (v : Vec3) with IO = do
     puts "{\n\t"

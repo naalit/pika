@@ -9,7 +9,7 @@ where
   # The constructors work without a dot here
   fun also_lit [a] (x : a) : Term a = Lit x
 
-val one : Term Type = Term.TypeType
-val two : Term (Type -> Type) = Term.Fun (x => x)
+let one : Term Type = Term.TypeType
+let two : Term (Type -> Type) = Term.Fun (x => x)
 # Make sure the associated namespace works
-val three : Term Type = Term.also_lit Type
+let three : Term Type = Term.also_lit Type

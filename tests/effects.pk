@@ -6,7 +6,7 @@ fun f () : () with Console = Console.Print (Console.Read ())
 
 fun greet (b: Bool) : () with Console = do
   Console.Print 1
-  val name : I32 = if b then Console.Read () else 12
+  let name : I32 = if b then Console.Read () else 12
   Console.Print name
 
 fun other () with Console = greet True

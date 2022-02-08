@@ -2,7 +2,7 @@
 
 type TheTrait = I32
 type Add A B R = sig
-    val add : A -> B -> R
+    let add : A -> B -> R
 
 fun spooky_action_at_a_distance [x : TheTrait] () with IO = case x of
     TheTrait x => print x

@@ -23,19 +23,19 @@ of
         a
     Err b
 where
-    val seven : I32 = 7
+    let seven : I32 = 7
 
 type ResultA a b = Result a b where
-    val eight : I32 = 8
+    let eight : I32 = 8
 
 type ResultB a b = Result a b
 where
-    val nine : I32 = 9
+    let nine : I32 = 9
 
 type ResultC a b
     = Result a b
 where
-    val ten : I32 = 10
+    let ten : I32 = 10
 
 type ResultD
     a
@@ -45,7 +45,7 @@ type ResultD
             a
             b
 where
-    val eleven : I32 = 11
+    let eleven : I32 = 11
 
 
 

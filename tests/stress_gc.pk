@@ -1,8 +1,8 @@
 # Computes fibonacci with Church numbers to stress-test the GC
-val Nat = (t: Type) -> (t -> t) -> t -> t
+let Nat = (t: Type) -> (t -> t) -> t -> t
 
-val zero : Nat = _ f x => x
-val one : Nat = _ f x => f x
+let zero : Nat = _ f x => x
+let one : Nat = _ f x => f x
 
 fun iszero (n : Nat) : Bool = n _ (_ => False) True
 
@@ -34,6 +34,6 @@ fun fib (i : Nat) : Nat with IO = if iszero (pred i)
 fun main () with IO = do
     # This is all tail calls, so we're limited only by heap size
     # Large Church naturals are very large, though, so 16 is as high as we can go with the default max heap size of 256KB
-    val n : Nat = fib (int_to_nat 16)
-    val i = nat_to_int n
+    let n : Nat = fib (int_to_nat 16)
+    let i = nat_to_int n
     print i

@@ -1,6 +1,6 @@
 type Eq [t] (a b : t) of
     Refl [t a] : Eq [t] a a
 
-val sanity : Eq [I32] 2 2 = Eq.Refl
-val plus : Eq [I32] 2 (1 + 1) = Eq.Refl
-val complicated : Eq [I32] ((5 + 7) / 6) (8 * 3 - 11 * 2) = Eq.Refl
+let sanity : Eq [I32] 2 2 = Eq.Refl
+let plus : Eq [I32] 2 (1 + 1) = Eq.Refl
+let complicated : Eq [I32] ((5 + 7) / 6) (8 * 3 - 11 * 2) = Eq.Refl

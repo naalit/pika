@@ -5,9 +5,9 @@ eff Console of
 
 fun producer () : I32 with Console = do
     Console.Print 1
-    val x = Console.Read ()
+    let x = Console.Read ()
     Console.Print x
-    val y = Console.Read ()
+    let y = Console.Read ()
     Console.Print y
     x + y
 
@@ -17,7 +17,7 @@ fun producer () : I32 with Console = do
 # 3
 # 5
 fun main () : () with IO = do
-    val handler : I32 -> I32 with IO = catch producer () of
+    let handler : I32 -> I32 with IO = catch producer () of
         x => _ => x
         eff (Console.Print i) k => acc => do
             print i

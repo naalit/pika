@@ -1,7 +1,7 @@
 fun main () : () = do
   fun inc x : I32 = x + 1
-  val four = inc 3
+  let four = inc 3
   # Implicitly returns ()
 
-val q = case main () of
+let q = case main () of
   () => ()

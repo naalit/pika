@@ -120,14 +120,15 @@ impl Term {
             }
             Term::Case(mut x, mut ty, cases, effs, mut rty) => {
                 let vx = x.evaluate(env, mcxt);
-                for (pat, body) in &cases {
-                    use crate::pattern::MatchResult::*;
-                    match pat.match_with(&vx, env.clone(), mcxt) {
-                        Yes(mut env) => return body.clone().eval_quote(&mut env, at, mcxt),
-                        No => continue,
-                        Maybe => break,
-                    }
-                }
+                // TODO check for side effects
+                // for (pat, body) in &cases {
+                //     use crate::pattern::MatchResult::*;
+                //     match pat.match_with(&vx, env.clone(), mcxt) {
+                //         Yes(mut env) => return body.clone().eval_quote(&mut env, at, mcxt),
+                //         No => continue,
+                //         Maybe => break,
+                //     }
+                // }
                 *x = vx.quote(at, mcxt);
                 *ty = ty.eval_quote(env, at, mcxt);
                 *rty = rty.eval_quote(env, at, mcxt);

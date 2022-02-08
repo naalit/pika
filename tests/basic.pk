@@ -1,14 +1,14 @@
-val AType = Type -> Type
-val M : Type -> AType = x y => x
-val Z : M Type Type = Type
-val Q = Z
+let AType = Type -> Type
+let M : Type -> AType = x y => x
+let Z : M Type Type = Type
+let Q = Z
 
-val U : Type = Type
+let U : Type = Type
 
 fun the (x: Type) (y: x) : x = y
 
 # We can do basic type inference now
-val g = the Type Type
+let g = the Type Type
 
 # Infering the argument type
 fun id_type x : Type = x
@@ -17,21 +17,21 @@ fun id_type x : Type = x
 fun id [t] (x: t) = x
 
 # Implicit parameters are passed implicitly
-val x = id Type
+let x = id Type
 
 # Pika is now pretty flexible about newlines, so this works:
-# val y : Type -> Type = x => x
-val
+# let y : Type -> Type = x => x
+let
   y
-    : Type -> Type
-    =
-      x => x
+  : Type -> Type
+  =
+    x => x
 
 fun local (_:Type) = do
   fun f x = the Type x
-  val t = Type -> Type
+  let t = Type -> Type
   f t
 
 @[elaborate]
 @[normalize]
-val test : [t] t -> t = id id
+let test : [t] t -> t = id id

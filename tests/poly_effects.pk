@@ -43,7 +43,7 @@ fun main () with IO = do
     handle
         () => poly [Console] (i => Console.Print (i - 2))
     # Then make it a coroutine, and print out the resultls again
-    val k = Coroutine.new [I32] (() => poly Yield.Y)
-    val k = k.step print
-    val k = k.step print
-    val k = k.step print
+    let k = Coroutine.new [I32] (() => poly Yield.Y)
+    let k = k.step print
+    let k = k.step print
+    let k = k.step print

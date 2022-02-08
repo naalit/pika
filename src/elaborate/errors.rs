@@ -96,6 +96,7 @@ pub enum TypeError {
     BinOpType(Span, VTy, Span),
     /// If the `bool` is true, this is a declaration outside a `sig`; otherwise, vice-versa.
     IllegalDec(Span, bool),
+    TopLevelLet(Span),
     /// An error has already been reported to the database, so this should be ignored.
     Sentinel,
 }
@@ -103,6 +104,12 @@ impl TypeError {
     pub fn into_error(self, file: FileId, mcxt: &MCxt) -> Option<Error> {
         Some(match self {
             TypeError::Sentinel => return None,
+            TypeError::TopLevelLet(span) => Error::new(
+                file,
+                "Pattern matching `let` isn't allowed on the top level, only in blocks",
+                span,
+                "patterns other than variables not allowed here",
+            ),
             TypeError::IllegalDec(span, true) => Error::new(
                 file,
                 "Illegal declaration outside record signature",

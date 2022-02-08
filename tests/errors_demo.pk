@@ -20,14 +20,14 @@ fun mismatched_case (x : Bool) = case x of
   True => False
   False => Type
 
-val mismatched_if = if True then False else Type
-val wrong_if_type = if 3 then 4 else 5
-val ambiguous_literal = 12
-val not_found = nonexistent
-val solution_for_type_not_found = x => x
-val solution_for_arg_not_found = do
+let mismatched_if = if True then False else Type
+let wrong_if_type = if 3 then 4 else 5
+let ambiguous_literal = 12
+let not_found = nonexistent
+let solution_for_type_not_found = x => x
+let solution_for_arg_not_found = do
   fun f [x: Type] (_: I32) = x
   f 12
 fun not_type (x : True) = x
-val not_function = True False
-val wrong_arg_type = True > False
+let not_function = True False
+let wrong_arg_type = True > False

@@ -7,6 +7,6 @@ fun match_on_bool (b: Bool) : I32 = case b of
   True => 1
   False => 0
 
-val with_dot = Bool.True
+let with_dot = Bool.True
 
 fun and_or a b c = (a and b) or c

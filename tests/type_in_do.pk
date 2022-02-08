@@ -4,6 +4,6 @@ fun f (_ : ()) = do
   type MyType of
     New
   where
-    val X : I32 = 3
+    let X : I32 = 3
 
   MyType.X

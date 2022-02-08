@@ -16,6 +16,9 @@ impl PreDef {
         let mut mcxt = MCxt::new(cxt, MCxtType::Global(id), db);
         match self {
             PreDef::Typed(_, ty, _) => Some(ty.clone()),
+            // Generally not allowed in contexts where given_type() will be called
+            // If that changes in the future, the protocol will need to be updated as just one type doesn't make sense here
+            PreDef::Let(_, _, _) => None,
             PreDef::Fun(_, args, rty, _, effs) | PreDef::FunDec(_, args, rty, effs) => {
                 let mut rargs = Vec::new();
                 elab_args(args, &mut rargs, &mut mcxt).ok()?;
@@ -181,12 +184,12 @@ pub fn elaborate_def(db: &dyn Compiler, def: DefId) -> Result<ElabInfo, DefError
             //     .line()
             //     .add(":")
             //     .space()
-            //     .chain(ty.pretty(db, &mcxt))
+            //     .chain(ty.pretty(&mcxt))
             //     .group()
             //     .line()
             //     .add("=")
             //     .space()
-            //     .chain(term.pretty(db, &mut Names::new(cxt, db)))
+            //     .chain(term.as_ref().unwrap_or(&Term::Type).pretty(db, &mut Names::new(cxt, db)))
             //     .indent()
             //     .group();
             // println!("{}\n", d.ansi_string());
@@ -272,6 +275,7 @@ fn infer_def(def: &PreDef, id: DefId, mcxt: &mut MCxt) -> Result<(Option<Term>, 
         }
         _ if mcxt.is_sig => Err(TypeError::IllegalDec(def.span(), false)),
 
+        PreDef::Let(_, _, _) => Err(TypeError::TopLevelLet(def.span())),
         PreDef::Val(_, ty, val) => {
             let tyspan = ty.span();
             let ty = check(ty, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
@@ -1007,6 +1011,14 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
     match &**pre {
         Pre_::Type => Ok((Term::Type, Val::Type)),
 
+        Pre_::Typed(x, t) => {
+            let tspan = t.span();
+            let t = check(t, &Val::Type, ReasonExpected::UsedAsType, mcxt)?;
+            let t = t.evaluate(&mcxt.env(), mcxt);
+            let x = check(x, &t, ReasonExpected::Given(tspan), mcxt)?;
+            Ok((x, t))
+        }
+
         // By default, () refers to the unit *value*
         Pre_::Unit => Ok((
             Term::Var(
@@ -1253,8 +1265,40 @@ pub fn infer(insert: bool, pre: &Pre, mcxt: &mut MCxt) -> Result<(Term, VTy), Ty
         }
 
         Pre_::Do(v) => {
+            let mut rv = Vec::new();
+            for i in 0..v.len() {
+                if let PreDef::Let(pat, ty, body) = &*v[i] {
+                    // Convert from
+                    //   do { ..a..; let p = t; ..b.. }
+                    // into
+                    //   do { ..a..; case t of { p => { ..b.. } } }
+                    let rest = v[i + 1..].to_vec();
+
+                    let do_span = Span(
+                        rest.first().map_or(v[i].span().1, |x| x.span().0),
+                        rest.last().map_or(v[i].span().1, |x| x.span().1),
+                    );
+                    let do_term = Spanned::new(Pre_::Do(rest), do_span);
+
+                    rv.push(
+                        PreDef::Expr(Spanned::new(
+                            Pre_::Case(
+                                false,
+                                body.copy_span(Pre_::Typed(body.clone(), ty.clone())),
+                                vec![(pat.clone(), do_term)],
+                            ),
+                            v[i].span(),
+                        ))
+                        .into(),
+                    );
+                    break;
+                } else {
+                    rv.push(v[i].clone());
+                }
+            }
+
             // We store the whole block in Salsa, then query the last expression
-            let mut block = mcxt.elab_block(v.clone(), false)?;
+            let mut block = mcxt.elab_block(rv, false)?;
 
             // Now query the last expression
             let mut ret_ty = None;

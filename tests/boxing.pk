@@ -21,8 +21,8 @@ fun range (a b : I32) : List I32 = if a >= b
     else List.Cons a (range (a + 1) b)
 
 fun main () : () with IO = do
-    val list = range 0 12
-    val eight = list.nth 8
+    let list = range 0 12
+    let eight = list.nth 8
     case eight of
         Option.Some x => print x
         Option.None => print -1

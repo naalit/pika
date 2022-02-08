@@ -46,7 +46,7 @@ pub enum Literal {
 pub enum Tok<'i> {
     // Keywords
     Fun,
-    Val,
+    Let,
     Impl,
     Do,
     Struct,
@@ -275,7 +275,7 @@ impl<'i> Lexer<'i> {
         }
         let tok = match self.slice() {
             "fun" => Tok::Fun,
-            "val" => Tok::Val,
+            "let" => Tok::Let,
             "impl" => Tok::Impl,
             "type" => Tok::Type,
             "Type" => Tok::TypeType,
@@ -586,7 +586,7 @@ impl<'i> fmt::Display for Tok<'i> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Tok::Fun => "'fun'",
-            Tok::Val => "'val'",
+            Tok::Let => "'val'",
             Tok::Impl => "'impl'",
             Tok::Do => "'do'",
             Tok::Struct => "'struct'",

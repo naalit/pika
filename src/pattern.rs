@@ -898,7 +898,7 @@ pub fn elab_pat(
                     _ => (),
                 }
             }
-            mcxt.define(*n, NameInfo::Local(ty.clone()));
+            mcxt.define(*n, NameInfo::Local(ty.clone().inline_metas(mcxt.size, mcxt)));
             Ok(Pat::Var(
                 *n,
                 Box::new(ty.clone().quote(mcxt.size.dec(), mcxt)),

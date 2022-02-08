@@ -1,27 +1,27 @@
 # Tests for edge cases in the new handwritten parser
-val pi = [a] (b: a) (c: I32 -> Type) (c 3) -> a
-val pi2 = (a: Type) ((b: a) -> a) -> a
+let pi = [a] (b: a) (c: I32 -> Type) (c 3) -> a
+let pi2 = (a: Type) ((b: a) -> a) -> a
 
 # This was allowed before, but it's confusing so I'm not going to support it in the new parser for now
 # If allowed, this would parse as `(f: _) -> (f I32 I32) -> I32`
-# val pi3 = (f: Type -> Type -> Type) (f I32) I32 -> I32
+# let pi3 = (f: Type -> Type -> Type) (f I32) I32 -> I32
 
-val pi4 = (a b c: Type) -> a
+let pi4 = (a b c: Type) -> a
 
 fun the t x : t = x
-val lam = () => ()
+let lam = () => ()
 # () is only allowed as the last argument in a lambda right now, otherwise it's ambiguous with application
-# val lam2 = () a b => a + b
-val lam3 = a b () => the I32 (a + b)
+# let lam2 = () a b => a + b
+let lam3 = a b () => the I32 (a + b)
 
 # I'm not 100% sure if this should be allowed? It is right now
 # Well, now it isn't. That's fine too.
-# val multiline : (a: _) -> a -> a -> a = (x : Type)
+# let multiline : (a: _) -> a -> a -> a = (x : Type)
 #     y
 #     z
 #     => y
 # Note that this *isn't* allowed, because it requires looking ahead past the newline
-# val not_multiline = x
+# let not_multiline = x
 #     y => y
 
 fun test b : I32 = if b then 3 else 4

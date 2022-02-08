@@ -178,46 +178,66 @@ impl<'i> Parser<'i> {
                 def.attributes.push(attr);
                 Ok(def)
             }
-            Tok::Val => {
-                // Consume the `val`
+            Tok::Let => {
+                // Consume the `let`
                 self.next();
-                let i_name = self.maybe(Tok::Indent);
+                let i_pat = self.maybe(Tok::Indent);
 
-                let name = self.name()?;
+                let pat = self.pat()?;
 
                 let i_colon = self.maybe(Tok::Indent);
+                if !i_colon && i_pat {
+                    self.maybe(Tok::Newline);
+                }
                 let ty = if let Tok::Colon = self.peek("=")? {
                     // Consume the :
                     self.next();
 
                     let t = self.term()?;
-                    if i_colon {
+                    if i_colon || i_pat {
                         self.maybe(Tok::Newline);
                     }
                     t
                 } else {
-                    Spanned::new(Pre_::Hole(MetaSource::LocalType(*name)), name.span())
+                    let name = match &*pat {
+                        Pre_::Var(n) => *n,
+                        _ => self.db.intern_name("<local definition>".to_string()),
+                    };
+                    Spanned::new(Pre_::Hole(MetaSource::LocalType(name)), pat.span())
                 };
 
-                let r = match self.peek("=")? {
-                    Tok::Equals => {
-                        self.next();
-                        let i_body = self.maybe(Tok::Indent);
-                        let body = self.term()?;
-                        if i_body {
-                            self.expect(Tok::Dedent)?;
-                        }
+                let r = if let Pre_::Var(name) = &*pat {
+                    let name = pat.copy_span(*name);
+                    match self.peek("=")? {
+                        Tok::Equals => {
+                            self.next();
+                            let i_body = self.maybe(Tok::Indent);
+                            let body = self.term()?;
+                            if i_body {
+                                self.expect(Tok::Dedent)?;
+                            }
 
-                        Ok(PreDef::Val(name, ty, body).into())
+                            Ok(PreDef::Val(name, ty, body).into())
+                        }
+                        Tok::Newline | Tok::Dedent => Ok(PreDef::ValDec(name, ty).into()),
+                        t => self.unexpected(t, "="),
+                    }?
+                } else {
+                    self.expect(Tok::Equals)?;
+
+                    let i_body = self.maybe(Tok::Indent);
+                    let body = self.term()?;
+                    if i_body {
+                        self.expect(Tok::Dedent)?;
                     }
-                    Tok::Newline | Tok::Dedent => Ok(PreDef::ValDec(name, ty).into()),
-                    t => self.unexpected(t, "="),
-                }?;
+
+                    PreDef::Let(pat, ty, body).into()
+                };
 
                 if i_colon {
                     self.expect(Tok::Dedent)?;
                 }
-                if i_name {
+                if i_pat {
                     self.expect(Tok::Dedent)?;
                 }
 

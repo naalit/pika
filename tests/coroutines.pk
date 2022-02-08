@@ -26,13 +26,13 @@ where
             k ()
 
 fun main () with IO = do
-    val k = Coroutine.new generator
+    let k = Coroutine.new generator
     print 0
-    val k = k.step print
+    let k = k.step print
     print 2
-    val k = k.step print
+    let k = k.step print
     print 4
-    val k = k.step print
+    let k = k.step print
     print 6
     # This shouldn't print anything, because the coroutine is done
     k.step print

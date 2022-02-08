@@ -8,9 +8,9 @@ eff R of
 fun producer () : I32 with P, R, IO = do
     print 0
     P.Print 1
-    val x = R.Read ()
+    let x = R.Read ()
     P.Print x
-    val y = R.Read ()
+    let y = R.Read ()
     P.Print y
     x + y
 
@@ -21,7 +21,7 @@ fun producer () : I32 with P, R, IO = do
 # 3
 # 5
 fun main () : () with IO = do
-    val handle : I32 -> I32 with IO = catch producer () of
+    let handle : I32 -> I32 with IO = catch producer () of
         x => _ => x
         eff (P.Print i) k => acc => do
             print i

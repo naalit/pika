@@ -1,0 +1,17 @@
+type WrappedInt = I32
+type Pair A B of
+    New A B
+
+fun unwrap (i: WrappedInt): I32 = do
+    let WrappedInt i = i
+    i
+
+fun addPair (p: Pair I32 I32): I32 = do
+    let Pair.New a b = p
+    a + b
+
+# expected output: 1
+fun main () with IO = do
+    let a = unwrap (WrappedInt 12)
+    let b = addPair (Pair.New [I32] [I32] 6 7)
+    print (b - a)
