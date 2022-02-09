@@ -18,10 +18,10 @@
 
 # Pika no longer has universes, instead Type : Type.
 # In fact, Pika no longer has any subtyping at all!
-val x : Type = Type
+let x : Type = Type
 # Lambdas use arrow syntax
 # Note that function types are just like SML or Haskell now.
-val y : Int -> Int = x => x + 1
+let y : Int -> Int = x => x + 1
 
 # Unlike other MLs or Haskell, Pika doesn't have multi-clause functions.
 # Instead, use case-of.
@@ -31,7 +31,7 @@ fun fib (i: Int) : Int = case i of
   i => fib (i - 1) + fib (i - 2)
 
 # One-line functions work, of course, as does type inference.
-# This is *probably* inferred as `val square : [t] [m: Mul t t] t -> m.Output`, like Haskell would.
+# This is *probably* inferred as `let square : [t] [m: Mul t t] t -> m.Output`, like Haskell would.
 fun square x = x * x
 
 # We don't have let-in, we use do-end which works like a Rust block.
@@ -52,21 +52,21 @@ fun fact i = do
 fun Functor (f: Type -> Type) = sig
   # We put implicit parameters in square brackets.
   # These are both inferred to have type `Type`.
-  val fmap : [a b] (a -> b) -> f a -> f b
+  let fmap : [a b] (a -> b) -> f a -> f b
 
 # Records are structural, and types are values.
 # So, this is a type alias.
-val Q : Type = sig
+let Q : Type = sig
   fun f (x : Int) : Int
 
-# You can use curly braces as a shorthand for either a sig or struct with only `val`s
-val u : Q = { f = y }
+# You can use curly braces as a shorthand for either a sig or struct with only `let`s
+let u : Q = { f = y }
 
 # ADTs don't use ML syntax, they look pretty different, more like Haskell
 type Option t of
-  # val None : [t] -> Option t
+  # let None : [t] -> Option t
   None
-  # val Some : [t] t -> Option t
+  # let Some : [t] t -> Option t
   Some t
 # This `where` starts the optional "associated module" for the datatype
 # Constructors go in the associated module even if there isn't a where clause
@@ -144,7 +144,7 @@ fun printf (s : String) : nfmtargs () (s.count "{}") = do
 
   # Since types have "associated modules", we use them for method resolution (no more `List.sort list`!)
   # This is equivalent to `String.split s "{}"`.
-  val l = s.split "{}"
+  let l = s.split "{}"
     # Significant indentation is used for operator chaining as well as grouping in expressions.
     # Also, you can give implicit parameters explicitly with square brackets.
     # Finally, the `_` introduces a hole, i.e. it asks the typechecker to fill in that parameter.
@@ -154,6 +154,6 @@ fun printf (s : String) : nfmtargs () (s.count "{}") = do
     l.head.unwrap_or ""
     l.tail.unwrap_or Nil
 
-# val greet : [t] [: Display t] t -> () with IO
+# let greet : [t] [: Display t] t -> () with IO
 fun greet s = do
   printf "Hello, {}" s

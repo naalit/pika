@@ -10,9 +10,9 @@ Pika doesn't have all its planned features implemented yet, but here are some th
 Look in the `tests` folder for more examples of Pika code that works today.
 For a demonstration of planned features, see `demo.pk`.
 ```cr
-# Syntax is similar to Standard ML, but comments use #
+# Syntax is similar to Standard ML or OCaml, but comments use #
 # Pika doesn't have universes, so Type has type Type
-val U : Type = Type
+let U : Type = Type
 
 # Functions can have implicit parameters with []
 fun id [T] (x : T) : T = x
@@ -22,12 +22,12 @@ fun one (x : Type) = x
 fun two y = one y
 
 # You can pass implicit parameters implicitly or explicitly
-val test = id Type
-val test2 = id [Type] Type
+let test = id Type
+let test2 = id [Type] Type
 
 # And you can use explicit lambdas instead of `fun`
 # Also, `_` introduces a hole filled by unification
-val id2 : [T] T -> _ = x => x
+let id2 : [T] T -> _ = x => x
 
 # Pika has datatypes and pattern matching as well
 # With explicit boxing and unboxing (but things are unboxed by default)
@@ -42,7 +42,7 @@ where
     Cons x rest => 1 + len rest
   # Pika uses significant indentation for blocks
 
-val _ = List.len (List.Cons Type (List.Nil))
+let _ = List.len (List.Cons Type (List.Nil))
 
 # And algebraic effects
 eff Console of
@@ -51,7 +51,7 @@ eff Console of
 
 fun greet () : () with Console = do
   Console.Print "Hello, "
-  val name : String = Console.Read ()
+  let name : String = Console.Read ()
   Console.Print name
 
 # Now we handle the effects
@@ -112,7 +112,7 @@ It's designed so that code usually does what it looks like - indentation should 
 There are generally three cases for what indentation means in Pika:
 
 1. Blocks, like `do`, `where`, `case-of`, etc., are delimited by indentation. This is simple, and works like Python:
-    ```cr
+    ```ml
     fun unwrap_and_print_or self default = case self of
       Some x => do
         print x
