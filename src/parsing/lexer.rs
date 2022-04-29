@@ -85,16 +85,37 @@ impl<'i> Lexer<'i> {
         self.input.slice(self.tok_start as usize..self.pos as usize)
     }
 
-    fn skip_whitespace(&mut self) {
+    fn process_trivia(&mut self) {
+        #[derive(PartialEq)]
+        enum Mode {
+            None,
+            Comment,
+            Space,
+        }
+        let mut mode = Mode::None;
         while let Some(next) = self.peek() {
-            // Skip line comments, but don't consume the newline
+            // Process line comments, but don't consume the newline
             if next == '#' {
+                if mode == Mode::Space {
+                    self.pending_toks.push_back(self.tok_in_place(Tok::Comment));
+                    self.tok_start = self.pos;
+                }
+                mode = Mode::Comment;
                 while self.peek().map_or(false, |x| x != '\n') {
                     self.next();
                 }
             } else if next.is_whitespace() && next != '\n' {
+                if mode == Mode::Comment {
+                    self.pending_toks.push_back(self.tok_in_place(Tok::Whitespace));
+                    self.tok_start = self.pos;
+                }
+                mode = Mode::Space;
                 self.next();
             } else {
+                if mode != Mode::None {
+                    self.pending_toks.push_back(self.tok_in_place(Tok::Whitespace));
+                    self.tok_start = self.pos;
+                }
                 break;
             }
         }
@@ -353,7 +374,7 @@ impl<'i> Lexer<'i> {
                             return self.tok_in_place(Tok::Error);
                         }
                         '#' => {
-                            self.skip_whitespace();
+                            self.process_trivia();
                             continue;
                         }
                         _ => break,
@@ -440,10 +461,12 @@ impl<'i> Lexer<'i> {
             return Some(tok);
         }
 
-        self.skip_whitespace();
-
-        // This is where the actual token starts
         self.tok_start = self.pos;
+        self.process_trivia();
+
+        if let Some(tok) = self.pending_toks.pop_front() {
+            return Some(tok);
+        }
 
         if let Some(binop) = self.try_lex_binop() {
             return Some(binop);
@@ -577,6 +600,7 @@ impl<'i> fmt::Display for Tok {
             Tok::Error => "<error>",
 
             Tok::Whitespace => "whitespace",
+            Tok::Comment => "comment",
             Tok::Root => "RootNode",
         })
     }

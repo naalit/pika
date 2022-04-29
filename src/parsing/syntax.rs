@@ -77,6 +77,7 @@ pub enum SyntaxKind {
     Backslash, // \
 
     Whitespace,
+    Comment,
     Error,
 
     // Composite nodes
