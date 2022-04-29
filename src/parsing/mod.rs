@@ -17,6 +17,8 @@
 pub mod lexer;
 mod parser;
 mod splitter;
+mod syntax;
+pub use syntax::*;
 
 use crate::common::*;
 use lsp_types::Url;

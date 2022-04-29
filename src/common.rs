@@ -3,7 +3,6 @@ use std::collections::HashMap;
 pub use crate::pretty::Doc;
 use ariadne::Color;
 pub use ariadne::Fmt;
-use lsp_types::Url;
 
 macro_rules! intern_key {
     ($n:ident) => {
@@ -23,11 +22,11 @@ macro_rules! intern_key {
 intern_key!(File);
 intern_key!(Name);
 
-pub type RelSpan = std::ops::Range<usize>;
+pub type RelSpan = std::ops::Range<u32>;
 pub type Spanned<T> = (T, RelSpan);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AbsSpan(pub File, pub std::ops::Range<usize>);
+pub struct AbsSpan(pub File, pub std::ops::Range<u32>);
 impl AbsSpan {
     pub fn add(&self, other: RelSpan) -> Self {
         AbsSpan(
@@ -38,18 +37,18 @@ impl AbsSpan {
 
     fn lsp_range(&self, files: &HashMap<File, ropey::Rope>) -> lsp_types::Range {
         let text = files.get(&self.0).unwrap();
-        let start_line = text.char_to_line(self.1.start);
+        let start_line = text.char_to_line(self.1.start as usize);
         let start_line_start = text.line_to_char(start_line);
-        let end_line = text.char_to_line(self.1.end);
+        let end_line = text.char_to_line(self.1.end as usize);
         let end_line_start = text.line_to_char(end_line);
         lsp_types::Range {
             start: lsp_types::Position {
                 line: start_line as u32,
-                character: self.1.start as u32 - start_line_start as u32,
+                character: self.1.start - start_line_start as u32,
             },
             end: lsp_types::Position {
                 line: end_line as u32,
-                character: self.1.end as u32 - end_line_start as u32,
+                character: self.1.end - end_line_start as u32,
             },
         }
     }
@@ -62,11 +61,11 @@ impl ariadne::Span for AbsSpan {
     }
 
     fn start(&self) -> usize {
-        self.1.start()
+        self.1.start as usize
     }
 
     fn end(&self) -> usize {
-        self.1.end()
+        self.1.end as usize
     }
 }
 
@@ -123,7 +122,7 @@ impl Error {
         let mut r = ariadne::Report::build(
             self.severity.ariadne(),
             primary_span.0,
-            primary_span.1.start,
+            primary_span.1.start as usize,
         )
         .with_message(self.message.to_string(true))
         .with_label(self.primary.ariadne(split_span));

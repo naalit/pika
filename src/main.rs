@@ -159,13 +159,12 @@ impl Server {
             let splits = self.db.split(file);
             let mut diagnostics = Vec::new();
             for split in splits {
-                let lexer = parsing::lexer::Lexer::new(&self.db, split.text.slice(..));
-                for (tok, span) in lexer {
-                    if let parsing::lexer::Tok::Error(e) = tok {
-                        let e = parsing::lexer::lexerror_to_error(e, span);
-                        let e = e.to_lsp(&split.abs_span, &self.source, &self.db);
-                        diagnostics.push(e);
-                    }
+                let mut lexer = parsing::lexer::Lexer::new(&self.db, split.text.slice(..));
+                let lex = lexer.lex();
+                for (e, span) in lex.error {
+                    let e = parsing::lexer::lexerror_to_error(e, span);
+                    let e = e.to_lsp(&split.abs_span, &self.source, &self.db);
+                    diagnostics.push(e);
                 }
             }
             // TODO only send diagnostics if they changed
@@ -228,12 +227,11 @@ fn main() {
     for file in files {
         let splits = db.split(file);
         for split in splits {
-            let lexer = parsing::lexer::Lexer::new(&db, split.text.slice(..));
-            for (tok, span) in lexer {
-                if let parsing::lexer::Tok::Error(e) = tok {
-                    let e = parsing::lexer::lexerror_to_error(e, span);
-                    e.write_cli(&split.abs_span, &mut cache);
-                }
+            let mut lexer = parsing::lexer::Lexer::new(&db, split.text.slice(..));
+            let lex = lexer.lex();
+            for (e, span) in lex.error {
+                let e = parsing::lexer::lexerror_to_error(e, span);
+                e.write_cli(&split.abs_span, &mut cache);
             }
         }
     }

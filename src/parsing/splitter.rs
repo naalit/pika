@@ -67,7 +67,7 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
         splits.push(TextSplit {
             name,
             start_line,
-            abs_span: AbsSpan(file, char_pos..i),
+            abs_span: AbsSpan(file, char_pos as u32..i as u32),
             text,
         });
         char_pos = i;

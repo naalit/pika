@@ -15,7 +15,14 @@ use std::str::FromStr;
 
 use super::*;
 
-pub type STok = Spanned<Tok>;
+type Tok = SyntaxKind;
+type STok = (SyntaxKind, u32);
+pub struct LexResult<'a> {
+    pub text: RopeSlice<'a>,
+    pub kind: Vec<SyntaxKind>,
+    pub start: Vec<u32>,
+    pub error: Vec<Spanned<LexError>>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LexError {
@@ -36,94 +43,16 @@ pub enum Literal {
     String(Name),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Tok {
-    // Keywords
-    Fun,
-    Let,
-    Impl,
-    Do,
-    Struct,
-    Sig,
-    /// This is lowercase `type`
-    Type,
-    Case,
-    Of,
-    /// This is uppercase `Type`. TODO make it a builtin instead of a keyword?
-    TypeType,
-    With,
-    Pure,
-    Where,
-    Raise,
-    Catch,
-    And,
-    Or,
-    If,
-    Then,
-    Else,
-    Eff,
-    Box,
-    Unbox,
-
-    // Symbols the lexer recognizes as a "binary operator"
-    Colon,     // :
-    Equals,    // =
-    Arrow,     // ->
-    WideArrow, // =>
-    Plus,      // +
-    Minus,     // -
-    Times,     // *
-    Div,       // /
-    Bar,       // |
-    Dot,       // .
-    Comma,     // ,
-    Exp,       // **
-    Mod,       // %
-    Xor,       // ^^
-    LShift,    // <<
-    RShift,    // >>
-    BitAnd,    // &
-    Gt,        // >
-    GtE,       // >=
-    Lt,        // <
-    LtE,       // <=
-    Eq,        // ==
-    NEq,       // !=
-    LPipe,     // <|
-    RPipe,     // |>
-
-    // Tokens with a payload
-    Lit(Literal),
-    Name(Name),
-    String(String),
-
-    // Other tokens
-    Indent,
-    Dedent,
-    At,      // @
-    POpen,   // (
-    PClose,  // )
-    SOpen,   // [
-    SClose,  // ]
-    COpen,   // {
-    CClose,  // }
-    Newline, // \n or ;
-    /// Backslash is reserved but not used for anything right now
-    /// It may eventually be used as a line continuation character, at the start of the line like wisp's '.'
-    Backslash, // \
-
-    Error(LexError),
-}
-
 pub struct Lexer<'i> {
     chars: Peekable<ropey::iter::Chars<'i>>,
     input: RopeSlice<'i>,
     db: &'i dyn Parser,
-    tok_start: usize,
-    pos: usize,
+    tok_start: u32,
+    pos: u32,
 
     indent_stack: Vec<usize>,
     pending_toks: VecDeque<STok>,
+    errors: Vec<Spanned<LexError>>,
 }
 
 impl<'i> Lexer<'i> {
@@ -136,6 +65,7 @@ impl<'i> Lexer<'i> {
             pos: 0,
             indent_stack: Vec::new(),
             pending_toks: VecDeque::new(),
+            errors: Vec::new(),
         }
     }
 
@@ -144,7 +74,7 @@ impl<'i> Lexer<'i> {
     }
 
     fn next(&mut self) -> Option<char> {
-        self.pos += self.peek()?.len_utf8();
+        self.pos += 1;
         self.chars.next()
     }
 
@@ -152,7 +82,7 @@ impl<'i> Lexer<'i> {
         self.tok_start..self.pos
     }
     fn slice(&self) -> RopeSlice<'i> {
-        self.input.slice(self.tok_start..self.pos)
+        self.input.slice(self.tok_start as usize..self.pos as usize)
     }
 
     fn skip_whitespace(&mut self) {
@@ -172,11 +102,11 @@ impl<'i> Lexer<'i> {
 
     fn tok(&mut self, tok: Tok) -> STok {
         self.next();
-        (tok, self.span())
+        (tok, self.tok_start)
     }
 
     fn tok_in_place(&self, tok: Tok) -> STok {
-        (tok, self.span())
+        (tok, self.tok_start)
     }
 
     fn lex_number(&mut self) -> STok {
@@ -209,13 +139,11 @@ impl<'i> Lexer<'i> {
                 self.next();
             } else if next.is_alphanumeric() {
                 self.next();
-                return (
-                    Tok::Error(LexError::InvalidLiteral(format!(
-                        "Invalid digit for int literal: {}",
-                        next
-                    ))),
+                self.errors.push((
+                    LexError::InvalidLiteral(format!("Invalid digit for int literal: {}", next)),
                     self.pos - 1..self.pos,
-                );
+                ));
+                return (Tok::Error, self.pos - 1);
             } else if next == '.' {
                 float = true;
                 buf.push(next);
@@ -224,23 +152,36 @@ impl<'i> Lexer<'i> {
                 break;
             }
         }
-        self.tok_in_place(if float {
+        let tok = if float {
             match f64::from_str(&buf) {
-                Ok(f) => Tok::Lit(Literal::Float(f.to_bits())),
-                Err(e) => Tok::Error(LexError::InvalidLiteral(e.to_string())),
+                Ok(_) => Tok::FloatLit,
+                Err(e) => {
+                    self.errors
+                        .push((LexError::InvalidLiteral(e.to_string()), self.span()));
+                    Tok::Error
+                }
             }
         } else if neg {
             match i64::from_str_radix(&buf, base) {
-                Ok(n) => Tok::Lit(Literal::Negative(n)),
+                Ok(_) => Tok::IntLit,
                 // TODO when `ParseIntError::kind()` gets stabilized (or Pika switches to nightly Rust) make custom error messages
-                Err(e) => Tok::Error(LexError::InvalidLiteral(e.to_string())),
+                Err(e) => {
+                    self.errors
+                        .push((LexError::InvalidLiteral(e.to_string()), self.span()));
+                    Tok::Error
+                }
             }
         } else {
             match u64::from_str_radix(&buf, base) {
-                Ok(n) => Tok::Lit(Literal::Positive(n)),
-                Err(e) => Tok::Error(LexError::InvalidLiteral(e.to_string())),
+                Ok(_) => Tok::IntLit,
+                Err(e) => {
+                    self.errors
+                        .push((LexError::InvalidLiteral(e.to_string()), self.span()));
+                    Tok::Error
+                }
             }
-        })
+        };
+        self.tok_in_place(tok)
     }
 
     fn lex_name(&mut self) -> STok {
@@ -276,7 +217,7 @@ impl<'i> Lexer<'i> {
             "struct" => Tok::Struct,
             "sig" => Tok::Sig,
             "of" => Tok::Of,
-            s => Tok::Name(self.db.name(s.to_string())),
+            _ => Tok::Name,
         };
         self.tok_in_place(tok)
     }
@@ -312,7 +253,8 @@ impl<'i> Lexer<'i> {
                 if self.peek() == Some('^') {
                     Some(self.tok(Tok::Xor))
                 } else {
-                    Some(self.tok_in_place(Tok::Error(LexError::Other("Ambiguous operator '^': use '**' for exponentiation, and '^^' for bitwise xor".into()))))
+                    self.errors.push((LexError::Other("Ambiguous operator '^': use '**' for exponentiation, and '^^' for bitwise xor".into()), self.span()));
+                    Some(self.tok_in_place(Tok::Error))
                 }
             }
             '<' => {
@@ -335,9 +277,11 @@ impl<'i> Lexer<'i> {
             '&' => {
                 self.next();
                 if self.peek() == Some('&') {
-                    Some(self.tok_in_place(Tok::Error(LexError::Other(
-                        "Invalid operator '&&': use 'and' for logical and".into(),
-                    ))))
+                    self.errors.push((
+                        LexError::Other("Invalid operator '&&': use 'and' for logical and".into()),
+                        self.span(),
+                    ));
+                    Some(self.tok_in_place(Tok::Error))
                 } else {
                     Some(self.tok_in_place(Tok::BitAnd))
                 }
@@ -363,7 +307,7 @@ impl<'i> Lexer<'i> {
             // This seems to be the best way to access the next character
             '-' if self
                 .input
-                .slice(self.pos + 1..)
+                .slice(self.pos as usize + 1..)
                 .chars()
                 .next()
                 .map_or(true, |x| !x.is_numeric()) =>
@@ -401,9 +345,12 @@ impl<'i> Lexer<'i> {
                         '\n' => start_pos = 0,
                         ' ' => start_pos += 1,
                         x if x.is_whitespace() => {
-                            return self.tok(Tok::Error(LexError::Other(
-                                "Only spaces are supported for indentation".to_string(),
-                            )))
+                            self.next();
+                            self.errors.push((
+                                LexError::Other("Only spaces are supported for indentation".into()),
+                                self.span(),
+                            ));
+                            return self.tok_in_place(Tok::Error);
                         }
                         '#' => {
                             self.skip_whitespace();
@@ -422,9 +369,8 @@ impl<'i> Lexer<'i> {
                         self.pending_toks.push_back(self.tok_in_place(Tok::Dedent));
                         self.indent_stack.remove(i);
                     } else {
-                        return self.tok_in_place(Tok::Error(LexError::Other(
-                            "Inconsistent indentation: dedent doesn't match any previous indentation level".to_string(),
-                        )));
+                        self.errors.push((LexError::Other("Inconsistent indentation: dedent doesn't match any previous indentation level".into()), self.span()));
+                        return self.tok_in_place(Tok::Error);
                     }
                 }
                 if start_pos > 0 {
@@ -442,7 +388,7 @@ impl<'i> Lexer<'i> {
                 let mut buf = String::new();
                 loop {
                     match self.next() {
-                        Some('"') => break self.tok_in_place(Tok::String(buf)),
+                        Some('"') => break self.tok_in_place(Tok::String),
                         Some('\\') => {
                             // Escape
                             match self.next() {
@@ -456,21 +402,24 @@ impl<'i> Lexer<'i> {
                                     buf.push('\t');
                                 }
                                 Some(c) => {
-                                    let r = (
-                                        Tok::Error(LexError::InvalidEscape(c)),
-                                        self.pos - 2..self.pos,
-                                    );
+                                    self.errors
+                                        .push((LexError::InvalidEscape(c), self.pos - 2..self.pos));
+                                    let r = (Tok::Error, self.tok_start);
                                     // Try to find the terminating " to avoid further errors
                                     while self.next().map_or(false, |x| x != '"') {}
                                     break r;
                                 }
                                 None => {
-                                    break self.tok_in_place(Tok::Error(LexError::UnclosedString))
+                                    self.errors.push((LexError::UnclosedString, self.tok_start..self.pos-1));
+                                    break self.tok_in_place(Tok::Error);
                                 }
                             }
                         }
                         Some(c) => buf.push(c),
-                        None => break self.tok_in_place(Tok::Error(LexError::UnclosedString)),
+                        None => {
+                            self.errors.push((LexError::UnclosedString, self.tok_start..self.pos-1));
+                            break self.tok_in_place(Tok::Error);
+                        }
                     }
                 }
             }
@@ -478,15 +427,15 @@ impl<'i> Lexer<'i> {
             // This is called after `try_lex_binop()`, so if we get a '-' it must be a number
             x if x.is_numeric() || x == '-' => self.lex_number(),
             x if x.is_alphabetic() || x == '_' => self.lex_name(),
-            x => self.tok(Tok::Error(LexError::InvalidToken(x))),
+            x => {
+                self.next();
+                self.errors.push((LexError::InvalidToken(x), self.span()));
+                self.tok_in_place(Tok::Error)
+            }
         }
     }
-}
 
-impl<'i> Iterator for Lexer<'i> {
-    type Item = STok;
-
-    fn next(&mut self) -> Option<STok> {
+    fn next_tok(&mut self) -> Option<STok> {
         if let Some(tok) = self.pending_toks.pop_front() {
             return Some(tok);
         }
@@ -511,6 +460,21 @@ impl<'i> Iterator for Lexer<'i> {
             self.pending_toks.pop_front()
         }
     }
+
+    pub fn lex(&mut self) -> LexResult {
+        let mut kind = Vec::new();
+        let mut start = Vec::new();
+        while let Some((tok, pos)) = self.next_tok() {
+            kind.push(tok);
+            start.push(pos);
+        }
+        LexResult {
+            text: self.input,
+            kind,
+            start,
+            error: self.errors.split_off(0),
+        }
+    }
 }
 
 pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
@@ -525,8 +489,8 @@ pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
             .add(e, b)
             .add("'", ()),
         LexError::UnclosedString => Doc::start("Unclosed ")
-            .add("string literal:", a)
-            .add(" expected a terminator '", ())
+            .add("string literal", a)
+            .add(": expected a terminator '", ())
             .add('"', b)
             .add("' here", ()),
         LexError::Other(s) => Doc::start(s),
@@ -595,9 +559,10 @@ impl<'i> fmt::Display for Tok {
             Tok::NEq => "'!='",
             Tok::LPipe => "'<|'",
             Tok::RPipe => "'|>'",
-            Tok::Lit(_) => "literal",
-            Tok::Name(_) => "name",
-            Tok::String(_) => "string literal",
+            Tok::FloatLit => "float literal",
+            Tok::IntLit => "float literal",
+            Tok::Name => "name",
+            Tok::String => "string literal",
             Tok::At => "'@'",
             Tok::POpen => "'('",
             Tok::PClose => "')'",
@@ -609,7 +574,10 @@ impl<'i> fmt::Display for Tok {
             Tok::Dedent => "dedent",
             Tok::Newline => "newline",
             Tok::Backslash => "'\\'",
-            Tok::Error(_) => "<error>",
+            Tok::Error => "<error>",
+
+            Tok::Whitespace => "whitespace",
+            Tok::Root => "RootNode",
         })
     }
 }
