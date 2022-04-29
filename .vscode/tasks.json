@@ -1,0 +1,16 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Extension",
+            "group": "build",
+            "type": "npm",
+            "script": "build",
+            "path": "editors/code/",
+            "problemMatcher": {
+                "base": "$tsc",
+                "fileLocation": ["relative", "${workspaceFolder}/editors/code"],
+            }
+        }
+    ]
+}

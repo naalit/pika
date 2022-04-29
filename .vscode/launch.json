@@ -1,0 +1,35 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+    {
+        "args": [
+            "--extensionDevelopmentPath=${workspaceFolder}/editors/code"
+        ],
+        "runtimeExecutable": "${execPath}",
+        "name": "Launch Extension",
+        "outFiles": [
+            "${workspaceFolder}/editors/code/out/**/*.js"
+        ],
+        "preLaunchTask": "Build Extension",
+        "request": "launch",
+        "type": "extensionHost"
+    },
+    {
+        // Used to attach LLDB to a running LSP server.
+        // NOTE: Might require root permissions. For this run:
+        //
+        // `echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope`
+        //
+        // Don't forget to set `debug = 2` in `Cargo.toml` before building the server
+
+        "name": "Attach To Server",
+        "type": "lldb",
+        "request": "attach",
+        "program": "${workspaceFolder}/target/debug/pika2",
+        "pid": "${command:pickMyProcess}",
+        "sourceLanguages": [
+            "rust"
+        ]
+    }
+    ]
+}
