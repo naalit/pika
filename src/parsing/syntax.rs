@@ -2,31 +2,30 @@
 #[repr(u16)]
 pub enum SyntaxKind {
     // Keywords
-    Fun,
-    Let,
-    Impl,
-    Do,
-    Struct,
-    Sig,
+    FunKw,
+    LetKw,
+    ImplKw,
+    DoKw,
+    StructKw,
+    SigKw,
     /// This is lowercase `type`
-    Type,
-    Case,
-    Of,
+    TypeKw,
+    CaseKw,
+    OfKw,
     /// This is uppercase `Type`. TODO make it a builtin instead of a keyword?
-    TypeType,
-    With,
-    Pure,
-    Where,
-    Raise,
-    Catch,
-    And,
-    Or,
-    If,
-    Then,
-    Else,
-    Eff,
-    Box,
-    Unbox,
+    TypeTypeKw,
+    WithKw,
+    PureKw,
+    WhereKw,
+    CatchKw,
+    AndKw,
+    OrKw,
+    IfKw,
+    ThenKw,
+    ElseKw,
+    EffKw,
+    BoxKw,
+    UnboxKw,
 
     // Symbols the lexer recognizes as a "binary operator"
     Colon,     // :
@@ -59,7 +58,7 @@ pub enum SyntaxKind {
     IntLit,
     FloatLit,
     Name,
-    String,
+    StringLit,
 
     // Other tokens
     Indent,
@@ -81,6 +80,33 @@ pub enum SyntaxKind {
     Error,
 
     // Composite nodes
+    Var,
+    Lam,
+    Ty,
+    Body,
+    ImpArg,
+    ExpArg,
+    ImpPar,
+    ExpPar,
+    WithClause,
+    Pi,
+    App,
+    Do,
+    Hole,
+    DotExpr,
+    OrPat,
+    EffPat,
+    Case,
+    Lit,
+    Unit,
+    BinOpKind,
+    BinOp,
+    If,
+    Box,
+    LetStmt,
+    Fun,
+    Type,
+    CaseBranch,
 
     // Top level node
     Root,
@@ -94,8 +120,8 @@ impl From<SyntaxKind> for rowan::SyntaxKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Lang {}
-impl rowan::Language for Lang {
+pub enum PikaLang {}
+impl rowan::Language for PikaLang {
     type Kind = SyntaxKind;
     fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
         assert!(raw.0 <= Root as u16);
@@ -105,3 +131,6 @@ impl rowan::Language for Lang {
         kind.into()
     }
 }
+
+pub type SyntaxNode = rowan::SyntaxNode<PikaLang>;
+pub type SyntaxToken = rowan::SyntaxToken<PikaLang>;

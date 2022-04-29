@@ -214,30 +214,29 @@ impl<'i> Lexer<'i> {
             }
         }
         let tok = match &*self.slice().to_string() {
-            "fun" => Tok::Fun,
-            "let" => Tok::Let,
-            "impl" => Tok::Impl,
-            "type" => Tok::Type,
-            "Type" => Tok::TypeType,
-            "case" => Tok::Case,
-            "with" => Tok::With,
-            "pure" => Tok::Pure,
-            "raise" => Tok::Raise,
-            "catch" => Tok::Catch,
-            "and" => Tok::And,
-            "or" => Tok::Or,
-            "if" => Tok::If,
-            "then" => Tok::Then,
-            "else" => Tok::Else,
-            "box" => Tok::Box,
-            "unbox" => Tok::Unbox,
+            "fun" => Tok::FunKw,
+            "let" => Tok::LetKw,
+            "impl" => Tok::ImplKw,
+            "type" => Tok::TypeKw,
+            "Type" => Tok::TypeTypeKw,
+            "case" => Tok::CaseKw,
+            "with" => Tok::WithKw,
+            "pure" => Tok::PureKw,
+            "catch" => Tok::CatchKw,
+            "and" => Tok::AndKw,
+            "or" => Tok::OrKw,
+            "if" => Tok::IfKw,
+            "then" => Tok::ThenKw,
+            "else" => Tok::ElseKw,
+            "box" => Tok::BoxKw,
+            "unbox" => Tok::UnboxKw,
             // Where technically ends one block and starts another one, but we ignore that.
-            "where" => Tok::Where,
-            "eff" => Tok::Eff,
-            "do" => Tok::Do,
-            "struct" => Tok::Struct,
-            "sig" => Tok::Sig,
-            "of" => Tok::Of,
+            "where" => Tok::WhereKw,
+            "eff" => Tok::EffKw,
+            "do" => Tok::DoKw,
+            "struct" => Tok::StructKw,
+            "sig" => Tok::SigKw,
+            "of" => Tok::OfKw,
             _ => Tok::Name,
         };
         self.tok_in_place(tok)
@@ -409,7 +408,7 @@ impl<'i> Lexer<'i> {
                 let mut buf = String::new();
                 loop {
                     match self.next() {
-                        Some('"') => break self.tok_in_place(Tok::String),
+                        Some('"') => break self.tok_in_place(Tok::StringLit),
                         Some('\\') => {
                             // Escape
                             match self.next() {
@@ -534,29 +533,28 @@ pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
 impl<'i> fmt::Display for Tok {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Tok::Fun => "'fun'",
-            Tok::Let => "'val'",
-            Tok::Impl => "'impl'",
-            Tok::Do => "'do'",
-            Tok::Struct => "'struct'",
-            Tok::Sig => "'sig'",
-            Tok::Type => "'type'",
-            Tok::Case => "'case'",
-            Tok::Of => "'of'",
-            Tok::TypeType => "'Type'",
-            Tok::With => "'with'",
-            Tok::Pure => "'pure'",
-            Tok::Where => "'where'",
-            Tok::Raise => "'raise'",
-            Tok::Catch => "'catch'",
-            Tok::And => "'and'",
-            Tok::Or => "'or'",
-            Tok::If => "'if'",
-            Tok::Then => "'then'",
-            Tok::Else => "'else'",
-            Tok::Eff => "'eff'",
-            Tok::Box => "'box'",
-            Tok::Unbox => "'unbox'",
+            Tok::FunKw => "'fun'",
+            Tok::LetKw => "'val'",
+            Tok::ImplKw => "'impl'",
+            Tok::DoKw => "'do'",
+            Tok::StructKw => "'struct'",
+            Tok::SigKw => "'sig'",
+            Tok::TypeKw => "'type'",
+            Tok::CaseKw => "'case'",
+            Tok::OfKw => "'of'",
+            Tok::TypeTypeKw => "'Type'",
+            Tok::WithKw => "'with'",
+            Tok::PureKw => "'pure'",
+            Tok::WhereKw => "'where'",
+            Tok::CatchKw => "'catch'",
+            Tok::AndKw => "'and'",
+            Tok::OrKw => "'or'",
+            Tok::IfKw => "'if'",
+            Tok::ThenKw => "'then'",
+            Tok::ElseKw => "'else'",
+            Tok::EffKw => "'eff'",
+            Tok::BoxKw => "'box'",
+            Tok::UnboxKw => "'unbox'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",
@@ -585,7 +583,7 @@ impl<'i> fmt::Display for Tok {
             Tok::FloatLit => "float literal",
             Tok::IntLit => "float literal",
             Tok::Name => "name",
-            Tok::String => "string literal",
+            Tok::StringLit => "string literal",
             Tok::At => "'@'",
             Tok::POpen => "'('",
             Tok::PClose => "')'",
@@ -601,7 +599,9 @@ impl<'i> fmt::Display for Tok {
 
             Tok::Whitespace => "whitespace",
             Tok::Comment => "comment",
-            Tok::Root => "RootNode",
+
+            // composite kinds that shouldn't be produced by the lexer
+            _ => "<??>",
         })
     }
 }

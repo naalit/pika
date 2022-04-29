@@ -18,6 +18,7 @@ pub mod lexer;
 mod parser;
 mod splitter;
 mod syntax;
+mod ast;
 pub use syntax::*;
 
 use crate::common::*;
