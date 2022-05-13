@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::error::Error;
+use std::io::Read;
 
+use common::ast::{AstNode, Pretty};
 use lsp_types::notification::{Notification, PublishDiagnostics};
 use lsp_types::request::GotoDefinition;
 use lsp_types::request::Request;
@@ -15,6 +17,8 @@ pub mod common;
 mod parsing;
 pub mod pretty;
 use common::*;
+
+use crate::parsing::SyntaxNode;
 
 #[salsa::database(ParserDatabase)]
 #[derive(Default)]
@@ -118,7 +122,7 @@ impl Server {
                 eprintln!("Received DidOpenTextDocument");
                 let params: DidOpenTextDocumentParams = msg.extract(DidOpenTextDocument::METHOD)?;
                 let file = params.text_document.uri;
-                let file = self.db.file_id(file);
+                let file = self.db.file_id(FileLoc::Url(file));
                 let source = params.text_document.text.into();
                 self.source.insert(file, source);
                 self.signal_change();
@@ -128,7 +132,7 @@ impl Server {
                 let params: DidChangeTextDocumentParams =
                     msg.extract(DidChangeTextDocument::METHOD)?;
                 let file = params.text_document.uri;
-                let file = self.db.file_id(file);
+                let file = self.db.file_id(FileLoc::Url(file));
                 let source = self.source.get_mut(&file).unwrap();
                 for change in params.content_changes {
                     if let Some(range) = change.range {
@@ -156,10 +160,10 @@ impl Server {
         eprintln!("Starting diagnostic publishing...");
         for (&file, source) in &self.source {
             self.db.set_input_file(file, source.clone());
-            let splits = self.db.split(file);
+            let splits = self.db.all_splits(file);
             let mut diagnostics = Vec::new();
             for split in splits {
-                let mut lexer = parsing::lexer::Lexer::new(&self.db, split.text.slice(..));
+                let mut lexer = parsing::lexer::Lexer::new(split.text.slice(..));
                 let lex = lexer.lex();
                 for (e, span) in lex.error {
                     let e = parsing::lexer::lexerror_to_error(e, span);
@@ -171,7 +175,7 @@ impl Server {
             let message = lsp::Notification {
                 method: PublishDiagnostics::METHOD.to_string(),
                 params: serde_json::to_value(&PublishDiagnosticsParams {
-                    uri: self.db.lookup_file_id(file),
+                    uri: self.db.lookup_file_id(file).to_url().unwrap(),
                     version: None,
                     diagnostics,
                 })
@@ -186,6 +190,24 @@ impl Server {
     }
 }
 
+fn print_tree(node: &SyntaxNode, indent: usize) {
+    for _ in 0..indent {
+        print!(" ");
+    }
+    println!("{:?}", node);
+    for i in node.children_with_tokens() {
+        match i {
+            rowan::NodeOrToken::Node(n) => print_tree(&n, indent + 2),
+            rowan::NodeOrToken::Token(t) => {
+                for _ in 0..indent + 2 {
+                    print!(" ");
+                }
+                println!("{:?}", t);
+            }
+        }
+    }
+}
+
 fn main() {
     use args::*;
 
@@ -194,7 +216,35 @@ fn main() {
         let mut server = Server::start();
         server.main_loop();
         server.shutdown();
+        return;
+    } else if config.command == Command::Repl {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).unwrap();
+        let input = Rope::from(input);
+        let mut db = DatabaseImpl::default();
+        let file = db.file_id(FileLoc::Input);
+        db.set_input_file(file, input);
+
+        let splits = db.all_split_ids(file);
+        let mut cache = FileCache::new(&db);
+        for split in splits {
+            let res = crate::parsing::parser::parser_entry(&db, file, split).unwrap();
+            let node = SyntaxNode::new_root(res.green);
+            print_tree(&node, 0);
+            let node = ast::Root::cast(node);
+            match node {
+                Some(node) => node.pretty().emit_stderr(),
+                None => eprintln!("<NO EXPRESSION>"),
+            }
+            for e in res.errors {
+                e.write_cli(&db.split(file, split).unwrap().abs_span, &mut cache);
+            }
+        }
+
+        return;
     }
+
+    // CLI driver
     if config.files.is_empty() {
         Doc::none()
             .add("Error", ariadne::Color::Red.style())
@@ -218,16 +268,16 @@ fn main() {
 
         let buf = ropey::Rope::from_reader(file).unwrap();
 
-        let file_id = db.file_id(Url::from_file_path(file_name).unwrap());
+        let file_id = db.file_id(FileLoc::Url(Url::from_file_path(file_name).unwrap()));
         db.set_input_file(file_id, buf);
         files.push(file_id);
     }
 
     let mut cache = FileCache::new(&db);
     for file in files {
-        let splits = db.split(file);
+        let splits = db.all_splits(file);
         for split in splits {
-            let mut lexer = parsing::lexer::Lexer::new(&db, split.text.slice(..));
+            let mut lexer = parsing::lexer::Lexer::new(split.text.slice(..));
             let lex = lexer.lex();
             for (e, span) in lex.error {
                 let e = parsing::lexer::lexerror_to_error(e, span);

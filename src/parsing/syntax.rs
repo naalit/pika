@@ -78,19 +78,19 @@ pub enum SyntaxKind {
     Whitespace,
     Comment,
     Error,
+    Eof,
 
     // Composite nodes
+    AppList,
     Var,
     Lam,
     Ty,
     Body,
     ImpArg,
-    ExpArg,
     ImpPar,
     ExpPar,
     WithClause,
     Pi,
-    App,
     Do,
     Hole,
     DotExpr,
@@ -107,6 +107,8 @@ pub enum SyntaxKind {
     Fun,
     Type,
     CaseBranch,
+    GroupedExpr,
+    Member,
 
     // Top level node
     Root,

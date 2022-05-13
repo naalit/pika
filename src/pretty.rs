@@ -47,6 +47,10 @@ pub struct Doc {
 }
 
 impl Doc {
+    pub fn style_keyword() -> Style {
+        Color::Magenta.style().bold()
+    }
+
     fn add_string(self, style: bool, indent: usize, buf: &mut String) {
         use std::fmt::Write;
         let indent = indent + self.indent;

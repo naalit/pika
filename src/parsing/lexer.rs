@@ -1,7 +1,7 @@
 //! Significant indentation overview:
 //! There are three tokens we can emit when we see a line break: INDENT, DEDENT, and NEWLINE.
 //! If the next non-empty line is indented more than the previous, we emit an INDENT token (and no NEWLINE).
-//! If it's the same indentation, we emit one NEWLINE token. We don't emit NEWLINEs for black lines, but we do for semicolons.
+//! If it's the same indentation, we emit one NEWLINE token. We don't emit NEWLINEs for blank lines, but we do for semicolons.
 //!   (so a semicolon is like a line break + the same indentation as the current line.)
 //! If it's a lower indentation level, we emit the appropriate number of DEDENTs and then a NEWLINE.
 
@@ -15,10 +15,10 @@ use std::str::FromStr;
 
 use super::*;
 
-type Tok = SyntaxKind;
+pub type Tok = SyntaxKind;
 type STok = (SyntaxKind, u32);
-pub struct LexResult<'a> {
-    pub text: RopeSlice<'a>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LexResult {
     pub kind: Vec<SyntaxKind>,
     pub start: Vec<u32>,
     pub error: Vec<Spanned<LexError>>,
@@ -46,7 +46,6 @@ pub enum Literal {
 pub struct Lexer<'i> {
     chars: Peekable<ropey::iter::Chars<'i>>,
     input: RopeSlice<'i>,
-    db: &'i dyn Parser,
     tok_start: u32,
     pos: u32,
 
@@ -56,9 +55,8 @@ pub struct Lexer<'i> {
 }
 
 impl<'i> Lexer<'i> {
-    pub fn new(db: &'i dyn Parser, input: RopeSlice<'i>) -> Self {
+    pub fn new(input: RopeSlice<'i>) -> Self {
         Lexer {
-            db,
             chars: input.chars().peekable(),
             input,
             tok_start: 0,
@@ -491,12 +489,17 @@ impl<'i> Lexer<'i> {
             start.push(pos);
         }
         LexResult {
-            text: self.input,
             kind,
             start,
             error: self.errors.split_off(0),
         }
     }
+}
+
+pub fn lexer_entry(db: &dyn Parser, file: File, id: SplitId) -> Option<LexResult> {
+    let split = db.split(file, id)?;
+    let mut lexer = Lexer::new(split.text.slice(..));
+    Some(lexer.lex())
 }
 
 pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+pub use crate::parsing::{ast, FileLoc};
 pub use crate::pretty::Doc;
 use ariadne::Color;
 pub use ariadne::Fmt;
+pub use std::borrow::Cow;
 
 macro_rules! intern_key {
     ($n:ident) => {
@@ -21,6 +23,12 @@ macro_rules! intern_key {
 }
 intern_key!(File);
 intern_key!(Name);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Icit {
+    Impl,
+    Expl,
+}
 
 pub type RelSpan = std::ops::Range<u32>;
 pub type Spanned<T> = (T, RelSpan);
@@ -154,7 +162,7 @@ impl Error {
                     .into_iter()
                     .map(|x| lsp_types::DiagnosticRelatedInformation {
                         location: lsp_types::Location {
-                            uri: db.lookup_file_id(split_span.0),
+                            uri: db.lookup_file_id(split_span.0).to_url().unwrap(),
                             range: split_span.add(x.span).lsp_range(files),
                         },
                         message: x.message.to_string(false),
@@ -183,24 +191,13 @@ impl<'a> FileCache<'a> {
 
 impl<'a> ariadne::Cache<File> for FileCache<'a> {
     fn fetch(&mut self, key: &File) -> Result<&ariadne::Source, Box<dyn std::fmt::Debug + '_>> {
-        Ok(self.files.entry(key.clone()).or_insert_with(|| {
-            ariadne::Source::from(
-                &std::fs::read_to_string(self.db.lookup_file_id(*key).path()).unwrap(),
-            )
-        }))
+        Ok(self
+            .files
+            .entry(key.clone())
+            .or_insert_with(|| ariadne::Source::from(&self.db.input_file(*key).to_string())))
     }
 
     fn display<'b>(&self, key: &'b File) -> Option<Box<dyn std::fmt::Display + 'b>> {
-        Some(Box::new(
-            self.db
-                .lookup_file_id(*key)
-                .to_file_path()
-                .ok()?
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string(),
-        ) as _)
+        Some(Box::new(self.db.lookup_file_id(*key)) as _)
     }
 }
