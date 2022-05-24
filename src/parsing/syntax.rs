@@ -81,15 +81,27 @@ pub enum SyntaxKind {
     Eof,
 
     // Composite nodes
-    Params,
-    AppList,
+    /// A parameter where a bare name is a binding
+    PatPar,
+    /// A parameter where a bare name is a reference
+    TermPar,
+
+    Pat,
+    Binder,
+    Tuple,
+    App,
+
+    // get rid of?
+    ImpArg,
+    ImpArgs,
+    ImpPar,
+    ImpPars,
+
     Var,
+    Member,
     Lam,
     Ty,
     Body,
-    ImpArg,
-    ImpPar,
-    ExpPar,
     WithClause,
     Pi,
     Do,
@@ -104,12 +116,10 @@ pub enum SyntaxKind {
     BinOp,
     If,
     Box,
-    Fun,
     Type,
     CaseBranch,
     GroupedExpr,
-    Member,
-    
+
     LetDef,
     FunDef,
     TypeDef,

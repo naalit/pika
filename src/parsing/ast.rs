@@ -112,28 +112,31 @@ macro_rules! make_nodes {
 
 make_nodes! {
     // Expressions
-    Type = ;
+    Type = kw: (!TypeTypeKw);
     Var = name: (!Name);
 
+
+    Pat = expr: Expr;
+    PatPar = pat: Pat;
+    TermPar = expr: Expr;
+    Binder = pat: Pat, ty: Ty;
+    Tuple = lhs: Expr, rhs: (1 Expr);
+
+    ImpPar = par: PatPar;
+    ImpPars = pars: [ImpPar];
     ImpArg = expr: Expr;
+    ImpArgs = args: [ImpArg];
 
-    ImpPar = pat: Expr, ty: Ty;
-    ExpPar = pat: Expr, ty: Ty;
-    enum Par = Var, ImpArg, ImpPar, ExpPar;
-    Params = params: [Par];
     WithClause = effs: [Expr];
-    Lam = params: Params, body: Body;
-    Pi = params: Params, body: Body, with: WithClause;
-    Fun = param: Expr, ret: (1 Expr), with: WithClause;
+    Lam = imp_par: ImpPars, exp_par: PatPar, body: Body;
+    Pi = imp_par: ImpPars, exp_par: TermPar, body: Body, with: WithClause;
 
-    enum AppArg = Expr, ImpArg;
-    AppList = exprs: [AppArg];
+    Member = var: Var;
+    App = lhs: Expr, member: Member, imp: ImpArgs, exp: (1 Expr);
 
     Do = block: [Stmt];
 
     Hole = ;
-
-    DotExpr = expr: Expr, member: Var;
 
     CaseKw = ;
     CatchKw = ;
@@ -156,27 +159,26 @@ make_nodes! {
 
     GroupedExpr = expr: Expr;
 
-    Member = expr: Expr, name: Var;
-
     enum Expr =
         Var,
         Lam,
         Pi,
-        AppList,
+        App,
         Do,
         Hole,
-        DotExpr,
         Case,
         Lit,
         Unit,
         BinOp,
         If,
         Box,
+        Type,
         GroupedExpr,
-        Member,
+        Tuple,
         // Patterns parse as expressions
         OrPat,
-        EffPat
+        EffPat,
+        Binder
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -188,11 +190,11 @@ make_nodes! {
     EffPat = a: Expr, b: (1 Expr);
 
     // Definitions
-    LetDef = pat: Expr, ty: Ty, body: Body;
-    FunDef = name: Var, params: Params, ret_ty: Ty, with: WithClause, body: Body;
-    ConsDef = name: Var, params: Params, ret_ty: Ty;
-    TypeDef = name: Var, params: Params, cons: [ConsDef], block: BlockDef;
-    TypeDefShort = name: Var, params: Params, inner: Ty, block: BlockDef;
+    LetDef = pat: Pat, body: Body;
+    FunDef = name: Var, imp_par: ImpPars, exp_par: PatPar, ret_ty: Ty, with: WithClause, body: Body;
+    ConsDef = name: Var, imp_par: ImpPars, exp_par: TermPar, ret_ty: Ty;
+    TypeDef = name: Var, imp_par: ImpPars, exp_par: PatPar, cons: [ConsDef], block: BlockDef;
+    TypeDefShort = name: Var, imp_par: ImpPars, exp_par: PatPar, inner: Ty, block: BlockDef;
     BlockDef = defs: [Def];
 
     enum Def = LetDef, FunDef, TypeDef, TypeDefShort;
@@ -201,8 +203,6 @@ make_nodes! {
 
     Root = def: Def;
 }
-
-use crate::pretty::Prec;
 
 pub trait Pretty {
     fn pretty(&self) -> Doc;
@@ -242,50 +242,87 @@ impl Pretty for Body {
     }
 }
 
-impl Pretty for Par {
+impl Pretty for TermPar {
     fn pretty(&self) -> Doc {
-        match self {
-            Par::Var(n) => n.pretty(),
-            Par::ImpArg(i) => Doc::start('[')
-                .chain(i.expr().pretty())
-                .add(']', ())
-                .prec(Prec::Atom),
-            Par::ImpPar(i) => Doc::start('[')
-                .chain(i.pat().pretty())
-                .add(':', ())
-                .space()
-                .chain(i.ty().pretty())
-                .add(']', ())
-                .prec(Prec::Atom),
-            Par::ExpPar(i) => Doc::start('(')
-                .chain(i.pat().pretty())
-                .add(':', ())
-                .space()
-                .chain(i.ty().pretty())
-                .add(')', ())
-                .prec(Prec::Atom),
-        }
+        self.expr().pretty()
+    }
+}
+impl Pretty for PatPar {
+    fn pretty(&self) -> Doc {
+        self.pat().pretty()
+    }
+}
+impl Pretty for Pat {
+    fn pretty(&self) -> Doc {
+        self.expr().pretty()
+    }
+}
+impl Pretty for ImpPar {
+    fn pretty(&self) -> Doc {
+        Doc::start('[').chain(self.par().pretty()).add(']', ())
+    }
+}
+impl Pretty for ImpArg {
+    fn pretty(&self) -> Doc {
+        Doc::start('[').chain(self.expr().pretty()).add(']', ())
+    }
+}
+impl Pretty for ImpArgs {
+    fn pretty(&self) -> Doc {
+        Doc::intersperse(self.args().iter().map(|x| x.pretty()), Doc::none())
+    }
+}
+impl Pretty for ImpPars {
+    fn pretty(&self) -> Doc {
+        Doc::intersperse(self.pars().iter().map(|x| x.pretty()), Doc::none())
     }
 }
 
-impl Pretty for AppArg {
-    fn pretty(&self) -> Doc {
-        match self {
-            AppArg::Expr(e) => e.pretty(),
-            AppArg::ImpArg(i) => Doc::start('[')
-                .chain(i.expr().pretty())
-                .add(']', ())
-                .prec(Prec::Atom),
-        }
-    }
-}
+// impl Pretty for Par {
+//     fn pretty(&self) -> Doc {
+//         match self {
+//             Par::Var(n) => n.pretty(),
+//             Par::ImpArg(i) => Doc::start('[')
+//                 .chain(i.expr().pretty())
+//                 .add(']', ())
+//                 .prec(Prec::Atom),
+//             Par::ImpPar(i) => Doc::start('[')
+//                 .chain(i.pat().pretty())
+//                 .add(':', ())
+//                 .space()
+//                 .chain(i.ty().pretty())
+//                 .add(']', ())
+//                 .prec(Prec::Atom),
+//             Par::ExpPar(i) => Doc::start('(')
+//                 .chain(i.pat().pretty())
+//                 .add(':', ())
+//                 .space()
+//                 .chain(i.ty().pretty())
+//                 .add(')', ())
+//                 .prec(Prec::Atom),
+//         }
+//     }
+// }
+
+// impl Pretty for AppArg {
+//     fn pretty(&self) -> Doc {
+//         match self {
+//             AppArg::Expr(e) => e.pretty(),
+//             AppArg::ImpArg(i) => Doc::start('[')
+//                 .chain(i.expr().pretty())
+//                 .add(']', ())
+//                 .prec(Prec::Atom),
+//         }
+//     }
+// }
 
 impl Pretty for ConsDef {
     fn pretty(&self) -> Doc {
         self.name()
             .pretty()
             .space()
-            .chain(self.params().pretty())
+            .chain(self.imp_par().pretty())
+            .chain(self.exp_par().pretty())
             .add(':', ())
             .space()
             .chain(self.ret_ty().pretty())
@@ -299,8 +336,6 @@ impl Pretty for Def {
                 .add("let", Doc::style_keyword())
                 .space()
                 .chain(l.pat().pretty())
-                .add(':', ())
-                .chain(l.ty().pretty())
                 .space()
                 .add('=', ())
                 .space()
@@ -310,7 +345,8 @@ impl Pretty for Def {
                 .space()
                 .chain(x.name().pretty())
                 .space()
-                .chain(x.params().pretty())
+                .chain(x.imp_par().pretty())
+                .chain(x.exp_par().pretty())
                 .add(':', ())
                 .space()
                 .chain(x.ret_ty().pretty())
@@ -323,7 +359,8 @@ impl Pretty for Def {
                 .space()
                 .chain(x.name().pretty())
                 .space()
-                .chain(x.params().pretty())
+                .chain(x.imp_par().pretty())
+                .chain(x.exp_par().pretty())
                 .space()
                 .add("=", Doc::style_keyword())
                 .space()
@@ -347,7 +384,8 @@ impl Pretty for Def {
                 .space()
                 .chain(x.name().pretty())
                 .space()
-                .chain(x.params().pretty())
+                .chain(x.imp_par().pretty())
+                .chain(x.exp_par().pretty())
                 .space()
                 .add("of", Doc::style_keyword())
                 .hardline()
@@ -389,35 +427,48 @@ impl Pretty for BinOpKind {
     }
 }
 
-impl Pretty for Params {
-    fn pretty(&self) -> Doc {
-        Doc::intersperse(
-            self.params().into_iter().map(|x| x.pretty()),
-            Doc::none().space(),
-        )
-    }
-}
-
 impl Pretty for Expr {
     fn pretty(&self) -> Doc {
         let p = match self {
             Expr::Var(n) => n.pretty(),
-            Expr::Lam(l) => l
-                .params()
-                .pretty()
+            Expr::Type(_) => Doc::none().add("Type", Doc::style_keyword()),
+            Expr::Lam(l) => Doc::none()
+                .chain(l.imp_par().pretty())
+                .chain(l.exp_par().pretty())
                 .space()
                 .add("=>", ())
+                .space()
                 .chain(l.body().pretty()),
-            Expr::Pi(l) => l
-                .params()
-                .pretty()
+            Expr::Pi(l) => Doc::none()
+                .chain(l.imp_par().pretty())
+                .chain(l.exp_par().pretty())
                 .space()
                 .add("->", ())
+                .space()
                 .chain(l.body().pretty()),
-            Expr::AppList(x) => Doc::intersperse(
-                x.exprs().into_iter().map(|x| x.pretty()),
-                Doc::none().space(),
-            ),
+            Expr::App(x) => {
+                if let Some(member) = x.member() {
+                    let doc = x.lhs().pretty().add('.', ()).chain(member.var().pretty());
+                    if x.imp().is_some() || x.exp().is_some() {
+                        doc.space().chain(x.imp().pretty()).chain(x.exp().pretty())
+                    } else {
+                        doc
+                    }
+                } else {
+                    x.lhs()
+                        .pretty()
+                        .space()
+                        .chain(x.imp().pretty())
+                        .chain(x.exp().pretty())
+                }
+            }
+            Expr::Tuple(x) => x
+                .lhs()
+                .pretty()
+                .add(',', ())
+                .space()
+                .chain(x.rhs().pretty()),
+            Expr::Binder(x) => x.pat().pretty().add(':', ()).space().chain(x.ty().pretty()),
             Expr::Do(x) => Doc::none()
                 .add("do", Doc::style_keyword())
                 .hardline()
@@ -427,7 +478,6 @@ impl Pretty for Expr {
                 ))
                 .indent(),
             Expr::Hole(_) => Doc::start("_"),
-            Expr::DotExpr(x) => x.expr().pretty().add('.', ()).chain(x.member().pretty()),
             Expr::Case(x) => Doc::none()
                 .add("case", Doc::style_keyword())
                 .space()
@@ -486,8 +536,7 @@ impl Pretty for Expr {
                 )
                 .space()
                 .chain(x.expr().pretty()),
-            Expr::GroupedExpr(x) => Doc::start('(').chain(x.expr().pretty()).add(')', ()),
-            Expr::Member(x) => x.expr().pretty().add('.', ()).chain(x.name().pretty()),
+            Expr::GroupedExpr(x) => return Doc::start('(').chain(x.expr().pretty()).add(')', ()),
             Expr::OrPat(x) => x.a().pretty().add('|', ()).chain(x.b().pretty()),
             Expr::EffPat(x) => Doc::none()
                 .add("eff", Doc::style_keyword())

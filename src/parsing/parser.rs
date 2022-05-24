@@ -63,7 +63,12 @@ impl<'a> Parser<'a> {
     fn advance_no_ws(&mut self) {
         let tok = self.lex_result.kind[self.tok_idx];
         let start = self.lex_result.start[self.tok_idx];
-        let end = self.lex_result.start.get(self.tok_idx + 1).copied().unwrap_or_else(|| self.text.len_chars() as u32);
+        let end = self
+            .lex_result
+            .start
+            .get(self.tok_idx + 1)
+            .copied()
+            .unwrap_or_else(|| self.text.len_chars() as u32);
         let slice = self.text.slice(start as usize..end as usize);
         self.builder
             .token(tok.into(), &std::borrow::Cow::<'a, str>::from(slice));
@@ -78,17 +83,32 @@ impl<'a> Parser<'a> {
             .unwrap_or(Tok::Eof)
     }
 
+    fn peek(&self, num_ahead: usize) -> Tok {
+        self.lex_result
+            .kind
+            .get(self.tok_idx + num_ahead)
+            .copied()
+            .unwrap_or(Tok::Eof)
+    }
+
     fn tok_span(&self) -> RelSpan {
         let start = self.lex_result.start[self.tok_idx];
-        let end = self.lex_result.start.get(self.tok_idx + 1).copied().unwrap_or_else(|| self.text.len_chars() as u32);
+        let end = self
+            .lex_result
+            .start
+            .get(self.tok_idx + 1)
+            .copied()
+            .unwrap_or_else(|| self.text.len_chars() as u32);
         start..end
     }
 
-    fn expect(&mut self, t: Tok) {
+    fn expect(&mut self, t: Tok) -> bool {
         if self.cur() != t {
             self.errors.push((ParseError::Expected(t), self.tok_span()));
+            false
         } else {
             self.advance();
+            true
         }
     }
 
@@ -135,7 +155,10 @@ impl<'a> Parser<'a> {
             }
         } else {
             let span = self.tok_span();
-            self.errors.push((ParseError::ExpectedMsg("newline or end of definitions".into()), span));
+            self.errors.push((
+                ParseError::ExpectedMsg("newline or end of definitions".into()),
+                span,
+            ));
         }
     }
 
@@ -147,17 +170,7 @@ impl<'a> Parser<'a> {
 
                 self.var();
 
-                self.push(Tok::Params);
-                loop {
-                    match self.cur() {
-                        Tok::POpen | Tok::SOpen => _ = self.parse_group(),
-                        t if t.starts_atom() => self.atom(),
-                        // TODO better error handling heuristics here
-                        // when should we give up on the function and when not?
-                        _ => break,
-                    }
-                }
-                self.pop();
+                self.params(true);
 
                 if self.maybe(Tok::Colon) {
                     self.push(Tok::Ty);
@@ -180,15 +193,7 @@ impl<'a> Parser<'a> {
 
                 self.var();
 
-                self.push(Tok::Params);
-                loop {
-                    match self.cur() {
-                        Tok::POpen | Tok::SOpen => _ = self.parse_group(),
-                        t if t.starts_atom() => self.atom(),
-                        _ => break,
-                    }
-                }
-                self.pop();
+                self.params(true);
 
                 if self.maybe(Tok::Equals) {
                     // Short form: type MyInt = i32 [where ...]
@@ -209,15 +214,7 @@ impl<'a> Parser<'a> {
 
                         self.var();
 
-                        self.push(Tok::Params);
-                        loop {
-                            match self.cur() {
-                                Tok::POpen | Tok::SOpen => _ = self.parse_group(),
-                                t if t.starts_atom() => self.atom(),
-                                _ => break,
-                            }
-                        }
-                        self.pop();
+                        self.params(false);
 
                         self.pop();
 
@@ -246,9 +243,27 @@ impl<'a> Parser<'a> {
                     self.def_end();
                 }
             }
+            Tok::LetKw => {
+                self.push(Tok::LetDef);
+                self.advance();
+
+                self.push(Tok::Pat);
+                self.expr(());
+                self.pop();
+
+                self.expect(Tok::Equals);
+
+                self.push(Tok::Body);
+                self.expr(());
+                self.pop();
+
+                self.pop();
+                self.def_end();
+            }
             _ => {
                 let span = self.tok_span();
-                self.errors.push((ParseError::ExpectedMsg("definition".into()), span));
+                self.errors
+                    .push((ParseError::ExpectedMsg("definition".into()), span));
                 self.advance();
             }
         }
@@ -268,12 +283,17 @@ impl<'a> Parser<'a> {
                 self.advance();
                 if !self.maybe(Tok::PClose) {
                     self.expr(());
-                    self.expect(Tok::PClose);    
+                    self.expect(Tok::PClose);
                 }
                 self.pop();
             }
             Tok::Name => {
                 self.var();
+            }
+            Tok::TypeTypeKw => {
+                self.push(Tok::Type);
+                self.advance();
+                self.pop();
             }
             tok => {
                 let span = self.tok_span();
@@ -283,57 +303,6 @@ impl<'a> Parser<'a> {
                 self.errors
                     .push((ParseError::ExpectedMsg("expression".into()), span));
             }
-        }
-    }
-
-    fn resolve_app(&mut self, atoms: &mut Vec<Checkpoint>) {
-        atoms.split_off(0).first().map(|&x| {
-            self.push_at(x, Tok::AppList);
-            self.pop();
-        });
-    }
-
-    /// (start checkpoint, whether it must be a parameter)
-    fn parse_group(&mut self) -> (Checkpoint, bool) {
-        let (close, par, arg) = match self.cur() {
-            Tok::SOpen => (Tok::SClose, Tok::ImpPar, Tok::ImpArg),
-            Tok::POpen => (Tok::PClose, Tok::ExpPar, Tok::GroupedExpr),
-            _ => unreachable!(),
-        };
-        let cp = self.checkpoint();
-        self.advance();
-
-        // `(: Type) -> ...` is allowed, usually used for traits `[x y z] [: Add x y z] -> x -> y -> z`
-        if self.maybe(Tok::Colon) {
-            self.push(Tok::Ty);
-            self.expr(());
-            self.pop();
-            self.expect(close);
-            self.push_at(cp, par);
-            self.pop();
-            return (cp, true);
-        }
-        // ()
-        if self.maybe(close) {
-            self.push_at(cp, arg);
-            self.pop();
-            return (cp, false);
-        }
-
-        self.expr(());
-        if self.maybe(Tok::Colon) {
-            self.push(Tok::Ty);
-            self.expr(());
-            self.pop();
-            self.expect(close);
-            self.push_at(cp, par);
-            self.pop();
-            (cp, true)
-        } else {
-            self.expect(close);
-            self.push_at(cp, arg);
-            self.pop();
-            (cp, false)
         }
     }
 
@@ -352,44 +321,148 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn lambda_pi(&mut self, lhs: Checkpoint) {
-        match self.cur() {
-            Tok::POpen | Tok::SOpen => _ = self.parse_group(),
-            t if t.starts_atom() => self.atom(),
-            Tok::WideArrow => {
-                self.push_at(lhs, Tok::Params);
-                self.pop();
-                self.advance();
+    fn params_inner(&mut self) -> Checkpoint {
+        // First implicit params
+        let cp = self.checkpoint();
+        let mut had_imp = false;
+        while self.cur() == Tok::SOpen {
+            had_imp = true;
+            self.push(Tok::ImpPar);
+            self.push(Tok::PatPar);
+            self.push(Tok::Pat);
 
-                // parse body
-                self.push(Tok::Body);
+            self.advance();
+            self.expr(());
+            self.expect(Tok::SClose);
+
+            self.pop();
+            self.pop();
+            self.pop();
+        }
+        if had_imp {
+            self.push_at(cp, Tok::ImpPars);
+            self.pop();
+        }
+
+        // Then explicit
+        let cp = self.checkpoint();
+        self.atom();
+        cp
+    }
+
+    fn params(&mut self, pat: bool) {
+        let cp = self.params_inner();
+        if pat {
+            self.push_at(cp, Tok::PatPar);
+            self.push_at(cp, Tok::Pat);
+            self.pop();
+        } else {
+            self.push_at(cp, Tok::TermPar);
+        }
+        self.pop();
+    }
+
+    fn arguments(&mut self) {
+        // First implicit args
+        let cp = self.checkpoint();
+        let mut had_imp = false;
+        while self.cur() == Tok::SOpen {
+            had_imp = true;
+            self.push(Tok::ImpArg);
+            self.advance();
+            self.expr(());
+            self.expect(Tok::SClose);
+            self.pop();
+        }
+        if had_imp {
+            self.push_at(cp, Tok::ImpArgs);
+            self.pop();
+        }
+
+        // Then explicit
+        if self.cur().starts_atom() {
+            self.atom();
+        }
+    }
+
+    fn argument_block(&mut self) {
+        // Implicit arguments
+        let cp = self.checkpoint();
+        let mut had_imp = false;
+        while self.cur() == Tok::SOpen {
+            had_imp = true;
+            self.push(Tok::ImpArg);
+            self.advance();
+            self.expr(());
+            self.expect(Tok::SClose);
+            self.pop();
+            self.maybe(Tok::Newline);
+        }
+        if had_imp {
+            self.push_at(cp, Tok::ImpArgs);
+            self.pop();
+        }
+
+        // Explicit
+        if !had_imp || self.cur().starts_atom() {
+            let mut cp = self.checkpoint();
+            let mut ntuples = 0;
+            loop {
+                let cp2 = self.checkpoint();
                 self.expr(());
-                self.pop();
-
-                self.push_at(lhs, Tok::Lam);
-                self.pop();
+                if self.maybe(Tok::Comma) {
+                    match self.cur() {
+                        Tok::Newline => {
+                            self.push_at(cp, Tok::Tuple);
+                            ntuples += 1;
+                            cp = cp2;
+                            self.advance()
+                        }
+                        Tok::Dedent => {
+                            self.advance();
+                            break;
+                        }
+                        _ => {
+                            let span = self.tok_span();
+                            self.errors
+                                .push((ParseError::ExpectedMsg("newline or dedent".into()), span));
+                            while !matches!(self.cur(), Tok::Newline | Tok::Dedent | Tok::Eof) {
+                                self.advance();
+                            }
+                            if self.maybe(Tok::Newline) {
+                                continue;
+                            } else {
+                                self.advance();
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    if !self.maybe(Tok::Dedent) {
+                        let span = self.tok_span();
+                        self.errors.push((
+                            ParseError::ExpectedMsg(
+                                "dedent or comma to continue argument list".into(),
+                            ),
+                            span,
+                        ));
+                        if self.maybe(Tok::Newline) {
+                            // Pretend there was a comma
+                            self.push_at(cp, Tok::Tuple);
+                            ntuples += 1;
+                            cp = cp2;
+                            continue;
+                        } else {
+                            while !self.maybe(Tok::Dedent) {
+                                self.advance();
+                            }
+                        }
+                    }
+                    break;
+                }
             }
-            Tok::Arrow => {
-                self.push_at(lhs, Tok::Params);
+            for _ in 0..ntuples {
                 self.pop();
-                self.advance();
-
-                // parse body
-                self.push(Tok::Body);
-                self.expr(());
-                self.pop();
-
-                self.maybe_with();
-
-                self.push_at(lhs, Tok::Pi);
-                self.pop();
-            }
-            _ => {
-                let span = self.tok_span();
-                self.errors.push((
-                    ParseError::ExpectedMsg("'=>' or '->' after parameter".into()),
-                    span,
-                ));
             }
         }
     }
@@ -402,7 +475,6 @@ impl<'a> Parser<'a> {
             lhs,
             allow_lambda,
         } = params.into();
-        let mut atoms: Vec<Checkpoint> = lhs.iter().copied().collect();
         let lhs = match lhs {
             None => {
                 let cp = self.checkpoint();
@@ -413,6 +485,16 @@ impl<'a> Parser<'a> {
                         self.advance();
                         self.expr(());
                         self.expect(Tok::Dedent);
+                        self.pop();
+                    }
+                    Tok::Colon if Prec::Binder > min_prec => {
+                        self.push(Tok::Binder);
+
+                        self.advance();
+                        self.push(Tok::Ty);
+                        self.expr(Prec::Binder);
+                        self.pop();
+
                         self.pop();
                     }
                     Tok::EffKw => {
@@ -494,10 +576,55 @@ impl<'a> Parser<'a> {
 
                         self.pop();
                     }
-                    _ => {
-                        atoms.push(cp);
-                        self.atom()
+                    // If it starts with [, it must be a lambda or pi
+                    Tok::SOpen => {
+                        let par_cp = self.params_inner();
+                        match self.cur() {
+                            Tok::WideArrow => {
+                                self.push_at(cp, Tok::Lam);
+
+                                self.push_at(par_cp, Tok::PatPar);
+                                self.push_at(par_cp, Tok::Pat);
+                                self.pop();
+                                self.pop();
+
+                                self.advance();
+
+                                self.push(Tok::Body);
+                                self.expr(());
+                                self.pop();
+
+                                self.pop();
+                            }
+                            Tok::Arrow => {
+                                self.push_at(cp, Tok::Pi);
+
+                                self.push_at(par_cp, Tok::TermPar);
+                                self.pop();
+
+                                self.advance();
+
+                                self.push(Tok::Body);
+                                self.expr(Prec::Arrow);
+                                self.pop();
+
+                                self.maybe_with();
+
+                                self.pop();
+                            }
+                            _ => {
+                                let span = self.tok_span();
+                                self.advance();
+                                self.errors.push((
+                                    ParseError::ExpectedMsg(
+                                        "-> or => after implicit parameters".into(),
+                                    ),
+                                    span,
+                                ));
+                            }
+                        }
                     }
+                    _ => self.atom(),
                 }
                 cp
             }
@@ -507,43 +634,73 @@ impl<'a> Parser<'a> {
         loop {
             match self.cur() {
                 Tok::SOpen | Tok::POpen => {
-                    let (cp, par) = self.parse_group();
-                    if par {
-                        self.lambda_pi(lhs);
-                        return;
-                    } else {
-                        atoms.push(cp);
-                    }
+                    self.push_at(lhs, Tok::App);
+                    self.arguments();
+                    self.pop();
                 }
 
                 x if x.starts_atom() => {
-                    atoms.push(self.checkpoint());
-                    self.atom();
+                    self.push_at(lhs, Tok::App);
+                    self.arguments();
+                    self.pop();
                 }
                 Tok::Dot => {
-                    let cp = atoms.last().copied().unwrap_or_else(|| {
-                        let span = self.tok_span();
-                        self.errors.push((
-                            ParseError::ExpectedMsg("expression before '.'".into()),
-                            span,
-                        ));
-                        self.checkpoint()
-                    });
-                    self.push_at(cp, Tok::Member);
+                    self.push_at(lhs, Tok::App);
                     self.advance();
+
+                    self.push(Tok::Member);
                     self.var();
+                    self.pop();
+
+                    if self.maybe(Tok::Indent) {
+                        self.argument_block();
+                    } else {
+                        self.arguments();
+                    }
+                    self.pop();
+                }
+                // , is right associative
+                Tok::Comma if Prec::Comma >= min_prec => {
+                    // Trailing comma special case
+                    if matches!(self.peek(1), Tok::Newline | Tok::Dedent) {
+                        return;
+                    }
+
+                    self.push_at(lhs, Tok::Tuple);
+
+                    self.advance();
+                    self.expr(Prec::Comma);
+
+                    self.pop();
+                }
+                // : is non-associative
+                Tok::Colon if Prec::Binder > min_prec => {
+                    self.push_at(lhs, Tok::Binder);
+                    self.push_at(lhs, Tok::Pat);
+                    self.pop();
+
+                    self.advance();
+                    self.push(Tok::Ty);
+                    self.expr(Prec::Binder);
+                    self.pop();
+
                     self.pop();
                 }
                 // This indent appears before an operator (inc. application)
                 // So implement operator chaining
                 // If we're not at the outermost expression, though, pass control back there
                 Tok::Indent => {
-                    self.resolve_app(&mut atoms);
                     if min_prec == Prec::Min {
                         self.advance();
                         loop {
+                            // Handle application
+                            if self.cur().starts_atom() || self.cur() == Tok::SOpen {
+                                self.push_at(lhs, Tok::App);
+                                self.argument_block();
+                                self.pop();
+                                break;
+                            }
                             // Each line has an operator + rhs, then a newline
-                            // This magically works for application as well!
                             self.expr((Prec::Min, Some(lhs)));
                             match self.cur() {
                                 // don't allow more operators after dedent
@@ -568,24 +725,38 @@ impl<'a> Parser<'a> {
                 }
                 // Lambda time
                 Tok::WideArrow if allow_lambda => {
-                    self.lambda_pi(lhs);
-                    return;
+                    self.push_at(lhs, Tok::Lam);
+
+                    self.push_at(lhs, Tok::PatPar);
+                    self.push_at(lhs, Tok::Pat);
+                    self.pop();
+                    self.pop();
+
+                    self.advance();
+
+                    self.push(Tok::Body);
+                    self.expr(());
+                    self.pop();
+
+                    self.pop();
                 }
-                // >= makes it right associative
-                Tok::Arrow => {
-                    self.resolve_app(&mut atoms);
-                    if Prec::Arrow >= min_prec {
-                        self.push_at(lhs, Tok::Arrow.into());
-                        self.advance();
-                        self.expr(Prec::Arrow);
-                        self.pop();
-                    } else {
-                        break;
-                    }
+                Tok::Arrow if Prec::Arrow >= min_prec => {
+                    self.push_at(lhs, Tok::Pi);
+
+                    self.push_at(lhs, Tok::TermPar);
+                    self.pop();
+
+                    self.advance();
+
+                    self.push(Tok::Body);
+                    self.expr(Prec::Arrow);
+                    self.pop();
+
+                    self.maybe_with();
+
+                    self.pop();
                 }
                 op if op.binop_prec().is_some() => {
-                    self.resolve_app(&mut atoms);
-
                     let prec = op.binop_prec().unwrap();
                     if prec > min_prec {
                         self.push(Tok::BinOpKind.into());
@@ -603,8 +774,6 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
-
-        self.resolve_app(&mut atoms);
     }
 }
 
@@ -712,6 +881,10 @@ enum Prec {
     App,
     /// if (not a real binop)
     If,
+    /// ,
+    Comma,
+    /// :
+    Binder,
     /// Synthetic minimum precedence to allow all operators
     Min,
 }
@@ -722,7 +895,6 @@ impl Prec {
     /// If this is one of the precedence levels used in arithmetic, which have a total order between them, returns that level as a `usize`.
     fn arith_prec(self) -> Option<usize> {
         match self {
-            Prec::Pipe => Some(0),
             Prec::Logic => Some(1),
             Prec::Comp => Some(2),
             Prec::AddSub => Some(3),
@@ -746,6 +918,17 @@ impl PartialOrd for Prec {
             (Prec::If, Prec::If) => return Some(Ordering::Equal),
             (Prec::If, _) => return Some(Ordering::Less),
             (_, Prec::If) => return Some(Ordering::Greater),
+            // Next is pipe
+            (Prec::Pipe, Prec::Pipe) => return Some(Ordering::Equal),
+            (Prec::Pipe, _) => return Some(Ordering::Less),
+            (_, Prec::Pipe) => return Some(Ordering::Greater),
+            // Next lowest precedence is comma, then binder
+            (Prec::Comma, Prec::Comma) => return Some(Ordering::Equal),
+            (Prec::Comma, _) => return Some(Ordering::Less),
+            (_, Prec::Comma) => return Some(Ordering::Greater),
+            (Prec::Binder, Prec::Binder) => return Some(Ordering::Equal),
+            (Prec::Binder, _) => return Some(Ordering::Less),
+            (_, Prec::Binder) => return Some(Ordering::Greater),
             _ => (),
         }
         match (self.arith_prec(), other.arith_prec()) {
@@ -848,7 +1031,6 @@ impl Tok {
     fn binop_prec(&self) -> Option<Prec> {
         Some(match self {
             Tok::AndKw | Tok::OrKw => Prec::Logic,
-            Tok::Arrow => Prec::Arrow,
             Tok::Plus | Tok::Minus => Prec::AddSub,
             Tok::Times | Tok::Mod | Tok::Div => Prec::MulDiv,
             Tok::Exp => Prec::Exp,

@@ -95,14 +95,16 @@ impl<'i> Lexer<'i> {
                 }
             } else if next.is_whitespace() && next != '\n' {
                 if mode == Mode::Comment {
-                    self.pending_toks.push_back(self.tok_in_place(Tok::Whitespace));
+                    self.pending_toks
+                        .push_back(self.tok_in_place(Tok::Whitespace));
                     self.tok_start = self.pos;
                 }
                 mode = Mode::Space;
                 self.next();
             } else {
                 if mode != Mode::None {
-                    self.pending_toks.push_back(self.tok_in_place(Tok::Whitespace));
+                    self.pending_toks
+                        .push_back(self.tok_in_place(Tok::Whitespace));
                     self.tok_start = self.pos;
                 }
                 break;
@@ -419,14 +421,18 @@ impl<'i> Lexer<'i> {
                                     break r;
                                 }
                                 None => {
-                                    self.errors.push((LexError::UnclosedString, self.tok_start..self.pos-1));
+                                    self.errors.push((
+                                        LexError::UnclosedString,
+                                        self.tok_start..self.pos - 1,
+                                    ));
                                     break self.tok_in_place(Tok::Error);
                                 }
                             }
                         }
                         Some(c) => buf.push(c),
                         None => {
-                            self.errors.push((LexError::UnclosedString, self.tok_start..self.pos-1));
+                            self.errors
+                                .push((LexError::UnclosedString, self.tok_start..self.pos - 1));
                             break self.tok_in_place(Tok::Error);
                         }
                     }
