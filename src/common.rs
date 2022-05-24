@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 pub use crate::parsing::{ast, FileLoc};
 pub use crate::pretty::Doc;
+pub use ast::AstNode;
+
 use ariadne::Color;
 pub use ariadne::Fmt;
 pub use std::borrow::Cow;
@@ -98,7 +100,7 @@ impl Severity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Label {
     pub span: RelSpan,
     pub message: Doc,
@@ -115,7 +117,7 @@ impl Label {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub severity: Severity,
     pub message: Doc,

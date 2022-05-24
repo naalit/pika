@@ -7,20 +7,28 @@ use super::{lexer::*, SplitId};
 use crate::common::*;
 
 enum ParseError {
-    Expected(Tok),
-    ExpectedMsg(Cow<'static, str>),
-    UnexpectedMsg(Cow<'static, str>),
+    Expected(Cow<'static, str>, Option<Cow<'static, str>>),
+    Unexpected(Cow<'static, str>, Option<Cow<'static, str>>),
     Other(Cow<'static, str>),
 }
 impl ParseError {
     fn to_error(self, span: RelSpan) -> Error {
         let mut gen = ariadne::ColorGenerator::default();
+        let _ = gen.next();
         let a = gen.next();
-        let b = gen.next();
         let message = match self {
-            ParseError::Expected(t) => Doc::start("expected ").add(t, a).space().add("here", ()),
-            ParseError::ExpectedMsg(m) => Doc::start("expected ").add(m, a).space().add("here", ()),
-            ParseError::UnexpectedMsg(m) => Doc::start("unexpected ").add(m, a),
+            ParseError::Expected(t, None) => {
+                Doc::start("expected ").add(t, a).space().add("here", ())
+            }
+            ParseError::Expected(t, Some(m)) => {
+                Doc::start("expected ").add(t, a).space().add(m, ())
+            }
+            ParseError::Unexpected(t, None) => {
+                Doc::start("unexpected ").add(t, a).space().add("here", ())
+            }
+            ParseError::Unexpected(t, Some(m)) => {
+                Doc::start("unexpected ").add(t, a).space().add(m, ())
+            }
             ParseError::Other(m) => Doc::start(m),
         };
         Error {
@@ -29,11 +37,28 @@ impl ParseError {
             primary: Label {
                 span,
                 message,
-                color: Some(b),
+                color: Some(a),
             },
             secondary: Vec::new(),
             note: None,
         }
+    }
+}
+
+trait IntoMsg {
+    fn into_msg(self) -> Option<Cow<'static, str>>;
+}
+trait X {}
+impl<T: Into<Cow<'static, str>> + X> IntoMsg for T {
+    fn into_msg(self) -> Option<Cow<'static, str>> {
+        Some(self.into())
+    }
+}
+impl X for &'static str {}
+impl X for String {}
+impl IntoMsg for Option<Cow<'static, str>> {
+    fn into_msg(self) -> Option<Cow<'static, str>> {
+        self
     }
 }
 
@@ -102,9 +127,15 @@ impl<'a> Parser<'a> {
         start..end
     }
 
+    fn expected(&mut self, x: impl Into<Cow<'static, str>>, m: impl IntoMsg) {
+        let span = self.tok_span();
+        self.errors
+            .push((ParseError::Expected(x.into(), m.into_msg()), span));
+    }
+
     fn expect(&mut self, t: Tok) -> bool {
         if self.cur() != t {
-            self.errors.push((ParseError::Expected(t), self.tok_span()));
+            self.expected(t.to_string(), None);
             false
         } else {
             self.advance();
@@ -154,11 +185,7 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
         } else {
-            let span = self.tok_span();
-            self.errors.push((
-                ParseError::ExpectedMsg("newline or end of definitions".into()),
-                span,
-            ));
+            self.expected("newline", " or end of definitions");
         }
     }
 
@@ -261,9 +288,7 @@ impl<'a> Parser<'a> {
                 self.def_end();
             }
             _ => {
-                let span = self.tok_span();
-                self.errors
-                    .push((ParseError::ExpectedMsg("definition".into()), span));
+                self.expected("definition", None);
                 self.advance();
             }
         }
@@ -296,12 +321,10 @@ impl<'a> Parser<'a> {
                 self.pop();
             }
             tok => {
-                let span = self.tok_span();
+                self.expected("expression", None);
                 if tok.starts_atom() {
                     self.advance();
                 }
-                self.errors
-                    .push((ParseError::ExpectedMsg("expression".into()), span));
             }
         }
     }
@@ -423,9 +446,7 @@ impl<'a> Parser<'a> {
                             break;
                         }
                         _ => {
-                            let span = self.tok_span();
-                            self.errors
-                                .push((ParseError::ExpectedMsg("newline or dedent".into()), span));
+                            self.expected("newline or dedent", "after comma");
                             while !matches!(self.cur(), Tok::Newline | Tok::Dedent | Tok::Eof) {
                                 self.advance();
                             }
@@ -439,13 +460,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     if !self.maybe(Tok::Dedent) {
-                        let span = self.tok_span();
-                        self.errors.push((
-                            ParseError::ExpectedMsg(
-                                "dedent or comma to continue argument list".into(),
-                            ),
-                            span,
-                        ));
+                        self.expected("dedent, or comma", "to continue argument list");
                         if self.maybe(Tok::Newline) {
                             // Pretend there was a comma
                             self.push_at(cp, Tok::Tuple);
@@ -613,14 +628,8 @@ impl<'a> Parser<'a> {
                                 self.pop();
                             }
                             _ => {
-                                let span = self.tok_span();
+                                self.expected("-> or =>", "after implicit parameters");
                                 self.advance();
-                                self.errors.push((
-                                    ParseError::ExpectedMsg(
-                                        "-> or => after implicit parameters".into(),
-                                    ),
-                                    span,
-                                ));
                             }
                         }
                     }
@@ -713,8 +722,7 @@ impl<'a> Parser<'a> {
                                     continue;
                                 }
                                 _ => {
-                                    let span = self.tok_span();
-                                    self.errors.push((ParseError::Expected(Tok::Dedent), span));
+                                    self.expected("dedent", None);
                                     break;
                                 }
                             }
@@ -821,6 +829,7 @@ impl From<(Prec, Option<Checkpoint>)> for ExprParams {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseResult {
     pub errors: Vec<Error>,
     pub green: GreenNode,

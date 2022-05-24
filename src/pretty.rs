@@ -31,7 +31,7 @@ pub enum Prec {
     Atom,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum DocEntry {
     String(String, Style),
     Break,
@@ -39,7 +39,7 @@ enum DocEntry {
     Doc(Box<Doc>),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Doc {
     data: VecDeque<DocEntry>,
     indent: usize,

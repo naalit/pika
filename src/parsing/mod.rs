@@ -20,7 +20,7 @@ pub mod ast;
 pub mod parser;
 mod splitter;
 mod syntax;
-use std::{fmt::Display, path::Path};
+use std::fmt::Display;
 
 pub use syntax::*;
 
@@ -94,7 +94,17 @@ pub trait Parser {
 
     #[salsa::invoke(lexer::lexer_entry)]
     fn lex(&self, file: File, id: SplitId) -> Option<lexer::LexResult>;
+
+    #[salsa::invoke(parser::parser_entry)]
+    fn parse(&self, file: File, id: SplitId) -> Option<parser::ParseResult>;
 }
+pub trait ParserExt: Parser {
+    fn ast(&self, file: File, id: SplitId) -> Option<ast::Root> {
+        let result = self.parse(file, id)?;
+        ast::Root::cast(SyntaxNode::new_root(result.green))
+    }
+}
+impl<T: Parser> ParserExt for T {}
 
 fn all_split_ids(db: &dyn Parser, file: File) -> Vec<SplitId> {
     db.all_splits(file)
