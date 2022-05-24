@@ -173,7 +173,8 @@ impl Doc {
     /// Marks that any line breaks in what we have so far should be indented another level
     pub fn indent(mut self) -> Self {
         self.indent += 4;
-        self
+        // We need another doc so the indent doesn't extend farther
+        Doc::none().chain(self)
     }
 
     /// Adds a break character, which might be a space or a newline

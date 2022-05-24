@@ -45,7 +45,8 @@ struct Parser<'a> {
     errors: Vec<Spanned<ParseError>>,
 }
 impl<'a> Parser<'a> {
-    // Helper methods
+    // -- helper methods --
+
     fn skip_ws(&mut self) {
         while matches!(self.cur(), Tok::Whitespace | Tok::Comment) {
             self.advance_no_ws()
@@ -62,7 +63,7 @@ impl<'a> Parser<'a> {
     fn advance_no_ws(&mut self) {
         let tok = self.lex_result.kind[self.tok_idx];
         let start = self.lex_result.start[self.tok_idx];
-        let end = self.lex_result.start[self.tok_idx + 1];
+        let end = self.lex_result.start.get(self.tok_idx + 1).copied().unwrap_or_else(|| self.text.len_chars() as u32);
         let slice = self.text.slice(start as usize..end as usize);
         self.builder
             .token(tok.into(), &std::borrow::Cow::<'a, str>::from(slice));
@@ -79,7 +80,7 @@ impl<'a> Parser<'a> {
 
     fn tok_span(&self) -> RelSpan {
         let start = self.lex_result.start[self.tok_idx];
-        let end = self.lex_result.start[self.tok_idx + 1];
+        let end = self.lex_result.start.get(self.tok_idx + 1).copied().unwrap_or_else(|| self.text.len_chars() as u32);
         start..end
     }
 
@@ -119,7 +120,142 @@ impl<'a> Parser<'a> {
         self.pop();
     }
 
-    // expression parsing
+    // -- definition parsing --
+
+    fn defs(&mut self) {
+        while !matches!(self.cur(), Tok::Eof | Tok::Dedent) {
+            self.def();
+        }
+    }
+
+    fn def_end(&mut self) {
+        if matches!(self.cur(), Tok::Newline | Tok::Eof | Tok::Dedent) {
+            if self.cur() == Tok::Newline {
+                self.advance();
+            }
+        } else {
+            let span = self.tok_span();
+            self.errors.push((ParseError::ExpectedMsg("newline or end of definitions".into()), span));
+        }
+    }
+
+    fn def(&mut self) {
+        match self.cur() {
+            Tok::FunKw => {
+                self.push(Tok::FunDef);
+                self.advance();
+
+                self.var();
+
+                self.push(Tok::Params);
+                loop {
+                    match self.cur() {
+                        Tok::POpen | Tok::SOpen => _ = self.parse_group(),
+                        t if t.starts_atom() => self.atom(),
+                        // TODO better error handling heuristics here
+                        // when should we give up on the function and when not?
+                        _ => break,
+                    }
+                }
+                self.pop();
+
+                if self.maybe(Tok::Colon) {
+                    self.push(Tok::Ty);
+                    self.expr(());
+                    self.pop();
+                }
+                // Allow function declarations without =
+                if self.maybe(Tok::Equals) {
+                    self.push(Tok::Body);
+                    self.expr(());
+                    self.pop();
+                }
+
+                self.pop();
+                self.def_end();
+            }
+            Tok::TypeKw | Tok::EffKw => {
+                let cp = self.checkpoint();
+                self.advance();
+
+                self.var();
+
+                self.push(Tok::Params);
+                loop {
+                    match self.cur() {
+                        Tok::POpen | Tok::SOpen => _ = self.parse_group(),
+                        t if t.starts_atom() => self.atom(),
+                        _ => break,
+                    }
+                }
+                self.pop();
+
+                if self.maybe(Tok::Equals) {
+                    // Short form: type MyInt = i32 [where ...]
+                    self.push_at(cp, Tok::TypeDefShort);
+
+                    self.push(Tok::Ty);
+                    self.expr(());
+                    self.pop();
+                } else {
+                    self.push_at(cp, Tok::TypeDef);
+
+                    self.expect(Tok::OfKw);
+                    self.expect(Tok::Indent);
+
+                    // constructors
+                    loop {
+                        self.push(Tok::ConsDef);
+
+                        self.var();
+
+                        self.push(Tok::Params);
+                        loop {
+                            match self.cur() {
+                                Tok::POpen | Tok::SOpen => _ = self.parse_group(),
+                                t if t.starts_atom() => self.atom(),
+                                _ => break,
+                            }
+                        }
+                        self.pop();
+
+                        self.pop();
+
+                        if !self.maybe(Tok::Newline) {
+                            break;
+                        }
+                    }
+
+                    self.expect(Tok::Dedent);
+                }
+
+                let mut had_newline = self.maybe(Tok::Newline);
+                if self.maybe(Tok::WhereKw) {
+                    had_newline = false;
+                    self.push(Tok::BlockDef);
+
+                    self.expect(Tok::Indent);
+                    self.defs();
+                    self.expect(Tok::Dedent);
+
+                    self.pop();
+                }
+
+                self.pop();
+                if !had_newline {
+                    self.def_end();
+                }
+            }
+            _ => {
+                let span = self.tok_span();
+                self.errors.push((ParseError::ExpectedMsg("definition".into()), span));
+                self.advance();
+            }
+        }
+    }
+
+    // -- expression parsing --
+
     fn atom(&mut self) {
         match self.cur() {
             Tok::IntLit => {
@@ -130,16 +266,20 @@ impl<'a> Parser<'a> {
             Tok::POpen => {
                 self.push(Tok::GroupedExpr);
                 self.advance();
-                self.expr(Prec::Min, None);
-                self.expect(Tok::PClose);
+                if !self.maybe(Tok::PClose) {
+                    self.expr(());
+                    self.expect(Tok::PClose);    
+                }
                 self.pop();
             }
             Tok::Name => {
                 self.var();
             }
-            _ => {
+            tok => {
                 let span = self.tok_span();
-                self.advance();
+                if tok.starts_atom() {
+                    self.advance();
+                }
                 self.errors
                     .push((ParseError::ExpectedMsg("expression".into()), span));
             }
@@ -158,27 +298,32 @@ impl<'a> Parser<'a> {
         let (close, par, arg) = match self.cur() {
             Tok::SOpen => (Tok::SClose, Tok::ImpPar, Tok::ImpArg),
             Tok::POpen => (Tok::PClose, Tok::ExpPar, Tok::GroupedExpr),
-            _ => unreachable!()
+            _ => unreachable!(),
         };
         let cp = self.checkpoint();
         self.advance();
 
         // `(: Type) -> ...` is allowed, usually used for traits `[x y z] [: Add x y z] -> x -> y -> z`
         if self.maybe(Tok::Colon) {
-            self.advance();
             self.push(Tok::Ty);
-            self.expr(Prec::Min, None);
+            self.expr(());
             self.pop();
             self.expect(close);
             self.push_at(cp, par);
             self.pop();
             return (cp, true);
         }
+        // ()
+        if self.maybe(close) {
+            self.push_at(cp, arg);
+            self.pop();
+            return (cp, false);
+        }
 
-        self.expr(Prec::Min, None);
+        self.expr(());
         if self.maybe(Tok::Colon) {
             self.push(Tok::Ty);
-            self.expr(Prec::Min, None);
+            self.expr(());
             self.pop();
             self.expect(close);
             self.push_at(cp, par);
@@ -197,10 +342,10 @@ impl<'a> Parser<'a> {
             self.push(Tok::WithClause);
             self.advance();
 
-            self.expr(Prec::Bitwise, None);
+            self.expr(Prec::Bitwise);
 
             while self.maybe(Tok::Comma) {
-                self.expr(Prec::Bitwise, None);
+                self.expr(Prec::Bitwise);
             }
 
             self.pop();
@@ -212,22 +357,26 @@ impl<'a> Parser<'a> {
             Tok::POpen | Tok::SOpen => _ = self.parse_group(),
             t if t.starts_atom() => self.atom(),
             Tok::WideArrow => {
+                self.push_at(lhs, Tok::Params);
+                self.pop();
                 self.advance();
 
                 // parse body
                 self.push(Tok::Body);
-                self.expr(Prec::Min, None);
+                self.expr(());
                 self.pop();
 
                 self.push_at(lhs, Tok::Lam);
                 self.pop();
             }
             Tok::Arrow => {
+                self.push_at(lhs, Tok::Params);
+                self.pop();
                 self.advance();
 
                 // parse body
                 self.push(Tok::Body);
-                self.expr(Prec::Min, None);
+                self.expr(());
                 self.pop();
 
                 self.maybe_with();
@@ -237,14 +386,22 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let span = self.tok_span();
-                self.errors.push((ParseError::ExpectedMsg("'=>' or '->' after parameter".into()), span));
-            },
+                self.errors.push((
+                    ParseError::ExpectedMsg("'=>' or '->' after parameter".into()),
+                    span,
+                ));
+            }
         }
     }
 
     /// Parses an expression where all operators have at least the given precedence
     /// If `lhs` is `Some`, will only parse the operator and right hand side and add it to the provides lhs
-    fn expr(&mut self, min_prec: Prec, lhs: Option<Checkpoint>) {
+    fn expr(&mut self, params: impl Into<ExprParams>) {
+        let ExprParams {
+            min_prec,
+            lhs,
+            allow_lambda,
+        } = params.into();
         let mut atoms: Vec<Checkpoint> = lhs.iter().copied().collect();
         let lhs = match lhs {
             None => {
@@ -254,8 +411,55 @@ impl<'a> Parser<'a> {
                     Tok::Indent => {
                         self.push(Tok::GroupedExpr);
                         self.advance();
-                        self.expr(Prec::Min, None);
+                        self.expr(());
                         self.expect(Tok::Dedent);
+                        self.pop();
+                    }
+                    Tok::EffKw => {
+                        self.push(Tok::EffPat);
+                        self.advance();
+                        self.atom();
+                        self.atom();
+                        self.pop();
+                    }
+                    Tok::CaseKw => {
+                        self.push(Tok::Case);
+                        self.advance();
+                        // scrutinee
+                        self.expr(());
+                        self.expect(Tok::OfKw);
+                        self.expect(Tok::Indent);
+
+                        let mut made_error = false;
+                        loop {
+                            self.push(Tok::CaseBranch);
+
+                            // Pattern
+                            self.expr(ExprParams::no_lambda());
+                            self.expect(Tok::WideArrow);
+
+                            // Body
+                            self.push(Tok::Body);
+                            self.expr(());
+                            self.pop();
+
+                            self.pop();
+
+                            match self.cur() {
+                                Tok::Newline => self.advance(),
+                                Tok::Dedent => {
+                                    self.advance();
+                                    break;
+                                }
+                                _ => {
+                                    if !made_error {
+                                        made_error = true;
+                                        self.expect(Tok::Dedent);
+                                    }
+                                    self.advance();
+                                }
+                            }
+                        }
                         self.pop();
                     }
                     // This should be able to handle
@@ -270,19 +474,19 @@ impl<'a> Parser<'a> {
                         self.push(Tok::If);
                         self.advance();
                         // condition
-                        self.expr(Prec::If, None);
+                        self.expr(Prec::If);
 
                         // then branch
                         let indent = self.maybe(Tok::Indent);
                         self.expect(Tok::ThenKw);
-                        self.expr(Prec::Min, None);
+                        self.expr(());
 
                         // else branch
                         if indent {
                             self.expect(Tok::Newline);
                         }
                         self.expect(Tok::ElseKw);
-                        self.expr(Prec::Min, None);
+                        self.expr(());
 
                         if indent {
                             self.expect(Tok::Dedent);
@@ -319,7 +523,10 @@ impl<'a> Parser<'a> {
                 Tok::Dot => {
                     let cp = atoms.last().copied().unwrap_or_else(|| {
                         let span = self.tok_span();
-                        self.errors.push((ParseError::ExpectedMsg("expression before '.'".into()), span));
+                        self.errors.push((
+                            ParseError::ExpectedMsg("expression before '.'".into()),
+                            span,
+                        ));
                         self.checkpoint()
                     });
                     self.push_at(cp, Tok::Member);
@@ -337,7 +544,7 @@ impl<'a> Parser<'a> {
                         loop {
                             // Each line has an operator + rhs, then a newline
                             // This magically works for application as well!
-                            self.expr(Prec::Min, Some(lhs));
+                            self.expr((Prec::Min, Some(lhs)));
                             match self.cur() {
                                 // don't allow more operators after dedent
                                 Tok::Dedent => {
@@ -360,7 +567,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 // Lambda time
-                Tok::WideArrow => {
+                Tok::WideArrow if allow_lambda => {
                     self.lambda_pi(lhs);
                     return;
                 }
@@ -370,7 +577,7 @@ impl<'a> Parser<'a> {
                     if Prec::Arrow >= min_prec {
                         self.push_at(lhs, Tok::Arrow.into());
                         self.advance();
-                        self.expr(Prec::Arrow, None);
+                        self.expr(Prec::Arrow);
                         self.pop();
                     } else {
                         break;
@@ -384,10 +591,10 @@ impl<'a> Parser<'a> {
                         self.push(Tok::BinOpKind.into());
                         self.advance_no_ws();
                         self.pop();
-                        
+
                         self.push_at(lhs, Tok::BinOp.into());
                         self.skip_ws();
-                        self.expr(prec, None);
+                        self.expr(prec);
                         self.pop();
                     } else {
                         break;
@@ -398,6 +605,50 @@ impl<'a> Parser<'a> {
         }
 
         self.resolve_app(&mut atoms);
+    }
+}
+
+struct ExprParams {
+    min_prec: Prec,
+    lhs: Option<Checkpoint>,
+    allow_lambda: bool,
+}
+impl ExprParams {
+    fn new() -> Self {
+        ().into()
+    }
+    fn no_lambda() -> Self {
+        ExprParams {
+            allow_lambda: false,
+            ..Self::new()
+        }
+    }
+}
+impl From<()> for ExprParams {
+    fn from(_: ()) -> Self {
+        ExprParams {
+            min_prec: Prec::Min,
+            lhs: None,
+            allow_lambda: true,
+        }
+    }
+}
+impl From<Prec> for ExprParams {
+    fn from(min_prec: Prec) -> Self {
+        ExprParams {
+            min_prec,
+            lhs: None,
+            allow_lambda: true,
+        }
+    }
+}
+impl From<(Prec, Option<Checkpoint>)> for ExprParams {
+    fn from((min_prec, lhs): (Prec, Option<Checkpoint>)) -> Self {
+        ExprParams {
+            min_prec,
+            lhs,
+            allow_lambda: true,
+        }
     }
 }
 
@@ -417,11 +668,18 @@ pub fn parser_entry(db: &dyn super::Parser, file: File, split: SplitId) -> Optio
         errors: Vec::new(),
     };
     parser.builder.start_node(Tok::Root.into());
-    parser.expr(Prec::Min, None);
+    parser.defs();
     parser.builder.finish_node();
-    let Parser { errors, builder, .. } = parser;
+    let Parser {
+        errors, builder, ..
+    } = parser;
     let mut errors: Vec<_> = errors.into_iter().map(|(x, s)| x.to_error(s)).collect();
-    errors.extend(lex_result.error.into_iter().map(|(x, s)| super::lexer::lexerror_to_error(x, s)));
+    errors.extend(
+        lex_result
+            .error
+            .into_iter()
+            .map(|(x, s)| super::lexer::lexerror_to_error(x, s)),
+    );
     Some(ParseResult {
         errors,
         green: builder.finish(),

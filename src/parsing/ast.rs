@@ -117,12 +117,13 @@ make_nodes! {
 
     ImpArg = expr: Expr;
 
-    ImpPar = arg: Var, ty: Ty;
-    ExpPar = arg: Var, ty: Ty;
+    ImpPar = pat: Expr, ty: Ty;
+    ExpPar = pat: Expr, ty: Ty;
     enum Par = Var, ImpArg, ImpPar, ExpPar;
+    Params = params: [Par];
     WithClause = effs: [Expr];
-    Lam = params: [Par], body: Body;
-    Pi = params: [Par], body: Body, with: WithClause;
+    Lam = params: Params, body: Body;
+    Pi = params: Params, body: Body, with: WithClause;
     Fun = param: Expr, ret: (1 Expr), with: WithClause;
 
     enum AppArg = Expr, ImpArg;
@@ -186,12 +187,19 @@ make_nodes! {
     OrPat = a: Expr, b: (1 Expr);
     EffPat = a: Expr, b: (1 Expr);
 
-    // Statements
-    LetStmt = pat: Expr, ty: Ty, body: Body;
+    // Definitions
+    LetDef = pat: Expr, ty: Ty, body: Body;
+    FunDef = name: Var, params: Params, ret_ty: Ty, with: WithClause, body: Body;
+    ConsDef = name: Var, params: Params, ret_ty: Ty;
+    TypeDef = name: Var, params: Params, cons: [ConsDef], block: BlockDef;
+    TypeDefShort = name: Var, params: Params, inner: Ty, block: BlockDef;
+    BlockDef = defs: [Def];
 
-    enum Stmt = Expr, LetStmt;
+    enum Def = LetDef, FunDef, TypeDef, TypeDefShort;
 
-    Root = expr: Expr;
+    enum Stmt = Expr, Def;
+
+    Root = def: Def;
 }
 
 use crate::pretty::Prec;
@@ -210,10 +218,7 @@ impl<T: Pretty> Pretty for Option<T> {
 
 impl Pretty for Root {
     fn pretty(&self) -> Doc {
-        match self.expr() {
-            Some(e) => e.pretty(),
-            None => Doc::start("<NO EXPRESSION>"),
-        }
+        self.def().pretty()
     }
 }
 
@@ -246,14 +251,16 @@ impl Pretty for Par {
                 .add(']', ())
                 .prec(Prec::Atom),
             Par::ImpPar(i) => Doc::start('[')
-                .chain(i.arg().pretty())
+                .chain(i.pat().pretty())
                 .add(':', ())
+                .space()
                 .chain(i.ty().pretty())
                 .add(']', ())
                 .prec(Prec::Atom),
             Par::ExpPar(i) => Doc::start('(')
-                .chain(i.arg().pretty())
+                .chain(i.pat().pretty())
                 .add(':', ())
+                .space()
                 .chain(i.ty().pretty())
                 .add(')', ())
                 .prec(Prec::Atom),
@@ -273,11 +280,22 @@ impl Pretty for AppArg {
     }
 }
 
-impl Pretty for Stmt {
+impl Pretty for ConsDef {
+    fn pretty(&self) -> Doc {
+        self.name()
+            .pretty()
+            .space()
+            .chain(self.params().pretty())
+            .add(':', ())
+            .space()
+            .chain(self.ret_ty().pretty())
+    }
+}
+
+impl Pretty for Def {
     fn pretty(&self) -> Doc {
         match self {
-            Stmt::Expr(e) => e.pretty(),
-            Stmt::LetStmt(l) => Doc::none()
+            Def::LetDef(l) => Doc::none()
                 .add("let", Doc::style_keyword())
                 .space()
                 .chain(l.pat().pretty())
@@ -287,6 +305,80 @@ impl Pretty for Stmt {
                 .add('=', ())
                 .space()
                 .chain(l.body().pretty()),
+            Def::FunDef(x) => Doc::none()
+                .add("fun", Doc::style_keyword())
+                .space()
+                .chain(x.name().pretty())
+                .space()
+                .chain(x.params().pretty())
+                .add(':', ())
+                .space()
+                .chain(x.ret_ty().pretty())
+                .space()
+                .add('=', ())
+                .space()
+                .chain(x.body().pretty()),
+            Def::TypeDefShort(x) => Doc::none()
+                .add("type", Doc::style_keyword())
+                .space()
+                .chain(x.name().pretty())
+                .space()
+                .chain(x.params().pretty())
+                .space()
+                .add("=", Doc::style_keyword())
+                .space()
+                .chain(x.inner().pretty())
+                .chain(if let Some(block) = x.block() {
+                    Doc::none().hardline().chain(
+                        Doc::none()
+                            .add("where", Doc::style_keyword())
+                            .hardline()
+                            .chain(Doc::intersperse(
+                                block.defs().into_iter().map(|x| x.pretty()),
+                                Doc::none().hardline(),
+                            ))
+                            .indent(),
+                    )
+                } else {
+                    Doc::none()
+                }),
+            Def::TypeDef(x) => Doc::none()
+                .add("type", Doc::style_keyword())
+                .space()
+                .chain(x.name().pretty())
+                .space()
+                .chain(x.params().pretty())
+                .space()
+                .add("of", Doc::style_keyword())
+                .hardline()
+                .chain(Doc::intersperse(
+                    x.cons().into_iter().map(|x| x.pretty()),
+                    Doc::none().hardline(),
+                ))
+                .indent()
+                .chain(if let Some(block) = x.block() {
+                    Doc::none().hardline().chain(
+                        Doc::none()
+                            .add("where", Doc::style_keyword())
+                            .hardline()
+                            .chain(Doc::intersperse(
+                                block.defs().into_iter().map(|x| x.pretty()),
+                                Doc::none().hardline(),
+                            ))
+                            .indent(),
+                    )
+                } else {
+                    Doc::none()
+                }),
+        }
+    }
+}
+
+impl Pretty for Stmt {
+    fn pretty(&self) -> Doc {
+        match self {
+            Stmt::Expr(e) => e.pretty(),
+            Stmt::Def(x) => x.pretty(),
         }
     }
 }
@@ -297,24 +389,31 @@ impl Pretty for BinOpKind {
     }
 }
 
+impl Pretty for Params {
+    fn pretty(&self) -> Doc {
+        Doc::intersperse(
+            self.params().into_iter().map(|x| x.pretty()),
+            Doc::none().space(),
+        )
+    }
+}
+
 impl Pretty for Expr {
     fn pretty(&self) -> Doc {
         let p = match self {
             Expr::Var(n) => n.pretty(),
-            Expr::Lam(l) => Doc::intersperse(
-                l.params().into_iter().map(|x| x.pretty()),
-                Doc::none().space(),
-            )
-            .space()
-            .add("=>", ())
-            .chain(l.body().pretty()),
-            Expr::Pi(l) => Doc::intersperse(
-                l.params().into_iter().map(|x| x.pretty()),
-                Doc::none().space(),
-            )
-            .space()
-            .add("->", ())
-            .chain(l.body().pretty()),
+            Expr::Lam(l) => l
+                .params()
+                .pretty()
+                .space()
+                .add("=>", ())
+                .chain(l.body().pretty()),
+            Expr::Pi(l) => l
+                .params()
+                .pretty()
+                .space()
+                .add("->", ())
+                .chain(l.body().pretty()),
             Expr::AppList(x) => Doc::intersperse(
                 x.exprs().into_iter().map(|x| x.pretty()),
                 Doc::none().space(),
@@ -335,6 +434,7 @@ impl Pretty for Expr {
                 .chain(x.scrutinee().pretty())
                 .space()
                 .add("of", Doc::style_keyword())
+                .hardline()
                 .chain(Doc::intersperse(
                     x.branches().into_iter().map(|branch| {
                         branch

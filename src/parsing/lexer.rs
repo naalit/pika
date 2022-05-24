@@ -34,15 +34,6 @@ pub enum LexError {
     Other(String),
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum Literal {
-    Positive(u64),
-    /// This should always be negative.
-    Negative(i64),
-    Float(u64),
-    String(Name),
-}
-
 pub struct Lexer<'i> {
     chars: Peekable<ropey::iter::Chars<'i>>,
     input: RopeSlice<'i>,

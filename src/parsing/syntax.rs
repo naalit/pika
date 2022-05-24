@@ -81,6 +81,7 @@ pub enum SyntaxKind {
     Eof,
 
     // Composite nodes
+    Params,
     AppList,
     Var,
     Lam,
@@ -103,12 +104,18 @@ pub enum SyntaxKind {
     BinOp,
     If,
     Box,
-    LetStmt,
     Fun,
     Type,
     CaseBranch,
     GroupedExpr,
     Member,
+    
+    LetDef,
+    FunDef,
+    TypeDef,
+    TypeDefShort,
+    ConsDef,
+    BlockDef,
 
     // Top level node
     Root,
