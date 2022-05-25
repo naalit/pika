@@ -1,0 +1,10 @@
+{
+    "Do block": {
+        "prefix": ["do"],
+        "body": ["do", "\t$0"]
+    },
+    "Case-of expression": {
+        "prefix": ["case", "case-of"],
+        "body": ["case ${1:value} of", "\t$0"]
+    }
+}

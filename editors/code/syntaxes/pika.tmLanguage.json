@@ -1,0 +1,91 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "Pika",
+	"patterns": [
+		{ "include": "#keywords" },
+		{ "include": "#symbols" },
+		{ "include": "#types" },
+		{ "include": "#vars" },
+		{ "include": "#literals" },
+		{ "include": "#comments" },
+		{ "include": "#strings" }
+	],
+	"repository": {
+		"attributes": {
+			"begin": "\\@\\[",
+			"end": "\\]",
+			"name": "entity.other.attribute-name.pika",
+			"patterns": [
+				{"include": "#strings" },
+				{"include": "#literals" }
+			]
+		},
+		"vars": {
+			"match": "\\b[a-z_][a-zA-Z_0-9]*\\b",
+			"name": "variable.other.pika"
+		},
+		"literals": {
+			"match": "\\d+(\\.\\d+)?",
+			"name": "constant.numeric.pika"
+		},
+		"comments": {
+			"match": "#.*$",
+			"name": "comment.line.number-sign.pika"
+		},
+        "types": {
+            "match": "\\b([A-Z][A-Za-z_0-9]*)",
+            "name": "entity.name.class.pika"
+        },
+		"keywords": {
+			"patterns": [{
+				"name": "keyword.control.pika",
+				"match": "\\b(do|case|catch|of|if|then|else)\\b"
+			},  {
+                "name": "keyword.other.pika",
+                "match": "\\b(type|eff|with|struct|let|fun|where|impl|box|unbox)\\b"
+            }]
+		},
+		"symbols": {
+			"patterns": [{
+				"match": "->|=>|<\\|\\|>",
+				"name": "keyword.operator.function.pika"
+			},
+			{
+				"match": "=>|\\|",
+				"name": "keyword.operator.pattern.pikas"
+			},
+			{
+				"match": "\\+|-|\\*\\*|\\*|/|\\^\\^|&|<<|>>",
+				"name": "keyword.operator.arithmetic.pika"
+			},
+			{
+				"match": ">=|<=|>|<|==|!=",
+				"name": "keyword.operator.comparison.pika"
+			},
+			{
+				"match": "\\b(and|or)\\b",
+				"name": "keyword.control.logic.pika"
+			},
+			{
+				"match": "=",
+				"name": "keyword.operator.definition.pika"
+			},
+			{
+				"match": ":",
+				"name": "keyword.operator.type.pika"
+			}]
+		},
+		"strings": {
+			"name": "string.quoted.double.pika",
+			"begin": "\"",
+			"end": "\"",
+			"patterns": [
+				{
+					"name": "constant.character.escape.pika",
+					"match": "\\\\."
+				}
+			]
+		}
+	},
+	"scopeName": "source.pika"
+}
