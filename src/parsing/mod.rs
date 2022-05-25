@@ -99,6 +99,10 @@ pub trait Parser {
     fn parse(&self, file: File, id: SplitId) -> Option<parser::ParseResult>;
 }
 pub trait ParserExt: Parser {
+    fn split_span(&self, file: File, id: SplitId) -> Option<AbsSpan> {
+        Some(self.split(file, id)?.abs_span)
+    }
+
     fn ast(&self, file: File, id: SplitId) -> Option<ast::Root> {
         let result = self.parse(file, id)?;
         ast::Root::cast(SyntaxNode::new_root(result.green))

@@ -86,14 +86,18 @@ impl<'a> Parser<'a> {
 
     /// Like `advance`, but doesn't skip trivia
     fn advance_no_ws(&mut self) {
+        if self.tok_idx >= self.lex_result.kind.len() {
+            return;
+        }
         let tok = self.lex_result.kind[self.tok_idx];
-        let start = self.lex_result.start[self.tok_idx];
+        let start = self.lex_result.start[self.tok_idx].min(self.text.len_chars() as u32);
         let end = self
             .lex_result
             .start
             .get(self.tok_idx + 1)
             .copied()
-            .unwrap_or_else(|| self.text.len_chars() as u32);
+            .unwrap_or(self.text.len_chars() as u32)
+            .min(self.text.len_chars() as u32);
         let slice = self.text.slice(start as usize..end as usize);
         self.builder
             .token(tok.into(), &std::borrow::Cow::<'a, str>::from(slice));
@@ -109,15 +113,21 @@ impl<'a> Parser<'a> {
     }
 
     fn peek(&self, num_ahead: usize) -> Tok {
-        self.lex_result
-            .kind
-            .get(self.tok_idx + num_ahead)
+        self.lex_result.kind[self.tok_idx..]
+            .iter()
+            .filter(|x| !matches!(x, Tok::Whitespace | Tok::Comment))
+            .nth(num_ahead)
             .copied()
             .unwrap_or(Tok::Eof)
     }
 
     fn tok_span(&self) -> RelSpan {
-        let start = self.lex_result.start[self.tok_idx];
+        let start = self
+            .lex_result
+            .start
+            .get(self.tok_idx)
+            .copied()
+            .unwrap_or_else(|| self.text.len_chars() as u32);
         let end = self
             .lex_result
             .start
@@ -128,9 +138,48 @@ impl<'a> Parser<'a> {
     }
 
     fn expected(&mut self, x: impl Into<Cow<'static, str>>, m: impl IntoMsg) {
+        if self.cur() == Tok::Error {
+            // Avoid duplicate errors when possible
+            return;
+        }
         let span = self.tok_span();
-        self.errors
-            .push((ParseError::Expected(x.into(), m.into_msg()), span));
+        let message = format!("got {}", self.cur());
+        self.errors.push((
+            ParseError::Expected(
+                x.into(),
+                Some(
+                    m.into_msg()
+                        .map_or(format!("but {}", message), |x| {
+                            format!("{}; {}", x, message)
+                        })
+                        .into(),
+                ),
+            ),
+            span,
+        ));
+    }
+
+    fn reset(&mut self, t: Tok, consume: bool) {
+        while self.cur() != t {
+            if self.cur() == Tok::Indent {
+                self.advance();
+                self.reset(Tok::Dedent, true);
+                continue;
+            }
+            if matches!(self.cur(), Tok::Dedent | Tok::Eof) {
+                break;
+            }
+            self.advance();
+        }
+        if consume && self.cur() == t {
+            self.advance();
+        }
+    }
+
+    fn expect_and_reset(&mut self, t: Tok) {
+        if !self.expect(t) {
+            self.reset(t, true);
+        }
     }
 
     fn expect(&mut self, t: Tok) -> bool {
@@ -171,21 +220,32 @@ impl<'a> Parser<'a> {
         self.pop();
     }
 
-    // -- definition parsing --
-
-    fn defs(&mut self) {
-        while !matches!(self.cur(), Tok::Eof | Tok::Dedent) {
-            self.def();
+    fn stmt(&mut self) {
+        if self.cur().starts_def() {
+            self.def()
+        } else {
+            self.expr(())
         }
     }
 
-    fn def_end(&mut self) {
-        if matches!(self.cur(), Tok::Newline | Tok::Eof | Tok::Dedent) {
-            if self.cur() == Tok::Newline {
-                self.advance();
+    // -- definition parsing --
+
+    fn defs(&mut self) {
+        // Allow leading whitespace, including newlines
+        self.skip_ws();
+        while matches!(self.cur(), Tok::Newline) {
+            self.advance();
+        }
+        while !matches!(self.cur(), Tok::Eof | Tok::Dedent) {
+            self.def();
+            if matches!(self.cur(), Tok::Newline | Tok::Eof | Tok::Dedent) {
+                if self.cur() == Tok::Newline {
+                    self.advance();
+                }
+            } else {
+                self.expected("newline", "or end of definitions");
+                self.reset(Tok::Newline, true);
             }
-        } else {
-            self.expected("newline", " or end of definitions");
         }
     }
 
@@ -204,15 +264,29 @@ impl<'a> Parser<'a> {
                     self.expr(());
                     self.pop();
                 }
+
+                self.maybe_with();
+
                 // Allow function declarations without =
-                if self.maybe(Tok::Equals) {
+                if !matches!(self.cur(), Tok::Newline | Tok::Dedent | Tok::Eof) {
+                    if !self.expect(Tok::Equals) {
+                        while !matches!(
+                            self.cur(),
+                            Tok::Equals | Tok::Newline | Tok::Dedent | Tok::Eof
+                        ) {
+                            self.advance();
+                        }
+                        if !self.maybe(Tok::Equals) {
+                            self.pop();
+                            return;
+                        }
+                    }
                     self.push(Tok::Body);
                     self.expr(());
                     self.pop();
                 }
 
                 self.pop();
-                self.def_end();
             }
             Tok::TypeKw | Tok::EffKw => {
                 let cp = self.checkpoint();
@@ -220,7 +294,9 @@ impl<'a> Parser<'a> {
 
                 self.var();
 
-                self.params(true);
+                if !matches!(self.cur(), Tok::Equals | Tok::OfKw | Tok::StructKw) {
+                    self.params(true);
+                }
 
                 if self.maybe(Tok::Equals) {
                     // Short form: type MyInt = i32 [where ...]
@@ -232,31 +308,46 @@ impl<'a> Parser<'a> {
                 } else {
                     self.push_at(cp, Tok::TypeDef);
 
-                    self.expect(Tok::OfKw);
-                    self.expect(Tok::Indent);
+                    // If they left off the 'of', attempt to recover the 'where' block if possible
+                    // since there will be lots of code in there which we want to check
+                    if self.expect(Tok::OfKw) {
+                        self.expect(Tok::Indent);
 
-                    // constructors
-                    loop {
-                        self.push(Tok::ConsDef);
+                        // constructors
+                        loop {
+                            self.push(Tok::ConsDef);
 
-                        self.var();
+                            self.var();
 
-                        self.params(false);
+                            if self.maybe(Tok::Newline) {
+                                self.pop();
+                                continue;
+                            }
+                            if self.cur() == Tok::Dedent {
+                                self.pop();
+                                break;
+                            }
 
-                        self.pop();
+                            self.params(false);
 
-                        if !self.maybe(Tok::Newline) {
-                            break;
+                            self.pop();
+
+                            if !self.maybe(Tok::Newline) {
+                                break;
+                            }
                         }
-                    }
 
-                    self.expect(Tok::Dedent);
+                        self.expect_and_reset(Tok::Dedent);
+                    } else {
+                        self.reset(Tok::Newline, false);
+                    }
                 }
 
-                let mut had_newline = self.maybe(Tok::Newline);
-                if self.maybe(Tok::WhereKw) {
-                    had_newline = false;
+                self.reset(Tok::Newline, false);
+                if self.peek(1) == Tok::WhereKw {
+                    self.expect(Tok::Newline);
                     self.push(Tok::BlockDef);
+                    self.advance(); // 'where'
 
                     self.expect(Tok::Indent);
                     self.defs();
@@ -266,9 +357,6 @@ impl<'a> Parser<'a> {
                 }
 
                 self.pop();
-                if !had_newline {
-                    self.def_end();
-                }
             }
             Tok::LetKw => {
                 self.push(Tok::LetDef);
@@ -285,7 +373,6 @@ impl<'a> Parser<'a> {
                 self.pop();
 
                 self.pop();
-                self.def_end();
             }
             _ => {
                 self.expected("definition", None);
@@ -298,7 +385,7 @@ impl<'a> Parser<'a> {
 
     fn atom(&mut self) {
         match self.cur() {
-            Tok::IntLit => {
+            Tok::IntLit | Tok::FloatLit | Tok::StringLit => {
                 self.push(Tok::Lit);
                 self.advance();
                 self.pop();
@@ -308,6 +395,8 @@ impl<'a> Parser<'a> {
                 self.advance();
                 if !self.maybe(Tok::PClose) {
                     self.expr(());
+                    // If the parens contained indentation, ignore the newline after the dedent
+                    self.maybe(Tok::Newline);
                     self.expect(Tok::PClose);
                 }
                 self.pop();
@@ -332,7 +421,6 @@ impl<'a> Parser<'a> {
     fn maybe_with(&mut self) {
         if self.maybe(Tok::WithKw) {
             self.push(Tok::WithClause);
-            self.advance();
 
             self.expr(Prec::Bitwise);
 
@@ -517,6 +605,39 @@ impl<'a> Parser<'a> {
                         self.advance();
                         self.atom();
                         self.atom();
+                        self.pop();
+                    }
+                    Tok::DoKw => {
+                        self.push(Tok::Do);
+                        self.advance();
+
+                        self.expect(Tok::Indent);
+                        loop {
+                            self.stmt();
+                            match self.cur() {
+                                Tok::Newline => self.advance(),
+                                Tok::Dedent => {
+                                    self.advance();
+                                    break;
+                                }
+                                _ => {
+                                    self.expected("newline or dedent", "after end of statement");
+                                    while !matches!(
+                                        self.cur(),
+                                        Tok::Newline | Tok::Dedent | Tok::Eof
+                                    ) {
+                                        self.advance();
+                                    }
+                                    if self.cur() == Tok::Newline {
+                                        self.advance();
+                                    } else {
+                                        self.advance();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
                         self.pop();
                     }
                     Tok::CaseKw => {
@@ -985,6 +1106,13 @@ impl Tok {
         )
     }
 
+    fn starts_def(&self) -> bool {
+        matches!(
+            self,
+            Tok::TypeKw | Tok::LetKw | Tok::EffKw | Tok::ImplKw | Tok::FunKw
+        )
+    }
+
     fn starts_atom(&self) -> bool {
         matches!(
             self,
@@ -992,12 +1120,9 @@ impl Tok {
                 | Tok::IntLit
                 | Tok::FloatLit
                 | Tok::POpen
-                | Tok::StructKw
-                | Tok::SigKw
                 | Tok::TypeTypeKw
                 | Tok::CaseKw
                 | Tok::CatchKw
-                | Tok::COpen
                 | Tok::DoKw
                 | Tok::StringLit
         )
@@ -1045,9 +1170,7 @@ impl Tok {
             Tok::Exp => Prec::Exp,
             Tok::Bar | Tok::Xor | Tok::LShift | Tok::RShift | Tok::BitAnd => Prec::Bitwise,
             Tok::Gt | Tok::GtE | Tok::Lt | Tok::LtE | Tok::Eq | Tok::NEq => Prec::Comp,
-            Tok::Comma => return None,
             Tok::LPipe | Tok::RPipe => Prec::Pipe,
-            Tok::ElseKw => Prec::Pipe,
             _ => return None,
         })
     }

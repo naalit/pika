@@ -534,7 +534,7 @@ impl<'i> fmt::Display for Tok {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Tok::FunKw => "'fun'",
-            Tok::LetKw => "'val'",
+            Tok::LetKw => "'let'",
             Tok::ImplKw => "'impl'",
             Tok::DoKw => "'do'",
             Tok::StructKw => "'struct'",

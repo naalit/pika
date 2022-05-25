@@ -18,7 +18,7 @@ mod parsing;
 pub mod pretty;
 use common::*;
 
-use crate::parsing::SyntaxNode;
+use crate::parsing::{ParserExt, SyntaxNode};
 
 #[salsa::database(ParserDatabase)]
 #[derive(Default)]
@@ -160,15 +160,18 @@ impl Server {
         eprintln!("Starting diagnostic publishing...");
         for (&file, source) in &self.source {
             self.db.set_input_file(file, source.clone());
-            let splits = self.db.all_splits(file);
             let mut diagnostics = Vec::new();
-            for split in splits {
-                let mut lexer = parsing::lexer::Lexer::new(split.text.slice(..));
-                let lex = lexer.lex();
-                for (e, span) in lex.error {
-                    let e = parsing::lexer::lexerror_to_error(e, span);
-                    let e = e.to_lsp(&split.abs_span, &self.source, &self.db);
-                    diagnostics.push(e);
+            for split in self.db.all_split_ids(file) {
+                let parse = self.db.parse(file, split);
+                if let Some(parse) = parse {
+                    for e in parse.errors {
+                        let e = e.to_lsp(
+                            &self.db.split_span(file, split).unwrap(),
+                            &self.source,
+                            &self.db,
+                        );
+                        diagnostics.push(e);
+                    }
                 }
             }
             // TODO only send diagnostics if they changed
@@ -275,13 +278,12 @@ fn main() {
 
     let mut cache = FileCache::new(&db);
     for file in files {
-        let splits = db.all_splits(file);
-        for split in splits {
-            let mut lexer = parsing::lexer::Lexer::new(split.text.slice(..));
-            let lex = lexer.lex();
-            for (e, span) in lex.error {
-                let e = parsing::lexer::lexerror_to_error(e, span);
-                e.write_cli(&split.abs_span, &mut cache);
+        for split in db.all_split_ids(file) {
+            let parse = db.parse(file, split);
+            if let Some(parse) = parse {
+                for e in parse.errors {
+                    e.write_cli(&db.split_span(file, split).unwrap(), &mut cache);
+                }
             }
         }
     }
