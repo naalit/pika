@@ -14,9 +14,8 @@
 //!    V
 //! parser
 
-pub mod lexer;
-// mod parser;
 pub mod ast;
+pub mod lexer;
 pub mod parser;
 mod splitter;
 mod syntax;

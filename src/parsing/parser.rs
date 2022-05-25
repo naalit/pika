@@ -299,12 +299,30 @@ impl<'a> Parser<'a> {
                 }
 
                 if self.maybe(Tok::Equals) {
-                    // Short form: type MyInt = i32 [where ...]
+                    // Short form: type MyInt = i32
+                    // [where ...]
                     self.push_at(cp, Tok::TypeDefShort);
 
                     self.push(Tok::Ty);
                     self.expr(());
                     self.pop();
+                } else if self.maybe(Tok::StructKw) {
+                    // Struct form type definition
+                    // type Config struct
+                    //   let maxIters : I32
+                    // [where ...]
+                    self.push_at(cp, Tok::TypeDefStruct);
+
+                    if self.expect(Tok::Indent) {
+                        // Fields
+                        self.push(Tok::StructFields);
+                        self.defs();
+                        self.pop();
+
+                        self.expect_and_reset(Tok::Dedent);
+                    } else {
+                        self.reset(Tok::Newline, false);
+                    }
                 } else {
                     self.push_at(cp, Tok::TypeDef);
 
@@ -366,11 +384,14 @@ impl<'a> Parser<'a> {
                 self.expr(());
                 self.pop();
 
-                self.expect(Tok::Equals);
-
-                self.push(Tok::Body);
-                self.expr(());
-                self.pop();
+                // Allow declarations like
+                //  let x : I32
+                // which are basically just allowed in structs
+                if self.maybe(Tok::Equals) {
+                    self.push(Tok::Body);
+                    self.expr(());
+                    self.pop();
+                }
 
                 self.pop();
             }
@@ -589,6 +610,19 @@ impl<'a> Parser<'a> {
                         self.expr(());
                         self.expect(Tok::Dedent);
                         self.pop();
+                    }
+                    Tok::BoxKw | Tok::UnboxKw => {
+                        self.push(Tok::Box);
+                        self.advance();
+
+                        self.expr(ExprParams {
+                            min_prec,
+                            lhs: None,
+                            allow_lambda,
+                        });
+
+                        self.pop();
+                        return;
                     }
                     Tok::Colon if Prec::Binder > min_prec => {
                         self.push(Tok::Binder);
@@ -813,6 +847,21 @@ impl<'a> Parser<'a> {
                     self.push(Tok::Ty);
                     self.expr(Prec::Binder);
                     self.pop();
+
+                    self.pop();
+                }
+                Tok::StructKw => {
+                    self.push_at(lhs, Tok::StructInit);
+
+                    self.advance();
+                    if self.maybe(Tok::Indent) {
+                        self.push(Tok::StructFields);
+                        self.defs();
+                        self.pop();
+                        self.expect_and_reset(Tok::Dedent);
+                    } else {
+                        self.reset(Tok::Newline, false);
+                    }
 
                     self.pop();
                 }

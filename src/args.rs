@@ -159,7 +159,9 @@ impl Config {
                         } else {
                             eprintln!("Unrecognized short flag '{}', ignoring; use '--flag' for long flags", c);
                             error = true;
-                            sargs.push_front(val.unwrap());
+                            if let Some(val) = val {
+                                sargs.push_front(val);
+                            }
                         }
                     } else if idx + 2 == i.len() && i.chars().nth(idx + 1).unwrap().is_ascii_digit()
                     {

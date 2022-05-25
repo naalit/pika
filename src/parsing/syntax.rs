@@ -91,12 +91,12 @@ pub enum SyntaxKind {
     Tuple,
     App,
 
-    // get rid of?
     ImpArg,
     ImpArgs,
     ImpPar,
     ImpPars,
 
+    StructInit,
     Var,
     Member,
     Lam,
@@ -124,8 +124,10 @@ pub enum SyntaxKind {
     FunDef,
     TypeDef,
     TypeDefShort,
+    TypeDefStruct,
     ConsDef,
     BlockDef,
+    StructFields,
 
     // Top level node
     Root,

@@ -131,6 +131,8 @@ make_nodes! {
     Lam = imp_par: ImpPars, exp_par: PatPar, body: Body;
     Pi = imp_par: ImpPars, exp_par: TermPar, body: Body, with: WithClause;
 
+    StructInit = lhs: Expr, fields: StructFields;
+
     Member = var: Var;
     App = lhs: Expr, member: Member, imp: ImpArgs, exp: (1 Expr);
 
@@ -178,7 +180,8 @@ make_nodes! {
         // Patterns parse as expressions
         OrPat,
         EffPat,
-        Binder
+        Binder,
+        StructInit
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -195,9 +198,11 @@ make_nodes! {
     ConsDef = name: Var, imp_par: ImpPars, exp_par: TermPar, ret_ty: Ty;
     TypeDef = name: Var, imp_par: ImpPars, exp_par: PatPar, cons: [ConsDef], block: BlockDef;
     TypeDefShort = name: Var, imp_par: ImpPars, exp_par: PatPar, inner: Ty, block: BlockDef;
+    TypeDefStruct = name: Var, imp_par: ImpPars, exp_par: PatPar, fields: StructFields, block: BlockDef;
+    StructFields = defs: [Def];
     BlockDef = defs: [Def];
 
-    enum Def = LetDef, FunDef, TypeDef, TypeDefShort;
+    enum Def = LetDef, FunDef, TypeDef, TypeDefShort, TypeDefStruct;
 
     enum Stmt = Expr, Def;
 
@@ -362,9 +367,41 @@ impl Pretty for Def {
                 .chain(x.imp_par().pretty())
                 .chain(x.exp_par().pretty())
                 .space()
-                .add("=", Doc::style_keyword())
+                .add("=", ())
                 .space()
                 .chain(x.inner().pretty())
+                .chain(if let Some(block) = x.block() {
+                    Doc::none().hardline().chain(
+                        Doc::none()
+                            .add("where", Doc::style_keyword())
+                            .hardline()
+                            .chain(Doc::intersperse(
+                                block.defs().into_iter().map(|x| x.pretty()),
+                                Doc::none().hardline(),
+                            ))
+                            .indent(),
+                    )
+                } else {
+                    Doc::none()
+                }),
+            Def::TypeDefStruct(x) => Doc::none()
+                .add("type", Doc::style_keyword())
+                .space()
+                .chain(x.name().pretty())
+                .space()
+                .chain(x.imp_par().pretty())
+                .chain(x.exp_par().pretty())
+                .space()
+                .add("struct", Doc::style_keyword())
+                .hardline()
+                .chain(Doc::intersperse(
+                    x.fields()
+                        .into_iter()
+                        .flat_map(|x| x.defs())
+                        .map(|x| x.pretty()),
+                    Doc::none().hardline(),
+                ))
+                .indent()
                 .chain(if let Some(block) = x.block() {
                     Doc::none().hardline().chain(
                         Doc::none()
@@ -446,6 +483,20 @@ impl Pretty for Expr {
                 .add("->", ())
                 .space()
                 .chain(l.body().pretty()),
+            Expr::StructInit(x) => x
+                .lhs()
+                .pretty()
+                .space()
+                .add("struct", Doc::style_keyword())
+                .hardline()
+                .chain(Doc::intersperse(
+                    x.fields()
+                        .into_iter()
+                        .flat_map(|x| x.defs())
+                        .map(|x| x.pretty()),
+                    Doc::none().hardline(),
+                ))
+                .indent(),
             Expr::App(x) => {
                 if let Some(member) = x.member() {
                     let doc = x.lhs().pretty().add('.', ()).chain(member.var().pretty());
