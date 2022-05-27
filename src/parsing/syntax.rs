@@ -111,7 +111,6 @@ pub enum SyntaxKind {
     EffPat,
     Case,
     Lit,
-    Unit,
     BinOpKind,
     BinOp,
     If,

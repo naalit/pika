@@ -1223,4 +1223,8 @@ impl Tok {
             _ => return None,
         })
     }
+
+    pub fn is_binop(&self) -> bool {
+        self.binop_prec().is_some()
+    }
 }

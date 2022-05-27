@@ -15,8 +15,8 @@
 //! parser
 
 pub mod ast;
-pub mod lexer;
-pub mod parser;
+mod lexer;
+mod parser;
 mod splitter;
 mod syntax;
 use std::fmt::Display;

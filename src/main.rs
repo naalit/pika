@@ -2,23 +2,22 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::Read;
 
-use common::ast::{AstNode, Pretty};
 use lsp_types::notification::{Notification, PublishDiagnostics};
 use lsp_types::request::GotoDefinition;
 use lsp_types::request::Request;
 use lsp_types::*;
-
 use lsp_server as lsp;
-use parsing::{Parser, ParserDatabase};
 use ropey::Rope;
 
 mod args;
-pub mod common;
+mod common;
+mod elab;
 mod parsing;
-pub mod pretty;
-use common::*;
+mod pretty;
 
-use crate::parsing::{ParserExt, SyntaxNode};
+use common::*;
+use crate::parsing::{Parser, ParserDatabase, ParserExt};
+use ast::Pretty;
 
 #[salsa::database(ParserDatabase)]
 #[derive(Default)]
@@ -193,24 +192,6 @@ impl Server {
     }
 }
 
-fn print_tree(node: &SyntaxNode, indent: usize) {
-    for _ in 0..indent {
-        print!(" ");
-    }
-    println!("{:?}", node);
-    for i in node.children_with_tokens() {
-        match i {
-            rowan::NodeOrToken::Node(n) => print_tree(&n, indent + 2),
-            rowan::NodeOrToken::Token(t) => {
-                for _ in 0..indent + 2 {
-                    print!(" ");
-                }
-                println!("{:?}", t);
-            }
-        }
-    }
-}
-
 fn main() {
     use args::*;
 
@@ -231,12 +212,13 @@ fn main() {
         let splits = db.all_split_ids(file);
         let mut cache = FileCache::new(&db);
         for split in splits {
-            let res = crate::parsing::parser::parser_entry(&db, file, split).unwrap();
-            let node = SyntaxNode::new_root(res.green);
-            print_tree(&node, 0);
-            let node = ast::Root::cast(node);
-            match node {
-                Some(node) => node.pretty().emit_stderr(),
+            let res = db.parse(file, split).unwrap();
+            let root = db.ast(file, split);
+            match root {
+                Some(node) => {
+                    node.print_tree();
+                    node.pretty().emit_stderr()
+                }
                 None => eprintln!("<NO EXPRESSION>"),
             }
             for e in res.errors {

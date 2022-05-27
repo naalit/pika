@@ -3,12 +3,15 @@ use super::*;
 pub trait AstNode: Sized {
     fn cast(syntax: SyntaxNode) -> Option<Self>;
     fn syntax(&self) -> &SyntaxNode;
+    fn span(&self) -> RelSpan {
+        self.syntax().text_range().into()
+    }
 }
 
 macro_rules! _make_getter {
     ($name:ident: (!$ty:ident)) => {
         #[allow(unused)]
-        fn $name(&self) -> Option<SyntaxToken> {
+        pub fn $name(&self) -> Option<SyntaxToken> {
             self.syntax
                 .children_with_tokens()
                 .filter_map(|x| x.as_token().cloned())
@@ -17,19 +20,19 @@ macro_rules! _make_getter {
     };
     ($name:ident: ($n:literal $ty:ty)) => {
         #[allow(unused)]
-        fn $name(&self) -> Option<$ty> {
+        pub fn $name(&self) -> Option<$ty> {
             self.syntax.children().filter_map(<$ty>::cast).nth($n)
         }
     };
     ($name:ident: [$ty:ty]) => {
         #[allow(unused)]
-        fn $name(&self) -> Vec<$ty> {
+        pub fn $name(&self) -> Vec<$ty> {
             self.syntax.children().filter_map(<$ty>::cast).collect()
         }
     };
     ($name:ident: $ty:ty) => {
         #[allow(unused)]
-        fn $name(&self) -> Option<$ty> {
+        pub fn $name(&self) -> Option<$ty> {
             self.syntax.children().find_map(<$ty>::cast)
         }
     };
@@ -113,7 +116,7 @@ macro_rules! make_nodes {
 make_nodes! {
     // Expressions
     Type = kw: (!TypeTypeKw);
-    Var = name: (!Name);
+    Var = name_tok: (!Name);
 
 
     Pat = expr: Expr;
@@ -148,8 +151,6 @@ make_nodes! {
 
     Lit = float: (!FloatLit), int: (!IntLit), string: (!StringLit);
 
-    Unit = ;
-
     BinOpKind = ;
     BinOp = a: Expr, op: BinOpKind, b: (1 Expr);
 
@@ -170,7 +171,6 @@ make_nodes! {
         Hole,
         Case,
         Lit,
-        Unit,
         BinOp,
         If,
         Box,
@@ -209,6 +209,36 @@ make_nodes! {
     Root = def: Def;
 }
 
+
+impl Root {
+    pub fn print_tree(&self) {
+        print_tree(self.syntax(), 0)
+    }
+}
+fn print_tree(node: &SyntaxNode, indent: usize) {
+    for _ in 0..indent {
+        print!(" ");
+    }
+    println!("{:?}", node);
+    for i in node.children_with_tokens() {
+        match i {
+            rowan::NodeOrToken::Node(n) => print_tree(&n, indent + 2),
+            rowan::NodeOrToken::Token(t) => {
+                for _ in 0..indent + 2 {
+                    print!(" ");
+                }
+                println!("{:?}", t);
+            }
+        }
+    }
+}
+
+impl Var {
+    pub fn name(&self, db: &dyn Parser) -> Name {
+        db.name(self.name_tok().unwrap().text().to_string())
+    }
+}
+
 pub trait Pretty {
     fn pretty(&self) -> Doc;
 }
@@ -230,7 +260,7 @@ impl Pretty for Root {
 impl Pretty for Var {
     fn pretty(&self) -> Doc {
         Doc::start(
-            self.name()
+            self.name_tok()
                 .map_or("?_".to_string(), |x| x.text().to_string()),
         )
     }
@@ -282,44 +312,6 @@ impl Pretty for ImpPars {
         Doc::intersperse(self.pars().iter().map(|x| x.pretty()), Doc::none())
     }
 }
-
-// impl Pretty for Par {
-//     fn pretty(&self) -> Doc {
-//         match self {
-//             Par::Var(n) => n.pretty(),
-//             Par::ImpArg(i) => Doc::start('[')
-//                 .chain(i.expr().pretty())
-//                 .add(']', ())
-//                 .prec(Prec::Atom),
-//             Par::ImpPar(i) => Doc::start('[')
-//                 .chain(i.pat().pretty())
-//                 .add(':', ())
-//                 .space()
-//                 .chain(i.ty().pretty())
-//                 .add(']', ())
-//                 .prec(Prec::Atom),
-//             Par::ExpPar(i) => Doc::start('(')
-//                 .chain(i.pat().pretty())
-//                 .add(':', ())
-//                 .space()
-//                 .chain(i.ty().pretty())
-//                 .add(')', ())
-//                 .prec(Prec::Atom),
-//         }
-//     }
-// }
-
-// impl Pretty for AppArg {
-//     fn pretty(&self) -> Doc {
-//         match self {
-//             AppArg::Expr(e) => e.pretty(),
-//             AppArg::ImpArg(i) => Doc::start('[')
-//                 .chain(i.expr().pretty())
-//                 .add(']', ())
-//                 .prec(Prec::Atom),
-//         }
-//     }
-// }
 
 impl Pretty for ConsDef {
     fn pretty(&self) -> Doc {
@@ -550,7 +542,6 @@ impl Pretty for Expr {
                 ))
                 .indent(),
             Expr::Lit(l) => Doc::start(l.syntax().text()),
-            Expr::Unit(_) => Doc::start("()"),
             Expr::BinOp(x) => x
                 .a()
                 .pretty()

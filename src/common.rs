@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+pub use std::collections::{HashMap, VecDeque};
 
 pub use crate::parsing::{ast, FileLoc};
 pub use crate::pretty::Doc;
