@@ -2,6 +2,11 @@ use super::*;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum FunClass {
+    /// Sigma types are treated identically to pi types in most cases:
+    /// (P: T1, T2(P)) is equivalent for many purposes to (P: T1) -> T2(P).
+    /// So their representation is the same (as is that for lambdas), and they're evaluated the same etc.
+    /// TODO: we'll eventually annotate pis and probably lambdas with effects, but this will not happen for sigmas.
+    Sigma,
     Lam,
     Pi,
 }
@@ -255,13 +260,6 @@ pub enum Expr {
     },
     // Do(Vec<Stmt>),
     Lit(Literal),
-    Sigma {
-        left_ty: Box<Expr>,
-        left_name: Option<Name>,
-        /// Has the left value in scope
-        right_ty: Box<Expr>,
-        right_name: Option<Name>,
-    },
     Pair(Box<Expr>, Box<Expr>),
     Error,
 }

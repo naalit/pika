@@ -346,19 +346,6 @@ impl Expr {
                 let (s_from, s_to) = params.check_solution(cxt, mode, s_from, s_to)?;
                 body.check_solution(cxt, mode, s_from, s_to)?;
             }
-            Expr::Sigma {
-                left_ty,
-                left_name,
-                right_ty,
-                right_name: _,
-            } => {
-                left_ty.check_solution(cxt, mode, s_from, s_to)?;
-                let (s_from, s_to) = match left_name {
-                    Some(_) => (s_from.inc(), s_to.inc()),
-                    None => (s_from, s_to),
-                };
-                right_ty.check_solution(cxt, mode, s_from, s_to)?;
-            }
             Expr::Lit(_) | Expr::Type | Expr::Error => (),
         }
         Ok(())

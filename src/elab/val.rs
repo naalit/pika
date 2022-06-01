@@ -82,44 +82,11 @@ pub struct Clos {
     body: Expr,
 }
 impl Clos {
-    pub fn simple(name: Option<Name>, expr: Expr, env: Env) -> Self {
-        Clos {
-            class: Lam,
-            // TODO should the Clos store lhs type in sigma types?
-            params: Params {
-                implicit: Vec::new(),
-                explicit: Some(Box::new(Par {
-                    pat: match name {
-                        Some(name) => Pat::Var(name),
-                        None => Pat::Any,
-                    },
-                    ty: Val::Error,
-                })),
-            },
-            env,
-            body: expr,
-        }
-    }
-
     pub fn apply(self, args: Args<Val>) -> Val {
         let Clos { mut env, body, .. } = self;
         // TODO check args against params
         env.extend(args.into_iter().map(Some));
         body.eval(&mut env)
-    }
-
-    pub fn quote_simple(self, size: Size) -> Expr {
-        let Clos {
-            class,
-            params,
-            mut env,
-            body,
-        } = self;
-        let (args, _) = params.synthesize_args(size);
-        let (params, size) = params.quote(size);
-        env.extend(args.into_iter().map(Some));
-        let body = body.eval(&mut env).quote(size);
-        body
     }
 
     pub fn quote(self, size: Size) -> Expr {
@@ -153,15 +120,6 @@ pub enum Val {
     Fun(Box<Clos>),
     // Do(Vec<Stmt>),
     Lit(Literal),
-    Sigma {
-        left_ty: Box<Val>,
-        /// Note: if this is None, the left value can't be used in right_ty and it's not a true sigma type.
-        /// For machine-created sigma types, use '_' as the name.
-        left_name: Option<Name>,
-        /// Has the left value in scope if left_name is Some
-        right_ty: Box<Clos>,
-        right_name: Option<Name>,
-    },
     Pair(Box<Val>, Box<Val>),
     Error,
 }
@@ -364,17 +322,6 @@ impl Expr {
                 body: *body,
             })),
             Expr::Lit(l) => Val::Lit(l),
-            Expr::Sigma {
-                left_ty,
-                left_name,
-                right_ty,
-                right_name,
-            } => Val::Sigma {
-                left_ty: Box::new(left_ty.eval(env)),
-                left_name,
-                right_ty: Box::new(Clos::simple(left_name, *right_ty, env.clone())),
-                right_name,
-            },
             Expr::Pair(a, b) => Val::Pair(Box::new(a.eval(env)), Box::new(b.eval(env))),
             Expr::Error => Val::Error,
         }
@@ -401,12 +348,6 @@ impl Val {
             }
             Val::Fun(clos) => clos.quote(size),
             Val::Lit(_) => todo!(),
-            Val::Sigma {
-                left_ty,
-                left_name,
-                right_ty,
-                right_name,
-            } => todo!(),
             Val::Pair(a, b) => Expr::Pair(Box::new(a.quote(size)), Box::new(b.quote(size))),
             Val::Error => Expr::Error,
         }
