@@ -59,6 +59,7 @@ macro_rules! _make_getter {
 /// ```
 macro_rules! make_nodes {
     {enum $n:ident = $($variant:ident),*; $($rest:tt)*} => {
+        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
         pub enum $n {
             $($variant($variant),)*
         }
@@ -84,6 +85,7 @@ macro_rules! make_nodes {
         make_nodes!{ $($rest)* }
     };
     {$n:ident = $($param:ident: $param_ty:tt),*; $($rest:tt)*} => {
+        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
         pub struct $n {
             pub syntax: SyntaxNode,
         }
@@ -208,7 +210,6 @@ make_nodes! {
 
     Root = def: Def;
 }
-
 
 impl Root {
     pub fn print_tree(&self) {

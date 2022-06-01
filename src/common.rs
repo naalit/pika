@@ -1,6 +1,6 @@
 pub use std::collections::{HashMap, VecDeque};
 
-pub use crate::parsing::{ast, FileLoc};
+pub use crate::parsing::{ast, FileLoc, ParserExt, SplitId};
 pub use crate::pretty::Doc;
 pub use ast::AstNode;
 
@@ -8,6 +8,7 @@ use ariadne::Color;
 pub use ariadne::Fmt;
 pub use std::borrow::Cow;
 
+#[macro_export]
 macro_rules! intern_key {
     ($n:ident) => {
         #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -25,6 +26,13 @@ macro_rules! intern_key {
 }
 intern_key!(File);
 intern_key!(Name);
+intern_key!(Def);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DefLoc {
+    Root(File, SplitId),
+    Child(Def, SplitId),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icit {

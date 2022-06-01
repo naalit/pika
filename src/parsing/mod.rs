@@ -107,7 +107,7 @@ pub trait ParserExt: Parser {
         ast::Root::cast(SyntaxNode::new_root(result.green))
     }
 }
-impl<T: Parser> ParserExt for T {}
+impl<T: Parser + ?Sized> ParserExt for T {}
 
 fn all_split_ids(db: &dyn Parser, file: File) -> Vec<SplitId> {
     db.all_splits(file)

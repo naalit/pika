@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::Read;
 
+use lsp_server as lsp;
 use lsp_types::notification::{Notification, PublishDiagnostics};
 use lsp_types::request::GotoDefinition;
 use lsp_types::request::Request;
 use lsp_types::*;
-use lsp_server as lsp;
 use ropey::Rope;
 
 mod args;
@@ -15,9 +15,9 @@ mod elab;
 mod parsing;
 mod pretty;
 
-use common::*;
 use crate::parsing::{Parser, ParserDatabase, ParserExt};
 use ast::Pretty;
+use common::*;
 
 #[salsa::database(ParserDatabase)]
 #[derive(Default)]

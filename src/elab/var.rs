@@ -1,11 +1,18 @@
+use super::{metas::Meta, val::Val};
+use crate::common::{Def, Name};
 use std::collections::VecDeque;
-use super::val::Val;
 
 // De Brujin indices and levels
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Idx(u32);
 impl Idx {
     pub fn lvl(self, size: Size) -> Lvl {
+        assert!(
+            self.0 + 1 <= size.0,
+            "Can't access a variable (lvl {}) that hasn't been bound yet (enclosing = {})!",
+            self.0,
+            size.0,
+        );
         Lvl(size.0 - 1 - self.0)
     }
 }
@@ -14,11 +21,17 @@ impl Idx {
 pub struct Lvl(u32);
 impl Lvl {
     pub fn idx(self, size: Size) -> Idx {
+        assert!(
+            self.0 + 1 <= size.0,
+            "Can't access a variable (idx {}) that hasn't been bound yet (enclosing = {})!",
+            self.0,
+            size.0,
+        );
         Idx(size.0 - 1 - self.0)
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Size(u32);
 impl Size {
     pub fn zero() -> Size {
@@ -36,24 +49,44 @@ impl Size {
     pub fn dec(self) -> Size {
         Size(self.0 - 1)
     }
-}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct Meta(u32);
+    pub fn until(self, other: Size) -> impl Iterator<Item = Size> {
+        (self.0..other.0).map(Size)
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Var<L> {
-    Local(L),
+    Local(Name, L),
     Meta(Meta),
     Builtin(super::term::Builtin),
-    Def(),
+    Def(Def),
 }
-
+impl Var<Lvl> {
+    pub fn cvt(self, size: Size) -> Var<Idx> {
+        match self {
+            Var::Local(n, l) => Var::Local(n, l.idx(size)),
+            Var::Meta(m) => Var::Meta(m),
+            Var::Builtin(b) => Var::Builtin(b),
+            Var::Def(d) => Var::Def(d),
+        }
+    }
+}
+impl Var<Idx> {
+    pub fn cvt(self, size: Size) -> Var<Lvl> {
+        match self {
+            Var::Local(n, l) => Var::Local(n, l.lvl(size)),
+            Var::Meta(m) => Var::Meta(m),
+            Var::Builtin(b) => Var::Builtin(b),
+            Var::Def(d) => Var::Def(d),
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct EnvState(usize);
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Env {
     /// Since locals are De Bruijn indices, we store a `VecDeque`, push to the front and index normally.
     /// When elaborating, we often want to evaluate something without any locals, or just add one or two at the front.
@@ -80,19 +113,16 @@ impl Env {
     }
 
     pub fn get(&self, i: Idx) -> Option<&Val> {
-        self.vals
-            .get(i.0 as usize)
-            .map(Option::as_ref)
-            .flatten()
+        self.vals.get(i.0 as usize).map(Option::as_ref).flatten()
     }
 
     /// If it's not present, returns a local variable value
-    pub fn val(&self, i: Idx) -> Val {
+    pub fn val(&self, n: Name, i: Idx) -> Val {
         self.vals
             .get(i.0 as usize)
             .cloned()
             .flatten()
-            .unwrap_or_else(|| Val::var(Var::Local(i.lvl(self.size))))
+            .unwrap_or_else(|| Val::var(Var::Local(n, i.lvl(self.size))))
     }
 
     pub fn push(&mut self, v: Option<Val>) {
@@ -105,5 +135,12 @@ impl Env {
     pub fn pop(&mut self) {
         self.size = self.size.dec();
         self.vals.pop_front();
+    }
+}
+impl Extend<Option<Val>> for Env {
+    fn extend<T: IntoIterator<Item = Option<Val>>>(&mut self, iter: T) {
+        for i in iter {
+            self.push(i);
+        }
     }
 }

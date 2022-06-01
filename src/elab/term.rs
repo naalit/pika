@@ -91,37 +91,85 @@ pub enum IntType {
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Literal {
-    Int(usize, IntType),
+    /// Stores the usize representation of the int
+    /// Whether it's positive or negative can be thought of as stored in meta bounds elsewhere
+    /// It will be reified during lowering by casting to its concrete type
+    Int(usize),
     F64(f64),
     F32(f32),
     String(Name),
 }
-
-#[derive(Clone)]
-pub enum Pat<T: IsTerm> {
-    Any,
-    Var { name: Name, ty: T },
+impl Eq for Literal {}
+impl std::hash::Hash for Literal {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Literal::Int(i) => i.hash(state),
+            // TODO do this for PartialEq too
+            Literal::F64(i) => i.to_bits().hash(state),
+            Literal::F32(i) => i.to_bits().hash(state),
+            Literal::String(s) => s.hash(state),
+        }
+    }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Pat {
+    Any,
+    Var(Name),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Par<T: IsTerm> {
-    pub pat: Pat<T>,
+    pub pat: Pat,
     pub ty: T,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Params<T: IsTerm> {
     pub implicit: Vec<Par<T>>,
     pub explicit: Option<Box<Par<T>>>,
 }
+impl<T: IsTerm> Params<T> {
+    pub fn n_bindings(&self) -> usize {
+        let mut n = 0;
+        for i in &self.implicit {
+            n += i.pat.n_bindings();
+        }
+        if let Some(e) = &self.explicit {
+            n += e.pat.n_bindings();
+        }
+        n
+    }
+}
+impl Pat {
+    pub fn n_bindings(&self) -> usize {
+        match self {
+            Pat::Any => 0,
+            Pat::Var(_) => 1,
+        }
+    }
+}
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Args<T: IsTerm> {
     pub implicit: Vec<T>,
     pub explicit: Option<Box<T>>,
 }
+impl<T: IsTerm + 'static> IntoIterator for Args<T> {
+    type Item = T;
+    type IntoIter = Box<dyn Iterator<Item = T>>;
 
-#[derive(Clone)]
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(
+            self.implicit
+                .into_iter()
+                .chain(self.explicit.into_iter().map(|x| *x)),
+        ) as _
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsDef {
     name: Name,
     // TODO ConsId or something
@@ -129,7 +177,7 @@ pub struct ConsDef {
     ret_ty: Expr,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Definition {
     /// A let definition is different from a local let statement.
     /// Let definitions are unordered, and can't contain patterns other than 'name' or 'name: ty'.
@@ -188,14 +236,14 @@ pub enum Head<L> {
     OrPat,
     EffPat
 */
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Elim<T: IsTerm> {
     App(Args<T>),
     // TODO probably use MemberId or something with a specific member of a specific type
     Member(Name),
-    Case(Vec<(Pat<T>, T::Clos)>),
+    Case(Vec<(Pat, T::Clos)>),
 }
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Type,
     Head(Head<Idx>),

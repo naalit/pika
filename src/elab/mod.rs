@@ -1,12 +1,92 @@
-use crate::common::*;
+use crate::{common::*, intern_key, parsing::ast::Pretty};
 
+mod metas;
 mod term;
+mod unify;
 mod val;
 mod var;
 
+use metas::*;
 pub use term::*;
 use val::*;
 use var::*;
+
+#[salsa::query_group(ElabDatabase)]
+pub trait Elaborator: crate::parsing::Parser {
+    #[salsa::interned]
+    fn def(&self, loc: DefLoc) -> Def;
+
+    #[salsa::interned]
+    fn def_node(&self, node: (ast::Def, DefCxt)) -> DefNode;
+
+    fn root_defs_n(&self, file: File) -> Vec<(SplitId, DefNode)>;
+
+    fn def_type_n(&self, def: DefNode) -> Option<Val>;
+
+    fn def_elab_n(&self, def: DefNode) -> DefElabResult;
+
+    fn def_elab(&self, def: Def) -> Option<DefElabResult>;
+
+    fn def_type(&self, def: Def) -> Option<Val>;
+}
+
+fn root_defs_n(db: &dyn Elaborator, file: File) -> Vec<(SplitId, DefNode)> {
+    db.all_split_ids(file)
+        .into_iter()
+        .filter_map(|split| {
+            let def = db.ast(file, split)?.def()?;
+            let node = db.def_node((def, DefCxt::global()));
+            Some((split, node))
+        })
+        .collect()
+}
+
+fn def_type_n(db: &dyn Elaborator, def: DefNode) -> Option<Val> {
+    let (def, cxt) = db.lookup_def_node(def);
+    todo!()
+}
+
+fn def_type(db: &dyn Elaborator, def: Def) -> Option<Val> {
+    match db.lookup_def(def) {
+        DefLoc::Root(file, split) => db
+            .root_defs_n(file)
+            .into_iter()
+            .find(|(x, _)| *x == split)
+            .and_then(|(_, x)| db.def_type_n(x)),
+        DefLoc::Child(parent, _) => {
+            // We have to completely elaborate the parent to find the type of the child
+            // which makes sense since we need all the type information in the body to determine the context for the child
+            let parent = db.def_elab(parent)?;
+            parent
+                .children
+                .into_iter()
+                .find(|(x, _)| *x == def)
+                .and_then(|(_, x)| db.def_type_n(x))
+        }
+    }
+}
+
+fn def_elab_n(db: &dyn Elaborator, def: DefNode) -> DefElabResult {
+    todo!()
+}
+
+fn def_elab(db: &dyn Elaborator, def: Def) -> Option<DefElabResult> {
+    match db.lookup_def(def) {
+        DefLoc::Root(file, split) => db
+            .root_defs_n(file)
+            .into_iter()
+            .find(|(x, _)| *x == split)
+            .map(|(_, x)| db.def_elab_n(x)),
+        DefLoc::Child(parent, _) => {
+            let parent = db.def_elab(parent)?;
+            parent
+                .children
+                .into_iter()
+                .find(|(x, _)| *x == def)
+                .map(|(_, x)| db.def_elab_n(x))
+        }
+    }
+}
 
 enum TypeError {
     NotFound(Name),
@@ -14,21 +94,94 @@ enum TypeError {
     Other(String),
 }
 
+// Problem: we want things to look up definitions by location
+// but with a design like this we can't use the child definitions within the body of the parent
+// the worst-case is something like
+//   let x = do
+//     let y: Type = I32
+//     fun f (): y = 12
+//     let z = f ()
+//     fun g () = z
+// where def g depends on local z, local z depends on def f, and def f depends on local y
+// this is probably impossible to do in a nice way
+// alternative A:
+// - eval has a check for not trying to inline defs that are children of this one
+// - we elaborate types for child definitions within the parent
+// - we never need to look inside child definitions
+// alternative B:
+// - still not allowed to inline children
+// - intern a (ast::Def, DefCxt) pair to e.g. DefNode
+// - elaborate def query takes a DefNode, returns list of child DefNodes
+// - another query that takes a Def and calls the above
+// - elaborating types occurs in salsa
+// alternative B is the same as A except type elaboration isn't duplicated so it's just better
+intern_key!(DefNode);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefElabResult {
+    result: Option<Definition>,
+    errors: Vec<Error>,
+    children: Vec<(Def, DefNode)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DefCxt {
+    scopes: Vec<ScopeState>,
+}
+impl DefCxt {
+    fn global() -> Self {
+        DefCxt {
+            scopes: vec![Scope::global().state()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ScopeState {
+    global: bool,
+    size: Size,
+    names: Vec<(Name, (Var<Lvl>, Val))>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Scope {
     global: bool,
-    names: HashMap<Name, (Var<Idx>, Val)>,
+    size: Size,
+    names: HashMap<Name, (Var<Lvl>, Val)>,
 }
 impl Scope {
+    fn state(&self) -> ScopeState {
+        ScopeState {
+            global: self.global,
+            size: self.size,
+            names: self
+                .names
+                .iter()
+                .map(|(a, b)| (a.clone(), b.clone()))
+                .collect(),
+        }
+    }
+
+    fn from_state(state: ScopeState) -> Scope {
+        Scope {
+            global: state.global,
+            size: state.size,
+            names: HashMap::from_iter(state.names),
+        }
+    }
+
     fn global() -> Self {
         Scope {
-            global: false,
+            global: true,
+            size: Size::zero(),
             names: HashMap::new(),
         }
     }
 
-    fn new() -> Self {
+    fn new(size: Size) -> Self {
         Scope {
             global: false,
+            size,
             names: HashMap::new(),
         }
     }
@@ -40,19 +193,31 @@ struct Cxt<'a> {
     errors: Vec<Spanned<TypeError>>,
 }
 impl Cxt<'_> {
+    fn new(db: &dyn crate::parsing::Parser, def_cxt: DefCxt) -> Cxt {
+        Cxt {
+            db,
+            scopes: def_cxt.scopes.into_iter().map(Scope::from_state).collect(),
+            errors: Vec::new(),
+        }
+    }
+
+    fn size(&self) -> Size {
+        self.scopes.last().unwrap().size
+    }
+
     fn scope(&self) -> &Scope {
         self.scopes.last().unwrap()
     }
 
     fn push(&mut self) {
-        self.scopes.push(Scope::new());
+        self.scopes.push(Scope::new(self.size()));
     }
 
     fn pop(&mut self) {
         self.scopes.pop();
     }
 
-    fn lookup(&self, name: Name) -> Option<(Var<Idx>, Val)> {
+    fn lookup(&self, name: Name) -> Option<(Var<Lvl>, Val)> {
         self.scopes
             .iter()
             .rev()
@@ -61,6 +226,153 @@ impl Cxt<'_> {
 
     fn error(&mut self, span: RelSpan, error: TypeError) {
         self.errors.push((error, span));
+    }
+}
+
+enum NumLiteral {
+    IPositive(u64),
+    INegative(i64),
+    Float(f64),
+}
+fn lex_number(s: &str) -> Result<NumLiteral, String> {
+    let mut chars = s.chars().peekable();
+    let mut buf = String::new();
+    let neg = chars.peek() == Some(&'-');
+    if neg {
+        buf.push(chars.next().unwrap());
+    }
+    let mut base = 10;
+    if chars.peek() == Some(&'0') {
+        buf.push(chars.next().unwrap());
+        match chars.peek() {
+            Some('x') => {
+                chars.next();
+                base = 16;
+            }
+            Some('b') => {
+                chars.next();
+                base = 2;
+            }
+            _ => (),
+        }
+    }
+    let mut float = false;
+    while let Some(&next) = chars.peek() {
+        if next.is_digit(base) {
+            buf.push(next);
+            chars.next();
+        } else if next == '_' {
+            chars.next();
+        } else if next.is_alphanumeric() {
+            chars.next();
+            return Err(format!("Invalid digit for int literal: {}", next));
+        } else if next == '.' {
+            float = true;
+            buf.push(next);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    use std::str::FromStr;
+    if float {
+        match f64::from_str(&buf) {
+            Ok(f) => Ok(NumLiteral::Float(f)),
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+    } else if neg {
+        match i64::from_str_radix(&buf, base) {
+            Ok(i) => Ok(NumLiteral::INegative(i)),
+            // TODO when `ParseIntError::kind()` gets stabilized (or Pika switches to nightly Rust) make custom error messages
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+    } else {
+        match u64::from_str_radix(&buf, base) {
+            Ok(i) => Ok(NumLiteral::IPositive(i)),
+            // TODO when `ParseIntError::kind()` gets stabilized (or Pika switches to nightly Rust) make custom error messages
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+    }
+}
+
+impl ast::Def {
+    fn elab_type(&self, cxt: &mut Cxt) -> Option<Val> {
+        match self {
+            ast::Def::LetDef(l) => match l.pat()?.expr()? {
+                ast::Expr::GroupedExpr(_) => {
+                    todo!("should allow `let (x: T) = q` definition")
+                }
+                ast::Expr::Binder(x) => Some(
+                    x.ty()?
+                        .expr()?
+                        .check(Val::Type, cxt)
+                        .eval(&mut Env::new(cxt.size())),
+                ),
+                _ => {
+                    // Infer the type from the value if possible
+                    // TODO use db.elab_def_n instead to memoize the result
+                    let def = self.elab(None, cxt)?;
+                    match def {
+                        Definition::Let { ty, .. } => Some(ty.eval(&mut Env::new(cxt.size()))),
+                        _ => unreachable!(),
+                    }
+                }
+            },
+            ast::Def::FunDef(_) => todo!(),
+            ast::Def::TypeDef(_) => todo!(),
+            ast::Def::TypeDefShort(_) => todo!(),
+            ast::Def::TypeDefStruct(_) => todo!(),
+        }
+    }
+
+    fn elab(&self, ty: Option<Val>, cxt: &mut Cxt) -> Option<Definition> {
+        match self {
+            ast::Def::LetDef(x) => match ty {
+                Some(ty) => {
+                    let body = x.body()?.expr()?.check(ty.clone(), cxt);
+                    let pat = x.pat()?.expr()?;
+                    // Let definitions only allow var and binder patterns
+                    match pat {
+                        ast::Expr::Var(x) => Some(Definition::Let {
+                            name: x.name(cxt.db),
+                            ty: Box::new(ty.quote(cxt.size())),
+                            body: Box::new(body),
+                        }),
+                        // TODO should probably warn about this since it's not very useful
+                        ast::Expr::Hole(_) => Some(Definition::Let {
+                            name: cxt.db.name("_".to_string()),
+                            ty: Box::new(ty.quote(cxt.size())),
+                            body: Box::new(body),
+                        }),
+                        ast::Expr::GroupedExpr(_) => {
+                            todo!("should allow `let (x: T) = q` definition")
+                        }
+                        ast::Expr::Binder(_) => todo!("unify"),
+                        _ => {
+                            cxt.error(
+                                pat.span(),
+                                TypeError::Other(format!(
+                                    "patterns aren't allowed in let definitions: got {}",
+                                    pat.pretty().to_string(true)
+                                )),
+                            );
+                            None
+                        }
+                    }
+                }
+                None => todo!(),
+            },
+            ast::Def::FunDef(_) => todo!(),
+            ast::Def::TypeDef(_) => todo!(),
+            ast::Def::TypeDefShort(_) => todo!(),
+            ast::Def::TypeDefStruct(_) => todo!(),
+        }
     }
 }
 
@@ -77,7 +389,7 @@ impl ast::Expr {
                     ast::Expr::Var(name) => {
                         let name = name.name(cxt.db);
                         let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name))?;
-                        (Expr::var(v), t)
+                        (Expr::var(v.cvt(cxt.size())), t)
                     }
                     ast::Expr::Lam(_) => todo!(),
                     ast::Expr::Pi(_) => todo!(),
@@ -89,7 +401,7 @@ impl ast::Expr {
                         if let Some(l) = l.string() {
                             // Process escape sequences to get the string's actual contents
                             // This work is also done by the lexer, which then throws it away;
-                            // TODO move all error checking here and simplify the lexer code
+                            // TODO move all error checking here and simplify the lexer code (same for numbers)
                             let mut buf = String::new();
                             let mut chars = l.text().chars().skip_while(|x| x.is_whitespace());
                             loop {
@@ -122,6 +434,15 @@ impl ast::Expr {
                                 Expr::Lit(Literal::String(cxt.db.name(buf))),
                                 Val::var(Var::Builtin(Builtin::StringType)),
                             )
+                        } else if let Some(l) = l.int().or(l.float()) {
+                            let num = lex_number(l.text())
+                                .map_err(|e| TypeError::Other(format!("invalid literal: {}", e)))?;
+                            match num {
+                                NumLiteral::IPositive(_) => todo!(),
+                                NumLiteral::INegative(_) => todo!(),
+                                NumLiteral::Float(_) => todo!(),
+                            }
+                            todo!()
                         } else {
                             todo!("invalid literal: {:?}", l.syntax());
                         }
