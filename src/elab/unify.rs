@@ -145,6 +145,7 @@ impl UnifyCxt<'_> {
             }
 
             // Now handle neutrals as directed by the unfolding state
+            // If possible, try approximate conversion checking, unfolding if it fails (and if that's allowed)
             (Val::Neutral(a), Val::Neutral(b)) if state.try_approx() && a.head() == b.head() => {
                 let err = match self.unify_spines(a.spine(), b.spine(), size, state.spine_mode()) {
                     Ok(true) => return Ok(()),
@@ -162,10 +163,16 @@ impl UnifyCxt<'_> {
                 }
             }
 
-            // Now try unfolding neutrals
+            // We want to prioritize solving the later meta first so it depends on the earlier meta
+            (Val::Neutral(a), Val::Neutral(b)) if matches!((a.head(), b.head()), (Head::Var(Var::Meta(a)), Head::Var(Var::Meta(b))) if a < b) => {
+                self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
+            }
+
+            // There are multiple cases for two neutrals which need to be handled in sequence
+            // basically we need to try one after another and they're not simple enough to disambiguate with guards
             (Val::Neutral(mut a), Val::Neutral(mut b)) => {
                 // Try solving metas; if both are metas, solve whichever is possible
-                if state.can_solve_metas() {
+                if state.can_solve_metas() && a.head() != b.head() {
                     if let Head::Var(Var::Meta(m)) = a.head() {
                         if !self.meta_cxt.is_solved(m) {
                             let bc = match b.head() {
@@ -224,6 +231,7 @@ impl UnifyCxt<'_> {
                 }
             }
 
+            // If only one side is a solvable meta, solve without unfolding the other side
             (Val::Neutral(n), x) | (x, Val::Neutral(n))
                 if state.can_solve_metas()
                     && matches!(n.head(), Head::Var(Var::Meta(m)) if !self.meta_cxt.is_solved(m)) =>
@@ -237,6 +245,7 @@ impl UnifyCxt<'_> {
                 }
             }
 
+            // If a neutral still hasn't unified with anything, try unfolding it if possible
             (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
                 match n.resolve(&mut Env::new(size)) {
                     Ok(n) => self.unify(n, x, size, state),

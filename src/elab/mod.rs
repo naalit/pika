@@ -1,6 +1,7 @@
 use crate::{common::*, intern_key, parsing::ast::Pretty};
 
 mod metas;
+mod pattern;
 mod term;
 mod unify;
 mod val;
@@ -170,6 +171,15 @@ impl Scope {
         }
     }
 
+    fn define(&mut self, name: Name, var: Var<Lvl>, ty: Val) {
+        self.names.insert(name, (var, ty));
+    }
+
+    fn define_local(&mut self, name: Name, ty: Val) {
+        self.define(name, Var::Local(name, self.size.next_lvl()), ty);
+        self.size = self.size.inc();
+    }
+
     fn global() -> Self {
         Scope {
             global: true,
@@ -188,12 +198,12 @@ impl Scope {
 }
 
 struct Cxt<'a> {
-    db: &'a dyn crate::parsing::Parser,
+    db: &'a dyn Elaborator,
     scopes: Vec<Scope>,
     errors: Vec<Spanned<TypeError>>,
 }
 impl Cxt<'_> {
-    fn new(db: &dyn crate::parsing::Parser, def_cxt: DefCxt) -> Cxt {
+    fn new(db: &dyn Elaborator, def_cxt: DefCxt) -> Cxt {
         Cxt {
             db,
             scopes: def_cxt.scopes.into_iter().map(Scope::from_state).collect(),
@@ -207,6 +217,10 @@ impl Cxt<'_> {
 
     fn scope(&self) -> &Scope {
         self.scopes.last().unwrap()
+    }
+
+    fn scope_mut(&mut self) -> &mut Scope {
+        self.scopes.last_mut().unwrap()
     }
 
     fn push(&mut self) {
@@ -376,6 +390,55 @@ impl ast::Def {
     }
 }
 
+impl ast::Lit {
+    pub(self) fn to_literal(&self, cxt: &Cxt) -> Result<Literal, String> {
+        if let Some(l) = self.string() {
+            // Process escape sequences to get the string's actual contents
+            // This work is also done by the lexer, which then throws it away;
+            // TODO move all error checking here and simplify the lexer code (same for numbers)
+            let mut buf = String::new();
+            let mut chars = l.text().chars().skip_while(|x| x.is_whitespace());
+            loop {
+                match chars.next() {
+                    Some('"') => break,
+                    Some('\\') => {
+                        // Escape
+                        match chars.next() {
+                            Some('\\') => {
+                                buf.push('\\');
+                            }
+                            Some('n') => {
+                                buf.push('\n');
+                            }
+                            Some('t') => {
+                                buf.push('\t');
+                            }
+                            _ => {
+                                panic!("Invalid escape should have been caught in lexer");
+                            }
+                        }
+                    }
+                    Some(c) => buf.push(c),
+                    None => {
+                        panic!("Unclosed string should have been caught in lexer")
+                    }
+                }
+            }
+            Ok(Literal::String(cxt.db.name(buf)))
+        } else if let Some(l) = self.int().or(self.float()) {
+            let num = lex_number(l.text()).map_err(|e| format!("invalid literal: {}", e))?;
+            match num {
+                NumLiteral::IPositive(_) => todo!(),
+                NumLiteral::INegative(_) => todo!(),
+                NumLiteral::Float(_) => todo!(),
+            }
+            todo!()
+        } else {
+            todo!("invalid literal: {:?}", self.syntax());
+        }
+    }
+}
+
 impl ast::Expr {
     fn check(&self, ty: Val, cxt: &mut Cxt) -> Expr {
         todo!()
@@ -396,57 +459,30 @@ impl ast::Expr {
                     ast::Expr::App(_) => todo!(),
                     ast::Expr::Do(_) => todo!(),
                     ast::Expr::Hole(_) => todo!(),
-                    ast::Expr::Case(_) => todo!(),
-                    ast::Expr::Lit(l) => {
-                        if let Some(l) = l.string() {
-                            // Process escape sequences to get the string's actual contents
-                            // This work is also done by the lexer, which then throws it away;
-                            // TODO move all error checking here and simplify the lexer code (same for numbers)
-                            let mut buf = String::new();
-                            let mut chars = l.text().chars().skip_while(|x| x.is_whitespace());
-                            loop {
-                                match chars.next() {
-                                    Some('"') => break,
-                                    Some('\\') => {
-                                        // Escape
-                                        match chars.next() {
-                                            Some('\\') => {
-                                                buf.push('\\');
-                                            }
-                                            Some('n') => {
-                                                buf.push('\n');
-                                            }
-                                            Some('t') => {
-                                                buf.push('\t');
-                                            }
-                                            _ => {
-                                                panic!("Invalid escape should have been caught in lexer");
-                                            }
-                                        }
-                                    }
-                                    Some(c) => buf.push(c),
-                                    None => {
-                                        panic!("Unclosed string should have been caught in lexer")
-                                    }
-                                }
-                            }
-                            (
-                                Expr::Lit(Literal::String(cxt.db.name(buf))),
-                                Val::var(Var::Builtin(Builtin::StringType)),
-                            )
-                        } else if let Some(l) = l.int().or(l.float()) {
-                            let num = lex_number(l.text())
-                                .map_err(|e| TypeError::Other(format!("invalid literal: {}", e)))?;
-                            match num {
-                                NumLiteral::IPositive(_) => todo!(),
-                                NumLiteral::INegative(_) => todo!(),
-                                NumLiteral::Float(_) => todo!(),
-                            }
-                            todo!()
-                        } else {
-                            todo!("invalid literal: {:?}", l.syntax());
-                        }
+                    ast::Expr::Case(case) => {
+                        let mut rty = None;
+                        let (scrutinee, case) = case.elaborate(&mut rty, cxt);
+                        let rty = rty.unwrap();
+                        (
+                            Expr::Elim(Box::new(scrutinee), Box::new(Elim::Case(case))),
+                            rty,
+                        )
                     }
+                    ast::Expr::Lit(l) => match l.to_literal(cxt) {
+                        Ok(l) => (
+                            Expr::Lit(l),
+                            Val::var(Var::Builtin(match l {
+                                Literal::Int(_) => todo!(),
+                                Literal::F64(_) => todo!(),
+                                Literal::F32(_) => todo!(),
+                                Literal::String(_) => Builtin::StringType,
+                            })),
+                        ),
+                        Err(e) => {
+                            cxt.error(self.span(), TypeError::Other(e));
+                            (Expr::Error, Val::Error)
+                        }
+                    },
                     ast::Expr::BinOp(x) => {
                         let tok = x
                             .op()
@@ -528,15 +564,22 @@ impl ast::Expr {
                     ast::Expr::If(_) => todo!(),
                     ast::Expr::Box(_) => todo!(),
                     ast::Expr::Type(_) => todo!(),
-                    ast::Expr::GroupedExpr(_) => todo!(),
+                    ast::Expr::GroupedExpr(e) => match e.expr() {
+                        Some(e) => e.infer(cxt),
+                        // Assume () is the unit value by default, it's only the unit type if it's checked against Type
+                        None => (
+                            Expr::var(Var::Builtin(Builtin::Unit)),
+                            Val::var(Var::Builtin(Builtin::UnitType)),
+                        ),
+                    },
                     ast::Expr::Tuple(_) => todo!(),
-                    ast::Expr::OrPat(_) => todo!(),
                     ast::Expr::EffPat(_) => todo!(),
                     ast::Expr::Binder(_) => todo!(),
                     ast::Expr::StructInit(_) => todo!(),
                 }
             })
         };
+        // TODO auto-applying implicits (probably? only allowing them on function calls is also an option to consider)
         match result() {
             Ok(x) => x,
             Err(e) => {

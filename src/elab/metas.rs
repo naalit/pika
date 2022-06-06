@@ -2,7 +2,7 @@ use std::sync::RwLock;
 
 use super::*;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct Meta(u32);
 
 pub enum SpecialBound {
@@ -40,6 +40,8 @@ impl MetaBounds {
 
 pub enum MetaEntry {
     Solved {
+        /// The solution can have free local variables, so its environment is stored with it similar to a Clos
+        env: Env,
         solution: Expr,
         occurs_cache: RwLock<Option<Meta>>,
     },
@@ -158,9 +160,21 @@ impl MetaCxt {
             .unwrap_or(false)
     }
 
-    pub fn lookup(&self, meta: Meta) -> Option<Expr> {
+    pub fn lookup_val(&self, meta: Meta) -> Option<Val> {
         self.metas.get(meta.0 as usize).and_then(|x| match x {
-            MetaEntry::Solved { solution, .. } => Some(solution.clone()),
+            MetaEntry::Solved { solution, env, .. } => {
+                Some(solution.clone().eval(&mut env.clone()))
+            }
+            MetaEntry::Unsolved { .. } => None,
+        })
+    }
+
+    pub fn lookup_expr(&self, meta: Meta, size: Size) -> Option<Expr> {
+        self.metas.get(meta.0 as usize).and_then(|x| match x {
+            // TODO combined eval-quote (that's why this function exists separately from lookup_val)
+            MetaEntry::Solved { solution, env, .. } => {
+                Some(solution.clone().eval(&mut env.clone()).quote(size))
+            }
             MetaEntry::Unsolved { .. } => None,
         })
     }
@@ -242,6 +256,7 @@ impl MetaCxt {
         }
 
         self.metas[meta.0 as usize] = MetaEntry::Solved {
+            env: Env::new(*scope),
             solution,
             occurs_cache: RwLock::new(None),
         };

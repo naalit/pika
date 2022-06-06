@@ -94,28 +94,17 @@ pub enum IntType {
     I64,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Literal {
     /// Stores the usize representation of the int
     /// Whether it's positive or negative can be thought of as stored in meta bounds elsewhere
     /// It will be reified during lowering by casting to its concrete type
     Int(usize),
-    F64(f64),
-    F32(f32),
+    /// Stores a u64 representation of the bits of the f64
+    F64(u64),
+    /// Stores a u32 representation of the bits of the f32
+    F32(u32),
     String(Name),
-}
-impl Eq for Literal {}
-impl std::hash::Hash for Literal {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        core::mem::discriminant(self).hash(state);
-        match self {
-            Literal::Int(i) => i.hash(state),
-            // TODO do this for PartialEq too
-            Literal::F64(i) => i.to_bits().hash(state),
-            Literal::F32(i) => i.to_bits().hash(state),
-            Literal::String(s) => s.hash(state),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -246,7 +235,7 @@ pub enum Elim<T: IsTerm> {
     App(Args<T>),
     // TODO probably use MemberId or something with a specific member of a specific type
     Member(Name),
-    Case(Vec<(Pat, T::Clos)>),
+    Case(super::pattern::CaseOf),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {

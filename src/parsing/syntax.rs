@@ -107,7 +107,6 @@ pub enum SyntaxKind {
     Do,
     Hole,
     DotExpr,
-    OrPat,
     EffPat,
     Case,
     Lit,

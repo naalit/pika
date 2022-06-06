@@ -180,7 +180,6 @@ make_nodes! {
         GroupedExpr,
         Tuple,
         // Patterns parse as expressions
-        OrPat,
         EffPat,
         Binder,
         StructInit
@@ -191,7 +190,6 @@ make_nodes! {
     Body = expr: Expr;
 
     // Patterns
-    OrPat = a: Expr, b: (1 Expr);
     EffPat = a: Expr, b: (1 Expr);
 
     // Definitions
@@ -235,7 +233,7 @@ fn print_tree(node: &SyntaxNode, indent: usize) {
 }
 
 impl Var {
-    pub fn name(&self, db: &dyn Parser) -> Name {
+    pub fn name<T: Parser + ?Sized>(&self, db: &T) -> Name {
         db.name(self.name_tok().unwrap().text().to_string())
     }
 }
@@ -580,7 +578,6 @@ impl Pretty for Expr {
                 .space()
                 .chain(x.expr().pretty()),
             Expr::GroupedExpr(x) => return Doc::start('(').chain(x.expr().pretty()).add(')', ()),
-            Expr::OrPat(x) => x.a().pretty().add('|', ()).chain(x.b().pretty()),
             Expr::EffPat(x) => Doc::none()
                 .add("eff", Doc::style_keyword())
                 .space()
