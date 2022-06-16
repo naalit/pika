@@ -83,20 +83,56 @@ pub struct Clos {
 }
 impl Clos {
     pub fn apply(self, args: Args<Val>) -> Val {
+        // deal with argument number mismatch when passing values that aren't syntactically tuples:
+        //
+        // ((x, y) => ...) p where p : (A, B) -->
+        // case p of (x, y) => ...
+        //
+        // ([a, b] (x, y) => ...) [t, u] p -->
+        // (case p of (x, y) => ...) [t/a, u/b]
         let Clos { mut env, body, .. } = self;
-        for (v, _) in args
-            .implicit
-            .into_iter()
-            .flat_map(|x| x.zip_pair(&self.params.implicit))
-        {
-            env.push(Some(v));
+        if let Some(imp) = args.implicit {
+            match imp.zip_pair(&self.params.implicit) {
+                Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
+                Err(imp) => {
+                    let imp_pars: Vec<_> = self.params.implicit.iter().map(|x| x.name).collect();
+                    let exp_pars: Vec<_> = self.params.explicit.iter().map(|x| x.name).collect();
+                    let body = match args.explicit {
+                        Some(exp) => Expr::Elim(
+                            Box::new(exp.quote(env.size + self.params.implicit.len())),
+                            Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
+                                &exp_pars,
+                                body,
+                                env.size + self.params.implicit.len(),
+                            ))),
+                        ),
+                        None => {
+                            assert!(exp_pars.is_empty());
+                            body
+                        }
+                    };
+                    return imp.app(
+                        Elim::Case(super::pattern::CaseOf::make_simple_args(
+                            &imp_pars, body, env.size,
+                        )),
+                        &mut env,
+                    );
+                }
+            }
         }
-        for (v, _) in args
-            .explicit
-            .into_iter()
-            .flat_map(|x| x.zip_pair(&self.params.explicit))
-        {
-            env.push(Some(v));
+        if let Some(exp) = args.explicit {
+            match exp.zip_pair(&self.params.explicit) {
+                Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
+                Err(exp) => {
+                    let exp_pars: Vec<_> = self.params.explicit.iter().map(|x| x.name).collect();
+                    return exp.app(
+                        Elim::Case(super::pattern::CaseOf::make_simple_args(
+                            &exp_pars, body, env.size,
+                        )),
+                        &mut env,
+                    );
+                }
+            }
         }
         body.eval(&mut env)
     }
@@ -110,19 +146,48 @@ impl Clos {
         } = self;
         let args = params.synthesize_args(size);
         let params = params.quote(size);
-        for (v, _) in args
-            .implicit
-            .into_iter()
-            .flat_map(|x| x.zip_pair(&params.implicit))
-        {
-            env.push(Some(v));
+        if let Some(imp) = args.implicit {
+            match imp.zip_pair(&params.implicit) {
+                Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
+                Err(imp) => {
+                    let imp_pars: Vec<_> = params.implicit.iter().map(|x| x.name).collect();
+                    let exp_pars: Vec<_> = params.explicit.iter().map(|x| x.name).collect();
+                    let body = match args.explicit {
+                        Some(exp) => Expr::Elim(
+                            Box::new(exp.quote(env.size + params.implicit.len())),
+                            Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
+                                &exp_pars,
+                                body,
+                                env.size + params.implicit.len(),
+                            ))),
+                        ),
+                        None => {
+                            assert!(exp_pars.is_empty());
+                            body
+                        }
+                    };
+                    return Expr::Elim(
+                        Box::new(imp.quote(env.size + params.implicit.len())),
+                        Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
+                            &imp_pars, body, env.size,
+                        ))),
+                    );
+                }
+            }
         }
-        for (v, _) in args
-            .explicit
-            .into_iter()
-            .flat_map(|x| x.zip_pair(&params.explicit))
-        {
-            env.push(Some(v));
+        if let Some(exp) = args.explicit {
+            match exp.zip_pair(&params.explicit) {
+                Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
+                Err(exp) => {
+                    let exp_pars: Vec<_> = params.explicit.iter().map(|x| x.name).collect();
+                    return Expr::Elim(
+                        Box::new(exp.quote(env.size)),
+                        Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
+                            &exp_pars, body, env.size,
+                        ))),
+                    );
+                }
+            }
         }
         let body = body.eval(&mut env).quote(size + params.len());
         Expr::Fun {
@@ -154,8 +219,19 @@ impl IsTerm for Val {
 }
 
 impl Val {
-    pub fn zip_pair<T>(self, with: &[T]) -> Vec<(Val, &T)> {
-        // TODO: ((x, y) => ...) p where p : (A, B) should not panic
+    pub fn zip_pair<T>(self, with: &[T]) -> Result<Vec<(Val, &T)>, Val> {
+        // ((x, y) => ...) p where p : (A, B) shouldn't panic
+        // so first check that we have enough of the pair inlined
+        let mut term = &self;
+        for _ in 0..with.len() {
+            match term {
+                Val::Pair(a, rest) => {
+                    term = rest;
+                }
+                Val::Error => (),
+                _ => return Err(self),
+            }
+        }
         let mut v = Vec::new();
         let mut term = self;
         for x in &with[..with.len() - 1] {
@@ -171,7 +247,7 @@ impl Val {
         if let Some(x) = with.last() {
             v.push((term, x));
         }
-        v
+        Ok(v)
     }
 
     pub fn app(mut self, x: Elim<Val>, env: &mut Env) -> Val {

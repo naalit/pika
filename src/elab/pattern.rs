@@ -570,6 +570,40 @@ pub struct CaseOf {
     dec: DecNode,
     rhs: Vec<CaseRhs>,
 }
+impl CaseOf {
+    pub(super) fn make_simple_args(args: &[Name], body: Expr, size: Size) -> CaseOf {
+        let mut var_num = 0;
+        let mut pvar = || {
+            var_num += 1;
+            PVar(var_num)
+        };
+        let (mut ipats, vrest) =
+            args.iter()
+                .take(args.len() - 1)
+                .fold((Vec::new(), PVar(0)), |(mut vec, var), name| {
+                    let va = pvar();
+                    let vb = pvar();
+                    vec.push((var, IPat::Pair(va, vb)));
+                    vec.push((va, IPat::Var(*name)));
+                    (vec, vb)
+                });
+        if let Some(name) = args.last() {
+            ipats.push((vrest, IPat::Var(*name)));
+        }
+
+        CaseOf {
+            svar: PVar(0),
+            dec: DecNode {
+                ipats,
+                dec: Dec::Success(Body(0)),
+            },
+            rhs: vec![CaseRhs {
+                size: size + args.len(),
+                body,
+            }],
+        }
+    }
+}
 
 impl ast::Case {
     pub(super) fn elaborate(&self, rty: &mut Option<Val>, ecxt: &mut Cxt) -> (Expr, CaseOf) {
