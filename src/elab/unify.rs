@@ -62,21 +62,11 @@ struct UnifyCxt<'a> {
 }
 
 enum UnifyError {
-    // TODO how do we pretty print this with correct names?
     Conversion(Val, Val),
     MetaSolve(MetaSolveError),
 }
 
 impl UnifyCxt<'_> {
-    fn unify_patterns(&mut self, a: &Pat, b: &Pat) -> bool {
-        // TODO (_ => 3) and (x => 3) should be unifiable
-        match (a, b) {
-            (Pat::Any, Pat::Any) => true,
-            (Pat::Var(_), Pat::Var(_)) => true,
-            _ => false,
-        }
-    }
-
     fn unify_spines(
         &mut self,
         a: &[Elim<Val>],
@@ -90,18 +80,18 @@ impl UnifyCxt<'_> {
         for (a, b) in a.iter().zip(b) {
             match (a, b) {
                 (Elim::App(a), Elim::App(b)) => {
-                    if a.implicit.len() != b.implicit.len()
+                    if a.implicit.is_some() != b.implicit.is_some()
                         || a.explicit.is_some() != b.explicit.is_some()
                     {
                         return Ok(false);
                     }
-                    for (a, b) in a
-                        .implicit
-                        .iter()
-                        .chain(a.explicit.as_deref())
-                        .zip(b.implicit.iter().chain(b.explicit.as_deref()))
-                    {
-                        self.unify(a.clone(), b.clone(), size, state)?;
+                    if let Some(a) = a.implicit.clone() {
+                        let b = b.implicit.clone().unwrap();
+                        self.unify(*a, *b, size, state)?;
+                    }
+                    if let Some(a) = a.explicit.clone() {
+                        let b = b.implicit.clone().unwrap();
+                        self.unify(*a, *b, size, state)?;
                     }
                 }
                 (Elim::Member(_), Elim::Member(_)) => todo!(),
@@ -118,29 +108,29 @@ impl UnifyCxt<'_> {
             (Val::Type, Val::Type) => Ok(()),
             (Val::Error, _) | (_, Val::Error) => Ok(()),
             (Val::Fun(a), Val::Fun(b))
-                if a.class == b.class && a.params.n_bindings() == b.params.n_bindings() =>
+                if a.class == b.class && a.params.len() == b.params.len() =>
             {
                 // First unify parameters
-                if a.params.implicit.len() != b.params.implicit.len() {
+                // TODO eta-conversion ((a, b, c) -> d == (a, (b, c)) -> d)
+                if a.params.implicit.len() != b.params.implicit.len()
+                    || a.params.explicit.len() != b.params.explicit.len()
+                {
                     return Err(UnifyError::Conversion(Val::Fun(a), Val::Fun(b)));
                 }
                 for (pa, pb) in a
                     .params
                     .implicit
                     .iter()
-                    .chain(a.params.explicit.as_deref())
-                    .zip(b.params.implicit.iter().chain(b.params.explicit.as_deref()))
+                    .chain(&a.params.explicit)
+                    .zip(b.params.implicit.iter().chain(&b.params.explicit))
                 {
                     self.unify(pa.ty.clone(), pb.ty.clone(), size, state)?;
-                    if !self.unify_patterns(&pa.pat, &pb.pat) {
-                        return Err(UnifyError::Conversion(Val::Fun(a), Val::Fun(b)));
-                    }
                 }
 
                 // Unify bodies
-                let (a, new_size) = a.vquote(size);
-                let (b, new_size2) = b.vquote(size);
-                assert_eq!(new_size, new_size2);
+                let new_size = size + a.params.len();
+                let a = a.vquote(size);
+                let b = b.vquote(size);
                 self.unify(a, b, new_size, state)
             }
 
@@ -255,9 +245,9 @@ impl UnifyCxt<'_> {
 
             // Eta-expand if there's a lambda on one side
             (Val::Fun(clos), x) | (x, Val::Fun(clos)) if clos.class == Lam => {
-                let (args, new_size) = clos.params.synthesize_args(size);
-                let (a, new_size2) = clos.vquote(size);
-                assert_eq!(new_size, new_size2);
+                let new_size = size + clos.params.len();
+                let args = clos.params.synthesize_args(size);
+                let a = clos.vquote(size);
                 self.unify(
                     a,
                     x.app(Elim::App(args), &mut Env::new(new_size)),

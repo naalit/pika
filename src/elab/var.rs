@@ -54,6 +54,18 @@ impl Size {
         (self.0..other.0).map(Size)
     }
 }
+impl std::ops::Add<usize> for Size {
+    type Output = Self;
+
+    fn add(self, rhs: usize) -> Self::Output {
+        Size(self.0 + rhs as u32)
+    }
+}
+impl std::ops::AddAssign<usize> for Size {
+    fn add_assign(&mut self, rhs: usize) {
+        *self = *self + rhs;
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Var<L> {

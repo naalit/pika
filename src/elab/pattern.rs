@@ -223,36 +223,30 @@ mod input {
                             } => (*a, *b),
                             _ => unreachable!(),
                         };
-                        let (ta, tb) = match ty {
+                        let (va, vb) = match ty {
                             Val::Fun(clos) if clos.class == Sigma => {
-                                let ta = clos
-                                    .params
-                                    .explicit
-                                    .as_ref()
-                                    .map_or(Val::Error, |par| par.ty.clone());
                                 // the sigma closure can capture the lhs, but it might not be a source-level variable in the pattern, e.g.
                                 //     let x: (a: SomeStruct, a.someType) = ...
                                 //     case x of
                                 //         (SomeStruct { someType }, x) => ...
                                 // there `x: a.someType`, so we need to materialize `a` as a "real" var, not just a PVar
-                                // we do this by adding the IPat from the Sigma (`a` in this case) to the pattern
-                                // however, they must go in order but before any other variables (since the types of those variables
-                                // can depend on the values of earlier ones.)
-                                row.ty_ipats.extend(
-                                    clos.params
-                                        .explicit
-                                        .as_ref()
-                                        .map(|_| todo!("change how sigma params are stored")),
-                                );
-                                let (tb, size) = clos.clone().vquote(row.tyvars_size);
-                                row.tyvars_size = size;
-                                (ta, tb)
+                                // we do this by adding an IPat with the name from the sigma (`a` in this case) to the pattern
+                                // however, these must go in order but before any other variables (since the types of those variables
+                                // can depend on the values of earlier ones.) Hence `row.ty_ipats`.
+                                assert!(clos.params.implicit.is_empty());
+                                assert_eq!(clos.params.explicit.len(), 1);
+                                let ta = clos.params.explicit[0].ty.clone();
+                                let tb = clos.clone().vquote(row.tyvars_size);
+                                let va = self.pvar(ta);
+                                let vb = self.pvar(tb);
+                                row.tyvars_size += clos.params.len();
+                                row.ty_ipats
+                                    .push((va, IPat::Var(clos.params.explicit[0].name)));
+                                (va, vb)
                             }
-                            Val::Error => (Val::Error, Val::Error),
+                            Val::Error => (self.pvar(Val::Error), self.pvar(Val::Error)),
                             _ => unreachable!(),
                         };
-                        let va = self.pvar(ta);
-                        let vb = self.pvar(tb);
                         row.columns.push_front(Column { var: vb, pat: b });
                         row.columns.push_front(Column { var: va, pat: a });
                         RemovedColumn::IPat(IPat::Pair(va, vb))
@@ -412,11 +406,6 @@ impl CaseElabCxt<'_, '_> {
         let l = self.bodies.len();
         self.bodies.push(body);
         Body(l)
-    }
-
-    fn manufacture_name(&self, i: Idx) -> Name {
-        let l = i.lvl(self.ecxt.size());
-        self.ecxt.db.name(format!("%{}", l.as_u32()))
     }
 
     fn column_select_heuristic(&self, topRow: &input::Row, rows: &[input::Row]) -> PVar {

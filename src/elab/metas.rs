@@ -93,7 +93,7 @@ struct PartialRename {
     vars: HashMap<Lvl, Lvl>,
 }
 impl PartialRename {
-    fn add_arg(&mut self, arg: Val, inner_size: &mut Size) -> Result<Pat, MetaSolveError> {
+    fn add_arg(&mut self, arg: Val, inner_size: Size) -> Result<Vec<Name>, MetaSolveError> {
         match arg {
             Val::Neutral(n)
                 if matches!(n.head(), Head::Var(Var::Local(_, _))) && n.spine().is_empty() =>
@@ -103,9 +103,8 @@ impl PartialRename {
                     _ => unreachable!(),
                 };
                 self.vars.insert(l, inner_size.next_lvl());
-                *inner_size = inner_size.inc();
 
-                Ok(Pat::Var(n))
+                Ok(vec![n])
             }
             // only right-associative pairs are allowed
             // TODO when box patterns are stabilized switch to that instead of nested matches!()
@@ -125,10 +124,10 @@ impl PartialRename {
                     _ => unreachable!(),
                 };
                 self.vars.insert(l, inner_size.next_lvl());
-                *inner_size = inner_size.inc();
 
-                let rhs = self.add_arg(*b, inner_size)?;
-                Ok(todo!("Pat::Pair(Box::new(Pat::Var(n)), rhs)"))
+                let mut rhs = self.add_arg(*b, inner_size.inc())?;
+                rhs.insert(0, n);
+                Ok(rhs)
             }
             // TODO handle Val::Error without creating more errors?
             v => Err(MetaSolveError::SpineNonVariable(v)),
@@ -212,30 +211,32 @@ impl MetaCxt {
             rename.vars.insert(i.next_lvl(), i.next_lvl());
         }
         // Inspect the spine to allow user-defined variable dependencies
-        let mut inner_size = start_size;
         if spine.len() > 1 {
             return Err(MetaSolveError::SpineTooLong);
         }
         let params = spine
             .pop()
             .map(|elim| match elim {
-                Elim::App(args) if args.implicit.is_empty() && args.explicit.is_some() => {
-                    let pat = rename.add_arg(*args.explicit.unwrap(), &mut inner_size)?;
-                    Ok(Params {
-                        implicit: Vec::new(),
-                        explicit: Some(Box::new(Par {
-                            pat,
+                Elim::App(args) if args.implicit.is_none() && args.explicit.is_some() => {
+                    let names = rename.add_arg(*args.explicit.unwrap(), start_size)?;
+                    let params = names
+                        .into_iter()
+                        .map(|name| Par {
+                            name,
                             // TODO is this type ever used? can we actually find the type of this?
                             ty: Val::Error,
-                        })),
+                        })
+                        .collect();
+                    Ok(Params {
+                        implicit: Vec::new(),
+                        explicit: params,
                     })
                 }
                 i => Err(MetaSolveError::SpineNonApp(i)),
             })
             .transpose()?;
-        let inner_size_scope = start_size
-            .until(inner_size)
-            .fold(*scope, |acc, _| acc.inc());
+        let inner_size = start_size + params.as_ref().map_or(0, |x| x.len());
+        let inner_size_scope = *scope + params.as_ref().map_or(0, |x| x.len());
 
         let mut solution = solution.quote(inner_size);
         solution.check_solution(
@@ -246,8 +247,7 @@ impl MetaCxt {
         )?;
 
         if let Some(params) = params {
-            let (params, i2) = params.quote(*scope);
-            assert_eq!(i2, inner_size_scope);
+            let params = params.quote(*scope);
             solution = Expr::Fun {
                 class: Lam,
                 params,
@@ -275,8 +275,11 @@ impl Elim<Expr> {
     ) -> Result<(), MetaSolveError> {
         match self {
             Elim::App(args) => {
-                for i in args.implicit.iter_mut().chain(args.explicit.as_deref_mut()) {
-                    i.check_solution(cxt, mode, s_from, s_to)?;
+                if let Some(x) = &mut args.implicit {
+                    x.check_solution(cxt, mode, s_from, s_to)?;
+                }
+                if let Some(x) = &mut args.explicit {
+                    x.check_solution(cxt, mode, s_from, s_to)?;
                 }
             }
             Elim::Member(_) => todo!(),
@@ -293,13 +296,13 @@ impl Params<Expr> {
         mode: &SolutionCheckMode,
         mut s_from: Size,
         mut s_to: Size,
-    ) -> Result<(Size, Size), MetaSolveError> {
-        for i in self.implicit.iter_mut().chain(self.explicit.as_deref_mut()) {
+    ) -> Result<(), MetaSolveError> {
+        for i in self.implicit.iter_mut().chain(self.explicit.iter_mut()) {
             i.ty.check_solution(cxt, mode, s_from, s_to)?;
-            s_from = i.pat.add_to_size(s_from);
-            s_to = i.pat.add_to_size(s_to);
+            s_from += 1;
+            s_to += 1;
         }
-        Ok((s_from, s_to))
+        Ok(())
     }
 }
 
@@ -358,8 +361,8 @@ impl Expr {
                 params,
                 body,
             } => {
-                let (s_from, s_to) = params.check_solution(cxt, mode, s_from, s_to)?;
-                body.check_solution(cxt, mode, s_from, s_to)?;
+                params.check_solution(cxt, mode, s_from, s_to)?;
+                body.check_solution(cxt, mode, s_from + params.len(), s_to + params.len())?;
             }
             Expr::Lit(_) | Expr::Type | Expr::Error => (),
         }

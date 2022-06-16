@@ -4,6 +4,7 @@ use super::*;
 pub enum FunClass {
     /// Sigma types are treated identically to pi types in most cases:
     /// (P: T1, T2(P)) is equivalent for many purposes to (P: T1) -> T2(P).
+    /// In a `Clos`, a sigma type may only have one, explicit, parameter.
     /// So their representation is the same (as is that for lambdas), and they're evaluated the same etc.
     /// TODO: we'll eventually annotate pis and probably lambdas with effects, but this will not happen for sigmas.
     Sigma,
@@ -108,59 +109,26 @@ pub enum Literal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Pat {
-    Any,
-    Var(Name),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Par<T: IsTerm> {
-    pub pat: Pat,
+    pub name: Name,
     pub ty: T,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Params<T: IsTerm> {
     pub implicit: Vec<Par<T>>,
-    pub explicit: Option<Box<Par<T>>>,
+    pub explicit: Vec<Par<T>>,
 }
 impl<T: IsTerm> Params<T> {
-    pub fn n_bindings(&self) -> usize {
-        let mut n = 0;
-        for i in &self.implicit {
-            n += i.pat.n_bindings();
-        }
-        if let Some(e) = &self.explicit {
-            n += e.pat.n_bindings();
-        }
-        n
-    }
-}
-impl Pat {
-    pub fn n_bindings(&self) -> usize {
-        match self {
-            Pat::Any => 0,
-            Pat::Var(_) => 1,
-        }
+    pub fn len(&self) -> usize {
+        self.implicit.len() + self.explicit.len()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Args<T: IsTerm> {
-    pub implicit: Vec<T>,
+    pub implicit: Option<Box<T>>,
     pub explicit: Option<Box<T>>,
-}
-impl<T: IsTerm + 'static> IntoIterator for Args<T> {
-    type Item = T;
-    type IntoIter = Box<dyn Iterator<Item = T>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        Box::new(
-            self.implicit
-                .into_iter()
-                .chain(self.explicit.into_iter().map(|x| *x)),
-        ) as _
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

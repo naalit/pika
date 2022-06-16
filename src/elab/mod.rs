@@ -516,7 +516,7 @@ impl ast::Expr {
                                 Expr::Elim(
                                     Box::new(Expr::var(Var::Builtin(Builtin::ArithOp(op)))),
                                     Box::new(Elim::App(Args {
-                                        implicit: Vec::new(),
+                                        implicit: None,
                                         explicit: Some(Box::new(Expr::Pair(
                                             Box::new(a),
                                             Box::new(b),
@@ -548,7 +548,7 @@ impl ast::Expr {
                                 Expr::Elim(
                                     Box::new(Expr::var(Var::Builtin(Builtin::CompOp(op)))),
                                     Box::new(Elim::App(Args {
-                                        implicit: Vec::new(),
+                                        implicit: None,
                                         explicit: Some(Box::new(Expr::Pair(
                                             Box::new(a),
                                             Box::new(b),
