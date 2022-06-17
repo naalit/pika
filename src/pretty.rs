@@ -27,6 +27,7 @@ impl IntoStyle for () {
 #[derive(PartialOrd, PartialEq, Eq, Ord, Clone, Copy, Debug)]
 pub enum Prec {
     Term,
+    Pair,
     App,
     Atom,
 }
@@ -47,6 +48,10 @@ pub struct Doc {
 }
 
 impl Doc {
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     pub fn style_keyword() -> Style {
         Color::Magenta.style().bold()
     }

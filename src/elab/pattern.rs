@@ -654,3 +654,117 @@ impl ast::Case {
         (scrutinee, CaseOf { dec, svar, rhs })
     }
 }
+
+impl std::fmt::Display for PVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "%{}", self.0)
+    }
+}
+impl IPat {
+    pub(super) fn pretty(&self, db: &impl Elaborator) -> Doc {
+        match self {
+            IPat::Pair(a, b) => Doc::start(a).add(',', ()).add(b, ()),
+            IPat::Var(v) => Doc::start(db.lookup_name(*v)),
+        }
+    }
+}
+impl Cons {
+    pub(super) fn pretty(&self, db: &impl Elaborator) -> Doc {
+        match self {
+            Cons::Lit(l) => l.pretty(db),
+        }
+    }
+}
+impl DecNode {
+    pub(super) fn pretty(&self, db: &impl Elaborator) -> Doc {
+        let mut doc = Doc::none();
+        for (v, pat) in &self.ipats {
+            doc = doc
+                .add("let#", Doc::style_keyword())
+                .space()
+                .chain(pat.pretty(db))
+                .space()
+                .add('=', ())
+                .space()
+                .add(v, ())
+                .hardline();
+        }
+        doc.chain(match &self.dec {
+            Dec::Success(b) => Doc::none()
+                .add("goto#", Doc::style_keyword())
+                .space()
+                .add(b.0, ()),
+            Dec::Failure => Doc::none().add("fail#", Doc::style_keyword()),
+            Dec::Guard(cond, yes, no) => Doc::none()
+                .add("if", Doc::style_keyword())
+                .space()
+                .chain(cond.pretty(db))
+                .space()
+                .add("then", Doc::style_keyword())
+                .space()
+                .add("goto#", Doc::style_keyword())
+                .space()
+                .add(yes.0, ())
+                .space()
+                .add("else", Doc::style_keyword())
+                .hardline()
+                .chain(no.pretty(db))
+                .indent(),
+            Dec::Switch(v, branches, fallback) => Doc::none()
+                .add("switch#", Doc::style_keyword())
+                .space()
+                .add(v, ())
+                .space()
+                .add("of", Doc::style_keyword())
+                .hardline()
+                .chain(Doc::intersperse(
+                    branches.iter().map(|x| {
+                        x.cons
+                            .pretty(db)
+                            .space()
+                            .chain(Doc::intersperse(
+                                x.args.iter().map(|x| Doc::start(x)),
+                                Doc::none().space(),
+                            ))
+                            .space()
+                            .add("=>", ())
+                            .space()
+                            .chain(x.then.pretty(db).indent())
+                    }),
+                    Doc::none().hardline(),
+                ))
+                .chain(fallback.as_ref().map_or(Doc::none(), |x| {
+                    Doc::start("_ => ").chain(x.pretty(db).indent())
+                }))
+                .indent(),
+        })
+    }
+}
+impl CaseOf {
+    pub(super) fn pretty(&self, scrut: Doc, db: &impl Elaborator) -> Doc {
+        Doc::none()
+            .add("case", Doc::style_keyword())
+            .hardline()
+            .add("let#", Doc::style_keyword())
+            .space()
+            .add(self.svar, ())
+            .space()
+            .chain(scrut)
+            .hardline()
+            .chain(self.dec.pretty(db))
+            .hardline()
+            .add("where#", Doc::style_keyword())
+            .chain(
+                Doc::none()
+                    .hardline()
+                    .chain(Doc::intersperse(
+                        self.rhs.iter().enumerate().map(|(i, x)| {
+                            Doc::start(i).add(':', ()).space().chain(x.body.pretty(db))
+                        }),
+                        Doc::none().hardline(),
+                    ))
+                    .indent(),
+            )
+            .indent()
+    }
+}

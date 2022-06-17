@@ -4,6 +4,11 @@ use super::*;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct Meta(u32);
+impl std::fmt::Display for Meta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "?{}", self.0)
+    }
+}
 
 pub enum SpecialBound {
     IntType { must_be_signed: bool, must_fit: u64 },

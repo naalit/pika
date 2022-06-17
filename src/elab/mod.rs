@@ -22,13 +22,35 @@ pub trait Elaborator: crate::parsing::Parser {
 
     fn root_defs_n(&self, file: File) -> Vec<(SplitId, DefNode)>;
 
-    fn def_type_n(&self, def: DefNode) -> Option<Val>;
+    fn def_type_n(&self, def: DefNode) -> DefTypeResult;
 
     fn def_elab_n(&self, def: DefNode) -> DefElabResult;
 
     fn def_elab(&self, def: Def) -> Option<DefElabResult>;
 
-    fn def_type(&self, def: Def) -> Option<Val>;
+    fn def_type(&self, def: Def) -> Option<DefTypeResult>;
+
+    fn to_def_node(&self, def: Def) -> Option<DefNode>;
+
+    fn def_name(&self, def: Def) -> Option<Name>;
+}
+
+fn def_name(db: &dyn Elaborator, def: Def) -> Option<Name> {
+    match db.lookup_def(def) {
+        DefLoc::Root(_, SplitId::Named(name)) => Some(name),
+        DefLoc::Child(_, SplitId::Named(name)) => Some(name),
+        _ => {
+            let def_node = db.to_def_node(def)?;
+            let (def, _) = db.lookup_def_node(def_node);
+            match def {
+                ast::Def::LetDef(x) => x.pat()?.expr()?.as_let_def_pat(&mut Cxt::new(db, DefCxt::global())).0,
+                ast::Def::FunDef(x) => Some(x.name()?.name(db)),
+                ast::Def::TypeDef(x) => Some(x.name()?.name(db)),
+                ast::Def::TypeDefShort(x) => Some(x.name()?.name(db)),
+                ast::Def::TypeDefStruct(x) => Some(x.name()?.name(db)),
+            }
+        }
+    }
 }
 
 fn root_defs_n(db: &dyn Elaborator, file: File) -> Vec<(SplitId, DefNode)> {
@@ -42,18 +64,13 @@ fn root_defs_n(db: &dyn Elaborator, file: File) -> Vec<(SplitId, DefNode)> {
         .collect()
 }
 
-fn def_type_n(db: &dyn Elaborator, def: DefNode) -> Option<Val> {
-    let (def, cxt) = db.lookup_def_node(def);
-    todo!()
-}
-
-fn def_type(db: &dyn Elaborator, def: Def) -> Option<Val> {
+fn to_def_node(db: &dyn Elaborator, def: Def) -> Option<DefNode> {
     match db.lookup_def(def) {
         DefLoc::Root(file, split) => db
             .root_defs_n(file)
             .into_iter()
             .find(|(x, _)| *x == split)
-            .and_then(|(_, x)| db.def_type_n(x)),
+            .map(|(_, x)| x),
         DefLoc::Child(parent, _) => {
             // We have to completely elaborate the parent to find the type of the child
             // which makes sense since we need all the type information in the body to determine the context for the child
@@ -62,37 +79,72 @@ fn def_type(db: &dyn Elaborator, def: Def) -> Option<Val> {
                 .children
                 .into_iter()
                 .find(|(x, _)| *x == def)
-                .and_then(|(_, x)| db.def_type_n(x))
+                .map(|(_, x)| x)
         }
     }
 }
 
-fn def_elab_n(db: &dyn Elaborator, def: DefNode) -> DefElabResult {
-    todo!()
+fn def_type_n(db: &dyn Elaborator, def_node: DefNode) -> DefTypeResult {
+    let (def, cxt) = db.lookup_def_node(def_node);
+    let mut cxt = Cxt::from_def_cxt(db, cxt);
+    let result = def.elab_type(def_node, &mut cxt);
+    DefTypeResult {
+        result,
+        errors: cxt.emit_errors(),
+    }
+}
+
+fn def_type(db: &dyn Elaborator, def: Def) -> Option<DefTypeResult> {
+    db.to_def_node(def).map(|x| db.def_type_n(x))
+}
+
+fn def_elab_n(db: &dyn Elaborator, def_node: DefNode) -> DefElabResult {
+    let (def, cxt) = db.lookup_def_node(def_node);
+    let mut cxt = Cxt::from_def_cxt(db, cxt);
+    let result = def.elab(def_node, &mut cxt);
+    DefElabResult {
+        result,
+        errors: cxt.emit_errors(),
+        // TODO def children
+        children: Vec::new(),
+    }
 }
 
 fn def_elab(db: &dyn Elaborator, def: Def) -> Option<DefElabResult> {
-    match db.lookup_def(def) {
-        DefLoc::Root(file, split) => db
-            .root_defs_n(file)
-            .into_iter()
-            .find(|(x, _)| *x == split)
-            .map(|(_, x)| db.def_elab_n(x)),
-        DefLoc::Child(parent, _) => {
-            let parent = db.def_elab(parent)?;
-            parent
-                .children
-                .into_iter()
-                .find(|(x, _)| *x == def)
-                .map(|(_, x)| db.def_elab_n(x))
-        }
-    }
+    db.to_def_node(def).map(|x| db.def_elab_n(x))
 }
 
 enum TypeError {
     NotFound(Name),
     Unify(Expr, Expr),
     Other(String),
+}
+impl TypeError {
+    fn to_error(&self, span: RelSpan, db: &dyn Elaborator) -> Error {
+        let mut gen = ariadne::ColorGenerator::new();
+        let ca = gen.next();
+        let (msg, label, note) = match self {
+            TypeError::NotFound(name) => (
+                Doc::start("Name not found: ")
+                    .add(db.lookup_name(*name), ca),
+                Doc::start("This name not found"),
+                None,
+            ),
+            TypeError::Unify(a, b) => todo!("pretty print Expr"),
+            TypeError::Other(msg) => (Doc::start(&msg), Doc::start(&msg), None),
+        };
+        Error {
+            severity: Severity::Error,
+            message: msg,
+            primary: Label {
+                span,
+                message: label,
+                color: Some(ca),
+            },
+            secondary: Vec::new(),
+            note,
+        }
+    }
 }
 
 // Problem: we want things to look up definitions by location
@@ -123,6 +175,12 @@ pub struct DefElabResult {
     result: Option<Definition>,
     errors: Vec<Error>,
     children: Vec<(Def, DefNode)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefTypeResult {
+    result: Option<Val>,
+    errors: Vec<Error>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -209,6 +267,27 @@ impl Cxt<'_> {
             scopes: def_cxt.scopes.into_iter().map(Scope::from_state).collect(),
             errors: Vec::new(),
         }
+    }
+
+    fn from_def_cxt(db: &dyn Elaborator, def_cxt: DefCxt) -> Cxt {
+        Cxt {
+            db,
+            scopes: def_cxt.scopes.into_iter().map(Scope::from_state).collect(),
+            errors: Vec::new(),
+        }
+    }
+
+    fn def_cxt(&self) -> DefCxt {
+        DefCxt {
+            scopes: self.scopes.iter().map(Scope::state).collect(),
+        }
+    }
+
+    fn emit_errors(&self) -> Vec<Error> {
+        self.errors
+            .iter()
+            .map(|(x, span)| x.to_error(span.clone(), self.db))
+            .collect()
     }
 
     fn size(&self) -> Size {
@@ -315,26 +394,54 @@ fn lex_number(s: &str) -> Result<NumLiteral, String> {
     }
 }
 
-impl ast::Def {
-    fn elab_type(&self, cxt: &mut Cxt) -> Option<Val> {
+impl ast::Expr {
+    fn as_let_def_pat(&self, cxt: &mut Cxt) -> (Option<Name>, Option<ast::Ty>) {
         match self {
-            ast::Def::LetDef(l) => match l.pat()?.expr()? {
-                ast::Expr::GroupedExpr(_) => {
-                    todo!("should allow `let (x: T) = q` definition")
+            ast::Expr::Var(n) => (Some(n.name(cxt.db)), None),
+            ast::Expr::GroupedExpr(x) => x
+                .expr()
+                .map(|x| x.as_let_def_pat(cxt))
+                .unwrap_or((None, None)),
+            ast::Expr::Binder(x) => {
+                let (name, ty) = x
+                    .pat()
+                    .and_then(|x| x.expr())
+                    .map(|x| x.as_let_def_pat(cxt))
+                    .unwrap_or((None, None));
+                if ty.is_some() {
+                    cxt.error(
+                        x.pat().unwrap().span(),
+                        TypeError::Other(
+                            "Binder (_:_) is not allowed to be nested in another binder"
+                                .to_string(),
+                        ),
+                    );
                 }
-                ast::Expr::Binder(x) => Some(
-                    x.ty()?
-                        .expr()?
+                (name, x.ty())
+            }
+            ast::Expr::Hole(_) => (Some(cxt.db.name("_".to_string())), None),
+            _ => (None, None),
+        }
+    }
+}
+
+impl ast::Def {
+    fn elab_type(&self, def_node: DefNode, cxt: &mut Cxt) -> Option<Val> {
+        match self {
+            ast::Def::LetDef(l) => match l.pat()?.expr()?.as_let_def_pat(cxt) {
+                (_, Some(ty)) => Some(
+                    ty.expr()?
                         .check(Val::Type, cxt)
                         .eval(&mut Env::new(cxt.size())),
                 ),
                 _ => {
                     // Infer the type from the value if possible
-                    // TODO use db.elab_def_n instead to memoize the result
-                    let def = self.elab(None, cxt)?;
-                    match def {
-                        Definition::Let { ty, .. } => Some(ty.eval(&mut Env::new(cxt.size()))),
-                        _ => unreachable!(),
+                    let def = cxt.db.def_elab_n(def_node);
+                    match def.result {
+                        Some(Definition::Let { ty, .. }) => {
+                            Some(ty.eval(&mut Env::new(cxt.size())))
+                        }
+                        _ => None,
                     }
                 }
             },
@@ -345,43 +452,32 @@ impl ast::Def {
         }
     }
 
-    fn elab(&self, ty: Option<Val>, cxt: &mut Cxt) -> Option<Definition> {
+    fn elab(&self, def_node: DefNode, cxt: &mut Cxt) -> Option<Definition> {
         match self {
-            ast::Def::LetDef(x) => match ty {
-                Some(ty) => {
-                    let body = x.body()?.expr()?.check(ty.clone(), cxt);
-                    let pat = x.pat()?.expr()?;
-                    // Let definitions only allow var and binder patterns
-                    match pat {
-                        ast::Expr::Var(x) => Some(Definition::Let {
-                            name: x.name(cxt.db),
+            ast::Def::LetDef(x) => {
+                let (name, ty) = x.pat()?.expr()?.as_let_def_pat(cxt);
+                match (name, ty) {
+                    (Some(name), None) => {
+                        let (body, ty) = x.body()?.expr()?.infer(cxt);
+                        Some(Definition::Let {
+                            name,
                             ty: Box::new(ty.quote(cxt.size())),
                             body: Box::new(body),
-                        }),
-                        // TODO should probably warn about this since it's not very useful
-                        ast::Expr::Hole(_) => Some(Definition::Let {
-                            name: cxt.db.name("_".to_string()),
-                            ty: Box::new(ty.quote(cxt.size())),
-                            body: Box::new(body),
-                        }),
-                        ast::Expr::GroupedExpr(_) => {
-                            todo!("should allow `let (x: T) = q` definition")
-                        }
-                        ast::Expr::Binder(_) => todo!("unify"),
-                        _ => {
-                            cxt.error(
-                                pat.span(),
-                                TypeError::Other(format!(
-                                    "patterns aren't allowed in let definitions: got {}",
-                                    pat.pretty().to_string(true)
-                                )),
-                            );
-                            None
-                        }
+                        })
                     }
+                    (Some(name), Some(_ty)) => {
+                        // We already elaborated the type, so avoid doing that twice
+                        let ty = cxt.db.def_type_n(def_node).result?;
+                        let body = x.body()?.expr()?.check(ty.clone(), cxt);
+                        Some(Definition::Let {
+                            name,
+                            ty: Box::new(ty.quote(cxt.size())),
+                            body: Box::new(body),
+                        })
+                    }
+                    (None, _) => None,
                 }
-                None => todo!(),
-            },
+            }
             ast::Def::FunDef(_) => todo!(),
             ast::Def::TypeDef(_) => todo!(),
             ast::Def::TypeDefShort(_) => todo!(),

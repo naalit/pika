@@ -1,3 +1,5 @@
+use crate::pretty::Prec;
+
 use super::*;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -47,6 +49,23 @@ impl ArithOp {
         })
     }
 }
+impl std::fmt::Display for ArithOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+            ArithOp::Exp => "**",
+            ArithOp::Mod => "%",
+            ArithOp::Ior => "|",
+            ArithOp::Xor => "^^",
+            ArithOp::And => "&",
+            ArithOp::Shl => "<<",
+            ArithOp::Shr => ">>",
+        })
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum CompOp {
@@ -71,6 +90,18 @@ impl CompOp {
         })
     }
 }
+impl std::fmt::Display for CompOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CompOp::Eq => "==",
+            CompOp::Ne => "!=",
+            CompOp::Gt => ">",
+            CompOp::Lt => "<",
+            CompOp::Ge => ">=",
+            CompOp::Le => "<=",
+        })
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Builtin {
@@ -81,6 +112,19 @@ pub enum Builtin {
     BoolType,
     ArithOp(ArithOp),
     CompOp(CompOp),
+}
+impl std::fmt::Display for Builtin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Builtin::IntType(i) => write!(f, "{:?}", i),
+            Builtin::Unit => write!(f, "()"),
+            Builtin::UnitType => write!(f, "()"),
+            Builtin::StringType => write!(f, "String"),
+            Builtin::BoolType => write!(f, "Bool"),
+            Builtin::ArithOp(op) => write!(f, "{}", op),
+            Builtin::CompOp(op) => write!(f, "{}", op),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -106,6 +150,16 @@ pub enum Literal {
     /// Stores a u32 representation of the bits of the f32
     F32(u32),
     String(Name),
+}
+impl Literal {
+    pub fn pretty(&self, db: &impl crate::parsing::Parser) -> Doc {
+        match self {
+            Literal::Int(i) => Doc::start(i),
+            Literal::F64(i) => Doc::start(f64::from_bits(*i)),
+            Literal::F32(i) => Doc::start(f32::from_bits(*i)),
+            Literal::String(s) => Doc::start(db.lookup_name(*s)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -227,5 +281,120 @@ impl IsTerm for Expr {
 impl Expr {
     pub fn var(var: Var<Idx>) -> Self {
         Self::Head(Head::Var(var))
+    }
+
+    pub fn pretty(&self, db: &impl Elaborator) -> Doc {
+        match self {
+            Expr::Type => Doc::none().add("Type", Doc::style_keyword()),
+            Expr::Head(h) => match h {
+                Head::Var(v) => match v {
+                    Var::Local(name, _) => Doc::start(db.lookup_name(*name)),
+                    Var::Meta(m) => Doc::start("?").add(m, ()),
+                    Var::Builtin(b) => Doc::start(b),
+                    // TODO better way of doing this - e.g. take into account module paths
+                    // also get rid of fallback
+                    Var::Def(d) => Doc::start(
+                        db.def_name(*d)
+                            .map(|x| db.lookup_name(x))
+                            .unwrap_or_else(|| format!("?{}", d.fallback_repr(db))),
+                    ),
+                },
+            },
+            Expr::Elim(a, b) => match &**b {
+                Elim::App(b) => a
+                    .pretty(db)
+                    .nest(Prec::App)
+                    .chain(
+                        b.implicit
+                            .as_ref()
+                            .map(|b| {
+                                Doc::none()
+                                    .space()
+                                    .add('[', ())
+                                    .chain(b.pretty(db))
+                                    .add(']', ())
+                            })
+                            .unwrap_or(Doc::none()),
+                    )
+                    .chain(
+                        b.explicit
+                            .as_ref()
+                            .map(|b| Doc::none().space().chain(b.pretty(db).nest(Prec::Atom)))
+                            .unwrap_or(Doc::none()),
+                    )
+                    .prec(Prec::App),
+                Elim::Member(m) => a
+                    .pretty(db)
+                    .add('.', ())
+                    .add(db.lookup_name(*m), ())
+                    .prec(Prec::App),
+                Elim::Case(c) => c.pretty(a.pretty(db), db).prec(Prec::Term),
+            },
+            Expr::Fun {
+                class,
+                params,
+                body,
+            } => {
+                let d_params = if params.implicit.is_empty() {
+                    Doc::none()
+                } else {
+                    Doc::start('[')
+                        .chain(Doc::intersperse(
+                            params.implicit.iter().map(|x| {
+                                Doc::start(db.lookup_name(x.name))
+                                    .add(':', ())
+                                    .space()
+                                    .chain(x.ty.pretty(db).nest(Prec::App))
+                            }),
+                            Doc::start(','),
+                        ))
+                        .add(']', ())
+                }
+                .chain(if params.explicit.is_empty() {
+                    Doc::none()
+                } else {
+                    Doc::start('(')
+                        .chain(Doc::intersperse(
+                            params.explicit.iter().map(|x| {
+                                Doc::start(db.lookup_name(x.name))
+                                    .add(':', ())
+                                    .space()
+                                    .chain(x.ty.pretty(db).nest(Prec::App))
+                            }),
+                            Doc::start(','),
+                        ))
+                        .add(')', ())
+                });
+                match class {
+                    Sigma => {
+                        assert!(params.implicit.is_empty());
+                        assert_eq!(params.explicit.len(), 1);
+                        d_params
+                            .add(',', ())
+                            .space()
+                            .chain(body.pretty(db).nest(Prec::Pair))
+                            .prec(Prec::Pair)
+                    }
+                    Lam => d_params
+                        .space()
+                        .add("=>", ())
+                        .chain(body.pretty(db))
+                        .prec(Prec::Term),
+                    Pi => d_params
+                        .space()
+                        .add("->", ())
+                        .chain(body.pretty(db))
+                        .prec(Prec::Term),
+                }
+            }
+            Expr::Lit(l) => l.pretty(db),
+            Expr::Pair(a, b) => a
+                .pretty(db)
+                .add(',', ())
+                .space()
+                .chain(b.pretty(db).nest(Prec::Pair))
+                .prec(Prec::Pair),
+            Expr::Error => Doc::none().add("%error", Doc::style_keyword()),
+        }
     }
 }
