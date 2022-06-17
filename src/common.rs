@@ -35,7 +35,7 @@ pub enum DefLoc {
 }
 
 impl Def {
-    pub fn fallback_repr(self, db: &impl crate::elab::Elaborator) -> String {
+    pub fn fallback_repr<T: crate::elab::Elaborator + ?Sized>(self, db: &T) -> String {
         match db.lookup_def(self) {
             DefLoc::Root(file, split) => match split {
                 SplitId::Named(n) => format!("{}.{}", db.lookup_file_id(file), db.lookup_name(n)),
@@ -44,9 +44,9 @@ impl Def {
             DefLoc::Child(a, split) => match split {
                 SplitId::Named(n) => format!("{}.{}", a.fallback_repr(db), db.lookup_name(n)),
                 SplitId::Idx(i) => format!("{}.%{}", a.fallback_repr(db), i),
-            }
+            },
         }
-    } 
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

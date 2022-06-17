@@ -152,7 +152,7 @@ pub enum Literal {
     String(Name),
 }
 impl Literal {
-    pub fn pretty(&self, db: &impl crate::parsing::Parser) -> Doc {
+    pub fn pretty<T: crate::parsing::Parser + ?Sized>(&self, db: &T) -> Doc {
         match self {
             Literal::Int(i) => Doc::start(i),
             Literal::F64(i) => Doc::start(f64::from_bits(*i)),
@@ -183,6 +183,14 @@ impl<T: IsTerm> Params<T> {
 pub struct Args<T: IsTerm> {
     pub implicit: Option<Box<T>>,
     pub explicit: Option<Box<T>>,
+}
+impl<T: IsTerm> Args<T> {
+    pub fn expl(x: T) -> Args<T> {
+        Args {
+            implicit: None,
+            explicit: Some(Box::new(x)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,7 +291,7 @@ impl Expr {
         Self::Head(Head::Var(var))
     }
 
-    pub fn pretty(&self, db: &impl Elaborator) -> Doc {
+    pub fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         match self {
             Expr::Type => Doc::none().add("Type", Doc::style_keyword()),
             Expr::Head(h) => match h {

@@ -124,6 +124,10 @@ impl Env {
         self.vals.truncate(state.0);
     }
 
+    pub fn reset_to_size(&mut self, size: Size) {
+        self.reset(EnvState(size.0 as usize))
+    }
+
     pub fn get(&self, i: Idx) -> Option<&Val> {
         self.vals.get(i.0 as usize).map(Option::as_ref).flatten()
     }

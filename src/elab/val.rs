@@ -77,11 +77,70 @@ impl Neutral {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Clos {
     pub class: FunClass,
-    pub params: Params<Val>,
+    /// Must be a Params<Expr>, not Params<Val>, because the types can depend on each other
+    /// which means that they contain bound variables on the top level.
+    /// It can be evaluated temporarily, but a Params<Val> can't be used at a different level
+    /// than it was evaluated at.
+    pub params: Params<Expr>,
     env: Env,
     body: Expr,
 }
 impl Clos {
+    pub fn imp_par_ty(&self) -> Option<Val> {
+        let Params { implicit, explicit } = &self.params;
+        let mut env = self.env.clone();
+        implicit
+            .iter()
+            .fold(None, |term, Par { name, ty }| {
+                let term = match term {
+                    Some(term) => Box::new(Expr::Fun {
+                        class: Sigma,
+                        params: Params {
+                            implicit: Vec::new(),
+                            explicit: vec![Par {
+                                name: *name,
+                                ty: ty.clone(),
+                            }],
+                        },
+                        body: term,
+                    }),
+                    None => Box::new(ty.clone()),
+                };
+                Some(term)
+            })
+            .map(|x| x.eval(&mut env))
+    }
+
+    pub fn exp_par_ty(&self, mut size: Size) -> Option<Val> {
+        let Params { implicit, explicit } = &self.params;
+        // Make sure explicit gets evaluated at the right level
+        let mut env = self.env.clone();
+        for Par { name, .. } in implicit {
+            env.push(Some(Val::var(Var::Local(*name, size.next_lvl()))));
+            size += 1;
+        }
+        explicit
+            .iter()
+            .fold(None, |term, Par { name, ty }| {
+                let term = match term {
+                    Some(term) => Box::new(Expr::Fun {
+                        class: Sigma,
+                        params: Params {
+                            implicit: Vec::new(),
+                            explicit: vec![Par {
+                                name: *name,
+                                ty: ty.clone(),
+                            }],
+                        },
+                        body: term,
+                    }),
+                    None => Box::new(ty.clone()),
+                };
+                Some(term)
+            })
+            .map(|x| x.eval(&mut env))
+    }
+
     pub fn apply(self, args: Args<Val>) -> Val {
         // deal with argument number mismatch when passing values that aren't syntactically tuples:
         //
@@ -145,7 +204,7 @@ impl Clos {
             body,
         } = self;
         let args = params.synthesize_args(size);
-        let params = params.quote(size);
+        let params = params.eval(&mut env).quote(size);
         if let Some(imp) = args.implicit {
             match imp.zip_pair(&params.implicit) {
                 Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
@@ -197,9 +256,39 @@ impl Clos {
         }
     }
 
-    pub fn vquote(self, size: Size) -> Val {
-        let args = self.params.synthesize_args(size);
-        self.apply(args)
+    /// Add the parameters to the environment and then evaluate the closure body, "opening" or "entering" the closure.
+    /// `size` is the size before adding any parameters.
+    /// If `size_after_imp` is `Some`, skip to that size after adding implicit parameters, even if there aren't
+    /// actually that many implicit parameters (this is for checking eta-conversion of implicit and explicit
+    /// parameters separately).
+    /// The size after calling `open` is `size + self.params.len()` (or `size_after_imp + self.params.explicit.len()` if `size_after_imp` is `Some`.)
+    pub fn open(self, mut size: Size, size_after_imp: Option<Size>) -> Val {
+        let Clos {
+            class,
+            params,
+            mut env,
+            body,
+        } = self;
+        for par in &params.implicit {
+            env.push(Some(Val::var(Var::Local(par.name, size.next_lvl()))));
+            size += 1;
+        }
+        if let Some(exp_size) = size_after_imp {
+            if size > exp_size {
+                panic!(
+                    "passed exp_size {:?} to vquote with imp_size {:?} and imp_len {}",
+                    exp_size,
+                    size,
+                    params.implicit.len()
+                );
+            }
+            size = exp_size;
+        }
+        for par in &params.explicit {
+            env.push(Some(Val::var(Var::Local(par.name, size.next_lvl()))));
+            size += 1;
+        }
+        body.eval(&mut env)
     }
 }
 
@@ -314,7 +403,7 @@ impl Args<Val> {
 
 impl Params<Expr> {
     /// Does not add anything to the env, only mutates it to keep internal Lvls correct
-    pub fn eval(self, env: &mut Env) -> Params<Val> {
+    fn eval(self, env: &mut Env) -> Params<Val> {
         let state = env.state();
         let Params { implicit, explicit } = self;
         let implicit = implicit
@@ -340,8 +429,7 @@ impl Params<Expr> {
         env.reset(state);
         Params { implicit, explicit }
     }
-}
-impl Params<Val> {
+
     pub fn synthesize_args(&self, size: Size) -> Args<Val> {
         let Params { implicit, explicit } = self;
         let (implicit, mut size) =
@@ -368,7 +456,8 @@ impl Params<Val> {
                 });
         Args { implicit, explicit }
     }
-
+}
+impl Params<Val> {
     pub fn quote(self, size: Size) -> Params<Expr> {
         let Params { implicit, explicit } = self;
         let (implicit, size) =
@@ -413,7 +502,7 @@ impl Expr {
                 body,
             } => Val::Fun(Box::new(Clos {
                 class,
-                params: params.eval(env),
+                params,
                 env: env.clone(),
                 body: *body,
             })),

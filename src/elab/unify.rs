@@ -12,6 +12,11 @@ enum UnfoldState {
     /// Full in smalltt
     Always,
 }
+impl Default for UnfoldState {
+    fn default() -> Self {
+        UnfoldState::Maybe
+    }
+}
 impl UnfoldState {
     fn try_approx(self) -> bool {
         match self {
@@ -61,9 +66,52 @@ struct UnifyCxt<'a> {
     meta_cxt: &'a mut MetaCxt,
 }
 
-enum UnifyError {
-    Conversion(Val, Val),
+pub enum UnifyError {
+    /// (Inferred, Expected)
+    Conversion(Expr, Expr),
     MetaSolve(MetaSolveError),
+}
+impl UnifyError {
+    pub fn to_error(&self, span: RelSpan, db: &dyn Elaborator) -> Error {
+        let mut gen = ariadne::ColorGenerator::new();
+        let ca = gen.next();
+        let (msg, label, note) = match self {
+            UnifyError::Conversion(a, b) => (
+                Doc::start("Could not match types '")
+                    .chain(a.pretty(db))
+                    .add("' and '", ())
+                    .chain(b.pretty(db))
+                    .add("'", ()),
+                Doc::start("Expected type '")
+                    .chain(b.pretty(db))
+                    .add("'", ()),
+                None,
+            ),
+            UnifyError::MetaSolve(m) => (
+                Doc::start("Error solving metavariable: ").chain(m.pretty(db)),
+                Doc::start("Meta solution found here"),
+                None,
+            ),
+        };
+        Error {
+            severity: Severity::Error,
+            message: msg,
+            primary: Label {
+                span,
+                message: label,
+                color: Some(ca),
+            },
+            secondary: Vec::new(),
+            note,
+        }
+    }
+}
+
+impl MetaCxt {
+    /// When possible, (inferred, expected)
+    pub fn unify(&mut self, a: Val, b: Val, size: Size) -> Result<(), UnifyError> {
+        UnifyCxt { meta_cxt: self }.unify(a, b, size, UnfoldState::default())
+    }
 }
 
 impl UnifyCxt<'_> {
@@ -111,27 +159,35 @@ impl UnifyCxt<'_> {
                 if a.class == b.class && a.params.len() == b.params.len() =>
             {
                 // First unify parameters
-                // TODO eta-conversion ((a, b, c) -> d == (a, (b, c)) -> d)
-                if a.params.implicit.len() != b.params.implicit.len()
-                    || a.params.explicit.len() != b.params.explicit.len()
-                {
-                    return Err(UnifyError::Conversion(Val::Fun(a), Val::Fun(b)));
+                let len_imp = a.params.implicit.len().max(b.params.implicit.len());
+                let len_exp = a.params.explicit.len().max(b.params.explicit.len());
+                match (a.imp_par_ty(), b.imp_par_ty()) {
+                    (None, None) => (),
+                    (Some(a), Some(b)) => self.unify(a, b, size, state)?,
+                    _ => {
+                        return Err(UnifyError::Conversion(
+                            Val::Fun(a).quote(size),
+                            Val::Fun(b).quote(size),
+                        ))
+                    }
                 }
-                for (pa, pb) in a
-                    .params
-                    .implicit
-                    .iter()
-                    .chain(&a.params.explicit)
-                    .zip(b.params.implicit.iter().chain(&b.params.explicit))
-                {
-                    self.unify(pa.ty.clone(), pb.ty.clone(), size, state)?;
+                let imp_size = size + len_imp;
+                match (a.exp_par_ty(size), b.exp_par_ty(size)) {
+                    (None, None) => (),
+                    (Some(a), Some(b)) => self.unify(a, b, imp_size, state)?,
+                    _ => {
+                        return Err(UnifyError::Conversion(
+                            Val::Fun(a).quote(size),
+                            Val::Fun(b).quote(size),
+                        ))
+                    }
                 }
 
                 // Unify bodies
-                let new_size = size + a.params.len();
-                let a = a.vquote(size);
-                let b = b.vquote(size);
-                self.unify(a, b, new_size, state)
+                let exp_size = imp_size + len_exp;
+                let a = a.open(size, Some(imp_size));
+                let b = b.open(size, Some(imp_size));
+                self.unify(a, b, exp_size, state)
             }
 
             // Now handle neutrals as directed by the unfolding state
@@ -147,7 +203,7 @@ impl UnifyCxt<'_> {
                     Some(state) => self.unify(a, b, size, state),
                     // don't try unfolded
                     None => Err(match err {
-                        Ok(_) => UnifyError::Conversion(a, b),
+                        Ok(_) => UnifyError::Conversion(a.quote(size), b.quote(size)),
                         Err(e) => e,
                     }),
                 }
@@ -217,7 +273,10 @@ impl UnifyCxt<'_> {
                 {
                     Ok(())
                 } else {
-                    Err(UnifyError::Conversion(Val::Neutral(a), Val::Neutral(b)))
+                    Err(UnifyError::Conversion(
+                        Val::Neutral(a).quote(size),
+                        Val::Neutral(b).quote(size),
+                    ))
                 }
             }
 
@@ -239,7 +298,10 @@ impl UnifyCxt<'_> {
             (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
                 match n.resolve(&mut Env::new(size)) {
                     Ok(n) => self.unify(n, x, size, state),
-                    Err(n) => Err(UnifyError::Conversion(Val::Neutral(n), x)),
+                    Err(n) => Err(UnifyError::Conversion(
+                        Val::Neutral(n).quote(size),
+                        x.quote(size),
+                    )),
                 }
             }
 
@@ -247,7 +309,7 @@ impl UnifyCxt<'_> {
             (Val::Fun(clos), x) | (x, Val::Fun(clos)) if clos.class == Lam => {
                 let new_size = size + clos.params.len();
                 let args = clos.params.synthesize_args(size);
-                let a = clos.vquote(size);
+                let a = clos.open(size, None);
                 self.unify(
                     a,
                     x.app(Elim::App(args), &mut Env::new(new_size)),
@@ -256,7 +318,7 @@ impl UnifyCxt<'_> {
                 )
             }
 
-            (a, b) => Err(UnifyError::Conversion(a, b)),
+            (a, b) => Err(UnifyError::Conversion(a.quote(size), b.quote(size))),
         }
     }
 }

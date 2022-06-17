@@ -235,8 +235,8 @@ mod input {
                                 // can depend on the values of earlier ones.) Hence `row.ty_ipats`.
                                 assert!(clos.params.implicit.is_empty());
                                 assert_eq!(clos.params.explicit.len(), 1);
-                                let ta = clos.params.explicit[0].ty.clone();
-                                let tb = clos.clone().vquote(row.tyvars_size);
+                                let ta = clos.exp_par_ty(row.tyvars_size).unwrap();
+                                let tb = clos.clone().open(row.tyvars_size, None);
                                 let va = self.pvar(ta);
                                 let vb = self.pvar(tb);
                                 row.tyvars_size += clos.params.len();
@@ -630,7 +630,7 @@ impl ast::Case {
                 Some(env) => {
                     cxt.ecxt.push();
                     for (name, ty) in env {
-                        cxt.ecxt.scope_mut().define_local(*name, ty.clone());
+                        cxt.ecxt.define_local(*name, ty.clone(), None);
                     }
                     let expr = match rty {
                         Some(rty) => body.map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt)),
@@ -661,7 +661,7 @@ impl std::fmt::Display for PVar {
     }
 }
 impl IPat {
-    pub(super) fn pretty(&self, db: &impl Elaborator) -> Doc {
+    pub(super) fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         match self {
             IPat::Pair(a, b) => Doc::start(a).add(',', ()).add(b, ()),
             IPat::Var(v) => Doc::start(db.lookup_name(*v)),
@@ -669,14 +669,14 @@ impl IPat {
     }
 }
 impl Cons {
-    pub(super) fn pretty(&self, db: &impl Elaborator) -> Doc {
+    pub(super) fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         match self {
             Cons::Lit(l) => l.pretty(db),
         }
     }
 }
 impl DecNode {
-    pub(super) fn pretty(&self, db: &impl Elaborator) -> Doc {
+    pub(super) fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         let mut doc = Doc::none();
         for (v, pat) in &self.ipats {
             doc = doc
@@ -741,7 +741,7 @@ impl DecNode {
     }
 }
 impl CaseOf {
-    pub(super) fn pretty(&self, scrut: Doc, db: &impl Elaborator) -> Doc {
+    pub(super) fn pretty<T: Elaborator + ?Sized>(&self, scrut: Doc, db: &T) -> Doc {
         Doc::none()
             .add("case", Doc::style_keyword())
             .hardline()

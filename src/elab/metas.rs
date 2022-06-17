@@ -60,10 +60,42 @@ pub enum MetaEntry {
 pub enum MetaSolveError {
     Occurs(Meta),
     Scope(Name),
-    SpineNonVariable(Val),
-    SpineNonApp(Elim<Val>),
+    SpineNonVariable(Expr),
+    SpineNonApp(Elim<Expr>),
     SpineTooLong,
     SpineDuplicate(Name),
+}
+impl MetaSolveError {
+    pub fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
+        let ca = ariadne::ColorGenerator::new().next();
+        match self {
+            MetaSolveError::Occurs(m) => Doc::start("Solved meta ")
+                .add(m, ca)
+                .add("occurs in solution", ()),
+            MetaSolveError::Scope(n) => Doc::start("Variable ").add(db.lookup_name(*n), ca).add(
+                ", which is outside of the scope of the meta, occurs in solution",
+                (),
+            ),
+            MetaSolveError::SpineNonVariable(e) => {
+                Doc::start("Meta is applied to something other than a local variable: '")
+                    .chain(e.pretty(db))
+                    .add("'", ())
+            }
+            MetaSolveError::SpineNonApp(e) => Doc::start("Meta is used by illegal eliminator ")
+                .add(
+                    match e {
+                        Elim::App(_) => unreachable!(),
+                        Elim::Member(_) => "member access",
+                        Elim::Case(_) => "case-of",
+                    },
+                    (),
+                ),
+            MetaSolveError::SpineTooLong => Doc::start("Meta may only be applied to one argument"),
+            MetaSolveError::SpineDuplicate(n) => Doc::start("Meta is applied to variable ")
+                .add(db.lookup_name(*n), ca)
+                .add(" more than once", ()),
+        }
+    }
 }
 
 enum SolutionCheckMode {
@@ -135,7 +167,7 @@ impl PartialRename {
                 Ok(rhs)
             }
             // TODO handle Val::Error without creating more errors?
-            v => Err(MetaSolveError::SpineNonVariable(v)),
+            v => Err(MetaSolveError::SpineNonVariable(v.quote(inner_size))),
         }
     }
 }
@@ -144,6 +176,10 @@ pub struct MetaCxt {
     metas: Vec<MetaEntry>,
 }
 impl MetaCxt {
+    pub fn new() -> Self {
+        MetaCxt { metas: Vec::new() }
+    }
+
     pub fn new_meta(&mut self, scope: Size, bounds: MetaBounds, introduced_span: RelSpan) -> Meta {
         let m = Meta(self.metas.len() as u32);
         self.metas.push(MetaEntry::Unsolved {
@@ -237,7 +273,7 @@ impl MetaCxt {
                         explicit: params,
                     })
                 }
-                i => Err(MetaSolveError::SpineNonApp(i)),
+                i => Err(MetaSolveError::SpineNonApp(i.quote(start_size))),
             })
             .transpose()?;
         let inner_size = start_size + params.as_ref().map_or(0, |x| x.len());

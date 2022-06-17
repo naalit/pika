@@ -1,5 +1,6 @@
 use crate::{common::*, intern_key, parsing::ast::Pretty};
 
+mod cxt;
 mod metas;
 mod pattern;
 mod term;
@@ -7,6 +8,7 @@ mod unify;
 mod val;
 mod var;
 
+use cxt::*;
 use metas::*;
 pub use term::*;
 use val::*;
@@ -43,7 +45,12 @@ fn def_name(db: &dyn Elaborator, def: Def) -> Option<Name> {
             let def_node = db.to_def_node(def)?;
             let (def, _) = db.lookup_def_node(def_node);
             match def {
-                ast::Def::LetDef(x) => x.pat()?.expr()?.as_let_def_pat(&mut Cxt::new(db, DefCxt::global())).0,
+                ast::Def::LetDef(x) => {
+                    x.pat()?
+                        .expr()?
+                        .as_let_def_pat(&mut Cxt::new(db, DefCxt::global()))
+                        .0
+                }
                 ast::Def::FunDef(x) => Some(x.name()?.name(db)),
                 ast::Def::TypeDef(x) => Some(x.name()?.name(db)),
                 ast::Def::TypeDefShort(x) => Some(x.name()?.name(db)),
@@ -86,7 +93,7 @@ fn to_def_node(db: &dyn Elaborator, def: Def) -> Option<DefNode> {
 
 fn def_type_n(db: &dyn Elaborator, def_node: DefNode) -> DefTypeResult {
     let (def, cxt) = db.lookup_def_node(def_node);
-    let mut cxt = Cxt::from_def_cxt(db, cxt);
+    let mut cxt = Cxt::new(db, cxt);
     let result = def.elab_type(def_node, &mut cxt);
     DefTypeResult {
         result,
@@ -100,7 +107,7 @@ fn def_type(db: &dyn Elaborator, def: Def) -> Option<DefTypeResult> {
 
 fn def_elab_n(db: &dyn Elaborator, def_node: DefNode) -> DefElabResult {
     let (def, cxt) = db.lookup_def_node(def_node);
-    let mut cxt = Cxt::from_def_cxt(db, cxt);
+    let mut cxt = Cxt::new(db, cxt);
     let result = def.elab(def_node, &mut cxt);
     DefElabResult {
         result,
@@ -114,9 +121,10 @@ fn def_elab(db: &dyn Elaborator, def: Def) -> Option<DefElabResult> {
     db.to_def_node(def).map(|x| db.def_elab_n(x))
 }
 
-enum TypeError {
+pub enum TypeError {
     NotFound(Name),
-    Unify(Expr, Expr),
+    Unify(unify::UnifyError),
+    NotFunction(Expr),
     Other(String),
 }
 impl TypeError {
@@ -125,13 +133,21 @@ impl TypeError {
         let ca = gen.next();
         let (msg, label, note) = match self {
             TypeError::NotFound(name) => (
-                Doc::start("Name not found: ")
-                    .add(db.lookup_name(*name), ca),
+                Doc::start("Name not found: ").add(db.lookup_name(*name), ca),
                 Doc::start("This name not found"),
                 None,
             ),
-            TypeError::Unify(a, b) => todo!("pretty print Expr"),
+            TypeError::Unify(e) => return e.to_error(span, db),
             TypeError::Other(msg) => (Doc::start(&msg), Doc::start(&msg), None),
+            TypeError::NotFunction(ty) => (
+                Doc::start("Expected function type in application, got '")
+                    .chain(ty.pretty(db))
+                    .add("'", ()),
+                Doc::start("This has type '")
+                    .chain(ty.pretty(db))
+                    .add("'", ()),
+                None,
+            ),
         };
         Error {
             severity: Severity::Error,
@@ -144,6 +160,11 @@ impl TypeError {
             secondary: Vec::new(),
             note,
         }
+    }
+}
+impl From<unify::UnifyError> for TypeError {
+    fn from(x: unify::UnifyError) -> Self {
+        TypeError::Unify(x)
     }
 }
 
@@ -181,145 +202,6 @@ pub struct DefElabResult {
 pub struct DefTypeResult {
     result: Option<Val>,
     errors: Vec<Error>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DefCxt {
-    scopes: Vec<ScopeState>,
-}
-impl DefCxt {
-    fn global() -> Self {
-        DefCxt {
-            scopes: vec![Scope::global().state()],
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ScopeState {
-    global: bool,
-    size: Size,
-    names: Vec<(Name, (Var<Lvl>, Val))>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Scope {
-    global: bool,
-    size: Size,
-    names: HashMap<Name, (Var<Lvl>, Val)>,
-}
-impl Scope {
-    fn state(&self) -> ScopeState {
-        ScopeState {
-            global: self.global,
-            size: self.size,
-            names: self
-                .names
-                .iter()
-                .map(|(a, b)| (a.clone(), b.clone()))
-                .collect(),
-        }
-    }
-
-    fn from_state(state: ScopeState) -> Scope {
-        Scope {
-            global: state.global,
-            size: state.size,
-            names: HashMap::from_iter(state.names),
-        }
-    }
-
-    fn define(&mut self, name: Name, var: Var<Lvl>, ty: Val) {
-        self.names.insert(name, (var, ty));
-    }
-
-    fn define_local(&mut self, name: Name, ty: Val) {
-        self.define(name, Var::Local(name, self.size.next_lvl()), ty);
-        self.size = self.size.inc();
-    }
-
-    fn global() -> Self {
-        Scope {
-            global: true,
-            size: Size::zero(),
-            names: HashMap::new(),
-        }
-    }
-
-    fn new(size: Size) -> Self {
-        Scope {
-            global: false,
-            size,
-            names: HashMap::new(),
-        }
-    }
-}
-
-struct Cxt<'a> {
-    db: &'a dyn Elaborator,
-    scopes: Vec<Scope>,
-    errors: Vec<Spanned<TypeError>>,
-}
-impl Cxt<'_> {
-    fn new(db: &dyn Elaborator, def_cxt: DefCxt) -> Cxt {
-        Cxt {
-            db,
-            scopes: def_cxt.scopes.into_iter().map(Scope::from_state).collect(),
-            errors: Vec::new(),
-        }
-    }
-
-    fn from_def_cxt(db: &dyn Elaborator, def_cxt: DefCxt) -> Cxt {
-        Cxt {
-            db,
-            scopes: def_cxt.scopes.into_iter().map(Scope::from_state).collect(),
-            errors: Vec::new(),
-        }
-    }
-
-    fn def_cxt(&self) -> DefCxt {
-        DefCxt {
-            scopes: self.scopes.iter().map(Scope::state).collect(),
-        }
-    }
-
-    fn emit_errors(&self) -> Vec<Error> {
-        self.errors
-            .iter()
-            .map(|(x, span)| x.to_error(span.clone(), self.db))
-            .collect()
-    }
-
-    fn size(&self) -> Size {
-        self.scopes.last().unwrap().size
-    }
-
-    fn scope(&self) -> &Scope {
-        self.scopes.last().unwrap()
-    }
-
-    fn scope_mut(&mut self) -> &mut Scope {
-        self.scopes.last_mut().unwrap()
-    }
-
-    fn push(&mut self) {
-        self.scopes.push(Scope::new(self.size()));
-    }
-
-    fn pop(&mut self) {
-        self.scopes.pop();
-    }
-
-    fn lookup(&self, name: Name) -> Option<(Var<Lvl>, Val)> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|x| x.names.get(&name).cloned())
-    }
-
-    fn error(&mut self, span: RelSpan, error: TypeError) {
-        self.errors.push((error, span));
-    }
 }
 
 enum NumLiteral {
@@ -535,9 +417,170 @@ impl ast::Lit {
     }
 }
 
+impl ast::TermPar {
+    fn elab(&self, cxt: &mut Cxt) -> Vec<Par<Expr>> {
+        self
+            .expr()
+            .map(|x| x.as_args())
+            .into_iter()
+            .flatten()
+            .map(|x| {
+                let par = match x {
+                    Some(ast::Expr::Binder(x)) => {
+                        let (name, ty) = x
+                            .pat()
+                            .and_then(|x| x.expr())
+                            .map(|x| {
+                                x.as_simple_pat(cxt.db).unwrap_or_else(|| {
+                                    todo!("move non-trivial pats to rhs")
+                                })
+                            })
+                            .unwrap_or((None, None));
+                        let name = name.unwrap_or_else(|| cxt.db.name("_".to_string()));
+                        if ty.is_some() {
+                            cxt.error(x.pat().unwrap().span(), TypeError::Other("Binder '_: _' not allowed in pattern of another binder".to_string()));
+                        }
+                        let ty = x.ty().and_then(|x| x.expr()).map(|x| x.check(Val::Type, cxt)).unwrap_or_else(|| {
+                            cxt.error(x.span(), TypeError::Other("Binder '_: _' missing type on right-hand side; use '_' to infer type".to_string()));
+                            Expr::Error
+                        });
+                        Par {
+                            name,
+                            ty,
+                        }
+                    }
+                    Some(x) => {
+                        let ty = x.check(Val::Type, cxt);
+                        Par {
+                            name: cxt.db.name("_".to_string()),
+                            ty,
+                        }
+                    }
+                    None => Par {
+                        name: cxt.db.name("_".to_string()),
+                        ty: Expr::Error,
+                    },
+                };
+                // Define each parameter so it can be used by the types of the rest
+                cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
+                par
+            })
+            .collect()
+    }
+}
+
+impl ast::PatPar {
+    fn elab(&self, cxt: &mut Cxt) -> Vec<Par<Expr>> {
+        self.pat()
+            .and_then(|x| x.expr())
+            .map(|x| x.as_args())
+            .into_iter()
+            .flatten()
+            .map(|x| {
+                let p = x.as_ref().map(|x| {
+                    x.as_simple_pat(cxt.db)
+                        .unwrap_or_else(|| todo!("move non-trivial pats to rhs"))
+                });
+                let par = match p {
+                    Some((name, ty)) => {
+                        let name = name.unwrap_or_else(|| cxt.db.name("_".to_string()));
+                        let ty = ty.map(|x| x.check(Val::Type, cxt)).unwrap_or_else(|| {
+                            Expr::var(Var::Meta(cxt.mcxt.new_meta(
+                                cxt.size(),
+                                MetaBounds::new(Val::Type),
+                                x.unwrap().span(),
+                            )))
+                        });
+                        Par { name, ty }
+                    }
+                    None => Par {
+                        name: cxt.db.name("_".to_string()),
+                        ty: Expr::Error,
+                    },
+                };
+                // Define each parameter so it can be used by the types of the rest
+                cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
+                par
+            })
+            .collect()
+    }
+}
+
 impl ast::Expr {
     fn check(&self, ty: Val, cxt: &mut Cxt) -> Expr {
-        todo!()
+        let result = || {
+            match (self, ty) {
+                (ast::Expr::Tuple(x), Val::Fun(clos)) if clos.class == Sigma => {
+                    assert!(clos.params.implicit.is_empty());
+                    assert_eq!(clos.params.explicit.len(), 1);
+                    let a = x
+                        .lhs()
+                        .ok_or_else(|| {
+                            TypeError::Other(format!("Missing pair left-hand side value"))
+                        })?
+                        .check(clos.exp_par_ty(cxt.size()).unwrap(), cxt);
+                    // TODO make this lazy
+                    let va = a.clone().eval(&mut cxt.env());
+                    let bty = clos.apply(Args::expl(va));
+                    let b = x
+                        .rhs()
+                        .ok_or_else(|| {
+                            TypeError::Other(format!("Missing pair right-hand side value"))
+                        })?
+                        .check(bty, cxt);
+                    Ok(Expr::Pair(Box::new(a), Box::new(b)))
+                }
+                (_, ty) => {
+                    let (a, ity) = self.infer(cxt);
+                    cxt.mcxt.unify(ity, ty, cxt.size())?;
+                    Ok(a)
+                }
+            }
+        };
+        // TODO auto-applying implicits (probably? only allowing them on function calls is also an option to consider)
+        match result() {
+            Ok(x) => x,
+            Err(e) => {
+                cxt.error(self.span(), e);
+                Expr::Error
+            }
+        }
+    }
+
+    fn as_args(self) -> Vec<Option<ast::Expr>> {
+        match self {
+            ast::Expr::GroupedExpr(ref x) => {
+                x.expr().map(|x| x.as_args()).unwrap_or_else(|| vec![None])
+            }
+            ast::Expr::Tuple(x) => {
+                let mut v = x.rhs().map(|x| x.as_args()).unwrap_or_else(|| vec![None]);
+                v.insert(0, x.lhs());
+                v
+            }
+            _ => vec![Some(self)],
+        }
+    }
+
+    fn as_simple_pat(&self, db: &dyn Elaborator) -> Option<(Option<Name>, Option<ast::Expr>)> {
+        match self {
+            ast::Expr::Var(x) => Some((Some(x.name(db)), None)),
+            ast::Expr::Hole(_) => Some((Some(db.name("_".to_string())), None)),
+            ast::Expr::Binder(x) => {
+                let (name, old_ty) = x.pat()?.expr()?.as_simple_pat(db)?;
+                if old_ty.is_some() {
+                    // ((x: A): B) is an error, let the actual pattern compilation code handle it
+                    None
+                } else {
+                    Some((name, x.ty().and_then(|x| x.expr())))
+                }
+            }
+            ast::Expr::GroupedExpr(x) => x
+                .expr()
+                .map(|x| x.as_simple_pat(db))
+                // For (), we return this expression as the type, since it's identical syntactically
+                .unwrap_or_else(|| Some((Some(db.name("_".to_string())), Some(self.clone())))),
+            _ => None,
+        }
     }
 
     fn infer(&self, cxt: &mut Cxt) -> (Expr, Val) {
@@ -550,9 +593,114 @@ impl ast::Expr {
                         let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name))?;
                         (Expr::var(v.cvt(cxt.size())), t)
                     }
-                    ast::Expr::Lam(_) => todo!(),
-                    ast::Expr::Pi(_) => todo!(),
-                    ast::Expr::App(_) => todo!(),
+                    ast::Expr::Lam(x) => {
+                        cxt.push();
+                        let implicit: Vec<_> = x
+                            .imp_par()
+                            .into_iter()
+                            .flat_map(|x| x.pars())
+                            .flat_map(|x| {
+                                // [] means [_: ()]
+                                x.par().map(|x| x.elab(cxt)).unwrap_or_else(|| {
+                                    vec![Par {
+                                        name: cxt.db.name("_".to_string()),
+                                        ty: Expr::var(Var::Builtin(Builtin::UnitType)),
+                                    }]
+                                })
+                            })
+                            .collect();
+                        let explicit: Vec<_> =
+                            x.exp_par().map(|x| x.elab(cxt)).unwrap_or(Vec::new());
+                        let (body, bty) = x
+                            .body()
+                            .and_then(|x| x.expr())
+                            .ok_or_else(|| {
+                                TypeError::Other("Missing body for function type".to_string())
+                            })?
+                            .infer(cxt);
+                        let params = Params { implicit, explicit };
+                        let bty = bty.quote(cxt.size());
+
+                        cxt.pop();
+
+                        // We have to evaluate this outside of the scope
+                        let ty = Expr::Fun {
+                            class: Pi,
+                            params: params.clone(),
+                            body: Box::new(bty),
+                        }
+                        .eval(&mut cxt.env());
+
+                        (
+                            Expr::Fun {
+                                class: Lam,
+                                params,
+                                body: Box::new(body),
+                            },
+                            ty,
+                        )
+                    }
+                    ast::Expr::Pi(x) => {
+                        cxt.push();
+                        let implicit: Vec<_> = x
+                            .imp_par()
+                            .into_iter()
+                            .flat_map(|x| x.pars())
+                            .flat_map(|x| {
+                                // [] means [_: ()]
+                                x.par().map(|x| x.elab(cxt)).unwrap_or_else(|| {
+                                    vec![Par {
+                                        name: cxt.db.name("_".to_string()),
+                                        ty: Expr::var(Var::Builtin(Builtin::UnitType)),
+                                    }]
+                                })
+                            })
+                            .collect();
+                        let explicit: Vec<_> =
+                            x.exp_par().map(|x| x.elab(cxt)).unwrap_or(Vec::new());
+                        let body = x
+                            .body()
+                            .and_then(|x| x.expr())
+                            .ok_or_else(|| {
+                                TypeError::Other("Missing body for function type".to_string())
+                            })?
+                            .check(Val::Type, cxt);
+                        if x.with().is_some() {
+                            todo!("implement effects")
+                        }
+
+                        cxt.pop();
+                        (
+                            Expr::Fun {
+                                class: Pi,
+                                params: Params { implicit, explicit },
+                                body: Box::new(body),
+                            },
+                            Val::Type,
+                        )
+                    }
+                    ast::Expr::App(x) => {
+                        let (lhs, lhs_ty) = x
+                            .lhs()
+                            .ok_or_else(|| {
+                                TypeError::Other(
+                                    "Missing left-hand side of application".to_string(),
+                                )
+                            })?
+                            .infer(cxt);
+                        if x.member().is_some() {
+                            todo!("implement members")
+                        }
+                        match lhs_ty {
+                            Val::Fun(clos) if clos.class == Pi => {
+                                todo!()
+                            }
+                            Val::Error => todo!(),
+                            lhs_ty => return Err(TypeError::NotFunction(lhs_ty.quote(cxt.size()))),
+                        }
+
+                        todo!()
+                    }
                     ast::Expr::Do(_) => todo!(),
                     ast::Expr::Hole(_) => todo!(),
                     ast::Expr::Case(case) => {
@@ -670,7 +818,11 @@ impl ast::Expr {
                     },
                     ast::Expr::Tuple(_) => todo!(),
                     ast::Expr::EffPat(_) => todo!(),
-                    ast::Expr::Binder(_) => todo!(),
+                    ast::Expr::Binder(_) => {
+                        return Err(TypeError::Other(format!(
+                            "Binder '_: _' not allowed in this context"
+                        )))
+                    }
                     ast::Expr::StructInit(_) => todo!(),
                 }
             })
