@@ -418,7 +418,7 @@ impl ast::Lit {
 }
 
 impl ast::TermPar {
-    fn elab(&self, cxt: &mut Cxt) -> Vec<Par<Expr>> {
+    fn elab(&self, cxt: &mut Cxt) -> Vec<Par> {
         self
             .expr()
             .map(|x| x.as_args())
@@ -470,7 +470,7 @@ impl ast::TermPar {
 }
 
 impl ast::PatPar {
-    fn elab(&self, cxt: &mut Cxt) -> Vec<Par<Expr>> {
+    fn elab(&self, cxt: &mut Cxt) -> Vec<Par> {
         self.pat()
             .and_then(|x| x.expr())
             .map(|x| x.as_args())
@@ -511,17 +511,16 @@ impl ast::Expr {
         let result = || {
             match (self, ty) {
                 (ast::Expr::Tuple(x), Val::Fun(clos)) if clos.class == Sigma => {
-                    assert!(clos.params.implicit.is_empty());
-                    assert_eq!(clos.params.explicit.len(), 1);
+                    assert_eq!(clos.params.len(), 1);
                     let a = x
                         .lhs()
                         .ok_or_else(|| {
                             TypeError::Other(format!("Missing pair left-hand side value"))
                         })?
-                        .check(clos.exp_par_ty(cxt.size()).unwrap(), cxt);
+                        .check(clos.par_ty(), cxt);
                     // TODO make this lazy
                     let va = a.clone().eval(&mut cxt.env());
-                    let bty = clos.apply(Args::expl(va));
+                    let bty = clos.apply(va);
                     let b = x
                         .rhs()
                         .ok_or_else(|| {
@@ -594,6 +593,10 @@ impl ast::Expr {
                         (Expr::var(v.cvt(cxt.size())), t)
                     }
                     ast::Expr::Lam(x) => {
+                        // [a, b] [c, d] (e, f) => ...
+                        // -->
+                        // [a, b, c, d] => ((e, f) => ...)
+
                         cxt.push();
                         let implicit: Vec<_> = x
                             .imp_par()
@@ -614,33 +617,39 @@ impl ast::Expr {
                         let (body, bty) = x
                             .body()
                             .and_then(|x| x.expr())
-                            .ok_or_else(|| {
-                                TypeError::Other("Missing body for function type".to_string())
-                            })?
+                            .ok_or_else(|| TypeError::Other("Missing body for lambda".to_string()))?
                             .infer(cxt);
-                        let params = Params { implicit, explicit };
                         let bty = bty.quote(cxt.size());
-
                         cxt.pop();
 
                         // We have to evaluate this outside of the scope
                         let ty = Expr::Fun {
-                            class: Pi,
-                            params: params.clone(),
-                            body: Box::new(bty),
+                            class: Pi(Impl),
+                            params: implicit.clone(),
+                            body: Box::new(Expr::Fun {
+                                class: Pi(Expl),
+                                params: explicit.clone(),
+                                body: Box::new(bty),
+                            }),
                         }
                         .eval(&mut cxt.env());
-
-                        (
-                            Expr::Fun {
-                                class: Lam,
-                                params,
+                        let term = Expr::Fun {
+                            class: Lam(Impl),
+                            params: implicit,
+                            body: Box::new(Expr::Fun {
+                                class: Lam(Expl),
+                                params: explicit,
                                 body: Box::new(body),
-                            },
-                            ty,
-                        )
+                            }),
+                        };
+
+                        (term, ty)
                     }
                     ast::Expr::Pi(x) => {
+                        // [a, b] [c, d] (e: A, f: B) -> ...
+                        // -->
+                        // [a, b, c, d] -> ((e: A, f: B) -> ...)
+
                         cxt.push();
                         let implicit: Vec<_> = x
                             .imp_par()
@@ -668,13 +677,17 @@ impl ast::Expr {
                         if x.with().is_some() {
                             todo!("implement effects")
                         }
-
                         cxt.pop();
+
                         (
                             Expr::Fun {
-                                class: Pi,
-                                params: Params { implicit, explicit },
-                                body: Box::new(body),
+                                class: Pi(Impl),
+                                params: implicit,
+                                body: Box::new(Expr::Fun {
+                                    class: Pi(Expl),
+                                    params: explicit,
+                                    body: Box::new(body),
+                                }),
                             },
                             Val::Type,
                         )
@@ -692,7 +705,7 @@ impl ast::Expr {
                             todo!("implement members")
                         }
                         match lhs_ty {
-                            Val::Fun(clos) if clos.class == Pi => {
+                            Val::Fun(clos) if matches!(clos.class, Pi(_)) => {
                                 todo!()
                             }
                             Val::Error => todo!(),
@@ -759,13 +772,7 @@ impl ast::Expr {
                             (
                                 Expr::Elim(
                                     Box::new(Expr::var(Var::Builtin(Builtin::ArithOp(op)))),
-                                    Box::new(Elim::App(Args {
-                                        implicit: None,
-                                        explicit: Some(Box::new(Expr::Pair(
-                                            Box::new(a),
-                                            Box::new(b),
-                                        ))),
-                                    })),
+                                    Box::new(Elim::App(Expl, Expr::Pair(Box::new(a), Box::new(b)))),
                                 ),
                                 ty,
                             )
@@ -791,13 +798,7 @@ impl ast::Expr {
                             (
                                 Expr::Elim(
                                     Box::new(Expr::var(Var::Builtin(Builtin::CompOp(op)))),
-                                    Box::new(Elim::App(Args {
-                                        implicit: None,
-                                        explicit: Some(Box::new(Expr::Pair(
-                                            Box::new(a),
-                                            Box::new(b),
-                                        ))),
-                                    })),
+                                    Box::new(Elim::App(Expl, Expr::Pair(Box::new(a), Box::new(b)))),
                                 ),
                                 Val::var(Var::Builtin(Builtin::BoolType)),
                             )

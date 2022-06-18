@@ -84,7 +84,8 @@ impl MetaSolveError {
             MetaSolveError::SpineNonApp(e) => Doc::start("Meta is used by illegal eliminator ")
                 .add(
                     match e {
-                        Elim::App(_) => unreachable!(),
+                        Elim::App(Impl, _) => "implicit application",
+                        Elim::App(_, _) => unreachable!(),
                         Elim::Member(_) => "member access",
                         Elim::Case(_) => "case-of",
                     },
@@ -255,23 +256,19 @@ impl MetaCxt {
         if spine.len() > 1 {
             return Err(MetaSolveError::SpineTooLong);
         }
-        let params = spine
+        let params: Option<Vec<_>> = spine
             .pop()
             .map(|elim| match elim {
-                Elim::App(args) if args.implicit.is_none() && args.explicit.is_some() => {
-                    let names = rename.add_arg(*args.explicit.unwrap(), start_size)?;
-                    let params = names
+                Elim::App(Expl, arg) => {
+                    let names = rename.add_arg(arg, start_size)?;
+                    Ok(names
                         .into_iter()
                         .map(|name| Par {
                             name,
                             // TODO is this type ever used? can we actually find the type of this?
-                            ty: Val::Error,
+                            ty: Expr::Error,
                         })
-                        .collect();
-                    Ok(Params {
-                        implicit: Vec::new(),
-                        explicit: params,
-                    })
+                        .collect())
                 }
                 i => Err(MetaSolveError::SpineNonApp(i.quote(start_size))),
             })
@@ -288,9 +285,8 @@ impl MetaCxt {
         )?;
 
         if let Some(params) = params {
-            let params = params.quote(*scope);
             solution = Expr::Fun {
-                class: Lam,
+                class: Lam(Expl),
                 params,
                 body: Box::new(solution),
             }
@@ -315,33 +311,11 @@ impl Elim<Expr> {
         s_to: Size,
     ) -> Result<(), MetaSolveError> {
         match self {
-            Elim::App(args) => {
-                if let Some(x) = &mut args.implicit {
-                    x.check_solution(cxt, mode, s_from, s_to)?;
-                }
-                if let Some(x) = &mut args.explicit {
-                    x.check_solution(cxt, mode, s_from, s_to)?;
-                }
+            Elim::App(_, x) => {
+                x.check_solution(cxt, mode, s_from, s_to)?;
             }
             Elim::Member(_) => todo!(),
             Elim::Case(_) => todo!(),
-        }
-        Ok(())
-    }
-}
-
-impl Params<Expr> {
-    fn check_solution(
-        &mut self,
-        cxt: &MetaCxt,
-        mode: &SolutionCheckMode,
-        mut s_from: Size,
-        mut s_to: Size,
-    ) -> Result<(), MetaSolveError> {
-        for i in self.implicit.iter_mut().chain(self.explicit.iter_mut()) {
-            i.ty.check_solution(cxt, mode, s_from, s_to)?;
-            s_from += 1;
-            s_to += 1;
         }
         Ok(())
     }
@@ -402,7 +376,12 @@ impl Expr {
                 params,
                 body,
             } => {
-                params.check_solution(cxt, mode, s_from, s_to)?;
+                let (mut s_from, mut s_to) = (s_from, s_to);
+                for i in params.iter_mut() {
+                    i.ty.check_solution(cxt, mode, s_from, s_to)?;
+                    s_from += 1;
+                    s_to += 1;
+                }
                 body.check_solution(cxt, mode, s_from + params.len(), s_to + params.len())?;
             }
             Expr::Lit(_) | Expr::Type | Expr::Error => (),

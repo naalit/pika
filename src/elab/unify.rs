@@ -127,20 +127,8 @@ impl UnifyCxt<'_> {
         }
         for (a, b) in a.iter().zip(b) {
             match (a, b) {
-                (Elim::App(a), Elim::App(b)) => {
-                    if a.implicit.is_some() != b.implicit.is_some()
-                        || a.explicit.is_some() != b.explicit.is_some()
-                    {
-                        return Ok(false);
-                    }
-                    if let Some(a) = a.implicit.clone() {
-                        let b = b.implicit.clone().unwrap();
-                        self.unify(*a, *b, size, state)?;
-                    }
-                    if let Some(a) = a.explicit.clone() {
-                        let b = b.implicit.clone().unwrap();
-                        self.unify(*a, *b, size, state)?;
-                    }
+                (Elim::App(i1, a), Elim::App(i2, b)) if i1 == i2 => {
+                    self.unify(a.clone(), b.clone(), size, state)?;
                 }
                 (Elim::Member(_), Elim::Member(_)) => todo!(),
                 (Elim::Case(_), Elim::Case(_)) => todo!(),
@@ -159,35 +147,13 @@ impl UnifyCxt<'_> {
                 if a.class == b.class && a.params.len() == b.params.len() =>
             {
                 // First unify parameters
-                let len_imp = a.params.implicit.len().max(b.params.implicit.len());
-                let len_exp = a.params.explicit.len().max(b.params.explicit.len());
-                match (a.imp_par_ty(), b.imp_par_ty()) {
-                    (None, None) => (),
-                    (Some(a), Some(b)) => self.unify(a, b, size, state)?,
-                    _ => {
-                        return Err(UnifyError::Conversion(
-                            Val::Fun(a).quote(size),
-                            Val::Fun(b).quote(size),
-                        ))
-                    }
-                }
-                let imp_size = size + len_imp;
-                match (a.exp_par_ty(size), b.exp_par_ty(size)) {
-                    (None, None) => (),
-                    (Some(a), Some(b)) => self.unify(a, b, imp_size, state)?,
-                    _ => {
-                        return Err(UnifyError::Conversion(
-                            Val::Fun(a).quote(size),
-                            Val::Fun(b).quote(size),
-                        ))
-                    }
-                }
+                self.unify(a.par_ty(), b.par_ty(), size, state)?;
 
                 // Unify bodies
-                let exp_size = imp_size + len_exp;
-                let a = a.open(size, Some(imp_size));
-                let b = b.open(size, Some(imp_size));
-                self.unify(a, b, exp_size, state)
+                let new_size = size + a.params.len().max(b.params.len());
+                let a = a.open(size);
+                let b = b.open(size);
+                self.unify(a, b, new_size, state)
             }
 
             // Now handle neutrals as directed by the unfolding state
@@ -306,16 +272,11 @@ impl UnifyCxt<'_> {
             }
 
             // Eta-expand if there's a lambda on one side
-            (Val::Fun(clos), x) | (x, Val::Fun(clos)) if clos.class == Lam => {
+            (Val::Fun(clos), x) | (x, Val::Fun(clos)) if matches!(clos.class, Lam(_)) => {
                 let new_size = size + clos.params.len();
-                let args = clos.params.synthesize_args(size);
-                let a = clos.open(size, None);
-                self.unify(
-                    a,
-                    x.app(Elim::App(args), &mut Env::new(new_size)),
-                    new_size,
-                    state,
-                )
+                let elim = Elim::App(clos.class.icit().unwrap(), clos.synthesize_args(size));
+                let a = clos.open(size);
+                self.unify(a, x.app(elim, &mut Env::new(new_size)), new_size, state)
             }
 
             (a, b) => Err(UnifyError::Conversion(a.quote(size), b.quote(size))),

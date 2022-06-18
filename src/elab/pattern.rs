@@ -233,15 +233,13 @@ mod input {
                                 // we do this by adding an IPat with the name from the sigma (`a` in this case) to the pattern
                                 // however, these must go in order but before any other variables (since the types of those variables
                                 // can depend on the values of earlier ones.) Hence `row.ty_ipats`.
-                                assert!(clos.params.implicit.is_empty());
-                                assert_eq!(clos.params.explicit.len(), 1);
-                                let ta = clos.exp_par_ty(row.tyvars_size).unwrap();
-                                let tb = clos.clone().open(row.tyvars_size, None);
+                                assert_eq!(clos.params.len(), 1);
+                                let ta = clos.par_ty();
+                                let tb = clos.clone().open(row.tyvars_size);
                                 let va = self.pvar(ta);
                                 let vb = self.pvar(tb);
                                 row.tyvars_size += clos.params.len();
-                                row.ty_ipats
-                                    .push((va, IPat::Var(clos.params.explicit[0].name)));
+                                row.ty_ipats.push((va, IPat::Var(clos.params[0].name)));
                                 (va, vb)
                             }
                             Val::Error => (self.pvar(Val::Error), self.pvar(Val::Error)),

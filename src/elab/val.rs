@@ -77,71 +77,34 @@ impl Neutral {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Clos {
     pub class: FunClass,
-    /// Must be a Params<Expr>, not Params<Val>, because the types can depend on each other
-    /// which means that they contain bound variables on the top level.
-    /// It can be evaluated temporarily, but a Params<Val> can't be used at a different level
-    /// than it was evaluated at.
-    pub params: Params<Expr>,
+    pub params: Vec<Par>,
     env: Env,
     body: Expr,
 }
 impl Clos {
-    pub fn imp_par_ty(&self) -> Option<Val> {
-        let Params { implicit, explicit } = &self.params;
+    pub fn par_ty(&self) -> Val {
         let mut env = self.env.clone();
-        implicit
+        self.params
             .iter()
             .fold(None, |term, Par { name, ty }| {
                 let term = match term {
                     Some(term) => Box::new(Expr::Fun {
                         class: Sigma,
-                        params: Params {
-                            implicit: Vec::new(),
-                            explicit: vec![Par {
-                                name: *name,
-                                ty: ty.clone(),
-                            }],
-                        },
+                        params: vec![Par {
+                            name: *name,
+                            ty: ty.clone(),
+                        }],
                         body: term,
                     }),
                     None => Box::new(ty.clone()),
                 };
                 Some(term)
             })
-            .map(|x| x.eval(&mut env))
+            .unwrap()
+            .eval(&mut env)
     }
 
-    pub fn exp_par_ty(&self, mut size: Size) -> Option<Val> {
-        let Params { implicit, explicit } = &self.params;
-        // Make sure explicit gets evaluated at the right level
-        let mut env = self.env.clone();
-        for Par { name, .. } in implicit {
-            env.push(Some(Val::var(Var::Local(*name, size.next_lvl()))));
-            size += 1;
-        }
-        explicit
-            .iter()
-            .fold(None, |term, Par { name, ty }| {
-                let term = match term {
-                    Some(term) => Box::new(Expr::Fun {
-                        class: Sigma,
-                        params: Params {
-                            implicit: Vec::new(),
-                            explicit: vec![Par {
-                                name: *name,
-                                ty: ty.clone(),
-                            }],
-                        },
-                        body: term,
-                    }),
-                    None => Box::new(ty.clone()),
-                };
-                Some(term)
-            })
-            .map(|x| x.eval(&mut env))
-    }
-
-    pub fn apply(self, args: Args<Val>) -> Val {
+    pub fn apply(self, arg: Val) -> Val {
         // deal with argument number mismatch when passing values that aren't syntactically tuples:
         //
         // ((x, y) => ...) p where p : (A, B) -->
@@ -150,102 +113,46 @@ impl Clos {
         // ([a, b] (x, y) => ...) [t, u] p -->
         // (case p of (x, y) => ...) [t/a, u/b]
         let Clos { mut env, body, .. } = self;
-        if let Some(imp) = args.implicit {
-            match imp.zip_pair(&self.params.implicit) {
-                Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
-                Err(imp) => {
-                    let imp_pars: Vec<_> = self.params.implicit.iter().map(|x| x.name).collect();
-                    let exp_pars: Vec<_> = self.params.explicit.iter().map(|x| x.name).collect();
-                    let body = match args.explicit {
-                        Some(exp) => Expr::Elim(
-                            Box::new(exp.quote(env.size + self.params.implicit.len())),
-                            Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
-                                &exp_pars,
-                                body,
-                                env.size + self.params.implicit.len(),
-                            ))),
-                        ),
-                        None => {
-                            assert!(exp_pars.is_empty());
-                            body
-                        }
-                    };
-                    return imp.app(
-                        Elim::Case(super::pattern::CaseOf::make_simple_args(
-                            &imp_pars, body, env.size,
-                        )),
-                        &mut env,
-                    );
-                }
-            }
-        }
-        if let Some(exp) = args.explicit {
-            match exp.zip_pair(&self.params.explicit) {
-                Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
-                Err(exp) => {
-                    let exp_pars: Vec<_> = self.params.explicit.iter().map(|x| x.name).collect();
-                    return exp.app(
-                        Elim::Case(super::pattern::CaseOf::make_simple_args(
-                            &exp_pars, body, env.size,
-                        )),
-                        &mut env,
-                    );
-                }
+        match arg.zip_pair(&self.params) {
+            Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
+            Err(arg) => {
+                let pars: Vec<_> = self.params.iter().map(|x| x.name).collect();
+                return arg.app(
+                    Elim::Case(super::pattern::CaseOf::make_simple_args(
+                        &pars, body, env.size,
+                    )),
+                    &mut env,
+                );
             }
         }
         body.eval(&mut env)
     }
 
     pub fn quote(self, size: Size) -> Expr {
+        let arg = self.synthesize_args(size);
         let Clos {
             class,
             params,
             mut env,
             body,
         } = self;
-        let args = params.synthesize_args(size);
-        let params = params.eval(&mut env).quote(size);
-        if let Some(imp) = args.implicit {
-            match imp.zip_pair(&params.implicit) {
-                Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
-                Err(imp) => {
-                    let imp_pars: Vec<_> = params.implicit.iter().map(|x| x.name).collect();
-                    let exp_pars: Vec<_> = params.explicit.iter().map(|x| x.name).collect();
-                    let body = match args.explicit {
-                        Some(exp) => Expr::Elim(
-                            Box::new(exp.quote(env.size + params.implicit.len())),
-                            Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
-                                &exp_pars,
-                                body,
-                                env.size + params.implicit.len(),
-                            ))),
-                        ),
-                        None => {
-                            assert!(exp_pars.is_empty());
-                            body
-                        }
-                    };
-                    return Expr::Elim(
-                        Box::new(imp.quote(env.size + params.implicit.len())),
-                        Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
-                            &imp_pars, body, env.size,
-                        ))),
-                    );
-                }
-            }
-        }
-        if let Some(exp) = args.explicit {
-            match exp.zip_pair(&params.explicit) {
-                Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
-                Err(exp) => {
-                    let exp_pars: Vec<_> = params.explicit.iter().map(|x| x.name).collect();
-                    return Expr::Elim(
-                        Box::new(exp.quote(env.size)),
-                        Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
-                            &exp_pars, body, env.size,
-                        ))),
-                    );
-                }
+        let params: Vec<_> = params
+            .into_iter()
+            .map(|Par { name, ty }| Par {
+                name,
+                ty: ty.eval(&mut env).quote(size),
+            })
+            .collect();
+        match arg.zip_pair(&params) {
+            Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
+            Err(arg) => {
+                let pars: Vec<_> = params.iter().map(|x| x.name).collect();
+                return Expr::Elim(
+                    Box::new(arg.quote(env.size)),
+                    Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
+                        &pars, body, env.size,
+                    ))),
+                );
             }
         }
         let body = body.eval(&mut env).quote(size + params.len());
@@ -258,37 +165,34 @@ impl Clos {
 
     /// Add the parameters to the environment and then evaluate the closure body, "opening" or "entering" the closure.
     /// `size` is the size before adding any parameters.
-    /// If `size_after_imp` is `Some`, skip to that size after adding implicit parameters, even if there aren't
-    /// actually that many implicit parameters (this is for checking eta-conversion of implicit and explicit
-    /// parameters separately).
-    /// The size after calling `open` is `size + self.params.len()` (or `size_after_imp + self.params.explicit.len()` if `size_after_imp` is `Some`.)
-    pub fn open(self, mut size: Size, size_after_imp: Option<Size>) -> Val {
+    /// The size after calling `open` is `size + self.params.len()`.
+    pub fn open(self, mut size: Size) -> Val {
         let Clos {
             class,
             params,
             mut env,
             body,
         } = self;
-        for par in &params.implicit {
-            env.push(Some(Val::var(Var::Local(par.name, size.next_lvl()))));
-            size += 1;
-        }
-        if let Some(exp_size) = size_after_imp {
-            if size > exp_size {
-                panic!(
-                    "passed exp_size {:?} to vquote with imp_size {:?} and imp_len {}",
-                    exp_size,
-                    size,
-                    params.implicit.len()
-                );
-            }
-            size = exp_size;
-        }
-        for par in &params.explicit {
+        for par in &params {
             env.push(Some(Val::var(Var::Local(par.name, size.next_lvl()))));
             size += 1;
         }
         body.eval(&mut env)
+    }
+
+    pub fn synthesize_args(&self, size: Size) -> Val {
+        let (arg, _size) =
+            self.params
+                .iter()
+                .fold((None, size), |(term, size), Par { name, ty }| {
+                    let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
+                    let term = match term {
+                        Some(term) => Box::new(Val::Pair(var, term)),
+                        None => var,
+                    };
+                    (Some(term), size)
+                });
+        *arg.unwrap()
     }
 }
 
@@ -349,8 +253,11 @@ impl Val {
             _ => (),
         }
         match x {
-            Elim::App(args) => match self {
-                Val::Fun(clos) => clos.apply(args),
+            Elim::App(icit, arg) => match self {
+                Val::Fun(clos) => {
+                    assert_eq!(clos.class.icit(), Some(icit));
+                    clos.apply(arg)
+                }
                 _ => unreachable!("Cannot resolve application to non-Lam"),
             },
             Elim::Member(_) => todo!(),
@@ -366,7 +273,7 @@ impl Val {
 impl Elim<Expr> {
     pub fn eval(self, env: &mut Env) -> Elim<Val> {
         match self {
-            Elim::App(arg) => Elim::App(arg.eval(env)),
+            Elim::App(icit, arg) => Elim::App(icit, arg.eval(env)),
             Elim::Member(_) => todo!(),
             Elim::Case(_) => todo!(),
         }
@@ -375,112 +282,10 @@ impl Elim<Expr> {
 impl Elim<Val> {
     pub fn quote(self, size: Size) -> Elim<Expr> {
         match self {
-            Elim::App(arg) => Elim::App(arg.quote(size)),
+            Elim::App(icit, arg) => Elim::App(icit, arg.quote(size)),
             Elim::Member(_) => todo!(),
             Elim::Case(_) => todo!(),
         }
-    }
-}
-
-impl Args<Expr> {
-    pub fn eval(self, env: &mut Env) -> Args<Val> {
-        let state = env.state();
-        let Args { implicit, explicit } = self;
-        let implicit = implicit.map(|x| Box::new(x.eval(env)));
-        let explicit = explicit.map(|x| Box::new(x.eval(env)));
-        env.reset(state);
-        Args { implicit, explicit }
-    }
-}
-impl Args<Val> {
-    pub fn quote(self, size: Size) -> Args<Expr> {
-        let Args { implicit, explicit } = self;
-        let implicit = implicit.map(|x| Box::new(x.quote(size)));
-        let explicit = explicit.map(|x| Box::new(x.quote(size)));
-        Args { implicit, explicit }
-    }
-}
-
-impl Params<Expr> {
-    /// Does not add anything to the env, only mutates it to keep internal Lvls correct
-    fn eval(self, env: &mut Env) -> Params<Val> {
-        let state = env.state();
-        let Params { implicit, explicit } = self;
-        let implicit = implicit
-            .into_iter()
-            .map(|Par { name, ty }| {
-                env.push(None);
-                Par {
-                    name,
-                    ty: ty.eval(env),
-                }
-            })
-            .collect();
-        let explicit = explicit
-            .into_iter()
-            .map(|Par { name, ty }| {
-                env.push(None);
-                Par {
-                    name,
-                    ty: ty.eval(env),
-                }
-            })
-            .collect();
-        env.reset(state);
-        Params { implicit, explicit }
-    }
-
-    pub fn synthesize_args(&self, size: Size) -> Args<Val> {
-        let Params { implicit, explicit } = self;
-        let (implicit, mut size) =
-            implicit
-                .iter()
-                .fold((None, size), |(term, size), Par { name, ty }| {
-                    let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
-                    let term = match term {
-                        Some(term) => Box::new(Val::Pair(var, term)),
-                        None => var,
-                    };
-                    (Some(term), size)
-                });
-        let (explicit, _size) =
-            explicit
-                .iter()
-                .fold((None, size), |(term, size), Par { name, ty }| {
-                    let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
-                    let term = match term {
-                        Some(term) => Box::new(Val::Pair(var, term)),
-                        None => var,
-                    };
-                    (Some(term), size)
-                });
-        Args { implicit, explicit }
-    }
-}
-impl Params<Val> {
-    pub fn quote(self, size: Size) -> Params<Expr> {
-        let Params { implicit, explicit } = self;
-        let (implicit, size) =
-            implicit
-                .into_iter()
-                .fold((Vec::new(), size), |(mut v, size), Par { name, ty }| {
-                    v.push(Par {
-                        name,
-                        ty: ty.quote(size),
-                    });
-                    (v, size.inc())
-                });
-        let (explicit, _size) =
-            explicit
-                .into_iter()
-                .fold((Vec::new(), size), |(mut v, size), Par { name, ty }| {
-                    v.push(Par {
-                        name,
-                        ty: ty.quote(size),
-                    });
-                    (v, size.inc())
-                });
-        Params { implicit, explicit }
     }
 }
 

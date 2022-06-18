@@ -10,10 +10,19 @@ pub enum FunClass {
     /// So their representation is the same (as is that for lambdas), and they're evaluated the same etc.
     /// TODO: we'll eventually annotate pis and probably lambdas with effects, but this will not happen for sigmas.
     Sigma,
-    Lam,
-    Pi,
+    Lam(Icit),
+    Pi(Icit),
 }
-pub use FunClass::*;
+impl FunClass {
+    pub fn icit(self) -> Option<Icit> {
+        match self {
+            Sigma => None,
+            Lam(i) => Some(i),
+            Pi(i) => Some(i),
+        }
+    }
+}
+pub use FunClass::{Lam, Pi, Sigma};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ArithOp {
@@ -162,42 +171,25 @@ impl Literal {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Icit {
+    Impl,
+    Expl,
+}
+pub use self::Icit::*;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Par<T: IsTerm> {
+pub struct Par {
     pub name: Name,
-    pub ty: T,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Params<T: IsTerm> {
-    pub implicit: Vec<Par<T>>,
-    pub explicit: Vec<Par<T>>,
-}
-impl<T: IsTerm> Params<T> {
-    pub fn len(&self) -> usize {
-        self.implicit.len() + self.explicit.len()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Args<T: IsTerm> {
-    pub implicit: Option<Box<T>>,
-    pub explicit: Option<Box<T>>,
-}
-impl<T: IsTerm> Args<T> {
-    pub fn expl(x: T) -> Args<T> {
-        Args {
-            implicit: None,
-            explicit: Some(Box::new(x)),
-        }
-    }
+    pub ty: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsDef {
     name: Name,
     // TODO ConsId or something
-    params: Params<Expr>,
+    implicit: Vec<Par>,
+    explicit: Vec<Par>,
     ret_ty: Expr,
 }
 
@@ -211,20 +203,20 @@ pub enum Definition {
         ty: Box<Expr>,
         body: Box<Expr>,
     },
-    Fun {
-        name: Name,
-        params: Params<Expr>,
-        ret_ty: Box<Expr>,
-        effects: Vec<Expr>,
-        body: Box<Expr>,
-    },
-    Type {
-        name: Name,
-        params: Params<Expr>,
-        cons: Vec<ConsDef>,
-        // TODO these should be interned
-        where_block: Vec<Definition>,
-    },
+    // Fun {
+    //     name: Name,
+    //     params: Params<Expr>,
+    //     ret_ty: Box<Expr>,
+    //     effects: Vec<Expr>,
+    //     body: Box<Expr>,
+    // },
+    // Type {
+    //     name: Name,
+    //     params: Params<Expr>,
+    //     cons: Vec<ConsDef>,
+    //     // TODO these should be interned
+    //     where_block: Vec<Definition>,
+    // },
 }
 
 pub trait IsTerm {
@@ -262,7 +254,7 @@ pub enum Head<L> {
 */
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Elim<T: IsTerm> {
-    App(Args<T>),
+    App(Icit, T),
     // TODO probably use MemberId or something with a specific member of a specific type
     Member(Name),
     Case(super::pattern::CaseOf),
@@ -274,7 +266,7 @@ pub enum Expr {
     Elim(Box<Expr>, Box<Elim<Expr>>),
     Fun {
         class: FunClass,
-        params: Params<Expr>,
+        params: Vec<Par>,
         body: Box<Expr>,
     },
     // Do(Vec<Stmt>),
@@ -309,27 +301,17 @@ impl Expr {
                 },
             },
             Expr::Elim(a, b) => match &**b {
-                Elim::App(b) => a
+                Elim::App(icit, b) => a
                     .pretty(db)
                     .nest(Prec::App)
-                    .chain(
-                        b.implicit
-                            .as_ref()
-                            .map(|b| {
-                                Doc::none()
-                                    .space()
-                                    .add('[', ())
-                                    .chain(b.pretty(db))
-                                    .add(']', ())
-                            })
-                            .unwrap_or(Doc::none()),
-                    )
-                    .chain(
-                        b.explicit
-                            .as_ref()
-                            .map(|b| Doc::none().space().chain(b.pretty(db).nest(Prec::Atom)))
-                            .unwrap_or(Doc::none()),
-                    )
+                    .chain(match icit {
+                        Impl => Doc::none()
+                            .space()
+                            .add('[', ())
+                            .chain(b.pretty(db))
+                            .add(']', ()),
+                        Expl => Doc::none().space().chain(b.pretty(db).nest(Prec::Atom)),
+                    })
                     .prec(Prec::App),
                 Elim::Member(m) => a
                     .pretty(db)
@@ -343,12 +325,10 @@ impl Expr {
                 params,
                 body,
             } => {
-                let d_params = if params.implicit.is_empty() {
-                    Doc::none()
-                } else {
-                    Doc::start('[')
+                let d_params = match class.icit() {
+                    Some(Impl) => Doc::start('[')
                         .chain(Doc::intersperse(
-                            params.implicit.iter().map(|x| {
+                            params.iter().map(|x| {
                                 Doc::start(db.lookup_name(x.name))
                                     .add(':', ())
                                     .space()
@@ -356,14 +336,10 @@ impl Expr {
                             }),
                             Doc::start(','),
                         ))
-                        .add(']', ())
-                }
-                .chain(if params.explicit.is_empty() {
-                    Doc::none()
-                } else {
-                    Doc::start('(')
+                        .add(']', ()),
+                    _ => Doc::start('(')
                         .chain(Doc::intersperse(
-                            params.explicit.iter().map(|x| {
+                            params.iter().map(|x| {
                                 Doc::start(db.lookup_name(x.name))
                                     .add(':', ())
                                     .space()
@@ -371,24 +347,23 @@ impl Expr {
                             }),
                             Doc::start(','),
                         ))
-                        .add(')', ())
-                });
+                        .add(')', ()),
+                };
                 match class {
                     Sigma => {
-                        assert!(params.implicit.is_empty());
-                        assert_eq!(params.explicit.len(), 1);
+                        assert_eq!(params.len(), 1);
                         d_params
                             .add(',', ())
                             .space()
                             .chain(body.pretty(db).nest(Prec::Pair))
                             .prec(Prec::Pair)
                     }
-                    Lam => d_params
+                    Lam(_) => d_params
                         .space()
                         .add("=>", ())
                         .chain(body.pretty(db))
                         .prec(Prec::Term),
-                    Pi => d_params
+                    Pi(_) => d_params
                         .space()
                         .add("->", ())
                         .chain(body.pretty(db))
