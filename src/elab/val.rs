@@ -48,7 +48,7 @@ impl Neutral {
         (self.head, self.spine)
     }
 
-    pub fn resolve(self, env: &Env) -> Result<Val, Self> {
+    pub fn resolve(self, env: &Env, mcxt: &MetaCxt) -> Result<Val, Self> {
         let guard = self.unfolded.read().unwrap();
         if let Some(v) = &*guard {
             Ok(v.clone())
@@ -58,7 +58,10 @@ impl Neutral {
             let head: Val = match self.head {
                 Head::Var(Var::Local(_, _)) => return Err(self),
                 Head::Var(Var::Builtin(_)) => return Err(self),
-                Head::Var(Var::Meta(_)) => return Err(self),
+                Head::Var(Var::Meta(m)) => match mcxt.lookup_val(m) {
+                    Some(v) => v,
+                    None => return Err(self),
+                },
                 Head::Var(Var::Def(_)) => return Err(self),
             };
             let mut env = env.clone();
@@ -66,8 +69,8 @@ impl Neutral {
                 .spine
                 .into_iter()
                 .fold(head, |head, elim| head.app(elim, &mut env));
-            val.inline_head(&mut env);
-            let guard = self.unfolded.write().unwrap();
+            val.inline_head(&mut env, mcxt);
+            let mut guard = self.unfolded.write().unwrap();
             *guard = Some(val.clone());
             Ok(val)
         }
@@ -78,15 +81,30 @@ impl Neutral {
 pub struct Clos {
     pub class: FunClass,
     pub params: Vec<Par>,
-    env: Env,
-    body: Expr,
+    pub env: Env,
+    pub body: Expr,
 }
 impl Clos {
+    /// arg: argument type -> argument value
+    pub fn elab_with(self, mut arg: impl FnMut(Val) -> Val) -> Val {
+        let Clos {
+            class,
+            params,
+            mut env,
+            body,
+        } = self;
+        for par in params {
+            let ty = par.ty.eval(&mut env);
+            env.push(Some(arg(ty)));
+        }
+        body.eval(&mut env)
+    }
+
     pub fn par_ty(&self) -> Val {
         let mut env = self.env.clone();
         self.params
             .iter()
-            .fold(None, |term, Par { name, ty }| {
+            .rfold(None, |term, Par { name, ty }| {
                 let term = match term {
                     Some(term) => Box::new(Expr::Fun {
                         class: Sigma,
@@ -128,8 +146,7 @@ impl Clos {
         body.eval(&mut env)
     }
 
-    pub fn quote(self, size: Size) -> Expr {
-        let arg = self.synthesize_args(size);
+    pub fn quote(self, mut size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
         let Clos {
             class,
             params,
@@ -138,28 +155,28 @@ impl Clos {
         } = self;
         let params: Vec<_> = params
             .into_iter()
-            .map(|Par { name, ty }| Par {
-                name,
-                ty: ty.eval(&mut env).quote(size),
+            .map(|Par { name, ty }| {
+                let par = Par {
+                    name,
+                    ty: ty.eval_quote(&mut env, size, inline_metas),
+                };
+                env.push(None);
+                size += 1;
+                par
             })
             .collect();
-        match arg.zip_pair(&params) {
-            Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
-            Err(arg) => {
-                let pars: Vec<_> = params.iter().map(|x| x.name).collect();
-                return Expr::Elim(
-                    Box::new(arg.quote(env.size)),
-                    Box::new(Elim::Case(super::pattern::CaseOf::make_simple_args(
-                        &pars, body, env.size,
-                    ))),
-                );
-            }
-        }
-        let body = body.eval(&mut env).quote(size + params.len());
+        let body = body.eval_quote(&mut env, size, inline_metas);
         Expr::Fun {
             class,
             params,
             body: Box::new(body),
+        }
+    }
+
+    pub fn move_env(self, env: &mut Env) -> Clos {
+        match self.quote(env.size, None).eval(env) {
+            Val::Fun(clos) => *clos,
+            _ => unreachable!(),
         }
     }
 
@@ -216,7 +233,7 @@ impl Val {
         // ((x, y) => ...) p where p : (A, B) shouldn't panic
         // so first check that we have enough of the pair inlined
         let mut term = &self;
-        for _ in 0..with.len() {
+        for _ in 0..with.len() - 1 {
             match term {
                 Val::Pair(a, rest) => {
                     term = rest;
@@ -280,9 +297,9 @@ impl Elim<Expr> {
     }
 }
 impl Elim<Val> {
-    pub fn quote(self, size: Size) -> Elim<Expr> {
+    pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Elim<Expr> {
         match self {
-            Elim::App(icit, arg) => Elim::App(icit, arg.quote(size)),
+            Elim::App(icit, arg) => Elim::App(icit, arg.quote(size, inline_metas)),
             Elim::Member(_) => todo!(),
             Elim::Case(_) => todo!(),
         }
@@ -316,10 +333,15 @@ impl Expr {
             Expr::Error => Val::Error,
         }
     }
+
+    pub fn eval_quote(self, env: &mut Env, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
+        // TODO do this more efficiently
+        self.eval(env).quote(size, inline_metas)
+    }
 }
 
 impl Val {
-    pub fn quote(self, size: Size) -> Expr {
+    pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
         match self {
             Val::Type => Expr::Type,
             Val::Neutral(neutral) => {
@@ -330,27 +352,35 @@ impl Val {
                     Head::Var(Var::Def(d)) => Expr::var(Var::Def(d)),
                     Head::Var(Var::Local(n, i)) => Expr::var(Var::Local(n, i.idx(size))),
                     Head::Var(Var::Builtin(b)) => Expr::var(Var::Builtin(b)),
-                    Head::Var(Var::Meta(m)) => Expr::var(Var::Meta(m)),
+                    Head::Var(Var::Meta(m)) => {
+                        match inline_metas.and_then(|mcxt| mcxt.lookup_expr(m, size)) {
+                            Some(t) => t,
+                            None => Expr::var(Var::Meta(m)),
+                        }
+                    }
                 };
                 spine.into_iter().fold(head, |head, elim| {
-                    Expr::Elim(Box::new(head), Box::new(elim.quote(size)))
+                    Expr::Elim(Box::new(head), Box::new(elim.quote(size, inline_metas)))
                 })
             }
-            Val::Fun(clos) => clos.quote(size),
+            Val::Fun(clos) => clos.quote(size, inline_metas),
             Val::Lit(l) => Expr::Lit(l),
-            Val::Pair(a, b) => Expr::Pair(Box::new(a.quote(size)), Box::new(b.quote(size))),
+            Val::Pair(a, b) => Expr::Pair(
+                Box::new(a.quote(size, inline_metas)),
+                Box::new(b.quote(size, inline_metas)),
+            ),
             Val::Error => Expr::Error,
         }
     }
 
     /// Unfolds the head of this value as much as possible, applying eliminators along the way.
     /// Does not recurse over anything - it doesn't affect spines, pairs, etc.
-    pub fn inline_head(&mut self, env: &mut Env) {
+    pub fn inline_head(&mut self, env: &mut Env, mcxt: &MetaCxt) {
         match self {
             Val::Neutral(n) => {
                 let mut n2 = Neutral::new(Head::Var(Var::Builtin(Builtin::Unit)), Vec::new());
                 std::mem::swap(n, &mut n2);
-                match n2.resolve(env) {
+                match n2.resolve(env, &mcxt) {
                     Ok(x) => *self = x,
                     Err(n2) => *n = n2,
                 }

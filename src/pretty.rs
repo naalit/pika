@@ -28,6 +28,7 @@ impl IntoStyle for () {
 pub enum Prec {
     Term,
     Pair,
+    Pi,
     App,
     Atom,
 }
@@ -54,6 +55,22 @@ impl Doc {
 
     pub fn style_keyword() -> Style {
         Color::Magenta.style().bold()
+    }
+
+    pub fn style_literal() -> Style {
+        Color::Cyan.style().bold()
+    }
+
+    /// Applies `style` to any string data directly in this Doc.
+    /// Does not apply to nested Docs.
+    pub fn style(mut self, style: impl IntoStyle) -> Self {
+        let style = style.into_style().unwrap_or_default();
+        for i in &mut self.data {
+            if let DocEntry::String(_, s) = i {
+                *s = style;
+            }
+        }
+        self
     }
 
     fn add_string(self, style: bool, indent: usize, buf: &mut String) {

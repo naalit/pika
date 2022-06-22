@@ -150,10 +150,9 @@ pub enum IntType {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Literal {
-    /// Stores the usize representation of the int
-    /// Whether it's positive or negative can be thought of as stored in meta bounds elsewhere
-    /// It will be reified during lowering by casting to its concrete type
-    Int(usize),
+    /// Stores the u64 representation of the int, plus a bool for whether it's signed
+    /// If the bool is true, then the actual value is obtained by a cast to i64
+    Int(bool, u64),
     /// Stores a u64 representation of the bits of the f64
     F64(u64),
     /// Stores a u32 representation of the bits of the f32
@@ -163,7 +162,8 @@ pub enum Literal {
 impl Literal {
     pub fn pretty<T: crate::parsing::Parser + ?Sized>(&self, db: &T) -> Doc {
         match self {
-            Literal::Int(i) => Doc::start(i),
+            Literal::Int(false, i) => Doc::start(i),
+            Literal::Int(true, i) => Doc::start(*i as i64),
             Literal::F64(i) => Doc::start(f64::from_bits(*i)),
             Literal::F32(i) => Doc::start(f32::from_bits(*i)),
             Literal::String(s) => Doc::start(db.lookup_name(*s)),
@@ -278,6 +278,13 @@ impl IsTerm for Expr {
     type Clos = Expr;
     type Loc = Idx;
 }
+fn pretty_bind<T: Elaborator + ?Sized>(n: Name, db: &T) -> Doc {
+    if db.name("_".to_string()) == n {
+        Doc::none()
+    } else {
+        Doc::start(db.lookup_name(n)).add(':', ()).space()
+    }
+}
 impl Expr {
     pub fn var(var: Var<Idx>) -> Self {
         Self::Head(Head::Var(var))
@@ -288,8 +295,8 @@ impl Expr {
             Expr::Type => Doc::none().add("Type", Doc::style_keyword()),
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
-                    Var::Local(name, _) => Doc::start(db.lookup_name(*name)),
-                    Var::Meta(m) => Doc::start("?").add(m, ()),
+                    Var::Local(name, i) => Doc::start(db.lookup_name(*name)), //.add('.', ()).add(i.as_u32(), ()),
+                    Var::Meta(m) => Doc::start(m).style(Doc::style_literal()),
                     Var::Builtin(b) => Doc::start(b),
                     // TODO better way of doing this - e.g. take into account module paths
                     // also get rid of fallback
@@ -325,8 +332,8 @@ impl Expr {
                 params,
                 body,
             } => {
-                let d_params = match class.icit() {
-                    Some(Impl) => Doc::start('[')
+                let d_params = match class {
+                    Pi(Impl) | Lam(Impl) => Doc::start('[')
                         .chain(Doc::intersperse(
                             params.iter().map(|x| {
                                 Doc::start(db.lookup_name(x.name))
@@ -334,10 +341,10 @@ impl Expr {
                                     .space()
                                     .chain(x.ty.pretty(db).nest(Prec::App))
                             }),
-                            Doc::start(','),
+                            Doc::start(',').space(),
                         ))
                         .add(']', ()),
-                    _ => Doc::start('(')
+                    Lam(Expl) => Doc::start('(')
                         .chain(Doc::intersperse(
                             params.iter().map(|x| {
                                 Doc::start(db.lookup_name(x.name))
@@ -345,9 +352,23 @@ impl Expr {
                                     .space()
                                     .chain(x.ty.pretty(db).nest(Prec::App))
                             }),
-                            Doc::start(','),
+                            Doc::start(',').space(),
                         ))
                         .add(')', ()),
+                    Pi(Expl) => Doc::start('(')
+                        .chain(Doc::intersperse(
+                            params.iter().map(|x| {
+                                pretty_bind(x.name, db).chain(x.ty.pretty(db).nest(Prec::App))
+                            }),
+                            Doc::start(',').space(),
+                        ))
+                        .add(')', ()),
+                    // Sigma
+                    Sigma => {
+                        assert_eq!(params.len(), 1);
+                        let x = &params[0];
+                        pretty_bind(x.name, db).chain(x.ty.pretty(db).nest(Prec::App))
+                    }
                 };
                 match class {
                     Sigma => {
@@ -361,23 +382,25 @@ impl Expr {
                     Lam(_) => d_params
                         .space()
                         .add("=>", ())
+                        .space()
                         .chain(body.pretty(db))
                         .prec(Prec::Term),
                     Pi(_) => d_params
                         .space()
                         .add("->", ())
-                        .chain(body.pretty(db))
-                        .prec(Prec::Term),
+                        .space()
+                        .chain(body.pretty(db).nest(Prec::Pi))
+                        .prec(Prec::Pi),
                 }
             }
-            Expr::Lit(l) => l.pretty(db),
+            Expr::Lit(l) => l.pretty(db).style(Doc::style_literal()),
             Expr::Pair(a, b) => a
                 .pretty(db)
                 .add(',', ())
                 .space()
                 .chain(b.pretty(db).nest(Prec::Pair))
                 .prec(Prec::Pair),
-            Expr::Error => Doc::none().add("%error", Doc::style_keyword()),
+            Expr::Error => Doc::none().add("%error", Doc::style_literal()),
         }
     }
 }

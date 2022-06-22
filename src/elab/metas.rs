@@ -11,7 +11,7 @@ impl std::fmt::Display for Meta {
 }
 
 pub enum SpecialBound {
-    IntType { must_be_signed: bool, must_fit: u64 },
+    IntType { must_fit: i128 },
 }
 
 pub struct MetaBounds {
@@ -22,22 +22,15 @@ impl MetaBounds {
     pub fn new(ty: Val) -> Self {
         MetaBounds { ty, special: None }
     }
-    pub fn int_positive(val: u64) -> Self {
+    pub fn int_type(signed: bool, val: u64) -> Self {
         MetaBounds {
             ty: Val::Type,
             special: Some(SpecialBound::IntType {
-                must_be_signed: false,
-                must_fit: val,
-            }),
-        }
-    }
-    pub fn int_negative(val: i64) -> Self {
-        MetaBounds {
-            ty: Val::Type,
-            special: Some(SpecialBound::IntType {
-                must_be_signed: true,
-                // e.g.: -255 is guaranteed to fit if 255 can fit, and since it's signed that means I16+
-                must_fit: (-val) as u64,
+                must_fit: if signed {
+                    val as i64 as i128
+                } else {
+                    val as i128
+                },
             }),
         }
     }
@@ -131,7 +124,12 @@ struct PartialRename {
     vars: HashMap<Lvl, Lvl>,
 }
 impl PartialRename {
-    fn add_arg(&mut self, arg: Val, inner_size: Size) -> Result<Vec<Name>, MetaSolveError> {
+    fn add_arg(
+        &mut self,
+        arg: Val,
+        inner_size: Size,
+        mcxt: &MetaCxt,
+    ) -> Result<Vec<Name>, MetaSolveError> {
         match arg {
             Val::Neutral(n)
                 if matches!(n.head(), Head::Var(Var::Local(_, _))) && n.spine().is_empty() =>
@@ -163,12 +161,14 @@ impl PartialRename {
                 };
                 self.vars.insert(l, inner_size.next_lvl());
 
-                let mut rhs = self.add_arg(*b, inner_size.inc())?;
+                let mut rhs = self.add_arg(*b, inner_size.inc(), mcxt)?;
                 rhs.insert(0, n);
                 Ok(rhs)
             }
             // TODO handle Val::Error without creating more errors?
-            v => Err(MetaSolveError::SpineNonVariable(v.quote(inner_size))),
+            v => Err(MetaSolveError::SpineNonVariable(
+                v.quote(inner_size, Some(mcxt)),
+            )),
         }
     }
 }
@@ -213,9 +213,11 @@ impl MetaCxt {
     pub fn lookup_expr(&self, meta: Meta, size: Size) -> Option<Expr> {
         self.metas.get(meta.0 as usize).and_then(|x| match x {
             // TODO combined eval-quote (that's why this function exists separately from lookup_val)
-            MetaEntry::Solved { solution, env, .. } => {
-                Some(solution.clone().eval(&mut env.clone()).quote(size))
-            }
+            MetaEntry::Solved { solution, env, .. } => Some(solution.clone().eval_quote(
+                &mut env.clone(),
+                size,
+                Some(self),
+            )),
             MetaEntry::Unsolved { .. } => None,
         })
     }
@@ -260,7 +262,7 @@ impl MetaCxt {
             .pop()
             .map(|elim| match elim {
                 Elim::App(Expl, arg) => {
-                    let names = rename.add_arg(arg, start_size)?;
+                    let names = rename.add_arg(arg, start_size, self)?;
                     Ok(names
                         .into_iter()
                         .map(|name| Par {
@@ -270,13 +272,14 @@ impl MetaCxt {
                         })
                         .collect())
                 }
-                i => Err(MetaSolveError::SpineNonApp(i.quote(start_size))),
+                i => Err(MetaSolveError::SpineNonApp(i.quote(start_size, Some(self)))),
             })
             .transpose()?;
         let inner_size = start_size + params.as_ref().map_or(0, |x| x.len());
         let inner_size_scope = *scope + params.as_ref().map_or(0, |x| x.len());
 
-        let mut solution = solution.quote(inner_size);
+        // Don't inline metas in the solution to keep it small
+        let mut solution = solution.quote(inner_size, None);
         solution.check_solution(
             self,
             &SolutionCheckMode::Full(rename),

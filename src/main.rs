@@ -15,11 +15,12 @@ mod elab;
 mod parsing;
 mod pretty;
 
+use crate::elab::{Definition, ElabDatabase, Elaborator};
 use crate::parsing::{Parser, ParserDatabase, ParserExt};
 use ast::Pretty;
 use common::*;
 
-#[salsa::database(ParserDatabase)]
+#[salsa::database(ParserDatabase, ElabDatabase)]
 #[derive(Default)]
 pub struct DatabaseImpl {
     storage: salsa::Storage<DatabaseImpl>,
@@ -160,18 +161,13 @@ impl Server {
         for (&file, source) in &self.source {
             self.db.set_input_file(file, source.clone());
             let mut diagnostics = Vec::new();
-            for split in self.db.all_split_ids(file) {
-                let parse = self.db.parse(file, split);
-                if let Some(parse) = parse {
-                    for e in parse.errors {
-                        let e = e.to_lsp(
-                            &self.db.split_span(file, split).unwrap(),
-                            &self.source,
-                            &self.db,
-                        );
-                        diagnostics.push(e);
-                    }
-                }
+            for (e, split) in self.db.all_errors(file) {
+                let e = e.to_lsp(
+                    &self.db.split_span(file, split).unwrap(),
+                    &self.source,
+                    &self.db,
+                );
+                diagnostics.push(e);
             }
             // TODO only send diagnostics if they changed
             let message = lsp::Notification {
@@ -212,18 +208,38 @@ fn main() {
         let splits = db.all_split_ids(file);
         let mut cache = FileCache::new(&db);
         for split in splits {
-            let res = db.parse(file, split).unwrap();
-            let root = db.ast(file, split);
-            match root {
-                Some(node) => {
-                    node.print_tree();
-                    node.pretty().emit_stderr()
+            // let res = db.parse(file, split).unwrap();
+            // let root = db.ast(file, split);
+            // match root {
+            //     Some(node) => {
+            //         node.print_tree();
+            //         node.pretty().emit_stderr()
+            //     }
+            //     None => eprintln!("<NO EXPRESSION>"),
+            // }
+            let def = db.def(DefLoc::Root(file, split));
+            if let Some(def) = db.def_elab(def) {
+                match def.result {
+                    Some(Definition::Let { name, ty, body }) => {
+                        Doc::none()
+                            .add("let", Doc::style_keyword())
+                            .space()
+                            .add(db.lookup_name(name), ())
+                            .add(':', ())
+                            .space()
+                            .chain(ty.pretty(&db))
+                            .space()
+                            .add('=', ())
+                            .space()
+                            .chain(body.pretty(&db))
+                            .emit_stderr();
+                    }
+                    None => todo!(),
                 }
-                None => eprintln!("<NO EXPRESSION>"),
             }
-            for e in res.errors {
-                e.write_cli(&db.split(file, split).unwrap().abs_span, &mut cache);
-            }
+        }
+        for (e, split) in db.all_errors(file) {
+            e.write_cli(&db.split_span(file, split).unwrap(), &mut cache);
         }
 
         return;
@@ -253,20 +269,17 @@ fn main() {
 
         let buf = ropey::Rope::from_reader(file).unwrap();
 
-        let file_id = db.file_id(FileLoc::Url(Url::from_file_path(file_name).unwrap()));
+        let file_id = db.file_id(FileLoc::Url(
+            Url::from_file_path(file_name.canonicalize().unwrap()).unwrap(),
+        ));
         db.set_input_file(file_id, buf);
         files.push(file_id);
     }
 
     let mut cache = FileCache::new(&db);
     for file in files {
-        for split in db.all_split_ids(file) {
-            let parse = db.parse(file, split);
-            if let Some(parse) = parse {
-                for e in parse.errors {
-                    e.write_cli(&db.split_span(file, split).unwrap(), &mut cache);
-                }
-            }
+        for (e, split) in db.all_errors(file) {
+            e.write_cli(&db.split_span(file, split).unwrap(), &mut cache);
         }
     }
 }

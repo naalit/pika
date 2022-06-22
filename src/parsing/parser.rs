@@ -545,7 +545,7 @@ impl<'a> Parser<'a> {
                 if self.maybe(Tok::Comma) {
                     match self.cur() {
                         Tok::Newline => {
-                            self.push_at(cp, Tok::Tuple);
+                            self.push_at(cp, Tok::Pair);
                             ntuples += 1;
                             cp = cp2;
                             self.advance()
@@ -572,7 +572,7 @@ impl<'a> Parser<'a> {
                         self.expected("dedent, or comma", "to continue argument list");
                         if self.maybe(Tok::Newline) {
                             // Pretend there was a comma
-                            self.push_at(cp, Tok::Tuple);
+                            self.push_at(cp, Tok::Pair);
                             ntuples += 1;
                             cp = cp2;
                             continue;
@@ -830,7 +830,7 @@ impl<'a> Parser<'a> {
                         return;
                     }
 
-                    self.push_at(lhs, Tok::Tuple);
+                    self.push_at(lhs, Tok::Pair);
 
                     self.advance();
                     self.expr(Prec::Comma);

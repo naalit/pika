@@ -88,7 +88,7 @@ pub enum SyntaxKind {
 
     Pat,
     Binder,
-    Tuple,
+    Pair,
     App,
 
     ImpArg,

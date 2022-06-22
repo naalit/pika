@@ -125,7 +125,7 @@ make_nodes! {
     PatPar = pat: Pat;
     TermPar = expr: Expr;
     Binder = pat: Pat, ty: Ty;
-    Tuple = lhs: Expr, rhs: (1 Expr);
+    Pair = lhs: Expr, rhs: (1 Expr);
 
     ImpPar = par: PatPar;
     ImpPars = pars: [ImpPar];
@@ -178,7 +178,7 @@ make_nodes! {
         Box,
         Type,
         GroupedExpr,
-        Tuple,
+        Pair,
         // Patterns parse as expressions
         EffPat,
         Binder,
@@ -504,7 +504,7 @@ impl Pretty for Expr {
                         .chain(x.exp().pretty())
                 }
             }
-            Expr::Tuple(x) => x
+            Expr::Pair(x) => x
                 .lhs()
                 .pretty()
                 .add(',', ())

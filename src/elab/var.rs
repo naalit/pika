@@ -6,6 +6,14 @@ use std::collections::VecDeque;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Idx(u32);
 impl Idx {
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    pub fn zero() -> Idx {
+        Idx(0)
+    }
+
     pub fn lvl(self, size: Size) -> Lvl {
         assert!(
             self.0 + 1 <= size.0,
@@ -20,6 +28,10 @@ impl Idx {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Lvl(u32);
 impl Lvl {
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+
     pub fn idx(self, size: Size) -> Idx {
         assert!(
             self.0 + 1 <= size.0,
@@ -34,6 +46,10 @@ impl Lvl {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Size(u32);
 impl Size {
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+
     pub fn zero() -> Size {
         Size(0)
     }
@@ -67,7 +83,7 @@ impl std::ops::AddAssign<usize> for Size {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, Hash)]
 pub enum Var<L> {
     Local(Name, L),
     Meta(Meta),
@@ -91,6 +107,17 @@ impl Var<Idx> {
             Var::Meta(m) => Var::Meta(m),
             Var::Builtin(b) => Var::Builtin(b),
             Var::Def(d) => Var::Def(d),
+        }
+    }
+}
+impl<L: PartialEq> PartialEq for Var<L> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local(_, l1), Self::Local(_, r1)) => l1 == r1,
+            (Self::Meta(l0), Self::Meta(r0)) => l0 == r0,
+            (Self::Builtin(l0), Self::Builtin(r0)) => l0 == r0,
+            (Self::Def(l0), Self::Def(r0)) => l0 == r0,
+            _ => false,
         }
     }
 }
@@ -125,7 +152,12 @@ impl Env {
     }
 
     pub fn reset_to_size(&mut self, size: Size) {
-        self.reset(EnvState(size.0 as usize))
+        for i in self.size.until(size) {
+            if self.vals.pop_front().is_none() {
+                break;
+            }
+        }
+        self.size = size;
     }
 
     pub fn get(&self, i: Idx) -> Option<&Val> {

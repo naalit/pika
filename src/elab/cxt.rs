@@ -5,9 +5,9 @@ pub struct DefCxt {
     scopes: Vec<ScopeState>,
 }
 impl DefCxt {
-    pub fn global() -> Self {
+    pub fn global(db: &(impl Elaborator + ?Sized)) -> Self {
         DefCxt {
-            scopes: vec![Scope::global().state()],
+            scopes: vec![Scope::global(db).state()],
         }
     }
 }
@@ -25,6 +25,7 @@ struct Scope {
     size: Size,
     names: HashMap<Name, (Var<Lvl>, Val)>,
 }
+
 impl Scope {
     fn state(&self) -> ScopeState {
         ScopeState {
@@ -55,11 +56,25 @@ impl Scope {
         self.size = self.size.inc();
     }
 
-    fn global() -> Self {
+    fn global(db: &(impl Elaborator + ?Sized)) -> Self {
+        let global_defs = HashMap::from_iter(
+            [
+                ("I8", Builtin::IntType(IntType::I8), Val::Type),
+                ("I16", Builtin::IntType(IntType::I16), Val::Type),
+                ("I32", Builtin::IntType(IntType::I32), Val::Type),
+                ("I64", Builtin::IntType(IntType::I64), Val::Type),
+                ("U8", Builtin::IntType(IntType::U8), Val::Type),
+                ("U16", Builtin::IntType(IntType::U16), Val::Type),
+                ("U32", Builtin::IntType(IntType::U32), Val::Type),
+                ("U64", Builtin::IntType(IntType::U64), Val::Type),
+            ]
+            .iter()
+            .map(|(k, v, t)| (db.name(k.to_string()), (Var::Builtin(*v), t.clone()))),
+        );
         Scope {
             global: true,
             size: Size::zero(),
-            names: HashMap::new(),
+            names: global_defs,
         }
     }
 

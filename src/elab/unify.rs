@@ -169,7 +169,10 @@ impl UnifyCxt<'_> {
                     Some(state) => self.unify(a, b, size, state),
                     // don't try unfolded
                     None => Err(match err {
-                        Ok(_) => UnifyError::Conversion(a.quote(size), b.quote(size)),
+                        Ok(_) => UnifyError::Conversion(
+                            a.quote(size, Some(&self.meta_cxt)),
+                            b.quote(size, Some(&self.meta_cxt)),
+                        ),
                         Err(e) => e,
                     }),
                 }
@@ -223,11 +226,11 @@ impl UnifyCxt<'_> {
                 // Unfold as much as possible first
                 if state.can_unfold() {
                     // TODO allow inlining local definitions
-                    match a.resolve(&mut Env::new(size)) {
+                    match a.resolve(&mut Env::new(size), &self.meta_cxt) {
                         Ok(a) => return self.unify(a, Val::Neutral(b), size, state),
                         Err(a2) => a = a2,
                     }
-                    match b.resolve(&mut Env::new(size)) {
+                    match b.resolve(&mut Env::new(size), &self.meta_cxt) {
                         Ok(b) => return self.unify(Val::Neutral(a), b, size, state),
                         Err(b2) => b = b2,
                     }
@@ -240,8 +243,8 @@ impl UnifyCxt<'_> {
                     Ok(())
                 } else {
                     Err(UnifyError::Conversion(
-                        Val::Neutral(a).quote(size),
-                        Val::Neutral(b).quote(size),
+                        Val::Neutral(a).quote(size, Some(&self.meta_cxt)),
+                        Val::Neutral(b).quote(size, Some(&self.meta_cxt)),
                     ))
                 }
             }
@@ -262,11 +265,11 @@ impl UnifyCxt<'_> {
 
             // If a neutral still hasn't unified with anything, try unfolding it if possible
             (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
-                match n.resolve(&mut Env::new(size)) {
+                match n.resolve(&mut Env::new(size), &self.meta_cxt) {
                     Ok(n) => self.unify(n, x, size, state),
                     Err(n) => Err(UnifyError::Conversion(
-                        Val::Neutral(n).quote(size),
-                        x.quote(size),
+                        Val::Neutral(n).quote(size, Some(&self.meta_cxt)),
+                        x.quote(size, Some(&self.meta_cxt)),
                     )),
                 }
             }
@@ -279,7 +282,10 @@ impl UnifyCxt<'_> {
                 self.unify(a, x.app(elim, &mut Env::new(new_size)), new_size, state)
             }
 
-            (a, b) => Err(UnifyError::Conversion(a.quote(size), b.quote(size))),
+            (a, b) => Err(UnifyError::Conversion(
+                a.quote(size, Some(&self.meta_cxt)),
+                b.quote(size, Some(&self.meta_cxt)),
+            )),
         }
     }
 }

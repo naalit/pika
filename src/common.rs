@@ -28,6 +28,13 @@ intern_key!(File);
 intern_key!(Name);
 intern_key!(Def);
 
+impl Name {
+    pub fn inaccessible(self, db: &(impl crate::parsing::Parser + ?Sized)) -> Name {
+        let str = db.lookup_name(self);
+        db.name(format!("{}'", str))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefLoc {
     Root(File, SplitId),

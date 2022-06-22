@@ -165,6 +165,23 @@ mod input {
         pub body: Body,
     }
     impl Row {
+        pub fn new(
+            var: PVar,
+            pat: Option<ast::Expr>,
+            body: Option<ast::Expr>,
+            cxt: &mut CaseElabCxt,
+        ) -> Row {
+            let pat = pat.map_or(Pattern::Any, |x| x.to_pattern(cxt));
+            Row {
+                columns: VecDeque::from(vec![Column { var, pat }]),
+                guard: None,
+                tyvars_size: cxt.ecxt.size(),
+                ty_ipats: Vec::new(),
+                end_ipats: VecDeque::new(),
+                body: cxt.add_body(body),
+            }
+        }
+
         pub fn make_env(&self, cxt: &CaseElabCxt) -> PEnv {
             let mut env = Vec::new();
             for (var, pat) in self.ty_ipats.iter().chain(&self.end_ipats) {
@@ -287,7 +304,7 @@ mod input {
                     }
                 },
                 ast::Expr::GroupedExpr(x) => x.expr().map_or(Pattern::Any, |x| x.to_pattern(cxt)),
-                ast::Expr::Tuple(x) => {
+                ast::Expr::Pair(x) => {
                     let a = x.lhs().map_or(Pattern::Any, |x| x.to_pattern(cxt));
                     let b = x.rhs().map_or(Pattern::Any, |x| x.to_pattern(cxt));
                     Pattern::Pair(Box::new(a), Box::new(b))
@@ -321,6 +338,10 @@ mod input {
     }
 
     impl ast::CaseBranch {
+        pub(super) fn as_row(&self) -> (Option<ast::Expr>, Option<ast::Expr>) {
+            (self.pat(), self.body().and_then(|x| x.expr()))
+        }
+
         pub(super) fn to_row(&self, var: PVar, cxt: &mut CaseElabCxt) -> Row {
             let pat = self.pat().map_or(Pattern::Any, |x| x.to_pattern(cxt));
             Row {
@@ -406,10 +427,10 @@ impl CaseElabCxt<'_, '_> {
         Body(l)
     }
 
-    fn column_select_heuristic(&self, topRow: &input::Row, rows: &[input::Row]) -> PVar {
+    fn column_select_heuristic(&self, top_row: &input::Row, rows: &[input::Row]) -> PVar {
         // Find the variable used by the most rows
         // TODO switch to left-to-right if GADT constructors are involved
-        topRow
+        top_row
             .columns
             .iter()
             .map(|c| {
@@ -603,53 +624,67 @@ impl CaseOf {
     }
 }
 
+pub(super) fn elab_case(
+    sty: Val,
+    branches: impl IntoIterator<Item = (Option<ast::Expr>, Option<ast::Expr>)>,
+    rty: &mut Option<Val>,
+    ecxt: &mut Cxt,
+) -> CaseOf {
+    let mut cxt = CaseElabCxt {
+        ecxt,
+        env_tys: HashMap::new(),
+        var_tys: Vec::new(),
+        bodies: Vec::new(),
+    };
+    let svar = cxt.pvar(sty);
+    let rows = branches
+        .into_iter()
+        .map(|(pat, body)| input::Row::new(svar, pat, body, &mut cxt))
+        .collect();
+    let dec = cxt.compile_rows(rows);
+    let mut rhs = Vec::new();
+    for (i, body) in cxt.bodies.into_iter().enumerate() {
+        match cxt.env_tys.get(&Body(i)) {
+            Some(env) => {
+                cxt.ecxt.push();
+                for (name, ty) in env {
+                    cxt.ecxt.define_local(*name, ty.clone(), None);
+                }
+                let expr = match rty {
+                    Some(rty) => body.map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt)),
+                    None => {
+                        let (expr, ty) =
+                            body.map_or((Expr::Error, Val::Error), |x| x.infer(cxt.ecxt));
+                        *rty = Some(ty);
+                        expr
+                    }
+                };
+                rhs.push(CaseRhs {
+                    size: cxt.ecxt.size(),
+                    body: expr,
+                });
+            }
+            None => {
+                eprintln!("Warning: unreachable case branch!");
+            }
+        }
+    }
+    CaseOf { dec, svar, rhs }
+}
+
 impl ast::Case {
     pub(super) fn elaborate(&self, rty: &mut Option<Val>, ecxt: &mut Cxt) -> (Expr, CaseOf) {
         let (scrutinee, sty) = self
             .scrutinee()
             .map(|x| x.infer(ecxt))
             .unwrap_or((Expr::Error, Val::Error));
-        let mut cxt = CaseElabCxt {
+        let case_of = elab_case(
+            sty,
+            self.branches().into_iter().map(|x| x.as_row()),
+            rty,
             ecxt,
-            env_tys: HashMap::new(),
-            var_tys: Vec::new(),
-            bodies: Vec::new(),
-        };
-        let svar = cxt.pvar(sty);
-        let rows = self
-            .branches()
-            .into_iter()
-            .map(|x| x.to_row(svar, &mut cxt))
-            .collect();
-        let dec = cxt.compile_rows(rows);
-        let mut rhs = Vec::new();
-        for (i, body) in cxt.bodies.into_iter().enumerate() {
-            match cxt.env_tys.get(&Body(i)) {
-                Some(env) => {
-                    cxt.ecxt.push();
-                    for (name, ty) in env {
-                        cxt.ecxt.define_local(*name, ty.clone(), None);
-                    }
-                    let expr = match rty {
-                        Some(rty) => body.map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt)),
-                        None => {
-                            let (expr, ty) =
-                                body.map_or((Expr::Error, Val::Error), |x| x.infer(cxt.ecxt));
-                            *rty = Some(ty);
-                            expr
-                        }
-                    };
-                    rhs.push(CaseRhs {
-                        size: cxt.ecxt.size(),
-                        body: expr,
-                    });
-                }
-                None => {
-                    eprintln!("Warning: unreachable case branch!");
-                }
-            }
-        }
-        (scrutinee, CaseOf { dec, svar, rhs })
+        );
+        (scrutinee, case_of)
     }
 }
 
