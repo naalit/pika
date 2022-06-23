@@ -34,6 +34,35 @@ impl MetaBounds {
             }),
         }
     }
+
+    pub fn check(&self, val: &Val, size: Size, mcxt: &MetaCxt) -> Result<(), MetaSolveError> {
+        // TODO check type
+        match self.special {
+            Some(SpecialBound::IntType { must_fit }) => {
+                let mut val = val.clone();
+                val.inline_head(&mut Env::new(size), mcxt);
+                match val {
+                    Val::Neutral(n)
+                        if matches!(n.head(), Head::Var(Var::Builtin(Builtin::IntType(_)))) =>
+                    {
+                        match n.head() {
+                            Head::Var(Var::Builtin(Builtin::IntType(t))) => {
+                                if must_fit >= t.min() && must_fit <= t.max() {
+                                    Ok(())
+                                } else {
+                                    Err(MetaSolveError::BoundsWrongIntSize(t))
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    Val::Error => Ok(()),
+                    val => Err(MetaSolveError::BoundsNotInt(val.quote(size, None))),
+                }
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 pub enum MetaEntry {
@@ -57,6 +86,8 @@ pub enum MetaSolveError {
     SpineNonApp(Elim<Expr>),
     SpineTooLong,
     SpineDuplicate(Name),
+    BoundsNotInt(Expr),
+    BoundsWrongIntSize(IntType),
 }
 impl MetaSolveError {
     pub fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
@@ -88,6 +119,14 @@ impl MetaSolveError {
             MetaSolveError::SpineDuplicate(n) => Doc::start("Meta is applied to variable ")
                 .add(db.lookup_name(*n), ca)
                 .add(" more than once", ()),
+            MetaSolveError::BoundsNotInt(t) => Doc::start("Integer literal can't have type '")
+                .chain(t.pretty(db))
+                .add("'", ()),
+            MetaSolveError::BoundsWrongIntSize(t) => {
+                Doc::start("Integer literal doesn't fit in type '")
+                    .debug(t)
+                    .add("'", ())
+            }
         }
     }
 }
@@ -222,6 +261,18 @@ impl MetaCxt {
         })
     }
 
+    pub fn introduced_span(&self, meta: Meta) -> RelSpan {
+        self.metas
+            .get(meta.0 as usize)
+            .and_then(|x| match x {
+                MetaEntry::Solved { .. } => None,
+                MetaEntry::Unsolved {
+                    introduced_span, ..
+                } => Some(introduced_span.clone()),
+            })
+            .unwrap()
+    }
+
     pub fn solve(
         &mut self,
         start_size: Size,
@@ -231,9 +282,7 @@ impl MetaCxt {
     ) -> Result<(), MetaSolveError> {
         // smalltt does eta-contraction here, but I don't think that's necessary, especially without explicit meta spines in most cases
 
-        // TODO check against `bounds`, which should be done before quoting
-
-        let (scope, bounds, intro_span) = self
+        let (scope, bounds, _intro_span) = self
             .metas
             .get(meta.0 as usize)
             .and_then(|x| match x {
@@ -245,6 +294,7 @@ impl MetaCxt {
                 } => Some((scope, bounds, introduced_span)),
             })
             .unwrap();
+        bounds.check(&solution, start_size, self)?;
 
         let mut rename = PartialRename {
             meta,

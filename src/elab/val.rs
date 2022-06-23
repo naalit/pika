@@ -88,7 +88,7 @@ impl Clos {
     /// arg: argument type -> argument value
     pub fn elab_with(self, mut arg: impl FnMut(Val) -> Val) -> Val {
         let Clos {
-            class,
+            class: _,
             params,
             mut env,
             body,
@@ -185,7 +185,7 @@ impl Clos {
     /// The size after calling `open` is `size + self.params.len()`.
     pub fn open(self, mut size: Size) -> Val {
         let Clos {
-            class,
+            class: _,
             params,
             mut env,
             body,
@@ -235,7 +235,7 @@ impl Val {
         let mut term = &self;
         for _ in 0..with.len() - 1 {
             match term {
-                Val::Pair(a, rest) => {
+                Val::Pair(_, rest) => {
                     term = rest;
                 }
                 Val::Error => (),

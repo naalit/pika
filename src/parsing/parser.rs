@@ -34,6 +34,7 @@ impl ParseError {
         Error {
             severity: Severity::Error,
             message: message.clone(),
+            message_lsp: None,
             primary: Label {
                 span,
                 message,
@@ -1136,25 +1137,6 @@ impl PartialOrd for Prec {
 }
 
 impl Tok {
-    /// Whether this token can end an argument list.
-    /// True for arrows, and things that can come after `fun` or constructor arguments.
-    fn ends_args(&self) -> bool {
-        matches!(
-            self,
-            Tok::WideArrow
-                | Tok::Arrow
-                | Tok::Equals
-                | Tok::Colon
-                | Tok::POpen
-                | Tok::SOpen
-                | Tok::OfKw
-                | Tok::Newline
-                | Tok::Dedent
-                | Tok::Indent
-                | Tok::WithKw
-        )
-    }
-
     fn starts_def(&self) -> bool {
         matches!(
             self,

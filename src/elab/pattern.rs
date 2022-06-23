@@ -341,18 +341,6 @@ mod input {
         pub(super) fn as_row(&self) -> (Option<ast::Expr>, Option<ast::Expr>) {
             (self.pat(), self.body().and_then(|x| x.expr()))
         }
-
-        pub(super) fn to_row(&self, var: PVar, cxt: &mut CaseElabCxt) -> Row {
-            let pat = self.pat().map_or(Pattern::Any, |x| x.to_pattern(cxt));
-            Row {
-                columns: VecDeque::from(vec![Column { var, pat }]),
-                guard: None,
-                tyvars_size: cxt.ecxt.size(),
-                ty_ipats: Vec::new(),
-                end_ipats: VecDeque::new(),
-                body: cxt.add_body(self.body().and_then(|x| x.expr())),
-            }
-        }
     }
 }
 
@@ -368,14 +356,6 @@ struct PVar(usize);
 enum IPat {
     Pair(PVar, PVar),
     Var(Name),
-}
-impl IPat {
-    fn add_size(&self, start: Size) -> Size {
-        match self {
-            IPat::Pair(_, _) => start,
-            IPat::Var(_) => start.inc(),
-        }
-    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -468,8 +448,11 @@ impl CaseElabCxt<'_, '_> {
             let dec = match &row.guard {
                 Some(guard) => {
                     // Add all extra rows to the guard fallback
-                    let guard =
-                        guard.check(Val::var(Var::Builtin(Builtin::BoolType)), &mut self.ecxt);
+                    let guard = guard.check(
+                        Val::var(Var::Builtin(Builtin::BoolType)),
+                        &mut self.ecxt,
+                        &CheckReason::Condition,
+                    );
                     Dec::Guard(guard, row.body, Box::new(self.compile_rows(rows)))
                 }
                 None => Dec::Success(row.body),
@@ -627,7 +610,7 @@ impl CaseOf {
 pub(super) fn elab_case(
     sty: Val,
     branches: impl IntoIterator<Item = (Option<ast::Expr>, Option<ast::Expr>)>,
-    rty: &mut Option<Val>,
+    rty: &mut Option<(Val, CheckReason)>,
     ecxt: &mut Cxt,
 ) -> CaseOf {
     let mut cxt = CaseElabCxt {
@@ -651,13 +634,17 @@ pub(super) fn elab_case(
                     cxt.ecxt.define_local(*name, ty.clone(), None);
                 }
                 let expr = match rty {
-                    Some(rty) => body.map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt)),
-                    None => {
-                        let (expr, ty) =
-                            body.map_or((Expr::Error, Val::Error), |x| x.infer(cxt.ecxt));
-                        *rty = Some(ty);
-                        expr
+                    Some((rty, reason)) => {
+                        body.map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, reason))
                     }
+                    None => match body {
+                        Some(body) => {
+                            let (expr, ty) = body.infer(cxt.ecxt);
+                            *rty = Some((ty, CheckReason::MustMatch(body.span())));
+                            expr
+                        }
+                        None => Expr::Error,
+                    },
                 };
                 rhs.push(CaseRhs {
                     size: cxt.ecxt.size(),
@@ -673,7 +660,11 @@ pub(super) fn elab_case(
 }
 
 impl ast::Case {
-    pub(super) fn elaborate(&self, rty: &mut Option<Val>, ecxt: &mut Cxt) -> (Expr, CaseOf) {
+    pub(super) fn elaborate(
+        &self,
+        rty: &mut Option<(Val, CheckReason)>,
+        ecxt: &mut Cxt,
+    ) -> (Expr, CaseOf) {
         let (scrutinee, sty) = self
             .scrutinee()
             .map(|x| x.infer(ecxt))

@@ -14,6 +14,8 @@ pub use term::*;
 use val::*;
 use var::*;
 
+use self::unify::CheckReason;
+
 #[salsa::query_group(ElabDatabase)]
 pub trait Elaborator: crate::parsing::Parser {
     #[salsa::interned]
@@ -172,6 +174,7 @@ impl TypeError {
         Error {
             severity: Severity::Error,
             message: msg,
+            message_lsp: None,
             primary: Label {
                 span,
                 message: label,
@@ -260,7 +263,14 @@ fn lex_number(s: &str) -> Result<NumLiteral, String> {
             chars.next();
         } else if next.is_alphanumeric() {
             chars.next();
-            return Err(format!("Invalid digit for int literal: {}", next));
+            if base != 10 {
+                return Err(format!(
+                    "Invalid digit for base {} int literal: {}",
+                    base, next
+                ));
+            } else {
+                return Err(format!("Invalid digit for int literal: {}", next));
+            }
         } else if next == '.' {
             float = true;
             buf.push(next);
@@ -333,7 +343,7 @@ impl ast::Def {
             ast::Def::LetDef(l) => match l.pat()?.expr()?.as_let_def_pat(cxt) {
                 (_, Some(ty)) => Some(
                     ty.expr()?
-                        .check(Val::Type, cxt)
+                        .check(Val::Type, cxt, &CheckReason::UsedAsType)
                         .eval_quote(&mut Env::new(cxt.size()), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut Env::new(cxt.size())),
                 ),
@@ -371,10 +381,14 @@ impl ast::Def {
                             body: Box::new(body),
                         })
                     }
-                    (Some(name), Some(_ty)) => {
+                    (Some(name), Some(pty)) => {
                         // We already elaborated the type, so avoid doing that twice
                         let ty = cxt.db.def_type_n(def_node).result?;
-                        let body = x.body()?.expr()?.check(ty.clone(), cxt);
+                        let body = x.body()?.expr()?.check(
+                            ty.clone(),
+                            cxt,
+                            &CheckReason::GivenType(pty.span()),
+                        );
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
                         Some(Definition::Let {
                             name,
@@ -429,7 +443,7 @@ impl ast::Lit {
             }
             Ok(Literal::String(cxt.db.name(buf)))
         } else if let Some(l) = self.int().or(self.float()) {
-            let num = lex_number(l.text()).map_err(|e| format!("invalid literal: {}", e))?;
+            let num = lex_number(l.text()).map_err(|e| format!("Invalid literal: {}", e))?;
             match num {
                 NumLiteral::IPositive(i) => Ok(Literal::Int(false, i)),
                 NumLiteral::INegative(i) => Ok(Literal::Int(true, i as u64)),
@@ -464,7 +478,7 @@ impl ast::TermPar {
                         if ty.is_some() {
                             cxt.error(x.pat().unwrap().span(), TypeError::Other("Binder '_: _' not allowed in pattern of another binder".to_string()));
                         }
-                        let ty = x.ty().and_then(|x| x.expr()).map(|x| x.check(Val::Type, cxt)).unwrap_or_else(|| {
+                        let ty = x.ty().and_then(|x| x.expr()).map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType)).unwrap_or_else(|| {
                             cxt.error(x.span(), TypeError::Other("Binder '_: _' missing type on right-hand side; use '_' to infer type".to_string()));
                             Expr::Error
                         });
@@ -474,7 +488,7 @@ impl ast::TermPar {
                         }
                     }
                     Ok(x) => {
-                        let ty = x.check(Val::Type, cxt);
+                        let ty = x.check(Val::Type, cxt, &CheckReason::UsedAsType);
                         Par {
                             name: cxt.db.name("_".to_string()),
                             ty,
@@ -508,13 +522,15 @@ impl ast::PatPar {
                 let par = match p {
                     Ok((name, ty)) => {
                         let name = name.unwrap_or_else(|| cxt.db.name("_".to_string()));
-                        let ty = ty.map(|x| x.check(Val::Type, cxt)).unwrap_or_else(|| {
-                            Expr::var(Var::Meta(cxt.mcxt.new_meta(
-                                cxt.size(),
-                                MetaBounds::new(Val::Type),
-                                x.unwrap().span(),
-                            )))
-                        });
+                        let ty = ty
+                            .map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType))
+                            .unwrap_or_else(|| {
+                                Expr::var(Var::Meta(cxt.mcxt.new_meta(
+                                    cxt.size(),
+                                    MetaBounds::new(Val::Type),
+                                    x.unwrap().span(),
+                                )))
+                            });
                         Par { name, ty }
                     }
                     Err(_) => Par {
@@ -550,7 +566,7 @@ impl ast::Pair {
                     .ty()
                     .and_then(|x| x.expr())
                     .ok_or_else(|| TypeError::Other(format!("Expected type after ':' in binder")))?
-                    .check(Val::Type, cxt);
+                    .check(Val::Type, cxt, &CheckReason::UsedAsType);
                 let vty = ty.clone().eval(&mut cxt.env());
 
                 if let Some(name) = name {
@@ -561,7 +577,7 @@ impl ast::Pair {
                         .ok_or_else(|| {
                             TypeError::Other(format!("Missing right-hand side type in pair type"))
                         })?
-                        .check(Val::Type, cxt);
+                        .check(Val::Type, cxt, &CheckReason::UsedAsType);
                     cxt.pop();
                     Ok(Expr::Fun {
                         class: Sigma,
@@ -576,7 +592,7 @@ impl ast::Pair {
                     let case = self::pattern::elab_case(
                         vty,
                         std::iter::once((x.pat().and_then(|x| x.expr()), self.rhs())),
-                        &mut Some(Val::Type),
+                        &mut Some((Val::Type, CheckReason::UsedAsType)),
                         cxt,
                     );
                     cxt.pop();
@@ -591,7 +607,7 @@ impl ast::Pair {
                 }
             }
             Some(a) => {
-                let a = a.check(Val::Type, cxt);
+                let a = a.check(Val::Type, cxt, &CheckReason::UsedAsType);
                 // We need to elaborate b at the proper size so the indices are correct
                 let name = cxt.db.name("_".to_string());
                 let va = a.clone().eval(&mut cxt.env());
@@ -603,7 +619,7 @@ impl ast::Pair {
                     .ok_or_else(|| {
                         TypeError::Other(format!("Missing right-hand side type in pair type"))
                     })?
-                    .check(Val::Type, cxt);
+                    .check(Val::Type, cxt, &CheckReason::UsedAsType);
                 cxt.pop();
                 Ok(Expr::Fun {
                     class: Sigma,
@@ -665,6 +681,7 @@ fn check_params(
     pars: impl Iterator<Item = (Option<ast::PatPar>, RelSpan)>,
     tys: ParamTys,
     cxt: &mut Cxt,
+    reason: &CheckReason,
 ) -> Vec<Par> {
     tys.zip_with(
         pars.flat_map(|(x, span)| {
@@ -690,9 +707,9 @@ fn check_params(
                 match x.map(|x| x.as_simple_pat(cxt.db)) {
                     Ok(Some((name, ty))) => {
                         let ty = if let Some(ty) = ty {
-                            let ty = ty.check(Val::Type, cxt);
+                            let ty = ty.check(Val::Type, cxt, &CheckReason::UsedAsType);
                             cxt.mcxt
-                                .unify(ty.clone().eval(&mut cxt.env()), vety, cxt.size())
+                                .unify(ty.clone().eval(&mut cxt.env()), vety, cxt.size(), reason)
                                 .unwrap_or_else(|e| cxt.error(xspan, e.into()));
                             ty
                         } else {
@@ -705,7 +722,12 @@ fn check_params(
                     Ok(None) => todo!("move non-trivial patterns to rhs"),
                     Err(span) => {
                         cxt.mcxt
-                            .unify(Val::var(Var::Builtin(Builtin::UnitType)), vety, cxt.size())
+                            .unify(
+                                Val::var(Var::Builtin(Builtin::UnitType)),
+                                vety,
+                                cxt.size(),
+                                reason,
+                            )
                             .unwrap_or_else(|e| cxt.error(span, e.into()));
                         let name = cxt.db.name("_".to_string());
                         Par {
@@ -741,11 +763,11 @@ fn check_params(
 }
 
 impl ast::Expr {
-    fn check(&self, ty: Val, cxt: &mut Cxt) -> Expr {
+    fn check(&self, ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Expr {
         let result = || {
             match (self, ty) {
                 (ast::Expr::GroupedExpr(x), ty) if x.expr().is_some() => {
-                    Ok(x.expr().unwrap().check(ty, cxt))
+                    Ok(x.expr().unwrap().check(ty, cxt, reason))
                 }
 
                 // Infer assumes (a, b) is a pair, so elaborate as sigma if checking against Type
@@ -763,7 +785,7 @@ impl ast::Expr {
                         .ok_or_else(|| {
                             TypeError::Other(format!("Missing pair left-hand side value"))
                         })?
-                        .check(clos.par_ty(), cxt);
+                        .check(clos.par_ty(), cxt, reason);
                     // TODO make this lazy
                     let va = a.clone().eval(&mut cxt.env());
                     let bty = clos.apply(va);
@@ -772,7 +794,7 @@ impl ast::Expr {
                         .ok_or_else(|| {
                             TypeError::Other(format!("Missing pair right-hand side value"))
                         })?
-                        .check(bty, cxt);
+                        .check(bty, cxt, reason);
                     Ok(Expr::Pair(Box::new(a), Box::new(b)))
                 }
                 (ast::Expr::Lam(x), Val::Fun(clos)) if matches!(clos.class, Pi(_)) => {
@@ -794,6 +816,7 @@ impl ast::Expr {
                             .map(|x| (x.par(), x.span())),
                         ParamTys::Impl(&mut implicit_tys),
                         cxt,
+                        reason,
                     );
                     // Add any implicit parameters in the type but not the lambda to the lambda
                     // Make sure, however, that they can't actually be accessed by name by code in the lambda
@@ -825,6 +848,7 @@ impl ast::Expr {
                             std::iter::once((Some(e), x.span())),
                             ParamTys::Expl(clos.par_ty().quote(cxt.size(), None)),
                             cxt,
+                            reason,
                         )
                     } else {
                         Vec::new()
@@ -835,7 +859,7 @@ impl ast::Expr {
                         .body()
                         .and_then(|x| x.expr())
                         .ok_or_else(|| TypeError::Other("Missing body for lambda".to_string()))?
-                        .check(bty, cxt);
+                        .check(bty, cxt, reason);
                     cxt.pop();
 
                     let mut term = if explicit.is_empty() {
@@ -859,7 +883,7 @@ impl ast::Expr {
 
                 (_, ty) => {
                     let (a, ity) = self.infer(cxt);
-                    cxt.mcxt.unify(ity, ty, cxt.size())?;
+                    cxt.mcxt.unify(ity, ty, cxt.size(), reason)?;
                     Ok(a)
                 }
             }
@@ -1019,7 +1043,7 @@ impl ast::Expr {
                             .ok_or_else(|| {
                                 TypeError::Other("Missing body for function type".to_string())
                             })?
-                            .check(Val::Type, cxt);
+                            .check(Val::Type, cxt, &CheckReason::UsedAsType);
                         if x.with().is_some() {
                             todo!("implement effects")
                         }
@@ -1052,6 +1076,7 @@ impl ast::Expr {
                                 )
                             })?
                             .infer(cxt);
+                        let mut lhs_span = x.lhs().unwrap().span();
                         if x.member().is_some() {
                             todo!("implement members")
                         }
@@ -1079,15 +1104,20 @@ impl ast::Expr {
                                 let rty = clos.elab_with(|aty| match args.pop_front() {
                                     Some(arg) => match arg {
                                         Ok(arg) => {
-                                            let arg = arg.check(aty, cxt);
+                                            let arg = arg.check(
+                                                aty,
+                                                cxt,
+                                                &CheckReason::ArgOf(lhs_span.clone()),
+                                            );
                                             targs.push(arg.clone());
                                             arg.eval(&mut cxt.env())
                                         }
                                         Err(span) => {
                                             if let Err(e) = cxt.mcxt.unify(
-                                                aty,
                                                 Val::var(Var::Builtin(Builtin::UnitType)),
+                                                aty,
                                                 cxt.size(),
+                                                &CheckReason::ArgOf(lhs_span.clone()),
                                             ) {
                                                 cxt.error(span, e.into());
                                                 Val::Error
@@ -1117,6 +1147,7 @@ impl ast::Expr {
                                     .unwrap();
                                 lhs = Expr::Elim(Box::new(lhs), Box::new(Elim::App(Impl, arg)));
                                 lhs_ty = rty;
+                                lhs_span.end = x.imp().unwrap().span().end;
                             }
                             _ => (),
                         }
@@ -1125,7 +1156,7 @@ impl ast::Expr {
                             match lhs_ty {
                                 Val::Fun(clos) if matches!(clos.class, Pi(_)) => {
                                     let aty = clos.par_ty();
-                                    let exp = exp.check(aty, cxt);
+                                    let exp = exp.check(aty, cxt, &CheckReason::ArgOf(lhs_span));
                                     let vexp = exp.clone().eval(&mut cxt.env());
                                     let rty = clos.apply(vexp);
                                     (
@@ -1167,7 +1198,7 @@ impl ast::Expr {
                     ast::Expr::Case(case) => {
                         let mut rty = None;
                         let (scrutinee, case) = case.elaborate(&mut rty, cxt);
-                        let rty = rty.unwrap();
+                        let (rty, _) = rty.unwrap();
                         (
                             Expr::Elim(Box::new(scrutinee), Box::new(Elim::Case(case))),
                             rty,
@@ -1223,7 +1254,11 @@ impl ast::Expr {
                                         tok
                                     ))
                                 })?
-                                .check(ty.clone(), cxt);
+                                .check(
+                                    ty.clone(),
+                                    cxt,
+                                    &CheckReason::MustMatch(x.a().unwrap().span()),
+                                );
                             (
                                 Expr::Elim(
                                     Box::new(Expr::var(Var::Builtin(Builtin::ArithOp(op)))),
@@ -1249,7 +1284,7 @@ impl ast::Expr {
                                         tok
                                     ))
                                 })?
-                                .check(ty, cxt);
+                                .check(ty, cxt, &CheckReason::MustMatch(x.a().unwrap().span()));
                             (
                                 Expr::Elim(
                                     Box::new(Expr::var(Var::Builtin(Builtin::CompOp(op)))),

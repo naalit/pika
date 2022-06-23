@@ -56,12 +56,6 @@ impl Def {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Icit {
-    Impl,
-    Expl,
-}
-
 pub type RelSpan = std::ops::Range<u32>;
 pub type Spanned<T> = (T, RelSpan);
 
@@ -150,6 +144,7 @@ impl Label {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub severity: Severity,
+    pub message_lsp: Option<Doc>,
     pub message: Doc,
     pub primary: Label,
     pub secondary: Vec<Label>,
@@ -187,7 +182,7 @@ impl Error {
             code: None,
             code_description: None,
             source: None,
-            message: self.message.to_string(false),
+            message: self.message_lsp.unwrap_or(self.message).to_string(false),
             // TODO: in some cases we may also want separate NOTE-type diagnostics for secondary labels?
             related_information: Some(
                 self.secondary

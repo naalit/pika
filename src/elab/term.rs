@@ -147,6 +147,30 @@ pub enum IntType {
     I32,
     I64,
 }
+impl IntType {
+    pub fn max(self) -> i128 {
+        match self {
+            IntType::U8 => u8::MAX as _,
+            IntType::U16 => u16::MAX as _,
+            IntType::U32 => u32::MAX as _,
+            IntType::U64 => u64::MAX as _,
+            IntType::I8 => i8::MAX as _,
+            IntType::I16 => i16::MAX as _,
+            IntType::I32 => i32::MAX as _,
+            IntType::I64 => i64::MAX as _,
+        }
+    }
+
+    pub fn min(self) -> i128 {
+        match self {
+            IntType::U8 | IntType::U16 | IntType::U32 | IntType::U64 => 0,
+            IntType::I8 => i8::MIN as _,
+            IntType::I16 => i16::MIN as _,
+            IntType::I32 => i32::MIN as _,
+            IntType::I64 => i64::MIN as _,
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Literal {
@@ -278,11 +302,16 @@ impl IsTerm for Expr {
     type Clos = Expr;
     type Loc = Idx;
 }
-fn pretty_bind<T: Elaborator + ?Sized>(n: Name, db: &T) -> Doc {
+fn pretty_bind<T: Elaborator + ?Sized>(n: Name, ty: Doc, db: &T, parens: bool) -> Doc {
     if db.name("_".to_string()) == n {
-        Doc::none()
+        ty
     } else {
-        Doc::start(db.lookup_name(n)).add(':', ()).space()
+        let doc = Doc::start(db.lookup_name(n)).add(':', ()).space().chain(ty);
+        if parens {
+            Doc::start('(').chain(doc).add(')', ())
+        } else {
+            doc
+        }
     }
 }
 impl Expr {
@@ -295,7 +324,7 @@ impl Expr {
             Expr::Type => Doc::none().add("Type", Doc::style_keyword()),
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
-                    Var::Local(name, i) => Doc::start(db.lookup_name(*name)), //.add('.', ()).add(i.as_u32(), ()),
+                    Var::Local(name, _i) => Doc::start(db.lookup_name(*name)), //.add('.', ()).add(_i.as_u32(), ()),
                     Var::Meta(m) => Doc::start(m).style(Doc::style_literal()),
                     Var::Builtin(b) => Doc::start(b),
                     // TODO better way of doing this - e.g. take into account module paths
@@ -355,20 +384,20 @@ impl Expr {
                             Doc::start(',').space(),
                         ))
                         .add(')', ()),
+                    Sigma | Pi(Expl) if params.len() == 1 => {
+                        assert_eq!(params.len(), 1);
+                        let x = &params[0];
+                        pretty_bind(x.name, x.ty.pretty(db).nest(Prec::App), db, *class != Sigma)
+                    }
                     Pi(Expl) => Doc::start('(')
                         .chain(Doc::intersperse(
                             params.iter().map(|x| {
-                                pretty_bind(x.name, db).chain(x.ty.pretty(db).nest(Prec::App))
+                                pretty_bind(x.name, x.ty.pretty(db).nest(Prec::App), db, false)
                             }),
                             Doc::start(',').space(),
                         ))
                         .add(')', ()),
-                    // Sigma
-                    Sigma => {
-                        assert_eq!(params.len(), 1);
-                        let x = &params[0];
-                        pretty_bind(x.name, db).chain(x.ty.pretty(db).nest(Prec::App))
-                    }
+                    Sigma => unreachable!("params.len(): {}", params.len()),
                 };
                 match class {
                     Sigma => {

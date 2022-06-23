@@ -151,5 +151,11 @@ impl rowan::Language for PikaLang {
     }
 }
 
+impl SyntaxKind {
+    pub fn is_trivia(self) -> bool {
+        matches!(self, Indent | Dedent | Whitespace | Comment | Eof)
+    }
+}
+
 pub type SyntaxNode = rowan::SyntaxNode<PikaLang>;
 pub type SyntaxToken = rowan::SyntaxToken<PikaLang>;

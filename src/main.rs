@@ -17,7 +17,6 @@ mod pretty;
 
 use crate::elab::{Definition, ElabDatabase, Elaborator};
 use crate::parsing::{Parser, ParserDatabase, ParserExt};
-use ast::Pretty;
 use common::*;
 
 #[salsa::database(ParserDatabase, ElabDatabase)]

@@ -66,51 +66,133 @@ struct UnifyCxt<'a> {
     meta_cxt: &'a mut MetaCxt,
 }
 
-pub enum UnifyError {
-    /// (Inferred, Expected)
-    Conversion(Expr, Expr),
-    MetaSolve(MetaSolveError),
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CheckReason {
+    UsedAsType,
+    Condition,
+    GivenType(RelSpan),
+    MustMatch(RelSpan),
+    ArgOf(RelSpan),
+}
+pub struct UnifyError {
+    kind: UnifyErrorKind,
+    inferred: Expr,
+    expected: Expr,
+    reason: CheckReason,
+}
+pub enum UnifyErrorKind {
+    Conversion,
+    MetaSolve(MetaSolveError, RelSpan),
 }
 impl UnifyError {
     pub fn to_error(&self, span: RelSpan, db: &dyn Elaborator) -> Error {
         let mut gen = ariadne::ColorGenerator::new();
         let ca = gen.next();
-        let (msg, label, note) = match self {
-            UnifyError::Conversion(a, b) => (
-                Doc::start("Could not match types '")
-                    .chain(a.pretty(db))
-                    .add("' and '", ())
-                    .chain(b.pretty(db))
-                    .add("'", ()),
-                Doc::start("Expected type '")
-                    .chain(b.pretty(db))
-                    .add("'", ()),
-                None,
-            ),
-            UnifyError::MetaSolve(m) => (
-                Doc::start("Error solving metavariable: ").chain(m.pretty(db)),
-                Doc::start("Meta solution found here"),
-                None,
-            ),
-        };
-        Error {
-            severity: Severity::Error,
-            message: msg,
-            primary: Label {
-                span,
-                message: label,
-                color: Some(ca),
+        let cb = gen.next();
+        let cc = gen.next();
+        match &self.kind {
+            UnifyErrorKind::Conversion => {
+                let (secondary, note) = match self.reason.clone() {
+                    CheckReason::UsedAsType => (
+                        None,
+                        Some(Doc::start("Expected because it was used as a type")),
+                    ),
+                    CheckReason::Condition => (
+                        None,
+                        Some(Doc::start(
+                            "Expected because it was used as a condition in an if expression",
+                        )),
+                    ),
+                    CheckReason::GivenType(span) => (
+                        Some(Label {
+                            span,
+                            message: Doc::start("The type is given here"),
+                            color: Some(cc),
+                        }),
+                        None,
+                    ),
+                    CheckReason::ArgOf(span) => (
+                        Some(Label {
+                            span,
+                            message: Doc::start(
+                                "Must have this type to pass as argument to this function",
+                            ),
+                            color: Some(cc),
+                        }),
+                        None,
+                    ),
+                    CheckReason::MustMatch(span) => (
+                        Some(Label {
+                            span,
+                            message: Doc::start("Must have the same type as this"),
+                            color: Some(cc),
+                        }),
+                        None,
+                    ),
+                };
+                Error {
+                    severity: Severity::Error,
+                    message: Doc::start("Could not match types '")
+                        .chain(self.inferred.pretty(db))
+                        .add("' and '", ())
+                        .chain(self.expected.pretty(db))
+                        .add("'", ()),
+                    message_lsp: Some(
+                        Doc::start("Expected type '")
+                            .chain(self.expected.pretty(db))
+                            .add("', found '", ())
+                            .chain(self.inferred.pretty(db))
+                            .add("'", ()),
+                    ),
+                    primary: Label {
+                        span,
+                        message: Doc::start("Expected type '")
+                            .chain(self.expected.pretty(db))
+                            .add("'", ()),
+                        color: Some(ca),
+                    },
+                    secondary: secondary.into_iter().collect(),
+                    note,
+                }
+            }
+            UnifyErrorKind::MetaSolve(m, intro_span) => Error {
+                severity: Severity::Error,
+                message: Doc::start("Error solving metavariable: ").chain(m.pretty(db)),
+                message_lsp: None,
+                primary: Label {
+                    span: intro_span.clone(),
+                    message: Doc::start("Meta introduced here"),
+                    color: Some(ca),
+                },
+                secondary: vec![Label {
+                    span,
+                    message: Doc::start("Meta solution found here"),
+                    color: Some(cb),
+                }],
+                note: None,
             },
-            secondary: Vec::new(),
-            note,
         }
     }
 }
 
 impl MetaCxt {
     /// When possible, (inferred, expected)
-    pub fn unify(&mut self, a: Val, b: Val, size: Size) -> Result<(), UnifyError> {
-        UnifyCxt { meta_cxt: self }.unify(a, b, size, UnfoldState::default())
+    pub fn unify(
+        &mut self,
+        a: Val,
+        b: Val,
+        size: Size,
+        reason: &CheckReason,
+    ) -> Result<(), UnifyError> {
+        UnifyCxt { meta_cxt: self }
+            // TODO any way to avoid this clone?
+            .unify(a.clone(), b.clone(), size, UnfoldState::default())
+            .map_err(|kind| UnifyError {
+                kind,
+                inferred: a.quote(size, Some(self)),
+                expected: b.quote(size, Some(self)),
+                reason: reason.clone(),
+            })
     }
 }
 
@@ -121,7 +203,7 @@ impl UnifyCxt<'_> {
         b: &[Elim<Val>],
         size: Size,
         state: UnfoldState,
-    ) -> Result<bool, UnifyError> {
+    ) -> Result<bool, UnifyErrorKind> {
         if a.len() != b.len() {
             return Ok(false);
         }
@@ -139,7 +221,13 @@ impl UnifyCxt<'_> {
         Ok(true)
     }
 
-    fn unify(&mut self, a: Val, b: Val, size: Size, state: UnfoldState) -> Result<(), UnifyError> {
+    fn unify(
+        &mut self,
+        a: Val,
+        b: Val,
+        size: Size,
+        state: UnfoldState,
+    ) -> Result<(), UnifyErrorKind> {
         match (a, b) {
             (Val::Type, Val::Type) => Ok(()),
             (Val::Error, _) | (_, Val::Error) => Ok(()),
@@ -169,17 +257,18 @@ impl UnifyCxt<'_> {
                     Some(state) => self.unify(a, b, size, state),
                     // don't try unfolded
                     None => Err(match err {
-                        Ok(_) => UnifyError::Conversion(
-                            a.quote(size, Some(&self.meta_cxt)),
-                            b.quote(size, Some(&self.meta_cxt)),
-                        ),
+                        Ok(_) => UnifyErrorKind::Conversion,
                         Err(e) => e,
                     }),
                 }
             }
 
             // We want to prioritize solving the later meta first so it depends on the earlier meta
-            (Val::Neutral(a), Val::Neutral(b)) if matches!((a.head(), b.head()), (Head::Var(Var::Meta(a)), Head::Var(Var::Meta(b))) if a < b) => {
+            (Val::Neutral(a), Val::Neutral(b))
+                if state.can_solve_metas()
+                    && matches!((a.head(), b.head()), (Head::Var(Var::Meta(a)), Head::Var(Var::Meta(b)))
+                        if a < b && !self.meta_cxt.is_solved(a) && !self.meta_cxt.is_solved(b)) =>
+            {
                 self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
             }
 
@@ -205,10 +294,20 @@ impl UnifyCxt<'_> {
                                     Some((m, bsp, a)) if !self.meta_cxt.is_solved(m) => {
                                         match self.meta_cxt.solve(size, m, bsp, Val::Neutral(a)) {
                                             Ok(()) => return Ok(()),
-                                            Err(_) => return Err(UnifyError::MetaSolve(e)),
+                                            Err(_) => {
+                                                return Err(UnifyErrorKind::MetaSolve(
+                                                    e,
+                                                    self.meta_cxt.introduced_span(m),
+                                                ))
+                                            }
                                         }
                                     }
-                                    _ => return Err(UnifyError::MetaSolve(e)),
+                                    _ => {
+                                        return Err(UnifyErrorKind::MetaSolve(
+                                            e,
+                                            self.meta_cxt.introduced_span(m),
+                                        ))
+                                    }
                                 },
                             }
                         }
@@ -218,7 +317,9 @@ impl UnifyCxt<'_> {
                             return self
                                 .meta_cxt
                                 .solve(size, m, b.into_parts().1, Val::Neutral(a))
-                                .map_err(UnifyError::MetaSolve);
+                                .map_err(|e| {
+                                    UnifyErrorKind::MetaSolve(e, self.meta_cxt.introduced_span(m))
+                                });
                         }
                     }
                 }
@@ -242,10 +343,7 @@ impl UnifyCxt<'_> {
                 {
                     Ok(())
                 } else {
-                    Err(UnifyError::Conversion(
-                        Val::Neutral(a).quote(size, Some(&self.meta_cxt)),
-                        Val::Neutral(b).quote(size, Some(&self.meta_cxt)),
-                    ))
+                    Err(UnifyErrorKind::Conversion)
                 }
             }
 
@@ -257,7 +355,7 @@ impl UnifyCxt<'_> {
                 if let Head::Var(Var::Meta(m)) = n.head() {
                     self.meta_cxt
                         .solve(size, m, n.into_parts().1, x)
-                        .map_err(UnifyError::MetaSolve)
+                        .map_err(|e| UnifyErrorKind::MetaSolve(e, self.meta_cxt.introduced_span(m)))
                 } else {
                     unreachable!()
                 }
@@ -267,10 +365,7 @@ impl UnifyCxt<'_> {
             (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
                 match n.resolve(&mut Env::new(size), &self.meta_cxt) {
                     Ok(n) => self.unify(n, x, size, state),
-                    Err(n) => Err(UnifyError::Conversion(
-                        Val::Neutral(n).quote(size, Some(&self.meta_cxt)),
-                        x.quote(size, Some(&self.meta_cxt)),
-                    )),
+                    Err(n) => Err(UnifyErrorKind::Conversion),
                 }
             }
 
@@ -282,10 +377,7 @@ impl UnifyCxt<'_> {
                 self.unify(a, x.app(elim, &mut Env::new(new_size)), new_size, state)
             }
 
-            (a, b) => Err(UnifyError::Conversion(
-                a.quote(size, Some(&self.meta_cxt)),
-                b.quote(size, Some(&self.meta_cxt)),
-            )),
+            (a, b) => Err(UnifyErrorKind::Conversion),
         }
     }
 }

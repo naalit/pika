@@ -11,7 +11,6 @@ use ropey::RopeSlice;
 use std::collections::VecDeque;
 use std::fmt;
 use std::iter::Peekable;
-use std::str::FromStr;
 
 use super::*;
 
@@ -122,78 +121,30 @@ impl<'i> Lexer<'i> {
     }
 
     fn lex_number(&mut self) -> STok {
-        let mut buf = String::new();
-        let neg = self.peek() == Some('-');
-        if neg {
-            buf.push(self.next().unwrap());
+        // No error checking, that all happens in the typechecker
+        // So this is just a regex `-?[A-Za-z0-9_]*(.[A-Za-z0-9_]*)?`
+        // and it's only called when the input starts with `-?[0-9]`
+        if self.peek() == Some('-') {
+            self.next();
         }
-        let mut base = 10;
-        if self.peek() == Some('0') {
-            buf.push(self.next().unwrap());
-            match self.peek() {
-                Some('x') => {
-                    self.next();
-                    base = 16;
-                }
-                Some('b') => {
-                    self.next();
-                    base = 2;
-                }
-                _ => (),
-            }
+        while self
+            .peek()
+            .map_or(false, |x| x.is_alphanumeric() || x == '_')
+        {
+            self.next();
         }
-        let mut float = false;
-        while let Some(next) = self.peek() {
-            if next.is_digit(base) {
-                buf.push(next);
+        if self.peek() == Some('.') {
+            self.next();
+            while self
+                .peek()
+                .map_or(false, |x| x.is_alphanumeric() || x == '_')
+            {
                 self.next();
-            } else if next == '_' {
-                self.next();
-            } else if next.is_alphanumeric() {
-                self.next();
-                self.errors.push((
-                    LexError::InvalidLiteral(format!("Invalid digit for int literal: {}", next)),
-                    self.pos - 1..self.pos,
-                ));
-                return (Tok::Error, self.pos - 1);
-            } else if next == '.' {
-                float = true;
-                buf.push(next);
-                self.next();
-            } else {
-                break;
             }
-        }
-        let tok = if float {
-            match f64::from_str(&buf) {
-                Ok(_) => Tok::FloatLit,
-                Err(e) => {
-                    self.errors
-                        .push((LexError::InvalidLiteral(e.to_string()), self.span()));
-                    Tok::Error
-                }
-            }
-        } else if neg {
-            match i64::from_str_radix(&buf, base) {
-                Ok(_) => Tok::IntLit,
-                // TODO when `ParseIntError::kind()` gets stabilized (or Pika switches to nightly Rust) make custom error messages
-                Err(e) => {
-                    self.errors
-                        .push((LexError::InvalidLiteral(e.to_string()), self.span()));
-                    Tok::Error
-                }
-            }
+            return self.tok_in_place(Tok::FloatLit);
         } else {
-            match u64::from_str_radix(&buf, base) {
-                Ok(_) => Tok::IntLit,
-                Err(e) => {
-                    self.errors
-                        .push((LexError::InvalidLiteral(e.to_string()), self.span()));
-                    Tok::Error
-                }
-            }
-        };
-        self.tok_in_place(tok)
+            return self.tok_in_place(Tok::IntLit);
+        }
     }
 
     fn lex_name(&mut self) -> STok {
@@ -321,7 +272,7 @@ impl<'i> Lexer<'i> {
                 .slice(self.pos as usize + 1..)
                 .chars()
                 .next()
-                .map_or(true, |x| !x.is_numeric()) =>
+                .map_or(true, |x| !x.is_ascii_digit()) =>
             {
                 self.next();
                 if self.peek() == Some('>') {
@@ -520,6 +471,7 @@ pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
     Error {
         severity: Severity::Error,
         message: message.clone(),
+        message_lsp: None,
         primary: Label {
             span,
             message,
