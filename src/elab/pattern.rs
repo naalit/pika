@@ -195,6 +195,12 @@ mod input {
             }
             env
         }
+
+        pub fn ipats(&self) -> Vec<(PVar, IPat)> {
+            let mut vec = self.ty_ipats.clone();
+            vec.extend(self.end_ipats.iter().cloned());
+            vec
+        }
     }
 
     impl CaseElabCxt<'_, '_> {
@@ -303,6 +309,7 @@ mod input {
                         Pattern::Any
                     }
                 },
+                // TODO verify that this actually has type ()
                 ast::Expr::GroupedExpr(x) => x.expr().map_or(Pattern::Any, |x| x.to_pattern(cxt)),
                 ast::Expr::Pair(x) => {
                     let a = x.lhs().map_or(Pattern::Any, |x| x.to_pattern(cxt));
@@ -367,24 +374,24 @@ enum Cons {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Branch {
+struct Branch<T: IsTerm> {
     cons: Cons,
     args: Vec<PVar>,
-    then: Box<DecNode>,
+    then: Box<DecNode<T>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Dec {
+enum Dec<T: IsTerm> {
     Success(Body),
     Failure,
-    Guard(Expr, Body, Box<DecNode>),
-    Switch(PVar, Vec<Branch>, Option<Box<DecNode>>),
+    Guard(T::Clos, Body, Box<DecNode<T>>),
+    Switch(PVar, Vec<Branch<T>>, Option<Box<DecNode<T>>>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct DecNode {
+struct DecNode<T: IsTerm> {
     ipats: Vec<(PVar, IPat)>,
-    dec: Dec,
+    dec: Dec<T>,
 }
 
 struct CaseElabCxt<'a, 'b> {
@@ -426,7 +433,7 @@ impl CaseElabCxt<'_, '_> {
             .0
     }
 
-    fn compile_rows(&mut self, mut rows: Vec<input::Row>) -> DecNode {
+    fn compile_rows(&mut self, mut rows: Vec<input::Row>) -> DecNode<Expr> {
         if rows.is_empty() {
             // TODO find missing pattern and possibly emit error
             return DecNode {
@@ -441,8 +448,6 @@ impl CaseElabCxt<'_, '_> {
         // other rows are unreachable here, but may be reachable through another path so we figue that out later
         if row.columns.is_empty() {
             let row = rows.remove(0);
-            // let size = row.end_ipats.iter().fold(self.ecxt.size(), |size, (_, i)| i.add_size(size));
-            // self.env_tys.insert(row.body, size);
             self.env_tys.insert(row.body, row.make_env(self));
 
             let dec = match &row.guard {
@@ -458,7 +463,8 @@ impl CaseElabCxt<'_, '_> {
                 None => Dec::Success(row.body),
             };
             return DecNode {
-                ipats: row.end_ipats.into(),
+                // TODO is this the correct way to handle ty_ipats or should it be higher up in the tree?
+                ipats: row.ipats(),
                 dec,
             };
         }
@@ -542,38 +548,50 @@ impl CaseElabCxt<'_, '_> {
             }
         }
 
-        let yes = self.compile_rows(yes);
-        let no = self.compile_rows(no);
+        let mut yes = self.compile_rows(yes);
+        match yes_cons {
+            Some(yes_cons) => {
+                let no = self.compile_rows(no);
 
-        DecNode {
-            ipats: start_ipats,
-            dec: Dec::Switch(
-                switch_var,
-                vec![Branch {
-                    cons: yes_cons.unwrap(),
-                    args,
-                    then: Box::new(yes),
-                }],
-                Some(Box::new(no)),
-            ),
+                DecNode {
+                    ipats: start_ipats,
+                    dec: Dec::Switch(
+                        switch_var,
+                        vec![Branch {
+                            cons: yes_cons,
+                            args,
+                            then: Box::new(yes),
+                        }],
+                        Some(Box::new(no)),
+                    ),
+                }
+            }
+            None => {
+                // The variable we're matching on turned out to be irrefutable, so we'll never get to `no`
+                // `no` should actually have the same contents as `yes` since everything is irrefutable for this var
+                // So prepend `start_ipats` onto `yes` and return that
+                start_ipats.append(&mut yes.ipats);
+                yes.ipats = start_ipats;
+                yes
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CaseRhs {
-    size: Size,
-    body: Expr,
+struct CaseRhs<T: IsTerm> {
+    bound: usize,
+    body: T::Clos,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CaseOf {
+pub struct CaseOf<T: IsTerm> {
     svar: PVar,
-    dec: DecNode,
-    rhs: Vec<CaseRhs>,
+    dec: DecNode<T>,
+    rhs: Vec<CaseRhs<T>>,
 }
-impl CaseOf {
-    pub(super) fn make_simple_args(args: &[Name], body: Expr, size: Size) -> CaseOf {
+impl CaseOf<Expr> {
+    pub(super) fn make_simple_args(args: &[Name], body: Expr, size: Size) -> CaseOf<Expr> {
         let mut var_num = 0;
         let mut pvar = || {
             var_num += 1;
@@ -600,7 +618,7 @@ impl CaseOf {
                 dec: Dec::Success(Body(0)),
             },
             rhs: vec![CaseRhs {
-                size: size + args.len(),
+                bound: args.len(),
                 body,
             }],
         }
@@ -612,7 +630,7 @@ pub(super) fn elab_case(
     branches: impl IntoIterator<Item = (Option<ast::Expr>, Option<ast::Expr>)>,
     rty: &mut Option<(Val, CheckReason)>,
     ecxt: &mut Cxt,
-) -> CaseOf {
+) -> CaseOf<Expr> {
     let mut cxt = CaseElabCxt {
         ecxt,
         env_tys: HashMap::new(),
@@ -647,7 +665,7 @@ pub(super) fn elab_case(
                     },
                 };
                 rhs.push(CaseRhs {
-                    size: cxt.ecxt.size(),
+                    bound: env.len(),
                     body: expr,
                 });
             }
@@ -664,7 +682,7 @@ impl ast::Case {
         &self,
         rty: &mut Option<(Val, CheckReason)>,
         ecxt: &mut Cxt,
-    ) -> (Expr, CaseOf) {
+    ) -> (Expr, CaseOf<Expr>) {
         let (scrutinee, sty) = self
             .scrutinee()
             .map(|x| x.infer(ecxt))
@@ -699,7 +717,7 @@ impl Cons {
         }
     }
 }
-impl DecNode {
+impl DecNode<Expr> {
     pub(super) fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         let mut doc = Doc::none();
         for (v, pat) in &self.ipats {
@@ -764,7 +782,7 @@ impl DecNode {
         })
     }
 }
-impl CaseOf {
+impl CaseOf<Expr> {
     pub(super) fn pretty<T: Elaborator + ?Sized>(&self, scrut: Doc, db: &T) -> Doc {
         Doc::none()
             .add("case", Doc::style_keyword())
@@ -772,6 +790,8 @@ impl CaseOf {
             .add("let#", Doc::style_keyword())
             .space()
             .add(self.svar, ())
+            .space()
+            .add('=', ())
             .space()
             .chain(scrut)
             .hardline()
@@ -783,12 +803,163 @@ impl CaseOf {
                     .hardline()
                     .chain(Doc::intersperse(
                         self.rhs.iter().enumerate().map(|(i, x)| {
-                            Doc::start(i).add(':', ()).space().chain(x.body.pretty(db))
+                            Doc::start(i)
+                                .add('(', ())
+                                .add(x.bound, ())
+                                .add("):", ())
+                                .space()
+                                .chain(x.body.pretty(db))
                         }),
                         Doc::none().hardline(),
                     ))
                     .indent(),
             )
             .indent()
+    }
+}
+
+impl Dec<Expr> {
+    fn eval(self, env: &mut Env) -> Dec<Val> {
+        match self {
+            Dec::Success(b) => Dec::Success(b),
+            Dec::Failure => Dec::Failure,
+            Dec::Guard(x, b, rest) => Dec::Guard(
+                Clos {
+                    // TODO new class
+                    class: Lam(Expl),
+                    params: Vec::new(),
+                    body: x,
+                    env: env.clone(),
+                },
+                b,
+                Box::new(rest.eval(env)),
+            ),
+            Dec::Switch(v, branches, rest) => Dec::Switch(
+                v,
+                branches.into_iter().map(|x| x.eval(env)).collect(),
+                rest.map(|x| Box::new(x.eval(env))),
+            ),
+        }
+    }
+}
+impl DecNode<Expr> {
+    fn eval(self, env: &mut Env) -> DecNode<Val> {
+        let DecNode { ipats, dec } = self;
+        let state = env.state();
+        for (_, p) in &ipats {
+            match p {
+                IPat::Pair(_, _) => (),
+                // Keep the size of `env` correct
+                IPat::Var(_) => env.push(None),
+            }
+        }
+        let node = DecNode {
+            ipats,
+            dec: dec.eval(env),
+        };
+        env.reset(state);
+        node
+    }
+}
+impl Branch<Expr> {
+    fn eval(self, env: &mut Env) -> Branch<Val> {
+        let Branch { cons, args, then } = self;
+        Branch {
+            cons,
+            args,
+            then: Box::new(then.eval(env)),
+        }
+    }
+}
+impl CaseOf<Expr> {
+    pub fn eval(self, env: &mut Env) -> CaseOf<Val> {
+        let CaseOf { svar, dec, rhs } = self;
+        CaseOf {
+            svar,
+            dec: dec.eval(env),
+            rhs: rhs
+                .into_iter()
+                .map(|CaseRhs { bound, body }| CaseRhs {
+                    bound,
+                    body: Clos {
+                        // TODO new class
+                        class: Lam(Expl),
+                        params: Vec::new(),
+                        body,
+                        env: {
+                            let mut env = env.clone();
+                            for _ in 0..bound {
+                                env.push(None);
+                            }
+                            env
+                        },
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
+impl Dec<Val> {
+    fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Dec<Expr> {
+        match self {
+            Dec::Success(b) => Dec::Success(b),
+            Dec::Failure => Dec::Failure,
+            Dec::Guard(x, b, rest) => Dec::Guard(
+                x.quote(size, inline_metas),
+                b,
+                Box::new(rest.quote(size, inline_metas)),
+            ),
+            Dec::Switch(v, branches, rest) => Dec::Switch(
+                v,
+                branches
+                    .into_iter()
+                    .map(|x| x.quote(size, inline_metas))
+                    .collect(),
+                rest.map(|x| Box::new(x.quote(size, inline_metas))),
+            ),
+        }
+    }
+}
+impl DecNode<Val> {
+    fn quote(self, mut size: Size, inline_metas: Option<&MetaCxt>) -> DecNode<Expr> {
+        let DecNode { ipats, dec } = self;
+        for (_, p) in &ipats {
+            match p {
+                IPat::Pair(_, _) => (),
+                // Keep the size correct
+                IPat::Var(_) => size += 1,
+            }
+        }
+        DecNode {
+            ipats,
+            dec: dec.quote(size, inline_metas),
+        }
+    }
+}
+impl Branch<Val> {
+    fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Branch<Expr> {
+        let Branch { cons, args, then } = self;
+        Branch {
+            cons,
+            args,
+            then: Box::new(then.quote(size, inline_metas)),
+        }
+    }
+}
+impl CaseOf<Val> {
+    pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> CaseOf<Expr> {
+        let CaseOf { svar, dec, rhs } = self;
+        CaseOf {
+            svar,
+            dec: dec.quote(size, inline_metas),
+            rhs: rhs
+                .into_iter()
+                .map(|CaseRhs { bound, body }| CaseRhs {
+                    bound,
+                    body: body.quote(size + bound, inline_metas),
+                })
+                .collect(),
+        }
     }
 }

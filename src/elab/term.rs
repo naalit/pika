@@ -244,8 +244,8 @@ pub enum Definition {
 }
 
 pub trait IsTerm {
-    type Clos: Clone;
-    type Loc: std::fmt::Debug + Clone + Copy + PartialEq;
+    type Clos: std::fmt::Debug + Clone + PartialEq + Eq + std::hash::Hash;
+    type Loc: std::fmt::Debug + Clone + Copy + PartialEq + Eq + std::hash::Hash;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -268,20 +268,16 @@ pub enum Head<L> {
     Box, -> ? will be handled later
     Type,
     GroupedExpr, -> removed, if empty replaced by Unit
-    Tuple, -> Sigma type or Pair term
+    Tuple, -> Sigma type as Fun or Pair term
     Binder, -> type, usually in Sigma
     StructInit, -> ? will be handled later
-    // Patterns parse as expressions
-    // but they're not, so they don't appear here
-    OrPat,
-    EffPat
 */
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Elim<T: IsTerm> {
     App(Icit, T),
     // TODO probably use MemberId or something with a specific member of a specific type
     Member(Name),
-    Case(super::pattern::CaseOf),
+    Case(super::pattern::CaseOf<T>),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {

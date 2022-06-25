@@ -3,6 +3,7 @@ use super::*;
 pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
     let source = db.input_file(file);
 
+    let mut names = HashMap::new();
     let mut psplits = Vec::new();
     let mut next_started = false;
     let mut split_start = 0;
@@ -58,8 +59,25 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
             if matches!(words.next(), Some("fun" | "let" | "eff" | "type")) {
                 name = words
                     .next()
-                    .map(|x| x.chars().take_while(|x| x.is_alphanumeric()).collect())
-                    .map(|x| db.name(x));
+                    .map(|x| {
+                        x.chars()
+                            .take_while(|x| x.is_alphanumeric() || *x == '_')
+                            .collect()
+                    })
+                    .map(|x| db.name(x))
+                    // For duplicate definition names in the same file, use `a`, `a'2`, `a'3` etc.
+                    // so they have different `SplitLoc`s
+                    .map(|x| match names.entry(x) {
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            let e = e.get_mut();
+                            *e += 1;
+                            db.name(format!("{}'{}", db.lookup_name(x), *e))
+                        }
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(1);
+                            x
+                        }
+                    });
                 break;
             }
         }

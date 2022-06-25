@@ -160,7 +160,8 @@ impl Error {
             primary_span.1.start as usize,
         )
         .with_message(self.message.to_string(true))
-        .with_label(self.primary.ariadne(split_span));
+        // The primary label appears first since it's the most important
+        .with_label(self.primary.ariadne(split_span).with_order(-1));
         r.add_labels(self.secondary.into_iter().map(|x| x.ariadne(split_span)));
         if let Some(note) = self.note {
             r.set_note(note.to_string(true));

@@ -132,10 +132,10 @@ impl UnifyError {
                 };
                 Error {
                     severity: Severity::Error,
-                    message: Doc::start("Could not match types '")
-                        .chain(self.inferred.pretty(db))
-                        .add("' and '", ())
+                    message: Doc::start("Could not match types: expected '")
                         .chain(self.expected.pretty(db))
+                        .add("' but found '", ())
+                        .chain(self.inferred.pretty(db))
                         .add("'", ()),
                     message_lsp: Some(
                         Doc::start("Expected type '")
@@ -155,6 +155,8 @@ impl UnifyError {
                     note,
                 }
             }
+            // TODO a lot of the time the Conversion message is actually more helpful here too
+            // but including all the information from both would be far too long
             UnifyErrorKind::MetaSolve(m, intro_span) => Error {
                 severity: Severity::Error,
                 message: Doc::start("Error solving metavariable: ").chain(m.pretty(db)),

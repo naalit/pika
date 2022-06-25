@@ -136,9 +136,10 @@ impl Clos {
             Err(arg) => {
                 let pars: Vec<_> = self.params.iter().map(|x| x.name).collect();
                 return arg.app(
-                    Elim::Case(super::pattern::CaseOf::make_simple_args(
-                        &pars, body, env.size,
-                    )),
+                    Elim::Case(
+                        super::pattern::CaseOf::make_simple_args(&pars, body, env.size)
+                            .eval(&mut env),
+                    ),
                     &mut env,
                 );
             }
@@ -166,10 +167,15 @@ impl Clos {
             })
             .collect();
         let body = body.eval_quote(&mut env, size, inline_metas);
-        Expr::Fun {
-            class,
-            params,
-            body: Box::new(body),
+        if params.is_empty() {
+            // For use in case where a Clos isn't for a function, just to hold an Env
+            body
+        } else {
+            Expr::Fun {
+                class,
+                params,
+                body: Box::new(body),
+            }
         }
     }
 
@@ -201,7 +207,7 @@ impl Clos {
         let (arg, _size) =
             self.params
                 .iter()
-                .fold((None, size), |(term, size), Par { name, ty }| {
+                .fold((None, size), |(term, size), Par { name, ty: _ }| {
                     let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
                     let term = match term {
                         Some(term) => Box::new(Val::Pair(var, term)),
@@ -292,7 +298,7 @@ impl Elim<Expr> {
         match self {
             Elim::App(icit, arg) => Elim::App(icit, arg.eval(env)),
             Elim::Member(_) => todo!(),
-            Elim::Case(_) => todo!(),
+            Elim::Case(case) => Elim::Case(case.eval(env)),
         }
     }
 }
@@ -301,7 +307,7 @@ impl Elim<Val> {
         match self {
             Elim::App(icit, arg) => Elim::App(icit, arg.quote(size, inline_metas)),
             Elim::Member(_) => todo!(),
-            Elim::Case(_) => todo!(),
+            Elim::Case(case) => Elim::Case(case.quote(size, inline_metas)),
         }
     }
 }

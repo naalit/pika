@@ -881,6 +881,13 @@ impl ast::Expr {
                     Ok(term)
                 }
 
+                // Propagate through case
+                (ast::Expr::Case(case), ty) => {
+                    let mut rty = Some((ty, reason.clone()));
+                    let (scrutinee, case) = case.elaborate(&mut rty, cxt);
+                    Ok(Expr::Elim(Box::new(scrutinee), Box::new(Elim::Case(case))))
+                }
+
                 (_, ty) => {
                     let (a, ity) = self.infer(cxt);
                     cxt.mcxt.unify(ity, ty, cxt.size(), reason)?;
@@ -1198,7 +1205,7 @@ impl ast::Expr {
                     ast::Expr::Case(case) => {
                         let mut rty = None;
                         let (scrutinee, case) = case.elaborate(&mut rty, cxt);
-                        let (rty, _) = rty.unwrap();
+                        let rty = rty.map(|(x, _)| x).unwrap_or(Val::Error);
                         (
                             Expr::Elim(Box::new(scrutinee), Box::new(Elim::Case(case))),
                             rty,

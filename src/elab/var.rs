@@ -123,7 +123,7 @@ impl<L: PartialEq> PartialEq for Var<L> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct EnvState(usize);
+pub struct EnvState(Size);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Env {
@@ -142,13 +142,10 @@ impl Env {
     }
 
     pub fn state(&self) -> EnvState {
-        EnvState(self.vals.len())
+        EnvState(self.size)
     }
     pub fn reset(&mut self, state: EnvState) {
-        let old = self.vals.len();
-        let dif = state.0 - old;
-        self.size.0 -= dif as u32;
-        self.vals.truncate(state.0);
+        self.reset_to_size(state.0);
     }
 
     pub fn reset_to_size(&mut self, size: Size) {
