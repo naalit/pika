@@ -351,7 +351,7 @@ impl ast::Def {
                     // Infer the type from the value if possible
                     let def = cxt.db.def_elab_n(def_node);
                     match def.result {
-                        Some(Definition::Let { ty, .. }) => Some(
+                        Some(Definition { ty, .. }) => Some(
                             ty.eval_quote(&mut Env::new(cxt.size()), cxt.size(), Some(&cxt.mcxt))
                                 .eval(&mut Env::new(cxt.size())),
                         ),
@@ -359,7 +359,53 @@ impl ast::Def {
                     }
                 }
             },
-            ast::Def::FunDef(_) => todo!(),
+            ast::Def::FunDef(x) => {
+                // [a, b] [c, d] (e, f) => ...
+                // -->
+                // [a, b, c, d] => ((e, f) => ...)
+
+                cxt.push();
+                let implicit: Vec<_> = x
+                    .imp_par()
+                    .into_iter()
+                    .flat_map(|x| x.pars())
+                    .flat_map(|x| {
+                        // [] means [_: ()]
+                        x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
+                            vec![Par {
+                                name: cxt.db.name("_".to_string()),
+                                ty: Expr::var(Var::Builtin(Builtin::UnitType)),
+                            }]
+                        })
+                    })
+                    .collect();
+                let explicit: Vec<_> = x.exp_par().map(|x| x.infer(cxt)).unwrap_or(Vec::new());
+                let bty = x.ret_ty().and_then(|x| x.expr())?;
+                let bty = bty.check(Val::Type, cxt, &CheckReason::UsedAsType);
+                let bty = bty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
+                cxt.pop();
+
+                // We have to evaluate this outside of the scope
+                let mut ty = if explicit.is_empty() {
+                    bty
+                } else {
+                    Expr::Fun {
+                        class: Pi(Expl),
+                        params: explicit.clone(),
+                        body: Box::new(bty),
+                    }
+                };
+                if !implicit.is_empty() {
+                    ty = Expr::Fun {
+                        class: Pi(Impl),
+                        params: implicit.clone(),
+                        body: Box::new(ty),
+                    };
+                }
+                let ty = ty.eval(&mut cxt.env());
+
+                Some(ty)
+            }
             ast::Def::TypeDef(_) => todo!(),
             ast::Def::TypeDefShort(_) => todo!(),
             ast::Def::TypeDefStruct(_) => todo!(),
@@ -375,7 +421,7 @@ impl ast::Def {
                         let (body, ty) = x.body()?.expr()?.infer(cxt);
                         // inline metas in the term
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
-                        Some(Definition::Let {
+                        Some(Definition {
                             name,
                             ty: Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
                             body: Box::new(body),
@@ -390,7 +436,7 @@ impl ast::Def {
                             &CheckReason::GivenType(pty.span()),
                         );
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
-                        Some(Definition::Let {
+                        Some(Definition {
                             name,
                             ty: Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
                             body: Box::new(body),
@@ -399,7 +445,101 @@ impl ast::Def {
                     (None, _) => None,
                 }
             }
-            ast::Def::FunDef(_) => todo!(),
+            ast::Def::FunDef(x) => {
+                // [a, b] [c, d] (e, f) => ...
+                // -->
+                // [a, b, c, d] => ((e, f) => ...)
+
+                cxt.push();
+                let implicit: Vec<_> = x
+                    .imp_par()
+                    .into_iter()
+                    .flat_map(|x| x.pars())
+                    .flat_map(|x| {
+                        // [] means [_: ()]
+                        x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
+                            vec![Par {
+                                name: cxt.db.name("_".to_string()),
+                                ty: Expr::var(Var::Builtin(Builtin::UnitType)),
+                            }]
+                        })
+                    })
+                    .collect();
+                let explicit: Vec<_> = x.exp_par().map(|x| x.infer(cxt)).unwrap_or(Vec::new());
+                let (body, bty) = match x.ret_ty().and_then(|x| x.expr()) {
+                    Some(bty) => {
+                        let span = bty.span();
+                        let bty = bty.check(Val::Type, cxt, &CheckReason::UsedAsType);
+                        let bty = bty.eval(&mut cxt.env());
+                        let body = x
+                            .body()
+                            .and_then(|x| x.expr())
+                            .map(|x| x.check(bty.clone(), cxt, &CheckReason::GivenType(span)))
+                            .unwrap_or_else(|| {
+                                cxt.error(
+                                    self.span(),
+                                    TypeError::Other("Missing function body".to_string()),
+                                );
+                                Expr::Error
+                            });
+                        (body, bty)
+                    }
+                    None => x
+                        .body()
+                        .and_then(|x| x.expr())
+                        .map(|x| x.infer(cxt))
+                        .unwrap_or_else(|| {
+                            cxt.error(
+                                self.span(),
+                                TypeError::Other("Missing function body".to_string()),
+                            );
+                            (Expr::Error, Val::Error)
+                        }),
+                };
+                let bty = bty.quote(cxt.size(), None);
+                cxt.pop();
+
+                // We have to evaluate this outside of the scope
+                let mut ty = if explicit.is_empty() {
+                    bty
+                } else {
+                    Expr::Fun {
+                        class: Pi(Expl),
+                        params: explicit.clone(),
+                        body: Box::new(bty),
+                    }
+                };
+                if !implicit.is_empty() {
+                    ty = Expr::Fun {
+                        class: Pi(Impl),
+                        params: implicit.clone(),
+                        body: Box::new(ty),
+                    };
+                }
+                let ty = ty.eval(&mut cxt.env());
+                let mut term = if explicit.is_empty() {
+                    body
+                } else {
+                    Expr::Fun {
+                        class: Lam(Expl),
+                        params: explicit,
+                        body: Box::new(body),
+                    }
+                };
+                if !implicit.is_empty() {
+                    term = Expr::Fun {
+                        class: Lam(Impl),
+                        params: implicit,
+                        body: Box::new(term),
+                    };
+                }
+
+                Some(Definition {
+                    name: x.name()?.name(cxt.db),
+                    ty: Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
+                    body: Box::new(term.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))),
+                })
+            }
             ast::Def::TypeDef(_) => todo!(),
             ast::Def::TypeDefShort(_) => todo!(),
             ast::Def::TypeDefStruct(_) => todo!(),

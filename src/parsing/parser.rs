@@ -216,9 +216,12 @@ impl<'a> Parser<'a> {
     }
 
     fn var(&mut self) {
-        self.push(Tok::Var);
-        self.expect(Tok::Name);
-        self.pop();
+        // Don't even generate a Var node if there isn't actually a name
+        let cp = self.checkpoint();
+        if self.expect(Tok::Name) {
+            self.push_at(cp, Tok::Var);
+            self.pop();
+        }
     }
 
     fn stmt(&mut self) {

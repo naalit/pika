@@ -219,7 +219,7 @@ fn main() {
             let def = db.def(DefLoc::Root(file, split));
             if let Some(def) = db.def_elab(def) {
                 match def.result {
-                    Some(Definition::Let { name, ty, body }) => {
+                    Some(Definition { name, ty, body }) => {
                         Doc::none()
                             .add("let", Doc::style_keyword())
                             .space()

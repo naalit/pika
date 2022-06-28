@@ -218,29 +218,13 @@ pub struct ConsDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Definition {
-    /// A let definition is different from a local let statement.
-    /// Let definitions are unordered, and can't contain patterns other than 'name' or 'name: ty'.
-    /// Local let statements are ordered, can contain arbitrary patterns, and create local variables rather than definitions.
-    Let {
-        name: Name,
-        ty: Box<Expr>,
-        body: Box<Expr>,
-    },
-    // Fun {
-    //     name: Name,
-    //     params: Params<Expr>,
-    //     ret_ty: Box<Expr>,
-    //     effects: Vec<Expr>,
-    //     body: Box<Expr>,
-    // },
-    // Type {
-    //     name: Name,
-    //     params: Params<Expr>,
-    //     cons: Vec<ConsDef>,
-    //     // TODO these should be interned
-    //     where_block: Vec<Definition>,
-    // },
+/// A let definition is different from a local let statement.
+/// Let definitions are unordered, and can't contain patterns other than 'name' or 'name: ty'.
+/// Local let statements are ordered, can contain arbitrary patterns, and create local variables rather than definitions.
+pub struct Definition {
+    pub name: Name,
+    pub ty: Box<Expr>,
+    pub body: Box<Expr>,
 }
 
 pub trait IsTerm {

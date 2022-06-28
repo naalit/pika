@@ -552,6 +552,8 @@ impl<'i> fmt::Display for Tok {
             Tok::Whitespace => "whitespace",
             Tok::Comment => "comment",
 
+            Tok::Eof => "end of file",
+
             // composite kinds that shouldn't be produced by the lexer
             _ => "<??>",
         })
