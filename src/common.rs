@@ -69,7 +69,7 @@ impl AbsSpan {
         )
     }
 
-    fn lsp_range(&self, files: &HashMap<File, ropey::Rope>) -> lsp_types::Range {
+    pub fn lsp_range(&self, files: &HashMap<File, ropey::Rope>) -> lsp_types::Range {
         let text = files.get(&self.0).unwrap();
         let start_line = text.char_to_line(self.1.start as usize);
         let start_line_start = text.line_to_char(start_line);

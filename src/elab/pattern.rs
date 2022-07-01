@@ -132,11 +132,12 @@ use super::*;
 mod input {
     use super::*;
 
+    type SPattern = Spanned<Pattern>;
     #[derive(Clone)]
     pub(super) enum Pattern {
-        Cons(Cons, Vec<Pattern>),
-        Pair(Box<Pattern>, Box<Pattern>),
-        Or(Vec<Pattern>),
+        Cons(Cons, Vec<SPattern>),
+        Pair(Box<SPattern>, Box<SPattern>),
+        Or(Vec<SPattern>),
         Var(Name),
         Any,
     }
@@ -144,14 +145,14 @@ mod input {
     #[derive(Clone)]
     pub(super) struct Column {
         pub var: PVar,
-        pub pat: Pattern,
+        pub pat: SPattern,
     }
 
     pub(super) enum RemovedColumn {
         Nothing,
         IPat(IPat),
         // TODO is this cons necessary?
-        Yes(Cons, Vec<Pattern>),
+        Yes(Cons, Vec<SPattern>),
         No,
     }
 
@@ -168,10 +169,11 @@ mod input {
         pub fn new(
             var: PVar,
             pat: Option<ast::Expr>,
+            span: RelSpan,
             body: Option<ast::Expr>,
             cxt: &mut CaseElabCxt,
         ) -> Row {
-            let pat = pat.map_or(Pattern::Any, |x| x.to_pattern(cxt));
+            let pat = pat.map_or((Pattern::Any, span), |x| x.to_pattern(cxt));
             Row {
                 columns: VecDeque::from(vec![Column { var, pat }]),
                 guard: None,
@@ -212,13 +214,13 @@ mod input {
             target_cons: &mut Option<Cons>,
         ) -> RemovedColumn {
             match row.columns.iter().position(|c| c.var == var) {
-                Some(i) => match &row.columns[i].pat {
+                Some(i) => match &row.columns[i].pat.0 {
                     Pattern::Cons(cons, _args) => match target_cons {
                         Some(tcons) => {
                             if tcons == cons {
                                 match row.columns.remove(i).unwrap() {
                                     Column {
-                                        pat: Pattern::Cons(cons, args),
+                                        pat: (Pattern::Cons(cons, args), _),
                                         ..
                                     } => RemovedColumn::Yes(cons, args),
                                     _ => unreachable!(),
@@ -231,7 +233,7 @@ mod input {
                             *target_cons = Some(cons.clone());
                             match row.columns.remove(i).unwrap() {
                                 Column {
-                                    pat: Pattern::Cons(cons, args),
+                                    pat: (Pattern::Cons(cons, args), _),
                                     ..
                                 } => RemovedColumn::Yes(cons, args),
                                 _ => unreachable!(),
@@ -239,11 +241,11 @@ mod input {
                         }
                     },
                     Pattern::Pair(_, _) => {
-                        let (a, b) = match row.columns.remove(i).unwrap() {
+                        let (a, b, span) = match row.columns.remove(i).unwrap() {
                             Column {
-                                pat: Pattern::Pair(a, b),
+                                pat: (Pattern::Pair(a, b), span),
                                 ..
-                            } => (*a, *b),
+                            } => (*a, *b, span),
                             _ => unreachable!(),
                         };
                         let (va, vb) = match ty {
@@ -266,7 +268,16 @@ mod input {
                                 (va, vb)
                             }
                             Val::Error => (self.pvar(Val::Error), self.pvar(Val::Error)),
-                            _ => unreachable!(),
+                            ty => {
+                                self.ecxt.error(
+                                    span,
+                                    TypeError::InvalidPattern(
+                                        "Tuple pattern invalid for type ".to_string(),
+                                        ty.clone().quote(row.tyvars_size, Some(&self.ecxt.mcxt)),
+                                    ),
+                                );
+                                (self.pvar(Val::Error), self.pvar(Val::Error))
+                            }
                         };
                         row.columns.push_front(Column { var: vb, pat: b });
                         row.columns.push_front(Column { var: va, pat: a });
@@ -294,8 +305,8 @@ mod input {
     }
 
     impl ast::Expr {
-        fn to_pattern(&self, cxt: &mut CaseElabCxt) -> Pattern {
-            match self {
+        fn to_pattern(&self, cxt: &mut CaseElabCxt) -> SPattern {
+            let pat = match self {
                 // TODO type constructors
                 ast::Expr::Var(v) => Pattern::Var(v.name(cxt.ecxt.db)),
                 ast::Expr::App(_) => todo!(),
@@ -310,10 +321,18 @@ mod input {
                     }
                 },
                 // TODO verify that this actually has type ()
-                ast::Expr::GroupedExpr(x) => x.expr().map_or(Pattern::Any, |x| x.to_pattern(cxt)),
+                ast::Expr::GroupedExpr(x) => {
+                    return x
+                        .expr()
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt))
+                }
                 ast::Expr::Pair(x) => {
-                    let a = x.lhs().map_or(Pattern::Any, |x| x.to_pattern(cxt));
-                    let b = x.rhs().map_or(Pattern::Any, |x| x.to_pattern(cxt));
+                    let a = x
+                        .lhs()
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
+                    let b = x
+                        .rhs()
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
                     Pattern::Pair(Box::new(a), Box::new(b))
                 }
                 // TODO are any other binops valid patterns?
@@ -325,8 +344,12 @@ mod input {
                             .any(|x| x.kind() == crate::parsing::SyntaxKind::Bar)
                     }) =>
                 {
-                    let a = x.a().map_or(Pattern::Any, |x| x.to_pattern(cxt));
-                    let b = x.a().map_or(Pattern::Any, |x| x.to_pattern(cxt));
+                    let a = x
+                        .a()
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
+                    let b = x
+                        .a()
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
                     Pattern::Or(vec![a, b])
                 }
                 ast::Expr::Binder(_) => todo!("binder patterns"),
@@ -340,13 +363,22 @@ mod input {
                     );
                     Pattern::Any
                 }
-            }
+            };
+            (pat, self.span())
         }
     }
 
     impl ast::CaseBranch {
-        pub(super) fn as_row(&self) -> (Option<ast::Expr>, Option<ast::Expr>) {
-            (self.pat(), self.body().and_then(|x| x.expr()))
+        pub(super) fn as_row(&self) -> (Option<ast::Expr>, RelSpan, Option<ast::Expr>) {
+            (
+                self.pat(),
+                self.span().start
+                    ..self
+                        .body()
+                        .map(|x| x.span().start)
+                        .unwrap_or(self.span().end),
+                self.body().and_then(|x| x.expr()),
+            )
         }
     }
 }
@@ -458,9 +490,33 @@ impl CaseElabCxt<'_, '_> {
                         &mut self.ecxt,
                         &CheckReason::Condition,
                     );
-                    Dec::Guard(guard, row.body, Box::new(self.compile_rows(rows)))
+                    let mut size = self.ecxt.size();
+                    let params = self.env_tys[&row.body]
+                        .iter()
+                        .map(|(n, ty)| Par {
+                            name: *n,
+                            ty: {
+                                let ty = ty.clone().quote(size, None);
+                                size += 1;
+                                ty
+                            },
+                        })
+                        .collect();
+                    Dec::Guard(
+                        EClos {
+                            class: Lam(Expl),
+                            params,
+                            body: Box::new(guard),
+                        },
+                        row.body,
+                        Box::new(self.compile_rows(rows)),
+                    )
                 }
-                None => Dec::Success(row.body),
+                None => {
+                    // We still want type errors in unreachable rows!
+                    let _ = self.compile_rows(rows);
+                    Dec::Success(row.body)
+                }
             };
             return DecNode {
                 // TODO is this the correct way to handle ty_ipats or should it be higher up in the tree?
@@ -475,7 +531,7 @@ impl CaseElabCxt<'_, '_> {
         if rows.iter().any(|x| {
             x.columns
                 .iter()
-                .any(|x| x.var == switch_var && matches!(x.pat, input::Pattern::Or(_)))
+                .any(|x| x.var == switch_var && matches!(x.pat.0, input::Pattern::Or(_)))
         }) {
             rows = rows
                 .to_vec()
@@ -485,14 +541,14 @@ impl CaseElabCxt<'_, '_> {
                         .columns
                         .iter()
                         .find(|x| x.var == switch_var)
-                        .map(|x| &x.pat)
+                        .map(|x| &x.pat.0)
                     {
                         Some(input::Pattern::Or(v)) => (0..v.len())
                             .map(|i| {
                                 let mut x = x.clone();
                                 for c in x.columns.iter_mut() {
                                     if c.var == switch_var {
-                                        match &mut c.pat {
+                                        match &mut c.pat.0 {
                                             input::Pattern::Or(v) => {
                                                 c.pat = v.remove(i);
                                             }
@@ -579,35 +635,29 @@ impl CaseElabCxt<'_, '_> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CaseRhs<T: IsTerm> {
-    bound: usize,
-    body: T::Clos,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CaseOf<T: IsTerm> {
     svar: PVar,
     dec: DecNode<T>,
-    rhs: Vec<CaseRhs<T>>,
+    rhs: Vec<T::Clos>,
 }
 impl CaseOf<Expr> {
-    pub(super) fn make_simple_args(args: &[Name], body: Expr, size: Size) -> CaseOf<Expr> {
+    pub(super) fn make_simple_args(body: EClos) -> CaseOf<Expr> {
         let mut var_num = 0;
         let mut pvar = || {
             var_num += 1;
             PVar(var_num)
         };
-        let (mut ipats, vrest) =
-            args.iter()
-                .take(args.len() - 1)
-                .fold((Vec::new(), PVar(0)), |(mut vec, var), name| {
-                    let va = pvar();
-                    let vb = pvar();
-                    vec.push((var, IPat::Pair(va, vb)));
-                    vec.push((va, IPat::Var(*name)));
-                    (vec, vb)
-                });
-        if let Some(name) = args.last() {
+        let (mut ipats, vrest) = body.params.iter().take(body.params.len() - 1).fold(
+            (Vec::new(), PVar(0)),
+            |(mut vec, var), Par { name, .. }| {
+                let va = pvar();
+                let vb = pvar();
+                vec.push((var, IPat::Pair(va, vb)));
+                vec.push((va, IPat::Var(*name)));
+                (vec, vb)
+            },
+        );
+        if let Some(Par { name, .. }) = body.params.last() {
             ipats.push((vrest, IPat::Var(*name)));
         }
 
@@ -617,20 +667,17 @@ impl CaseOf<Expr> {
                 ipats,
                 dec: Dec::Success(Body(0)),
             },
-            rhs: vec![CaseRhs {
-                bound: args.len(),
-                body,
-            }],
+            rhs: vec![body],
         }
     }
 }
 
 pub(super) fn elab_case(
     sty: Val,
-    branches: impl IntoIterator<Item = (Option<ast::Expr>, Option<ast::Expr>)>,
+    branches: impl IntoIterator<Item = (Option<ast::Expr>, RelSpan, Option<ast::Expr>)>,
     rty: &mut Option<(Val, CheckReason)>,
     ecxt: &mut Cxt,
-) -> CaseOf<Expr> {
+) -> (CaseOf<Expr>, Expr) {
     let mut cxt = CaseElabCxt {
         ecxt,
         env_tys: HashMap::new(),
@@ -640,7 +687,7 @@ pub(super) fn elab_case(
     let svar = cxt.pvar(sty);
     let rows = branches
         .into_iter()
-        .map(|(pat, body)| input::Row::new(svar, pat, body, &mut cxt))
+        .map(|(pat, span, body)| input::Row::new(svar, pat, span, body, &mut cxt))
         .collect();
     let dec = cxt.compile_rows(rows);
     let mut rhs = Vec::new();
@@ -648,10 +695,15 @@ pub(super) fn elab_case(
         match cxt.env_tys.get(&Body(i)) {
             Some(env) => {
                 cxt.ecxt.push();
+                let mut params = Vec::new();
                 for (name, ty) in env {
+                    params.push(Par {
+                        name: *name,
+                        ty: ty.clone().quote(cxt.ecxt.size(), None),
+                    });
                     cxt.ecxt.define_local(*name, ty.clone(), None);
                 }
-                let expr = match rty {
+                let body = match rty {
                     Some((rty, reason)) => {
                         body.map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, reason))
                     }
@@ -664,9 +716,11 @@ pub(super) fn elab_case(
                         None => Expr::Error,
                     },
                 };
-                rhs.push(CaseRhs {
-                    bound: env.len(),
-                    body: expr,
+                cxt.ecxt.pop();
+                rhs.push(EClos {
+                    class: Lam(Expl),
+                    params,
+                    body: Box::new(body),
                 });
             }
             None => {
@@ -674,7 +728,23 @@ pub(super) fn elab_case(
             }
         }
     }
-    CaseOf { dec, svar, rhs }
+    (
+        CaseOf { dec, svar, rhs },
+        // TODO quote with scope constraint
+        // basically we need to reject this:
+        //      (x: (a: Type, a)) => case x of
+        //          (_, x) => x
+        // (technically also possible is to type it as
+        //      (x: (a: Type, a)) -> case x of
+        //          (a, _) => a
+        // but that falls apart when x is complicated; best to let the user check that if necessary.)
+        //
+        // it should also attempt to do e.g.
+        //      ((a: I32, b: I32) => a + b) x
+        //      : case x of { (a, b) => I32 }
+        //      --> I32
+        rty.as_ref().unwrap().0.clone().quote(ecxt.size(), None),
+    )
 }
 
 impl ast::Case {
@@ -682,18 +752,18 @@ impl ast::Case {
         &self,
         rty: &mut Option<(Val, CheckReason)>,
         ecxt: &mut Cxt,
-    ) -> (Expr, CaseOf<Expr>) {
+    ) -> (Expr, CaseOf<Expr>, Expr) {
         let (scrutinee, sty) = self
             .scrutinee()
             .map(|x| x.infer(ecxt))
             .unwrap_or((Expr::Error, Val::Error));
-        let case_of = elab_case(
+        let (case_of, ty) = elab_case(
             sty,
             self.branches().into_iter().map(|x| x.as_row()),
             rty,
             ecxt,
         );
-        (scrutinee, case_of)
+        (scrutinee, case_of, ty)
     }
 }
 
@@ -802,14 +872,10 @@ impl CaseOf<Expr> {
                 Doc::none()
                     .hardline()
                     .chain(Doc::intersperse(
-                        self.rhs.iter().enumerate().map(|(i, x)| {
-                            Doc::start(i)
-                                .add('(', ())
-                                .add(x.bound, ())
-                                .add("):", ())
-                                .space()
-                                .chain(x.body.pretty(db))
-                        }),
+                        self.rhs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, x)| Doc::start(i).add(" = ", ()).chain(x.pretty(db))),
                         Doc::none().hardline(),
                     ))
                     .indent(),
@@ -818,148 +884,100 @@ impl CaseOf<Expr> {
     }
 }
 
-impl Dec<Expr> {
-    fn eval(self, env: &mut Env) -> Dec<Val> {
+impl<T: IsTerm> Dec<T> {
+    fn visit_mut<'a>(&'a mut self, func: &mut impl FnMut(&'a mut T::Clos)) {
         match self {
-            Dec::Success(b) => Dec::Success(b),
-            Dec::Failure => Dec::Failure,
-            Dec::Guard(x, b, rest) => Dec::Guard(
-                Clos {
-                    // TODO new class
-                    class: Lam(Expl),
-                    params: Vec::new(),
-                    body: x,
-                    env: env.clone(),
-                },
-                b,
-                Box::new(rest.eval(env)),
-            ),
-            Dec::Switch(v, branches, rest) => Dec::Switch(
-                v,
-                branches.into_iter().map(|x| x.eval(env)).collect(),
-                rest.map(|x| Box::new(x.eval(env))),
-            ),
-        }
-    }
-}
-impl DecNode<Expr> {
-    fn eval(self, env: &mut Env) -> DecNode<Val> {
-        let DecNode { ipats, dec } = self;
-        let state = env.state();
-        for (_, p) in &ipats {
-            match p {
-                IPat::Pair(_, _) => (),
-                // Keep the size of `env` correct
-                IPat::Var(_) => env.push(None),
+            Dec::Success(_) => (),
+            Dec::Failure => (),
+            Dec::Guard(guard, _, rest) => {
+                func(guard);
+                rest.dec.visit_mut(func);
+            }
+            Dec::Switch(_, branches, rest) => {
+                for i in branches {
+                    i.then.dec.visit_mut(func);
+                }
+                if let Some(rest) = rest {
+                    rest.dec.visit_mut(func);
+                }
             }
         }
-        let node = DecNode {
-            ipats,
-            dec: dec.eval(env),
-        };
-        env.reset(state);
-        node
     }
-}
-impl Branch<Expr> {
-    fn eval(self, env: &mut Env) -> Branch<Val> {
-        let Branch { cons, args, then } = self;
-        Branch {
-            cons,
-            args,
-            then: Box::new(then.eval(env)),
+    fn visit<'a>(&'a self, func: &mut impl FnMut(&'a T::Clos)) {
+        match self {
+            Dec::Success(_) => (),
+            Dec::Failure => (),
+            Dec::Guard(guard, _, rest) => {
+                func(guard);
+                rest.dec.visit(func);
+            }
+            Dec::Switch(_, branches, rest) => {
+                for i in branches {
+                    i.then.dec.visit(func);
+                }
+                if let Some(rest) = rest {
+                    rest.dec.visit(func);
+                }
+            }
         }
     }
 }
-impl CaseOf<Expr> {
-    pub fn eval(self, env: &mut Env) -> CaseOf<Val> {
-        let CaseOf { svar, dec, rhs } = self;
-        CaseOf {
-            svar,
-            dec: dec.eval(env),
-            rhs: rhs
-                .into_iter()
-                .map(|CaseRhs { bound, body }| CaseRhs {
-                    bound,
-                    body: Clos {
-                        // TODO new class
-                        class: Lam(Expl),
-                        params: Vec::new(),
-                        body,
-                        env: {
-                            let mut env = env.clone();
-                            for _ in 0..bound {
-                                env.push(None);
-                            }
-                            env
-                        },
-                    },
-                })
-                .collect(),
+impl<T: IsTerm> CaseOf<T> {
+    pub fn visit_mut<'a>(&'a mut self, mut func: impl FnMut(&'a mut T::Clos)) {
+        for i in &mut self.rhs {
+            func(i);
         }
+        self.dec.dec.visit_mut(&mut func);
+    }
+    pub fn visit<'a>(&'a self, mut func: impl FnMut(&'a T::Clos)) {
+        // pub fn visit(&mut self, mut func: impl FnMut(&T::Clos)) {
+        for i in &self.rhs {
+            func(i);
+        }
+        self.dec.dec.visit(&mut func);
     }
 }
 
-impl Dec<Val> {
-    fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Dec<Expr> {
+impl<T: IsTerm> Dec<T> {
+    fn map<U: IsTerm>(self, func: &mut impl FnMut(T::Clos) -> U::Clos) -> Dec<U> {
         match self {
             Dec::Success(b) => Dec::Success(b),
             Dec::Failure => Dec::Failure,
-            Dec::Guard(x, b, rest) => Dec::Guard(
-                x.quote(size, inline_metas),
-                b,
-                Box::new(rest.quote(size, inline_metas)),
-            ),
+            Dec::Guard(x, b, rest) => Dec::Guard(func(x), b, Box::new(rest.map(func))),
             Dec::Switch(v, branches, rest) => Dec::Switch(
                 v,
-                branches
-                    .into_iter()
-                    .map(|x| x.quote(size, inline_metas))
-                    .collect(),
-                rest.map(|x| Box::new(x.quote(size, inline_metas))),
+                branches.into_iter().map(|x| x.map(func)).collect(),
+                rest.map(|x| Box::new(x.map(func))),
             ),
         }
     }
 }
-impl DecNode<Val> {
-    fn quote(self, mut size: Size, inline_metas: Option<&MetaCxt>) -> DecNode<Expr> {
+impl<T: IsTerm> DecNode<T> {
+    fn map<U: IsTerm>(self, func: &mut impl FnMut(T::Clos) -> U::Clos) -> DecNode<U> {
         let DecNode { ipats, dec } = self;
-        for (_, p) in &ipats {
-            match p {
-                IPat::Pair(_, _) => (),
-                // Keep the size correct
-                IPat::Var(_) => size += 1,
-            }
-        }
         DecNode {
             ipats,
-            dec: dec.quote(size, inline_metas),
+            dec: dec.map(func),
         }
     }
 }
-impl Branch<Val> {
-    fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Branch<Expr> {
+impl<T: IsTerm> Branch<T> {
+    fn map<U: IsTerm>(self, func: &mut impl FnMut(T::Clos) -> U::Clos) -> Branch<U> {
         let Branch { cons, args, then } = self;
         Branch {
             cons,
             args,
-            then: Box::new(then.quote(size, inline_metas)),
+            then: Box::new(then.map(func)),
         }
     }
 }
-impl CaseOf<Val> {
-    pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> CaseOf<Expr> {
+impl<T: IsTerm> CaseOf<T> {
+    pub fn map<U: IsTerm>(self, mut func: impl FnMut(T::Clos) -> U::Clos) -> CaseOf<U> {
         let CaseOf { svar, dec, rhs } = self;
         CaseOf {
             svar,
-            dec: dec.quote(size, inline_metas),
-            rhs: rhs
-                .into_iter()
-                .map(|CaseRhs { bound, body }| CaseRhs {
-                    bound,
-                    body: body.quote(size + bound, inline_metas),
-                })
-                .collect(),
+            dec: dec.map(&mut func),
+            rhs: rhs.into_iter().map(|x| func(x)).collect(),
         }
     }
 }

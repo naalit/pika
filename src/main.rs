@@ -48,6 +48,7 @@ impl Server {
                 TextDocumentSyncKind::INCREMENTAL,
             )),
             definition_provider: Some(OneOf::Left(true)),
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
             ..Default::default()
         })
         .unwrap();
@@ -94,12 +95,56 @@ impl Server {
         }
 
         match &*msg.method {
+            request::HoverRequest::METHOD => {
+                let (id, params): (_, lsp_types::HoverParams) =
+                    msg.extract(request::HoverRequest::METHOD)?;
+                let file = self.db.file_id(FileLoc::Url(
+                    params.text_document_position_params.text_document.uri,
+                ));
+                let pos = params.text_document_position_params.position;
+                let source = self.source.get(&file).unwrap();
+                let pos = source.line_to_char(pos.line as usize) as u32 + pos.character;
+                if let Some(split) = self.db.split_at(file, pos) {
+                    let aspan = self.db.split_span(file, split).unwrap();
+                    if let Some((ty, span)) = crate::elab::ide_support::hover_type(
+                        &self.db,
+                        file,
+                        split,
+                        pos - aspan.1.start,
+                    ) {
+                        let range = aspan.add(span).lsp_range(&self.source);
+                        let result = Hover {
+                            contents: HoverContents::Scalar(MarkedString::LanguageString(
+                                LanguageString {
+                                    language: "pika".into(),
+                                    value: ty.to_string(false),
+                                },
+                            )),
+                            range: Some(range),
+                        };
+                        let result = serde_json::to_value(&result)?;
+                        let resp = lsp::Response {
+                            id,
+                            result: Some(result),
+                            error: None,
+                        };
+                        self.connection.sender.send(lsp::Message::Response(resp))?;
+                        return Ok(());
+                    }
+                }
+                let resp = lsp::Response {
+                    id,
+                    result: Some(serde_json::Value::Null),
+                    error: None,
+                };
+                self.connection.sender.send(lsp::Message::Response(resp))?;
+            }
             GotoDefinition::METHOD => {
                 eprintln!("Handling GoToDefinition");
                 let (id, params): (_, GotoDefinitionParams) =
-                    msg.extract(GotoDefinition::METHOD)?.1;
+                    msg.extract(GotoDefinition::METHOD)?;
                 // example go to definition handler
-                let result = Some(GotoDefinitionResponse::Array(Vec::new()));
+                let result = GotoDefinitionResponse::Array(Vec::new());
                 let result = serde_json::to_value(&result)?;
                 let resp = lsp::Response {
                     id,

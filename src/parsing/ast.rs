@@ -4,23 +4,25 @@ pub trait AstNode: Sized {
     fn cast(syntax: SyntaxNode) -> Option<Self>;
     fn syntax(&self) -> &SyntaxNode;
     fn span(&self) -> RelSpan {
-        // If possible, don't include surrounding whitespace in the span
-        let start = self
-            .syntax()
-            .children_with_tokens()
-            .find(|x| x.as_token().map_or(true, |x| !x.kind().is_trivia()))
-            .map(|x| x.text_range().start());
-        let end = self
-            .syntax()
-            .children_with_tokens()
-            .filter(|x| x.as_token().map_or(true, |x| !x.kind().is_trivia()))
-            .map(|x| x.text_range().end())
-            .last();
-        if start.is_none() || end.is_none() {
-            self.syntax().text_range().into()
-        } else {
-            start.unwrap().into()..end.unwrap().into()
-        }
+        node_span(self.syntax())
+    }
+}
+
+pub fn node_span(node: &SyntaxNode) -> RelSpan {
+    // If possible, don't include surrounding whitespace in the span
+    let start = node
+        .children_with_tokens()
+        .find(|x| x.as_token().map_or(true, |x| !x.kind().is_trivia()))
+        .map(|x| x.text_range().start());
+    let end = node
+        .children_with_tokens()
+        .filter(|x| x.as_token().map_or(true, |x| !x.kind().is_trivia()))
+        .map(|x| x.text_range().end())
+        .last();
+    if start.is_none() || end.is_none() {
+        node.text_range().into()
+    } else {
+        start.unwrap().into()..end.unwrap().into()
     }
 }
 

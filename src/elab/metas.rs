@@ -111,7 +111,7 @@ impl MetaSolveError {
                         Elim::App(Impl, _) => "implicit application",
                         Elim::App(_, _) => unreachable!(),
                         Elim::Member(_) => "member access",
-                        Elim::Case(_) => "case-of",
+                        Elim::Case(_, _) => "case-of",
                     },
                     (),
                 ),
@@ -183,7 +183,7 @@ impl PartialRename {
             }
             // only right-associative pairs are allowed
             // TODO when box patterns are stabilized switch to that instead of nested matches!()
-            Val::Pair(a, b)
+            Val::Pair(a, b, _)
                 if matches!(
                         &*a,
                         Val::Neutral(n)
@@ -238,6 +238,14 @@ impl MetaCxt {
                 MetaEntry::Unsolved { .. } => false,
             })
             .unwrap_or(false)
+    }
+
+    pub fn meta_ty(&self, meta: Meta) -> Option<Val> {
+        self.metas.get(meta.0 as usize).and_then(|x| match x {
+            // TODO maybe store type of solved metas?
+            MetaEntry::Solved { .. } => None,
+            MetaEntry::Unsolved { bounds, .. } => Some(bounds.ty.clone()),
+        })
     }
 
     pub fn lookup_val(&self, meta: Meta) -> Option<Val> {
@@ -338,11 +346,11 @@ impl MetaCxt {
         )?;
 
         if let Some(params) = params {
-            solution = Expr::Fun {
+            solution = Expr::Fun(EClos {
                 class: Lam(Expl),
                 params,
                 body: Box::new(solution),
-            }
+            })
         }
 
         self.metas[meta.0 as usize] = MetaEntry::Solved {
@@ -368,7 +376,7 @@ impl Elim<Expr> {
                 x.check_solution(cxt, mode, s_from, s_to)?;
             }
             Elim::Member(_) => todo!(),
-            Elim::Case(_) => todo!(),
+            Elim::Case(_, _) => todo!(),
         }
         Ok(())
     }
@@ -383,6 +391,7 @@ impl Expr {
         s_to: Size,
     ) -> Result<(), MetaSolveError> {
         match self {
+            Expr::Spanned(_, x) => x.check_solution(cxt, mode, s_from, s_to)?,
             Expr::Head(h) => match h {
                 Head::Var(Var::Local(n, i)) if mode.should_rename() => {
                     match mode.renamed(i.lvl(s_from)) {
@@ -420,15 +429,16 @@ impl Expr {
                 a.check_solution(cxt, mode, s_from, s_to)?;
                 b.check_solution(cxt, mode, s_from, s_to)?;
             }
-            Expr::Pair(a, b) => {
+            Expr::Pair(a, b, t) => {
                 a.check_solution(cxt, mode, s_from, s_to)?;
                 b.check_solution(cxt, mode, s_from, s_to)?;
+                t.check_solution(cxt, mode, s_from, s_to)?;
             }
-            Expr::Fun {
+            Expr::Fun(EClos {
                 class: _,
                 params,
                 body,
-            } => {
+            }) => {
                 let (mut s_from, mut s_to) = (s_from, s_to);
                 for i in params.iter_mut() {
                     i.ty.check_solution(cxt, mode, s_from, s_to)?;

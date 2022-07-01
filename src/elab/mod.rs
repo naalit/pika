@@ -1,6 +1,7 @@
 use crate::{common::*, intern_key};
 
 mod cxt;
+pub mod ide_support;
 mod metas;
 mod pattern;
 mod term;
@@ -147,6 +148,7 @@ pub enum TypeError {
     NotFound(Name),
     Unify(unify::UnifyError),
     NotFunction(Expr),
+    InvalidPattern(String, Expr),
     Other(String),
 }
 impl TypeError {
@@ -161,6 +163,13 @@ impl TypeError {
             ),
             TypeError::Unify(e) => return e.to_error(span, db),
             TypeError::Other(msg) => (Doc::start(&msg), Doc::start(&msg), None),
+            TypeError::InvalidPattern(msg, ty) => (
+                Doc::start("Invalid pattern: ")
+                    .add(msg, ())
+                    .chain(ty.pretty(db)),
+                Doc::start(msg),
+                None,
+            ),
             TypeError::NotFunction(ty) => (
                 Doc::start("Expected function type in application, got '")
                     .chain(ty.pretty(db))
@@ -389,18 +398,18 @@ impl ast::Def {
                 let mut ty = if explicit.is_empty() {
                     bty
                 } else {
-                    Expr::Fun {
+                    Expr::Fun(EClos {
                         class: Pi(Expl),
                         params: explicit.clone(),
                         body: Box::new(bty),
-                    }
+                    })
                 };
                 if !implicit.is_empty() {
-                    ty = Expr::Fun {
+                    ty = Expr::Fun(EClos {
                         class: Pi(Impl),
                         params: implicit.clone(),
                         body: Box::new(ty),
-                    };
+                    });
                 }
                 let ty = ty.eval(&mut cxt.env());
 
@@ -424,7 +433,7 @@ impl ast::Def {
                         Some(Definition {
                             name,
                             ty: Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
-                            body: Box::new(body),
+                            body: Box::new(Expr::Spanned(x.body().unwrap().span(), Box::new(body))),
                         })
                     }
                     (Some(name), Some(pty)) => {
@@ -438,8 +447,11 @@ impl ast::Def {
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
                         Some(Definition {
                             name,
-                            ty: Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
-                            body: Box::new(body),
+                            ty: Box::new(Expr::Spanned(
+                                pty.span(),
+                                Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
+                            )),
+                            body: Box::new(Expr::Spanned(x.body().unwrap().span(), Box::new(body))),
                         })
                     }
                     (None, _) => None,
@@ -503,35 +515,35 @@ impl ast::Def {
                 let mut ty = if explicit.is_empty() {
                     bty
                 } else {
-                    Expr::Fun {
+                    Expr::Fun(EClos {
                         class: Pi(Expl),
                         params: explicit.clone(),
                         body: Box::new(bty),
-                    }
+                    })
                 };
                 if !implicit.is_empty() {
-                    ty = Expr::Fun {
+                    ty = Expr::Fun(EClos {
                         class: Pi(Impl),
                         params: implicit.clone(),
                         body: Box::new(ty),
-                    };
+                    });
                 }
                 let ty = ty.eval(&mut cxt.env());
                 let mut term = if explicit.is_empty() {
                     body
                 } else {
-                    Expr::Fun {
+                    Expr::Fun(EClos {
                         class: Lam(Expl),
                         params: explicit,
                         body: Box::new(body),
-                    }
+                    })
                 };
                 if !implicit.is_empty() {
-                    term = Expr::Fun {
+                    term = Expr::Fun(EClos {
                         class: Lam(Impl),
                         params: implicit,
                         body: Box::new(term),
-                    };
+                    });
                 }
 
                 Some(Definition {
@@ -548,7 +560,7 @@ impl ast::Def {
 }
 
 impl ast::Lit {
-    pub(self) fn to_literal(&self, cxt: &Cxt) -> Result<Literal, String> {
+    pub(self) fn to_literal(&self, cxt: &mut Cxt) -> Result<Literal, String> {
         if let Some(l) = self.string() {
             // Process escape sequences to get the string's actual contents
             // This work is also done by the lexer, which then throws it away;
@@ -585,8 +597,20 @@ impl ast::Lit {
         } else if let Some(l) = self.int().or(self.float()) {
             let num = lex_number(l.text()).map_err(|e| format!("Invalid literal: {}", e))?;
             match num {
-                NumLiteral::IPositive(i) => Ok(Literal::Int(false, i)),
-                NumLiteral::INegative(i) => Ok(Literal::Int(true, i as u64)),
+                NumLiteral::IPositive(i) => {
+                    let meta =
+                        cxt.mcxt
+                            .new_meta(cxt.size(), MetaBounds::int_type(false, i), self.span());
+                    Ok(Literal::Int(i, Err((false, meta))))
+                }
+                NumLiteral::INegative(i) => {
+                    let meta = cxt.mcxt.new_meta(
+                        cxt.size(),
+                        MetaBounds::int_type(true, i as u64),
+                        self.span(),
+                    );
+                    Ok(Literal::Int(i as u64, Err((true, meta))))
+                }
                 NumLiteral::Float(_) => todo!(),
             }
         } else {
@@ -719,31 +743,35 @@ impl ast::Pair {
                         })?
                         .check(Val::Type, cxt, &CheckReason::UsedAsType);
                     cxt.pop();
-                    Ok(Expr::Fun {
+                    Ok(Expr::Fun(EClos {
                         class: Sigma,
                         params: vec![Par { name, ty }],
                         body: Box::new(body),
-                    })
+                    }))
                 } else {
                     // We have a more complicated pattern on the lhs, so move it to a case on the rhs
                     let name = cxt.db.name("_".to_string());
                     cxt.push();
                     cxt.define_local(name, vty.clone(), None);
-                    let case = self::pattern::elab_case(
+                    let (case, cty) = self::pattern::elab_case(
                         vty,
-                        std::iter::once((x.pat().and_then(|x| x.expr()), self.rhs())),
+                        std::iter::once((
+                            x.pat().and_then(|x| x.expr()),
+                            x.pat().map(|x| x.span()).unwrap_or(x.span()),
+                            self.rhs(),
+                        )),
                         &mut Some((Val::Type, CheckReason::UsedAsType)),
                         cxt,
                     );
                     cxt.pop();
-                    Ok(Expr::Fun {
+                    Ok(Expr::Fun(EClos {
                         class: Sigma,
                         params: vec![Par { name, ty }],
                         body: Box::new(Expr::Elim(
                             Box::new(Expr::var(Var::Local(name, Idx::zero()))),
-                            Box::new(Elim::Case(case)),
+                            Box::new(Elim::Case(case, cty)),
                         )),
-                    })
+                    }))
                 }
             }
             Some(a) => {
@@ -761,11 +789,11 @@ impl ast::Pair {
                     })?
                     .check(Val::Type, cxt, &CheckReason::UsedAsType);
                 cxt.pop();
-                Ok(Expr::Fun {
+                Ok(Expr::Fun(EClos {
                     class: Sigma,
                     params: vec![Par { name, ty: a }],
                     body: Box::new(b),
-                })
+                }))
             }
             None => Err(TypeError::Other(format!(
                 "Missing left-hand side type in pair type"
@@ -789,11 +817,11 @@ impl<'b> ParamTys<'_, 'b> {
                 let (t, vec) =
                     it.enumerate()
                         .fold((Some(t), Vec::new()), |(t, mut vec), (i, x)| match t {
-                            Some(Expr::Fun {
+                            Some(Expr::Fun(EClos {
                                 class: Sigma,
                                 mut params,
                                 body,
-                            }) if i + 1 != len => {
+                            })) if i + 1 != len => {
                                 assert_eq!(params.len(), 1);
                                 let ty = params.pop().unwrap().ty;
                                 vec.push((Some(ty), vec![x]));
@@ -920,6 +948,7 @@ impl ast::Expr {
                 // Check pair against sigma and lambda against pi
                 (ast::Expr::Pair(x), Val::Fun(clos)) if clos.class == Sigma => {
                     assert_eq!(clos.params.len(), 1);
+                    let ety = clos.clone().quote(cxt.size(), None);
                     let a = x
                         .lhs()
                         .ok_or_else(|| {
@@ -935,7 +964,11 @@ impl ast::Expr {
                             TypeError::Other(format!("Missing pair right-hand side value"))
                         })?
                         .check(bty, cxt, reason);
-                    Ok(Expr::Pair(Box::new(a), Box::new(b)))
+                    Ok(Expr::Pair(
+                        Box::new(a),
+                        Box::new(b),
+                        Box::new(Expr::Fun(ety)),
+                    ))
                 }
                 (ast::Expr::Lam(x), Val::Fun(clos)) if matches!(clos.class, Pi(_)) => {
                     // [a, b] [c, d] (e, f) => ...
@@ -1005,18 +1038,18 @@ impl ast::Expr {
                     let mut term = if explicit.is_empty() {
                         body
                     } else {
-                        Expr::Fun {
+                        Expr::Fun(EClos {
                             class: Lam(Expl),
                             params: explicit,
                             body: Box::new(body),
-                        }
+                        })
                     };
                     if !implicit.is_empty() {
-                        term = Expr::Fun {
+                        term = Expr::Fun(EClos {
                             class: Lam(Impl),
                             params: implicit,
                             body: Box::new(term),
-                        };
+                        });
                     }
                     Ok(term)
                 }
@@ -1024,8 +1057,11 @@ impl ast::Expr {
                 // Propagate through case
                 (ast::Expr::Case(case), ty) => {
                     let mut rty = Some((ty, reason.clone()));
-                    let (scrutinee, case) = case.elaborate(&mut rty, cxt);
-                    Ok(Expr::Elim(Box::new(scrutinee), Box::new(Elim::Case(case))))
+                    let (scrutinee, case, cty) = case.elaborate(&mut rty, cxt);
+                    Ok(Expr::Elim(
+                        Box::new(scrutinee),
+                        Box::new(Elim::Case(case, cty)),
+                    ))
                 }
 
                 (_, ty) => {
@@ -1037,7 +1073,7 @@ impl ast::Expr {
         };
         // TODO auto-applying implicits (probably? only allowing them on function calls is also an option to consider)
         match result() {
-            Ok(x) => x,
+            Ok(x) => Expr::Spanned(self.span(), Box::new(x)),
             Err(e) => {
                 cxt.error(self.span(), e);
                 Expr::Error
@@ -1129,35 +1165,35 @@ impl ast::Expr {
                         let mut ty = if explicit.is_empty() {
                             bty
                         } else {
-                            Expr::Fun {
+                            Expr::Fun(EClos {
                                 class: Pi(Expl),
                                 params: explicit.clone(),
                                 body: Box::new(bty),
-                            }
+                            })
                         };
                         if !implicit.is_empty() {
-                            ty = Expr::Fun {
+                            ty = Expr::Fun(EClos {
                                 class: Pi(Impl),
                                 params: implicit.clone(),
                                 body: Box::new(ty),
-                            };
+                            });
                         }
                         let ty = ty.eval(&mut cxt.env());
                         let mut term = if explicit.is_empty() {
                             body
                         } else {
-                            Expr::Fun {
+                            Expr::Fun(EClos {
                                 class: Lam(Expl),
                                 params: explicit,
                                 body: Box::new(body),
-                            }
+                            })
                         };
                         if !implicit.is_empty() {
-                            term = Expr::Fun {
+                            term = Expr::Fun(EClos {
                                 class: Lam(Impl),
                                 params: implicit,
                                 body: Box::new(term),
-                            };
+                            });
                         }
 
                         (term, ty)
@@ -1199,18 +1235,18 @@ impl ast::Expr {
                         let mut term = if explicit.is_empty() {
                             body
                         } else {
-                            Expr::Fun {
+                            Expr::Fun(EClos {
                                 class: Pi(Expl),
                                 params: explicit.clone(),
                                 body: Box::new(body),
-                            }
+                            })
                         };
                         if !implicit.is_empty() {
-                            term = Expr::Fun {
+                            term = Expr::Fun(EClos {
                                 class: Pi(Impl),
                                 params: implicit.clone(),
                                 body: Box::new(term),
-                            };
+                            });
                         }
                         (term, Val::Type)
                     }
@@ -1248,6 +1284,7 @@ impl ast::Expr {
                                     })
                                     .collect();
                                 let mut targs: Vec<Expr> = Vec::new();
+                                let par_ty = clos.par_ty();
                                 let rty = clos.elab_with(|aty| match args.pop_front() {
                                     Some(arg) => match arg {
                                         Ok(arg) => {
@@ -1285,12 +1322,31 @@ impl ast::Expr {
                                         Val::var(Var::Meta(meta))
                                     }
                                 });
+                                let ty = par_ty.quote(cxt.size(), None);
                                 let arg = targs
                                     .into_iter()
-                                    .rfold(None, |a, b| match a {
-                                        Some(a) => Some(Expr::Pair(Box::new(a), Box::new(b))),
-                                        None => Some(b),
+                                    .rfold((None, ty), |(a, ty), b| match a {
+                                        Some(a) => {
+                                            let p = Some(Expr::Pair(
+                                                Box::new(a),
+                                                Box::new(b),
+                                                Box::new(ty.clone()),
+                                            ));
+                                            let ty = match ty {
+                                                Expr::Fun(EClos {
+                                                    class: Sigma, body, ..
+                                                }) => {
+                                                    let mut env = cxt.env();
+                                                    env.push(None);
+                                                    body.eval_quote(&mut env, cxt.size(), None)
+                                                }
+                                                _ => Expr::Error,
+                                            };
+                                            (p, ty)
+                                        }
+                                        None => (Some(b), ty),
                                     })
+                                    .0
                                     .unwrap();
                                 lhs = Expr::Elim(Box::new(lhs), Box::new(Elim::App(Impl, arg)));
                                 lhs_ty = rty;
@@ -1344,10 +1400,10 @@ impl ast::Expr {
                     }
                     ast::Expr::Case(case) => {
                         let mut rty = None;
-                        let (scrutinee, case) = case.elaborate(&mut rty, cxt);
+                        let (scrutinee, case, cty) = case.elaborate(&mut rty, cxt);
                         let rty = rty.map(|(x, _)| x).unwrap_or(Val::Error);
                         (
-                            Expr::Elim(Box::new(scrutinee), Box::new(Elim::Case(case))),
+                            Expr::Elim(Box::new(scrutinee), Box::new(Elim::Case(case, cty))),
                             rty,
                         )
                     }
@@ -1355,14 +1411,10 @@ impl ast::Expr {
                         Ok(l) => (
                             Expr::Lit(l),
                             match l {
-                                Literal::Int(signed, val) => {
-                                    let meta = cxt.mcxt.new_meta(
-                                        cxt.size(),
-                                        MetaBounds::int_type(signed, val),
-                                        self.span(),
-                                    );
-                                    Val::var(Var::Meta(meta))
-                                }
+                                Literal::Int(_, ty) => match ty {
+                                    Ok(t) => Val::var(Var::Builtin(Builtin::IntType(t))),
+                                    Err((_, m)) => Val::var(Var::Meta(m)),
+                                },
                                 Literal::F64(_) => todo!(),
                                 Literal::F32(_) => todo!(),
                                 Literal::String(_) => Val::var(Var::Builtin(Builtin::StringType)),
@@ -1409,7 +1461,23 @@ impl ast::Expr {
                             (
                                 Expr::Elim(
                                     Box::new(Expr::var(Var::Builtin(Builtin::ArithOp(op)))),
-                                    Box::new(Elim::App(Expl, Expr::Pair(Box::new(a), Box::new(b)))),
+                                    Box::new(Elim::App(
+                                        Expl,
+                                        Expr::Pair(
+                                            Box::new(a),
+                                            Box::new(b),
+                                            Box::new(Expr::Fun(EClos {
+                                                class: Sigma,
+                                                params: vec![Par {
+                                                    name: cxt.db.name("_".into()),
+                                                    ty: ty.clone().quote(cxt.size(), None),
+                                                }],
+                                                body: Box::new(
+                                                    ty.clone().quote(cxt.size().inc(), None),
+                                                ),
+                                            })),
+                                        ),
+                                    )),
                                 ),
                                 ty,
                             )
@@ -1431,11 +1499,29 @@ impl ast::Expr {
                                         tok
                                     ))
                                 })?
-                                .check(ty, cxt, &CheckReason::MustMatch(x.a().unwrap().span()));
+                                .check(
+                                    ty.clone(),
+                                    cxt,
+                                    &CheckReason::MustMatch(x.a().unwrap().span()),
+                                );
                             (
                                 Expr::Elim(
                                     Box::new(Expr::var(Var::Builtin(Builtin::CompOp(op)))),
-                                    Box::new(Elim::App(Expl, Expr::Pair(Box::new(a), Box::new(b)))),
+                                    Box::new(Elim::App(
+                                        Expl,
+                                        Expr::Pair(
+                                            Box::new(a),
+                                            Box::new(b),
+                                            Box::new(Expr::Fun(EClos {
+                                                class: Sigma,
+                                                params: vec![Par {
+                                                    name: cxt.db.name("_".into()),
+                                                    ty: ty.clone().quote(cxt.size(), None),
+                                                }],
+                                                body: Box::new(ty.quote(cxt.size().inc(), None)),
+                                            })),
+                                        ),
+                                    )),
                                 ),
                                 Val::var(Var::Builtin(Builtin::BoolType)),
                             )
@@ -1473,16 +1559,16 @@ impl ast::Expr {
                         let aty = aty.quote(cxt.size(), None);
                         // bty is quoted inside of the sigma scope
                         let bty = bty.quote(cxt.size().inc(), None);
-                        let ty = Expr::Fun {
+                        let ty = Expr::Fun(EClos {
                             class: Sigma,
                             params: vec![Par {
                                 name: cxt.db.name("_".to_string()),
                                 ty: aty,
                             }],
                             body: Box::new(bty),
-                        }
-                        .eval(&mut cxt.env());
-                        (Expr::Pair(Box::new(a), Box::new(b)), ty)
+                        });
+                        let vty = ty.clone().eval(&mut cxt.env());
+                        (Expr::Pair(Box::new(a), Box::new(b), Box::new(ty)), vty)
                     }
                     ast::Expr::EffPat(_) => todo!(),
                     ast::Expr::Binder(_) => {
@@ -1496,7 +1582,7 @@ impl ast::Expr {
         };
         // TODO auto-applying implicits (probably? only allowing them on function calls is also an option to consider)
         match result() {
-            Ok(x) => x,
+            Ok((x, t)) => (Expr::Spanned(self.span(), Box::new(x)), t),
             Err(e) => {
                 cxt.error(self.span(), e);
                 (Expr::Error, Val::Error)

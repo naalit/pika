@@ -170,13 +170,21 @@ impl IntType {
             IntType::I64 => i64::MIN as _,
         }
     }
+
+    pub fn signed(self) -> bool {
+        match self {
+            IntType::U8 | IntType::U16 | IntType::U32 | IntType::U64 => false,
+            IntType::I8 | IntType::I16 | IntType::I32 | IntType::I64 => true,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Literal {
-    /// Stores the u64 representation of the int, plus a bool for whether it's signed
-    /// If the bool is true, then the actual value is obtained by a cast to i64
-    Int(bool, u64),
+    /// Stores the u64 representation of the int and its type
+    /// If the type is signed, then the actual value is obtained by a cast to i64
+    /// If the type isn't known, we store the meta and a bool for whether it's signed
+    Int(u64, Result<IntType, (bool, Meta)>),
     /// Stores a u64 representation of the bits of the f64
     F64(u64),
     /// Stores a u32 representation of the bits of the f32
@@ -186,8 +194,9 @@ pub enum Literal {
 impl Literal {
     pub fn pretty<T: crate::parsing::Parser + ?Sized>(&self, db: &T) -> Doc {
         match self {
-            Literal::Int(false, i) => Doc::start(i),
-            Literal::Int(true, i) => Doc::start(*i as i64),
+            Literal::Int(i, Ok(t)) if t.signed() => Doc::start(*i as i64),
+            Literal::Int(i, Err((true, _))) => Doc::start(*i as i64),
+            Literal::Int(i, _) => Doc::start(i),
             Literal::F64(i) => Doc::start(f64::from_bits(*i)),
             Literal::F32(i) => Doc::start(f32::from_bits(*i)),
             Literal::String(s) => Doc::start(db.lookup_name(*s)),
@@ -261,25 +270,44 @@ pub enum Elim<T: IsTerm> {
     App(Icit, T),
     // TODO probably use MemberId or something with a specific member of a specific type
     Member(Name),
-    Case(super::pattern::CaseOf<T>),
+    Case(super::pattern::CaseOf<T>, T),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EClos {
+    pub class: FunClass,
+    pub params: Vec<Par>,
+    pub body: Box<Expr>,
+}
+#[derive(Debug, Clone, Eq, Hash)]
 pub enum Expr {
     Type,
     Head(Head<Idx>),
     Elim(Box<Expr>, Box<Elim<Expr>>),
-    Fun {
-        class: FunClass,
-        params: Vec<Par>,
-        body: Box<Expr>,
-    },
+    Fun(EClos),
     // Do(Vec<Stmt>),
     Lit(Literal),
-    Pair(Box<Expr>, Box<Expr>),
+    /// The last Expr is the type, which can't be inferred from the values
+    /// (consider `(I32, 3)`, which may be `(Type, I32)` or `(a: Type, a)`)
+    Pair(Box<Expr>, Box<Expr>, Box<Expr>),
+    Spanned(RelSpan, Box<Expr>),
     Error,
 }
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Head(l0), Self::Head(r0)) => l0 == r0,
+            (Self::Elim(l0, l1), Self::Elim(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Fun(l0), Self::Fun(r0)) => l0 == r0,
+            (Self::Lit(l0), Self::Lit(r0)) => l0 == r0,
+            (Self::Pair(l0, l1, l2), Self::Pair(r0, r1, r2)) => l0 == r0 && l1 == r1 && l2 == r2,
+            // Ignore spans
+            (Self::Spanned(_, l1), Self::Spanned(_, r1)) => l1 == r1,
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
 impl IsTerm for Expr {
-    type Clos = Expr;
+    type Clos = EClos;
     type Loc = Idx;
 }
 fn pretty_bind<T: Elaborator + ?Sized>(n: Name, ty: Doc, db: &T, parens: bool) -> Doc {
@@ -294,13 +322,98 @@ fn pretty_bind<T: Elaborator + ?Sized>(n: Name, ty: Doc, db: &T, parens: bool) -
         }
     }
 }
+impl Builtin {
+    pub fn ty(self) -> Val {
+        match self {
+            Builtin::IntType(_) => Val::Type,
+            Builtin::Unit => Val::var(Var::Builtin(Builtin::UnitType)),
+            Builtin::UnitType => Val::Type,
+            Builtin::StringType => Val::Type,
+            Builtin::BoolType => Val::Type,
+            // TODO types for operators
+            Builtin::ArithOp(_) => Val::Error,
+            Builtin::CompOp(_) => Val::Error,
+        }
+    }
+}
 impl Expr {
     pub fn var(var: Var<Idx>) -> Self {
         Self::Head(Head::Var(var))
     }
 
+    pub fn ty(&self, cxt: &mut Cxt) -> Val {
+        match self {
+            Expr::Type => Val::Type,
+            Expr::Head(h) => match h {
+                Head::Var(v) => match v {
+                    Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
+                    Var::Meta(m) => match cxt.mcxt.meta_ty(*m) {
+                        Some(t) => t,
+                        None => match cxt.mcxt.lookup_expr(*m, cxt.size()) {
+                            Some(e) => e.ty(cxt),
+                            None => {
+                                eprintln!("WARNING: could not get meta type!");
+                                Val::Error
+                            }
+                        },
+                    },
+                    Var::Builtin(b) => b.ty(),
+                    Var::Def(d) => cxt
+                        .db
+                        .def_type(*d)
+                        .and_then(|x| x.result)
+                        .unwrap_or(Val::Error),
+                },
+            },
+            Expr::Elim(head, elim) => match &**elim {
+                Elim::App(_, x) => match head.ty(cxt) {
+                    Val::Fun(clos) if matches!(clos.class, Pi(_)) => {
+                        clos.apply(x.clone().eval(&mut cxt.env()))
+                    }
+                    _ => Val::Error,
+                },
+                Elim::Member(_) => todo!(),
+                Elim::Case(_, ty) => ty.clone().eval(&mut cxt.env()),
+            },
+            Expr::Fun(EClos {
+                class,
+                params,
+                body,
+            }) => match class {
+                Sigma | Pi(_) => Val::Type,
+                // I don't *think* we need a return type annotation, but there might be edge cases where we do
+                Lam(icit) => {
+                    cxt.push();
+                    for Par { name, ty } in params {
+                        cxt.define_local(*name, ty.clone().eval(&mut cxt.env()), None);
+                    }
+                    let ty = Expr::Fun(EClos {
+                        class: Pi(*icit),
+                        params: params.clone(),
+                        body: Box::new(body.ty(cxt).quote(cxt.size(), None)),
+                    });
+                    cxt.pop();
+                    ty.eval(&mut cxt.env())
+                }
+            },
+            Expr::Lit(l) => match l {
+                Literal::Int(_, t) => match t {
+                    Ok(t) => Val::var(Var::Builtin(Builtin::IntType(*t))),
+                    Err((_, m)) => Val::var(Var::Meta(*m)),
+                },
+                Literal::F64(_) => todo!(),
+                Literal::F32(_) => todo!(),
+                Literal::String(_) => Val::var(Var::Builtin(Builtin::StringType)),
+            },
+            Expr::Pair(_, _, ty) => ty.clone().eval(&mut cxt.env()),
+            Expr::Spanned(_, x) => x.ty(cxt),
+            Expr::Error => Val::Error,
+        }
+    }
+
     pub fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         match self {
+            Expr::Spanned(_, x) => x.pretty(db),
             Expr::Type => Doc::none().add("Type", Doc::style_keyword()),
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
@@ -334,82 +447,86 @@ impl Expr {
                     .add('.', ())
                     .add(db.lookup_name(*m), ())
                     .prec(Prec::App),
-                Elim::Case(c) => c.pretty(a.pretty(db), db).prec(Prec::Term),
+                Elim::Case(c, _) => c.pretty(a.pretty(db), db).prec(Prec::Term),
             },
-            Expr::Fun {
-                class,
-                params,
-                body,
-            } => {
-                let d_params = match class {
-                    Pi(Impl) | Lam(Impl) => Doc::start('[')
-                        .chain(Doc::intersperse(
-                            params.iter().map(|x| {
-                                Doc::start(db.lookup_name(x.name))
-                                    .add(':', ())
-                                    .space()
-                                    .chain(x.ty.pretty(db).nest(Prec::App))
-                            }),
-                            Doc::start(',').space(),
-                        ))
-                        .add(']', ()),
-                    Lam(Expl) => Doc::start('(')
-                        .chain(Doc::intersperse(
-                            params.iter().map(|x| {
-                                Doc::start(db.lookup_name(x.name))
-                                    .add(':', ())
-                                    .space()
-                                    .chain(x.ty.pretty(db).nest(Prec::App))
-                            }),
-                            Doc::start(',').space(),
-                        ))
-                        .add(')', ()),
-                    Sigma | Pi(Expl) if params.len() == 1 => {
-                        assert_eq!(params.len(), 1);
-                        let x = &params[0];
-                        pretty_bind(x.name, x.ty.pretty(db).nest(Prec::App), db, *class != Sigma)
-                    }
-                    Pi(Expl) => Doc::start('(')
-                        .chain(Doc::intersperse(
-                            params.iter().map(|x| {
-                                pretty_bind(x.name, x.ty.pretty(db).nest(Prec::App), db, false)
-                            }),
-                            Doc::start(',').space(),
-                        ))
-                        .add(')', ()),
-                    Sigma => unreachable!("params.len(): {}", params.len()),
-                };
-                match class {
-                    Sigma => {
-                        assert_eq!(params.len(), 1);
-                        d_params
-                            .add(',', ())
-                            .space()
-                            .chain(body.pretty(db).nest(Prec::Pair))
-                            .prec(Prec::Pair)
-                    }
-                    Lam(_) => d_params
-                        .space()
-                        .add("=>", ())
-                        .space()
-                        .chain(body.pretty(db))
-                        .prec(Prec::Term),
-                    Pi(_) => d_params
-                        .space()
-                        .add("->", ())
-                        .space()
-                        .chain(body.pretty(db).nest(Prec::Pi))
-                        .prec(Prec::Pi),
-                }
-            }
+            Expr::Fun(clos) => clos.pretty(db),
             Expr::Lit(l) => l.pretty(db).style(Doc::style_literal()),
-            Expr::Pair(a, b) => a
+            Expr::Pair(a, b, _) => a
                 .pretty(db)
                 .add(',', ())
                 .space()
                 .chain(b.pretty(db).nest(Prec::Pair))
                 .prec(Prec::Pair),
             Expr::Error => Doc::none().add("%error", Doc::style_literal()),
+        }
+    }
+}
+impl EClos {
+    pub fn pretty(&self, db: &(impl Elaborator + ?Sized)) -> Doc {
+        let EClos {
+            class,
+            params,
+            body,
+        } = self;
+        let d_params = match class {
+            Pi(Impl) | Lam(Impl) => Doc::start('[')
+                .chain(Doc::intersperse(
+                    params.iter().map(|x| {
+                        Doc::start(db.lookup_name(x.name))
+                            .add(':', ())
+                            .space()
+                            .chain(x.ty.pretty(db).nest(Prec::App))
+                    }),
+                    Doc::start(',').space(),
+                ))
+                .add(']', ()),
+            Lam(Expl) => Doc::start('(')
+                .chain(Doc::intersperse(
+                    params.iter().map(|x| {
+                        Doc::start(db.lookup_name(x.name))
+                            .add(':', ())
+                            .space()
+                            .chain(x.ty.pretty(db).nest(Prec::App))
+                    }),
+                    Doc::start(',').space(),
+                ))
+                .add(')', ()),
+            Sigma | Pi(Expl) if params.len() == 1 => {
+                assert_eq!(params.len(), 1);
+                let x = &params[0];
+                pretty_bind(x.name, x.ty.pretty(db).nest(Prec::App), db, *class != Sigma)
+            }
+            Pi(Expl) => Doc::start('(')
+                .chain(Doc::intersperse(
+                    params
+                        .iter()
+                        .map(|x| pretty_bind(x.name, x.ty.pretty(db).nest(Prec::App), db, false)),
+                    Doc::start(',').space(),
+                ))
+                .add(')', ()),
+            Sigma => unreachable!("params.len(): {}", params.len()),
+        };
+        match class {
+            Sigma => {
+                assert_eq!(params.len(), 1);
+                d_params
+                    .add(',', ())
+                    .space()
+                    .chain(body.pretty(db).nest(Prec::Pair))
+                    .prec(Prec::Pair)
+            }
+            Lam(_) => d_params
+                .space()
+                .add("=>", ())
+                .space()
+                .chain(body.pretty(db))
+                .prec(Prec::Term),
+            Pi(_) => d_params
+                .space()
+                .add("->", ())
+                .space()
+                .chain(body.pretty(db).nest(Prec::Pi))
+                .prec(Prec::Pi),
         }
     }
 }

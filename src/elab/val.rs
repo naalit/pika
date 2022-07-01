@@ -78,16 +78,16 @@ impl Neutral {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Clos {
+pub struct VClos {
     pub class: FunClass,
     pub params: Vec<Par>,
     pub env: Env,
     pub body: Expr,
 }
-impl Clos {
+impl VClos {
     /// arg: argument type -> argument value
     pub fn elab_with(self, mut arg: impl FnMut(Val) -> Val) -> Val {
-        let Clos {
+        let VClos {
             class: _,
             params,
             mut env,
@@ -106,14 +106,14 @@ impl Clos {
             .iter()
             .rfold(None, |term, Par { name, ty }| {
                 let term = match term {
-                    Some(term) => Box::new(Expr::Fun {
+                    Some(term) => Box::new(Expr::Fun(EClos {
                         class: Sigma,
                         params: vec![Par {
                             name: *name,
                             ty: ty.clone(),
                         }],
                         body: term,
-                    }),
+                    })),
                     None => Box::new(ty.clone()),
                 };
                 Some(term)
@@ -130,15 +130,21 @@ impl Clos {
         //
         // ([a, b] (x, y) => ...) [t, u] p -->
         // (case p of (x, y) => ...) [t/a, u/b]
-        let Clos { mut env, body, .. } = self;
+        let VClos { mut env, body, .. } = self;
         match arg.zip_pair(&self.params) {
             Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
             Err(arg) => {
-                let pars: Vec<_> = self.params.iter().map(|x| x.name).collect();
+                // let pars: Vec<_> = self.params.iter().map(|x| x.name).collect();
                 return arg.app(
                     Elim::Case(
-                        super::pattern::CaseOf::make_simple_args(&pars, body, env.size)
-                            .eval(&mut env),
+                        super::pattern::CaseOf::make_simple_args(EClos {
+                            class: Lam(Expl),
+                            params: self.params,
+                            body: Box::new(body),
+                        })
+                        .map(|x| x.eval(&mut env)),
+                        // TODO how do we find this return type?
+                        Val::Error,
                     ),
                     &mut env,
                 );
@@ -147,8 +153,8 @@ impl Clos {
         body.eval(&mut env)
     }
 
-    pub fn quote(self, mut size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
-        let Clos {
+    pub fn quote(self, mut size: Size, inline_metas: Option<&MetaCxt>) -> EClos {
+        let VClos {
             class,
             params,
             mut env,
@@ -167,30 +173,22 @@ impl Clos {
             })
             .collect();
         let body = body.eval_quote(&mut env, size, inline_metas);
-        if params.is_empty() {
-            // For use in case where a Clos isn't for a function, just to hold an Env
-            body
-        } else {
-            Expr::Fun {
-                class,
-                params,
-                body: Box::new(body),
-            }
+        EClos {
+            class,
+            params,
+            body: Box::new(body),
         }
     }
 
-    pub fn move_env(self, env: &mut Env) -> Clos {
-        match self.quote(env.size, None).eval(env) {
-            Val::Fun(clos) => *clos,
-            _ => unreachable!(),
-        }
+    pub fn move_env(self, env: &mut Env) -> VClos {
+        self.quote(env.size, None).eval(env)
     }
 
     /// Add the parameters to the environment and then evaluate the closure body, "opening" or "entering" the closure.
     /// `size` is the size before adding any parameters.
     /// The size after calling `open` is `size + self.params.len()`.
     pub fn open(self, mut size: Size) -> Val {
-        let Clos {
+        let VClos {
             class: _,
             params,
             mut env,
@@ -204,17 +202,21 @@ impl Clos {
     }
 
     pub fn synthesize_args(&self, size: Size) -> Val {
-        let (arg, _size) =
-            self.params
-                .iter()
-                .fold((None, size), |(term, size), Par { name, ty: _ }| {
-                    let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
-                    let term = match term {
-                        Some(term) => Box::new(Val::Pair(var, term)),
-                        None => var,
-                    };
-                    (Some(term), size)
-                });
+        let (arg, _size, _ty) = self.params.iter().fold(
+            (None, size, self.par_ty()),
+            |(term, size, ty), Par { name, ty: _ }| {
+                let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
+                let term = match term {
+                    Some(term) => Box::new(Val::Pair(var, term, Box::new(ty.clone()))),
+                    None => var,
+                };
+                let ty = match ty {
+                    Val::Fun(clos) => clos.open(size),
+                    ty => ty,
+                };
+                (Some(term), size, ty)
+            },
+        );
         *arg.unwrap()
     }
 }
@@ -223,14 +225,14 @@ impl Clos {
 pub enum Val {
     Type,
     Neutral(Neutral),
-    Fun(Box<Clos>),
+    Fun(Box<VClos>),
     // Do(Vec<Stmt>),
     Lit(Literal),
-    Pair(Box<Val>, Box<Val>),
+    Pair(Box<Val>, Box<Val>, Box<Val>),
     Error,
 }
 impl IsTerm for Val {
-    type Clos = Clos;
+    type Clos = VClos;
     type Loc = Lvl;
 }
 
@@ -241,7 +243,7 @@ impl Val {
         let mut term = &self;
         for _ in 0..with.len() - 1 {
             match term {
-                Val::Pair(_, rest) => {
+                Val::Pair(_, rest, _) => {
                     term = rest;
                 }
                 Val::Error => (),
@@ -252,7 +254,7 @@ impl Val {
         let mut term = self;
         for x in &with[..with.len() - 1] {
             match term {
-                Val::Pair(a, rest) => {
+                Val::Pair(a, rest, _) => {
                     v.push((*a, x));
                     term = *rest;
                 }
@@ -284,7 +286,7 @@ impl Val {
                 _ => unreachable!("Cannot resolve application to non-Lam"),
             },
             Elim::Member(_) => todo!(),
-            Elim::Case(_) => todo!(),
+            Elim::Case(_, _) => todo!(),
         }
     }
 
@@ -298,7 +300,7 @@ impl Elim<Expr> {
         match self {
             Elim::App(icit, arg) => Elim::App(icit, arg.eval(env)),
             Elim::Member(_) => todo!(),
-            Elim::Case(case) => Elim::Case(case.eval(env)),
+            Elim::Case(case, ty) => Elim::Case(case.map(|x| x.eval(env)), ty.eval(env)),
         }
     }
 }
@@ -307,8 +309,38 @@ impl Elim<Val> {
         match self {
             Elim::App(icit, arg) => Elim::App(icit, arg.quote(size, inline_metas)),
             Elim::Member(_) => todo!(),
-            Elim::Case(case) => Elim::Case(case.quote(size, inline_metas)),
+            Elim::Case(case, ty) => Elim::Case(
+                case.map(|x| x.quote(size, inline_metas)),
+                ty.quote(size, inline_metas),
+            ),
         }
+    }
+}
+
+impl EClos {
+    pub fn eval(self, env: &mut Env) -> VClos {
+        let EClos {
+            class,
+            params,
+            body,
+        } = self;
+        VClos {
+            class,
+            params,
+            env: env.clone(),
+            body: *body,
+        }
+    }
+
+    fn _eval_quote(&mut self, env: &mut Env, mut size: Size, inline_metas: Option<&MetaCxt>) {
+        let state = env.state();
+        for i in &mut self.params {
+            i.ty._eval_quote(env, size, inline_metas);
+            env.push(None);
+            size += 1;
+        }
+        self.body._eval_quote(env, size, inline_metas);
+        env.reset(state);
     }
 }
 
@@ -324,25 +356,70 @@ impl Expr {
                 Head::Var(Var::Meta(m)) => Val::var(Var::Meta(m)),
             },
             Expr::Elim(x, e) => x.eval(env).app(e.eval(env), env),
-            Expr::Fun {
-                class,
-                params,
-                body,
-            } => Val::Fun(Box::new(Clos {
-                class,
-                params,
-                env: env.clone(),
-                body: *body,
-            })),
+            Expr::Fun(clos) => Val::Fun(Box::new(clos.eval(env))),
             Expr::Lit(l) => Val::Lit(l),
-            Expr::Pair(a, b) => Val::Pair(Box::new(a.eval(env)), Box::new(b.eval(env))),
+            Expr::Pair(a, b, t) => Val::Pair(
+                Box::new(a.eval(env)),
+                Box::new(b.eval(env)),
+                Box::new(t.eval(env)),
+            ),
             Expr::Error => Val::Error,
+            Expr::Spanned(_, x) => x.eval(env),
         }
     }
 
-    pub fn eval_quote(self, env: &mut Env, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
-        // TODO do this more efficiently
-        self.eval(env).quote(size, inline_metas)
+    fn _eval_quote(&mut self, env: &mut Env, size: Size, inline_metas: Option<&MetaCxt>) {
+        match self {
+            Expr::Type => (),
+            Expr::Head(h) => match h {
+                Head::Var(Var::Local(n, i)) => *self = env.val(*n, *i).quote(size, inline_metas),
+                Head::Var(Var::Meta(m)) => match inline_metas {
+                    Some(mcxt) => {
+                        if let Some(expr) = mcxt.lookup_expr(*m, size) {
+                            *self = expr;
+                        }
+                    }
+                    None => (),
+                },
+                _ => (),
+            },
+            Expr::Elim(x, e) => {
+                x._eval_quote(env, size, inline_metas);
+                match &mut **e {
+                    Elim::App(_, x) => x._eval_quote(env, size, inline_metas),
+                    Elim::Member(_) => todo!(),
+                    Elim::Case(case, ty) => {
+                        case.visit_mut(|x| x._eval_quote(env, size, inline_metas));
+                        ty._eval_quote(env, size, inline_metas);
+                    }
+                }
+            }
+            Expr::Fun(clos) => clos._eval_quote(env, size, inline_metas),
+            Expr::Lit(Literal::Int(val, Err((_, meta)))) => match inline_metas {
+                Some(mcxt) => {
+                    if let Some(Expr::Head(Head::Var(Var::Builtin(Builtin::IntType(i))))) =
+                        mcxt.lookup_expr(*meta, size)
+                    {
+                        *self = Expr::Lit(Literal::Int(*val, Ok(i)));
+                    }
+                }
+                None => (),
+            },
+            Expr::Lit(_) => (),
+            Expr::Pair(a, b, t) => {
+                a._eval_quote(env, size, inline_metas);
+                b._eval_quote(env, size, inline_metas);
+                t._eval_quote(env, size, inline_metas);
+            }
+            Expr::Error => (),
+            Expr::Spanned(_, x) => x._eval_quote(env, size, inline_metas),
+        }
+    }
+
+    /// More or less like `self.eval().quote()`, but doesn't beta-reduce.
+    pub fn eval_quote(mut self, env: &mut Env, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
+        self._eval_quote(env, size, inline_metas);
+        self
     }
 }
 
@@ -369,11 +446,12 @@ impl Val {
                     Expr::Elim(Box::new(head), Box::new(elim.quote(size, inline_metas)))
                 })
             }
-            Val::Fun(clos) => clos.quote(size, inline_metas),
+            Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),
-            Val::Pair(a, b) => Expr::Pair(
+            Val::Pair(a, b, t) => Expr::Pair(
                 Box::new(a.quote(size, inline_metas)),
                 Box::new(b.quote(size, inline_metas)),
+                Box::new(t.quote(size, inline_metas)),
             ),
             Val::Error => Expr::Error,
         }

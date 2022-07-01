@@ -102,6 +102,18 @@ pub trait ParserExt: Parser {
         Some(self.split(file, id)?.abs_span)
     }
 
+    fn split_at(&self, file: File, abs_pos: u32) -> Option<SplitId> {
+        let splits = self.all_split_ids(file);
+        for i in splits {
+            if let Some(span) = self.split_span(file, i) {
+                if span.1.contains(&abs_pos) {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
     fn ast(&self, file: File, id: SplitId) -> Option<ast::Root> {
         let result = self.parse(file, id)?;
         ast::Root::cast(SyntaxNode::new_root(result.green))

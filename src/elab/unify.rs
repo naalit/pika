@@ -215,7 +215,7 @@ impl UnifyCxt<'_> {
                     self.unify(a.clone(), b.clone(), size, state)?;
                 }
                 (Elim::Member(_), Elim::Member(_)) => todo!(),
-                (Elim::Case(_), Elim::Case(_)) => todo!(),
+                (Elim::Case(_, _), Elim::Case(_, _)) => todo!(),
 
                 _ => return Ok(false),
             }
@@ -367,7 +367,7 @@ impl UnifyCxt<'_> {
             (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
                 match n.resolve(&mut Env::new(size), &self.meta_cxt) {
                     Ok(n) => self.unify(n, x, size, state),
-                    Err(n) => Err(UnifyErrorKind::Conversion),
+                    Err(_) => Err(UnifyErrorKind::Conversion),
                 }
             }
 
@@ -379,7 +379,7 @@ impl UnifyCxt<'_> {
                 self.unify(a, x.app(elim, &mut Env::new(new_size)), new_size, state)
             }
 
-            (a, b) => Err(UnifyErrorKind::Conversion),
+            _ => Err(UnifyErrorKind::Conversion),
         }
     }
 }

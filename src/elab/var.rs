@@ -17,7 +17,7 @@ impl Idx {
     pub fn lvl(self, size: Size) -> Lvl {
         assert!(
             self.0 + 1 <= size.0,
-            "Can't access a variable (lvl {}) that hasn't been bound yet (enclosing = {})!",
+            "Can't access a variable (idx {}) that hasn't been bound yet (enclosing = {})!",
             self.0,
             size.0,
         );
@@ -35,7 +35,7 @@ impl Lvl {
     pub fn idx(self, size: Size) -> Idx {
         assert!(
             self.0 + 1 <= size.0,
-            "Can't access a variable (idx {}) that hasn't been bound yet (enclosing = {})!",
+            "Can't access a variable (lvl {}) that hasn't been bound yet (enclosing = {})!",
             self.0,
             size.0,
         );

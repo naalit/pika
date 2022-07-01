@@ -164,6 +164,19 @@ impl Cxt<'_> {
             .find_map(|x| x.names.get(&name).cloned())
     }
 
+    pub fn local_ty(&self, lvl: Lvl) -> Val {
+        self.scopes
+            .iter()
+            .find_map(|x| {
+                x.names
+                    .values()
+                    .find(|(v, _)| matches!(v, Var::Local(_, l) if *l == lvl))
+            })
+            .unwrap()
+            .1
+            .clone()
+    }
+
     pub fn error(&mut self, span: RelSpan, error: TypeError) {
         self.errors.push((error, span));
     }
