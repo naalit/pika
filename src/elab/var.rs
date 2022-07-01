@@ -23,6 +23,10 @@ impl Idx {
         );
         Lvl(size.0 - 1 - self.0)
     }
+
+    pub fn in_scope(self, size: Size) -> bool {
+        self.0 + 1 <= size.0
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -40,6 +44,10 @@ impl Lvl {
             size.0,
         );
         Idx(size.0 - 1 - self.0)
+    }
+
+    pub fn in_scope(self, size: Size) -> bool {
+        self.0 + 1 <= size.0
     }
 }
 

@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, RwLock},
+};
 
 use super::*;
 
@@ -120,6 +123,18 @@ impl VClos {
             })
             .unwrap()
             .eval(&mut env)
+    }
+
+    pub fn apply_exact(self, args: Vec<Option<Val>>) -> Val {
+        let VClos {
+            class: _,
+            params,
+            mut env,
+            body,
+        } = self;
+        assert_eq!(args.len(), params.len(), "apply_exact() not exact");
+        env.extend(args);
+        body.eval(&mut env)
     }
 
     pub fn apply(self, arg: Val) -> Val {
@@ -269,24 +284,31 @@ impl Val {
     }
 
     pub fn app(mut self, x: Elim<Val>, env: &mut Env) -> Val {
-        match &mut self {
-            Val::Neutral(neutral) => {
-                neutral.app(x);
-                return self;
-            }
-            Val::Error => return Val::Error,
-            _ => (),
-        }
         match x {
             Elim::App(icit, arg) => match self {
                 Val::Fun(clos) => {
                     assert_eq!(clos.class.icit(), Some(icit));
                     clos.apply(arg)
                 }
+                Val::Neutral(ref mut neutral) => {
+                    neutral.app(Elim::App(icit, arg));
+                    return self;
+                }
+                Val::Error => return Val::Error,
                 _ => unreachable!("Cannot resolve application to non-Lam"),
             },
             Elim::Member(_) => todo!(),
-            Elim::Case(_, _) => todo!(),
+            Elim::Case(ref case, _) => match case.try_eval(&self) {
+                Some(v) => return v,
+                None => match self {
+                    Val::Neutral(ref mut neutral) => {
+                        neutral.app(x);
+                        return self;
+                    }
+                    Val::Error => return Val::Error,
+                    x => todo!("couldn't eval case of {:?}", x),
+                },
+            },
         }
     }
 
@@ -470,6 +492,110 @@ impl Val {
                 }
             }
             _ => (),
+        }
+    }
+
+    pub fn check_scope(&self, size: Size) -> bool {
+        match self {
+            Val::Type => true,
+            Val::Neutral(n) => {
+                (match n.head() {
+                    Head::Var(Var::Local(_, l)) => l.in_scope(size),
+                    _ => true,
+                }) && n.spine().iter().all(|x| match x {
+                    Elim::App(_, x) => x.check_scope(size),
+                    Elim::Member(_) => todo!(),
+                    Elim::Case(case, ty) => {
+                        let mut all_good = true;
+                        case.visit(|x| {
+                            if all_good {
+                                all_good = x.check_scope(size);
+                            }
+                        });
+                        all_good && ty.check_scope(size)
+                    }
+                })
+            }
+            Val::Fun(clos) => clos.check_scope(size),
+            Val::Lit(_) => true,
+            Val::Pair(a, b, t) => a.check_scope(size) && b.check_scope(size) && t.check_scope(size),
+            Val::Error => true,
+        }
+    }
+}
+impl VClos {
+    pub fn check_scope(&self, size: Size) -> bool {
+        let mut allowed = HashSet::new();
+        for i in Size::zero().until(size) {
+            allowed.insert(i.next_lvl());
+        }
+        for i in size.until(self.env.size) {
+            if self.env.get(i.next_lvl().idx(self.env.size)).is_some() {
+                allowed.insert(i.next_lvl());
+            }
+        }
+        let mut inner_size = Size::zero();
+        let mut size = self.env.size;
+        for i in &self.params {
+            if !i.ty.check_scope(&allowed, inner_size, size) {
+                return false;
+            }
+            inner_size += 1;
+            size += 1;
+        }
+        self.body.check_scope(&allowed, inner_size, size)
+    }
+}
+impl EClos {
+    pub fn check_scope(
+        &self,
+        allowed: &HashSet<Lvl>,
+        mut inner_size: Size,
+        mut size: Size,
+    ) -> bool {
+        for i in &self.params {
+            if !i.ty.check_scope(allowed, inner_size, size) {
+                return false;
+            }
+            inner_size += 1;
+            size += 1;
+        }
+        self.body.check_scope(allowed, inner_size, size)
+    }
+}
+impl Expr {
+    pub fn check_scope(&self, allowed: &HashSet<Lvl>, inner_size: Size, size: Size) -> bool {
+        match self {
+            Expr::Type => true,
+            Expr::Head(Head::Var(Var::Local(_, i))) => {
+                i.in_scope(inner_size) || allowed.contains(&i.lvl(size))
+            }
+            Expr::Head(_) => true,
+            Expr::Elim(a, e) => {
+                a.check_scope(allowed, inner_size, size)
+                    && match &**e {
+                        Elim::App(_, x) => x.check_scope(allowed, inner_size, size),
+                        Elim::Member(_) => todo!(),
+                        Elim::Case(case, ty) => {
+                            let mut all_good = true;
+                            case.visit(|c| {
+                                if all_good {
+                                    all_good = c.check_scope(allowed, inner_size, size)
+                                }
+                            });
+                            ty.check_scope(allowed, inner_size, size)
+                        }
+                    }
+            }
+            Expr::Fun(c) => c.check_scope(allowed, inner_size, size),
+            Expr::Lit(_) => true,
+            Expr::Pair(a, b, t) => {
+                a.check_scope(allowed, inner_size, size)
+                    && b.check_scope(allowed, inner_size, size)
+                    && t.check_scope(allowed, inner_size, size)
+            }
+            Expr::Spanned(_, x) => x.check_scope(allowed, inner_size, size),
+            Expr::Error => true,
         }
     }
 }

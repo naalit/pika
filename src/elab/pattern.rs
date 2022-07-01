@@ -767,6 +767,59 @@ impl ast::Case {
     }
 }
 
+impl Dec<Val> {
+    fn try_eval(
+        &self,
+        env: &mut HashMap<PVar, &Val>,
+        params: &mut Vec<Option<Val>>,
+    ) -> Option<Body> {
+        match self {
+            Dec::Success(b) => Some(*b),
+            Dec::Failure => None,
+            // TODO evaluate guards?
+            Dec::Guard(_, _, _) => None,
+            // TODO constructors
+            Dec::Switch(_, _, _) => None,
+        }
+    }
+}
+impl DecNode<Val> {
+    fn try_eval(
+        &self,
+        env: &mut HashMap<PVar, &Val>,
+        params: &mut Vec<Option<Val>>,
+    ) -> Option<Body> {
+        for (var, pat) in &self.ipats {
+            match pat {
+                IPat::Pair(a, b) => match env.get(var) {
+                    Some(Val::Pair(va, vb, _)) => {
+                        env.insert(*a, va);
+                        env.insert(*b, vb);
+                    }
+                    // Leave a and b unset, the body we pick might not use them
+                    _ => (),
+                },
+                IPat::Var(_) => params.push(env.get(var).copied().cloned()),
+            }
+        }
+        self.dec.try_eval(env, params)
+    }
+}
+impl CaseOf<Val> {
+    pub fn try_eval(&self, x: &Val) -> Option<Val> {
+        let mut env = HashMap::new();
+        env.insert(self.svar, x);
+        let mut params = Vec::new();
+        let body = self.dec.try_eval(&mut env, &mut params)?;
+        let val = self.rhs[body.0].clone().apply_exact(params);
+        if val.check_scope(self.rhs[body.0].env.size) {
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+
 impl std::fmt::Display for PVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "%{}", self.0)
