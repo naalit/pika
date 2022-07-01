@@ -268,7 +268,7 @@ fn main() {
                         Doc::none()
                             .add("let", Doc::style_keyword())
                             .space()
-                            .add(db.lookup_name(name), ())
+                            .chain(name.pretty(&db))
                             .add(':', ())
                             .space()
                             .chain(ty.pretty(&db))

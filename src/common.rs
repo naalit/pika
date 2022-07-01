@@ -1,7 +1,7 @@
 pub use std::collections::{HashMap, VecDeque};
 
 pub use crate::parsing::{ast, FileLoc, ParserExt, SplitId};
-pub use crate::pretty::Doc;
+pub use crate::pretty::{Doc, Pretty};
 pub use ast::AstNode;
 
 use ariadne::Color;
@@ -56,8 +56,52 @@ impl Def {
     }
 }
 
-pub type RelSpan = std::ops::Range<u32>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RelSpan {
+    pub start: u32,
+    pub end: u32,
+}
+impl RelSpan {
+    pub fn new(start: u32, end: u32) -> RelSpan {
+        RelSpan { start, end }
+    }
+
+    pub fn contains(self, pos: u32) -> bool {
+        pos >= self.start && pos < self.end
+    }
+
+    pub fn superset(self, other: RelSpan) -> bool {
+        self.start <= other.start && self.end >= other.end
+    }
+}
+impl From<rowan::TextRange> for RelSpan {
+    fn from(range: rowan::TextRange) -> Self {
+        RelSpan {
+            start: range.start().into(),
+            end: range.end().into(),
+        }
+    }
+}
+impl From<std::ops::Range<u32>> for RelSpan {
+    fn from(range: std::ops::Range<u32>) -> Self {
+        RelSpan {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
 pub type Spanned<T> = (T, RelSpan);
+pub type SName = Spanned<Name>;
+impl Pretty for Name {
+    fn pretty(&self, db: &(impl crate::elab::Elaborator + ?Sized)) -> Doc {
+        Doc::start(db.lookup_name(*self))
+    }
+}
+impl Pretty for SName {
+    fn pretty(&self, db: &(impl crate::elab::Elaborator + ?Sized)) -> Doc {
+        self.0.pretty(db)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AbsSpan(pub File, pub std::ops::Range<u32>);
@@ -153,7 +197,7 @@ pub struct Error {
 
 impl Error {
     pub fn write_cli(self, split_span: &AbsSpan, cache: &mut FileCache) {
-        let primary_span = split_span.add(self.primary.span.clone());
+        let primary_span = split_span.add(self.primary.span);
         let mut r = ariadne::Report::build(
             self.severity.ariadne(),
             primary_span.0,

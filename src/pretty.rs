@@ -3,7 +3,9 @@ use std::collections::VecDeque;
 use ariadne::Color;
 use yansi::Style;
 
-// use crate::common::ErrMessage;
+pub trait Pretty {
+    fn pretty(&self, db: &(impl crate::elab::Elaborator + ?Sized)) -> Doc;
+}
 
 pub trait IntoStyle {
     fn into_style(self) -> Option<Style>;

@@ -210,7 +210,7 @@ impl VClos {
             body,
         } = self;
         for par in &params {
-            env.push(Some(Val::var(Var::Local(par.name, size.next_lvl()))));
+            env.push(Some(Val::var(Var::Local(par.name.0, size.next_lvl()))));
             size += 1;
         }
         body.eval(&mut env)
@@ -220,7 +220,7 @@ impl VClos {
         let (arg, _size, _ty) = self.params.iter().fold(
             (None, size, self.par_ty()),
             |(term, size, ty), Par { name, ty: _ }| {
-                let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
+                let var = Box::new(Val::var(Var::Local(name.0, size.next_lvl())));
                 let term = match term {
                     Some(term) => Box::new(Val::Pair(var, term, Box::new(ty.clone()))),
                     None => var,

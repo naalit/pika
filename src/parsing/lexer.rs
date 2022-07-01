@@ -67,7 +67,7 @@ impl<'i> Lexer<'i> {
     }
 
     pub fn span(&self) -> RelSpan {
-        self.tok_start..self.pos
+        RelSpan::new(self.tok_start, self.pos)
     }
     fn slice(&self) -> RopeSlice<'i> {
         self.input.slice(self.tok_start as usize..self.pos as usize)
@@ -364,8 +364,10 @@ impl<'i> Lexer<'i> {
                                     buf.push('\t');
                                 }
                                 Some(c) => {
-                                    self.errors
-                                        .push((LexError::InvalidEscape(c), self.pos - 2..self.pos));
+                                    self.errors.push((
+                                        LexError::InvalidEscape(c),
+                                        RelSpan::new(self.pos - 2, self.pos),
+                                    ));
                                     let r = (Tok::Error, self.tok_start);
                                     // Try to find the terminating " to avoid further errors
                                     while self.next().map_or(false, |x| x != '"') {}
@@ -374,7 +376,7 @@ impl<'i> Lexer<'i> {
                                 None => {
                                     self.errors.push((
                                         LexError::UnclosedString,
-                                        self.tok_start..self.pos - 1,
+                                        RelSpan::new(self.tok_start, self.pos - 1),
                                     ));
                                     break self.tok_in_place(Tok::Error);
                                 }
@@ -382,8 +384,10 @@ impl<'i> Lexer<'i> {
                         }
                         Some(c) => buf.push(c),
                         None => {
-                            self.errors
-                                .push((LexError::UnclosedString, self.tok_start..self.pos - 1));
+                            self.errors.push((
+                                LexError::UnclosedString,
+                                RelSpan::new(self.tok_start, self.pos - 1),
+                            ));
                             break self.tok_in_place(Tok::Error);
                         }
                     }

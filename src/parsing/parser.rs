@@ -135,7 +135,7 @@ impl<'a> Parser<'a> {
             .get(self.tok_idx + 1)
             .copied()
             .unwrap_or_else(|| self.text.len_chars() as u32);
-        start..end
+        RelSpan::new(start, end)
     }
 
     fn expected(&mut self, x: impl Into<Cow<'static, str>>, m: impl IntoMsg) {

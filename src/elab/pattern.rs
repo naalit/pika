@@ -138,7 +138,7 @@ mod input {
         Cons(Cons, Vec<SPattern>),
         Pair(Box<SPattern>, Box<SPattern>),
         Or(Vec<SPattern>),
-        Var(Name),
+        Var(SName),
         Any,
     }
 
@@ -311,7 +311,9 @@ mod input {
                 ast::Expr::Var(v) => Pattern::Var(v.name(cxt.ecxt.db)),
                 ast::Expr::App(_) => todo!(),
                 // Manufacture a name instead of Pattern::Any, so type inference can use the value
-                ast::Expr::Hole(_) => Pattern::Var(cxt.ecxt.db.name("_".to_string())),
+                ast::Expr::Hole(_) => {
+                    Pattern::Var((cxt.ecxt.db.name("_".to_string()), self.span()))
+                }
                 ast::Expr::Lit(l) => match l.to_literal(cxt.ecxt) {
                     Ok(l) => Pattern::Cons(Cons::Lit(l), Vec::new()),
                     Err(e) => {
@@ -372,11 +374,12 @@ mod input {
         pub(super) fn as_row(&self) -> (Option<ast::Expr>, RelSpan, Option<ast::Expr>) {
             (
                 self.pat(),
-                self.span().start
-                    ..self
-                        .body()
+                RelSpan::new(
+                    self.span().start,
+                    self.body()
                         .map(|x| x.span().start)
                         .unwrap_or(self.span().end),
+                ),
                 self.body().and_then(|x| x.expr()),
             )
         }
@@ -385,7 +388,7 @@ mod input {
 
 // OUTPUT
 
-type PEnv = Vec<(Name, Val)>;
+type PEnv = Vec<(SName, Val)>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct PVar(usize);
@@ -394,7 +397,7 @@ struct PVar(usize);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum IPat {
     Pair(PVar, PVar),
-    Var(Name),
+    Var(SName),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -829,7 +832,7 @@ impl IPat {
     pub(super) fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         match self {
             IPat::Pair(a, b) => Doc::start(a).add(',', ()).add(b, ()),
-            IPat::Var(v) => Doc::start(db.lookup_name(*v)),
+            IPat::Var(v) => v.pretty(db),
         }
     }
 }

@@ -213,13 +213,13 @@ pub use self::Icit::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Par {
-    pub name: Name,
+    pub name: SName,
     pub ty: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsDef {
-    name: Name,
+    name: SName,
     // TODO ConsId or something
     implicit: Vec<Par>,
     explicit: Vec<Par>,
@@ -231,7 +231,7 @@ pub struct ConsDef {
 /// Let definitions are unordered, and can't contain patterns other than 'name' or 'name: ty'.
 /// Local let statements are ordered, can contain arbitrary patterns, and create local variables rather than definitions.
 pub struct Definition {
-    pub name: Name,
+    pub name: SName,
     pub ty: Box<Expr>,
     pub body: Box<Expr>,
 }
@@ -269,7 +269,7 @@ pub enum Head<L> {
 pub enum Elim<T: IsTerm> {
     App(Icit, T),
     // TODO probably use MemberId or something with a specific member of a specific type
-    Member(Name),
+    Member(SName),
     Case(super::pattern::CaseOf<T>, T),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -310,11 +310,11 @@ impl IsTerm for Expr {
     type Clos = EClos;
     type Loc = Idx;
 }
-fn pretty_bind<T: Elaborator + ?Sized>(n: Name, ty: Doc, db: &T, parens: bool) -> Doc {
-    if db.name("_".to_string()) == n {
+fn pretty_bind<T: Elaborator + ?Sized>(n: SName, ty: Doc, db: &T, parens: bool) -> Doc {
+    if db.name("_".to_string()) == n.0 {
         ty
     } else {
-        let doc = Doc::start(db.lookup_name(n)).add(':', ()).space().chain(ty);
+        let doc = n.pretty(db).add(':', ()).space().chain(ty);
         if parens {
             Doc::start('(').chain(doc).add(')', ())
         } else {
@@ -410,8 +410,9 @@ impl Expr {
             Expr::Error => Val::Error,
         }
     }
-
-    pub fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
+}
+impl Pretty for Expr {
+    fn pretty(&self, db: &(impl Elaborator + ?Sized)) -> Doc {
         match self {
             Expr::Spanned(_, x) => x.pretty(db),
             Expr::Type => Doc::none().add("Type", Doc::style_keyword()),
@@ -445,7 +446,7 @@ impl Expr {
                 Elim::Member(m) => a
                     .pretty(db)
                     .add('.', ())
-                    .add(db.lookup_name(*m), ())
+                    .chain(m.pretty(db))
                     .prec(Prec::App),
                 Elim::Case(c, _) => c.pretty(a.pretty(db), db).prec(Prec::Term),
             },
@@ -461,8 +462,8 @@ impl Expr {
         }
     }
 }
-impl EClos {
-    pub fn pretty(&self, db: &(impl Elaborator + ?Sized)) -> Doc {
+impl Pretty for EClos {
+    fn pretty(&self, db: &(impl Elaborator + ?Sized)) -> Doc {
         let EClos {
             class,
             params,
@@ -472,7 +473,8 @@ impl EClos {
             Pi(Impl) | Lam(Impl) => Doc::start('[')
                 .chain(Doc::intersperse(
                     params.iter().map(|x| {
-                        Doc::start(db.lookup_name(x.name))
+                        x.name
+                            .pretty(db)
                             .add(':', ())
                             .space()
                             .chain(x.ty.pretty(db).nest(Prec::App))
@@ -483,7 +485,8 @@ impl EClos {
             Lam(Expl) => Doc::start('(')
                 .chain(Doc::intersperse(
                     params.iter().map(|x| {
-                        Doc::start(db.lookup_name(x.name))
+                        x.name
+                            .pretty(db)
                             .add(':', ())
                             .space()
                             .chain(x.ty.pretty(db).nest(Prec::App))

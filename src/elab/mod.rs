@@ -68,16 +68,16 @@ fn def_name(db: &dyn Elaborator, def: Def) -> Option<Name> {
             let def_node = db.to_def_node(def)?;
             let (def, _) = db.lookup_def_node(def_node);
             match def {
-                ast::Def::LetDef(x) => {
-                    x.pat()?
-                        .expr()?
-                        .as_let_def_pat(&mut Cxt::new(db, DefCxt::global(db)))
-                        .0
-                }
-                ast::Def::FunDef(x) => Some(x.name()?.name(db)),
-                ast::Def::TypeDef(x) => Some(x.name()?.name(db)),
-                ast::Def::TypeDefShort(x) => Some(x.name()?.name(db)),
-                ast::Def::TypeDefStruct(x) => Some(x.name()?.name(db)),
+                ast::Def::LetDef(x) => x
+                    .pat()?
+                    .expr()?
+                    .as_let_def_pat(&mut Cxt::new(db, DefCxt::global(db)))
+                    .0
+                    .map(|x| x.0),
+                ast::Def::FunDef(x) => Some(x.name()?.name(db).0),
+                ast::Def::TypeDef(x) => Some(x.name()?.name(db).0),
+                ast::Def::TypeDefShort(x) => Some(x.name()?.name(db).0),
+                ast::Def::TypeDefStruct(x) => Some(x.name()?.name(db).0),
             }
         }
     }
@@ -316,7 +316,7 @@ fn lex_number(s: &str) -> Result<NumLiteral, String> {
 }
 
 impl ast::Expr {
-    fn as_let_def_pat(&self, cxt: &mut Cxt) -> (Option<Name>, Option<ast::Ty>) {
+    fn as_let_def_pat(&self, cxt: &mut Cxt) -> (Option<SName>, Option<ast::Ty>) {
         match self {
             ast::Expr::Var(n) => (Some(n.name(cxt.db)), None),
             ast::Expr::GroupedExpr(x) => x
@@ -340,7 +340,7 @@ impl ast::Expr {
                 }
                 (name, x.ty())
             }
-            ast::Expr::Hole(_) => (Some(cxt.db.name("_".to_string())), None),
+            ast::Expr::Hole(_) => (Some((cxt.db.name("_".to_string()), self.span())), None),
             _ => (None, None),
         }
     }
@@ -382,7 +382,7 @@ impl ast::Def {
                         // [] means [_: ()]
                         x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
                             vec![Par {
-                                name: cxt.db.name("_".to_string()),
+                                name: (cxt.db.name("_".to_string()), x.span()),
                                 ty: Expr::var(Var::Builtin(Builtin::UnitType)),
                             }]
                         })
@@ -471,7 +471,7 @@ impl ast::Def {
                         // [] means [_: ()]
                         x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
                             vec![Par {
-                                name: cxt.db.name("_".to_string()),
+                                name: (cxt.db.name("_".to_string()), x.span()),
                                 ty: Expr::var(Var::Builtin(Builtin::UnitType)),
                             }]
                         })
@@ -638,7 +638,7 @@ impl ast::TermPar {
                                 })
                             })
                             .unwrap_or((None, None));
-                        let name = name.unwrap_or_else(|| cxt.db.name("_".to_string()));
+                        let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), x.span()));
                         if ty.is_some() {
                             cxt.error(x.pat().unwrap().span(), TypeError::Other("Binder '_: _' not allowed in pattern of another binder".to_string()));
                         }
@@ -654,12 +654,12 @@ impl ast::TermPar {
                     Ok(x) => {
                         let ty = x.check(Val::Type, cxt, &CheckReason::UsedAsType);
                         Par {
-                            name: cxt.db.name("_".to_string()),
+                            name: (cxt.db.name("_".to_string()), x.span()),
                             ty,
                         }
                     }
-                    Err(_) => Par {
-                        name: cxt.db.name("_".to_string()),
+                    Err(span) => Par {
+                        name: (cxt.db.name("_".to_string()), span),
                         ty: Expr::var(Var::Builtin(Builtin::UnitType)),
                     },
                 };
@@ -685,7 +685,9 @@ impl ast::PatPar {
                 });
                 let par = match p {
                     Ok((name, ty)) => {
-                        let name = name.unwrap_or_else(|| cxt.db.name("_".to_string()));
+                        let name = name.unwrap_or_else(|| {
+                            (cxt.db.name("_".to_string()), x.as_ref().unwrap().span())
+                        });
                         let ty = ty
                             .map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType))
                             .unwrap_or_else(|| {
@@ -697,8 +699,8 @@ impl ast::PatPar {
                             });
                         Par { name, ty }
                     }
-                    Err(_) => Par {
-                        name: cxt.db.name("_".to_string()),
+                    Err(span) => Par {
+                        name: (cxt.db.name("_".to_string()), *span),
                         ty: Expr::var(Var::Builtin(Builtin::UnitType)),
                     },
                 };
@@ -719,12 +721,12 @@ impl ast::Pair {
                     .and_then(|x| x.expr())
                     .map(|x| match x {
                         ast::Expr::Var(x) => Some(x.name(cxt.db)),
-                        ast::Expr::Hole(_) => Some(cxt.db.name("_".to_string())),
+                        ast::Expr::Hole(_) => Some((cxt.db.name("_".to_string()), x.span())),
                         _ => None,
                     })
                     // Allow (: I32, I32) as (_: I32, I32)
                     // this is mostly useful to disambiguate between pair and sigma in inferred context
-                    .unwrap_or_else(|| Some(cxt.db.name("_".to_string())));
+                    .unwrap_or_else(|| Some((cxt.db.name("_".to_string()), x.span())));
 
                 let ty = x
                     .ty()
@@ -750,7 +752,7 @@ impl ast::Pair {
                     }))
                 } else {
                     // We have a more complicated pattern on the lhs, so move it to a case on the rhs
-                    let name = cxt.db.name("_".to_string());
+                    let name = (cxt.db.name("_".to_string()), x.pat().unwrap().span());
                     cxt.push();
                     cxt.define_local(name, vty.clone(), None);
                     let (case, cty) = self::pattern::elab_case(
@@ -768,16 +770,16 @@ impl ast::Pair {
                         class: Sigma,
                         params: vec![Par { name, ty }],
                         body: Box::new(Expr::Elim(
-                            Box::new(Expr::var(Var::Local(name, Idx::zero()))),
+                            Box::new(Expr::var(Var::Local(name.0, Idx::zero()))),
                             Box::new(Elim::Case(case, cty)),
                         )),
                     }))
                 }
             }
-            Some(a) => {
-                let a = a.check(Val::Type, cxt, &CheckReason::UsedAsType);
+            Some(pa) => {
+                let a = pa.check(Val::Type, cxt, &CheckReason::UsedAsType);
                 // We need to elaborate b at the proper size so the indices are correct
-                let name = cxt.db.name("_".to_string());
+                let name = (cxt.db.name("_".to_string()), pa.span());
                 let va = a.clone().eval(&mut cxt.env());
                 cxt.push();
                 // TODO can we just use Val::Error or something? it should be impossible to use this...?
@@ -868,7 +870,7 @@ fn check_params(
             1 => xs.pop().unwrap(),
             _ => todo!("probably should do pattern elaboration"),
         };
-        let xspan = x.as_ref().map_or_else(|x| x.clone(), |x| x.span());
+        let xspan = x.as_ref().map_or_else(|x| *x, |x| x.span());
         let par = match ty {
             Some(ety) => {
                 let vety = ety.clone().eval(&mut cxt.env());
@@ -884,7 +886,7 @@ fn check_params(
                             // This is fine since we keep cxt.size() at the level that the parameters expect
                             ety
                         };
-                        let name = name.unwrap_or_else(|| cxt.db.name("_".to_string()));
+                        let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), xspan));
                         Par { name, ty }
                     }
                     Ok(None) => todo!("move non-trivial patterns to rhs"),
@@ -897,7 +899,7 @@ fn check_params(
                                 reason,
                             )
                             .unwrap_or_else(|e| cxt.error(span, e.into()));
-                        let name = cxt.db.name("_".to_string());
+                        let name = (cxt.db.name("_".to_string()), span);
                         Par {
                             name,
                             ty: Expr::var(Var::Builtin(Builtin::UnitType)),
@@ -919,7 +921,7 @@ fn check_params(
                         .ok()
                         .and_then(|x| x.as_simple_pat(cxt.db))
                         .and_then(|x| x.0)
-                        .unwrap_or_else(|| cxt.db.name("_".to_string())),
+                        .unwrap_or_else(|| (cxt.db.name("_".to_string()), xspan)),
                     ty: Expr::Error,
                 }
             }
@@ -995,7 +997,7 @@ impl ast::Expr {
                     // Make sure, however, that they can't actually be accessed by name by code in the lambda
                     for par in implicit_tys {
                         cxt.define_local(
-                            par.name.inaccessible(cxt.db),
+                            (par.name.0.inaccessible(cxt.db), par.name.1),
                             par.ty.clone().eval(&mut cxt.env()),
                             None,
                         );
@@ -1099,10 +1101,10 @@ impl ast::Expr {
         }
     }
 
-    fn as_simple_pat(&self, db: &dyn Elaborator) -> Option<(Option<Name>, Option<ast::Expr>)> {
+    fn as_simple_pat(&self, db: &dyn Elaborator) -> Option<(Option<SName>, Option<ast::Expr>)> {
         match self {
             ast::Expr::Var(x) => Some((Some(x.name(db)), None)),
-            ast::Expr::Hole(_) => Some((Some(db.name("_".to_string())), None)),
+            ast::Expr::Hole(_) => Some((Some((db.name("_".to_string()), self.span())), None)),
             ast::Expr::Binder(x) => {
                 let (name, old_ty) = x.pat()?.expr()?.as_simple_pat(db)?;
                 if old_ty.is_some() {
@@ -1116,7 +1118,12 @@ impl ast::Expr {
                 .expr()
                 .map(|x| x.as_simple_pat(db))
                 // For (), we return this expression as the type, since it's identical syntactically
-                .unwrap_or_else(|| Some((Some(db.name("_".to_string())), Some(self.clone())))),
+                .unwrap_or_else(|| {
+                    Some((
+                        Some((db.name("_".to_string()), self.span())),
+                        Some(self.clone()),
+                    ))
+                }),
             _ => None,
         }
     }
@@ -1127,7 +1134,7 @@ impl ast::Expr {
             Ok({
                 match self {
                     ast::Expr::Var(name) => {
-                        let name = name.name(cxt.db);
+                        let name = name.name(cxt.db).0;
                         let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name))?;
                         (Expr::var(v.cvt(cxt.size())), t)
                     }
@@ -1145,7 +1152,7 @@ impl ast::Expr {
                                 // [] means [_: ()]
                                 x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
                                     vec![Par {
-                                        name: cxt.db.name("_".to_string()),
+                                        name: (cxt.db.name("_".to_string()), x.span()),
                                         ty: Expr::var(Var::Builtin(Builtin::UnitType)),
                                     }]
                                 })
@@ -1212,7 +1219,7 @@ impl ast::Expr {
                                 // [] means [_: ()]
                                 x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
                                     vec![Par {
-                                        name: cxt.db.name("_".to_string()),
+                                        name: (cxt.db.name("_".to_string()), x.span()),
                                         ty: Expr::var(Var::Builtin(Builtin::UnitType)),
                                     }]
                                 })
@@ -1288,11 +1295,8 @@ impl ast::Expr {
                                 let rty = clos.elab_with(|aty| match args.pop_front() {
                                     Some(arg) => match arg {
                                         Ok(arg) => {
-                                            let arg = arg.check(
-                                                aty,
-                                                cxt,
-                                                &CheckReason::ArgOf(lhs_span.clone()),
-                                            );
+                                            let arg =
+                                                arg.check(aty, cxt, &CheckReason::ArgOf(lhs_span));
                                             targs.push(arg.clone());
                                             arg.eval(&mut cxt.env())
                                         }
@@ -1301,7 +1305,7 @@ impl ast::Expr {
                                                 Val::var(Var::Builtin(Builtin::UnitType)),
                                                 aty,
                                                 cxt.size(),
-                                                &CheckReason::ArgOf(lhs_span.clone()),
+                                                &CheckReason::ArgOf(lhs_span),
                                             ) {
                                                 cxt.error(span, e.into());
                                                 Val::Error
@@ -1469,7 +1473,10 @@ impl ast::Expr {
                                             Box::new(Expr::Fun(EClos {
                                                 class: Sigma,
                                                 params: vec![Par {
-                                                    name: cxt.db.name("_".into()),
+                                                    name: (
+                                                        cxt.db.name("_".into()),
+                                                        x.a().unwrap().span(),
+                                                    ),
                                                     ty: ty.clone().quote(cxt.size(), None),
                                                 }],
                                                 body: Box::new(
@@ -1515,7 +1522,10 @@ impl ast::Expr {
                                             Box::new(Expr::Fun(EClos {
                                                 class: Sigma,
                                                 params: vec![Par {
-                                                    name: cxt.db.name("_".into()),
+                                                    name: (
+                                                        cxt.db.name("_".into()),
+                                                        x.a().unwrap().span(),
+                                                    ),
                                                     ty: ty.clone().quote(cxt.size(), None),
                                                 }],
                                                 body: Box::new(ty.quote(cxt.size().inc(), None)),
@@ -1562,7 +1572,7 @@ impl ast::Expr {
                         let ty = Expr::Fun(EClos {
                             class: Sigma,
                             params: vec![Par {
-                                name: cxt.db.name("_".to_string()),
+                                name: (cxt.db.name("_".to_string()), x.lhs().unwrap().span()),
                                 ty: aty,
                             }],
                             body: Box::new(bty),

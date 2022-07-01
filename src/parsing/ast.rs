@@ -22,7 +22,7 @@ pub fn node_span(node: &SyntaxNode) -> RelSpan {
     if start.is_none() || end.is_none() {
         node.text_range().into()
     } else {
-        start.unwrap().into()..end.unwrap().into()
+        RelSpan::new(start.unwrap().into(), end.unwrap().into())
     }
 }
 
@@ -228,8 +228,11 @@ make_nodes! {
 }
 
 impl Var {
-    pub fn name<T: Parser + ?Sized>(&self, db: &T) -> Name {
-        db.name(self.name_tok().unwrap().text().to_string())
+    pub fn name<T: Parser + ?Sized>(&self, db: &T) -> SName {
+        (
+            db.name(self.name_tok().unwrap().text().to_string()),
+            self.span(),
+        )
     }
 }
 

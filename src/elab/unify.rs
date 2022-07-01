@@ -162,7 +162,7 @@ impl UnifyError {
                 message: Doc::start("Error solving metavariable: ").chain(m.pretty(db)),
                 message_lsp: None,
                 primary: Label {
-                    span: intro_span.clone(),
+                    span: *intro_span,
                     message: Doc::start("Meta introduced here"),
                     color: Some(ca),
                 },

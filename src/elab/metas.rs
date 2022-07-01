@@ -276,7 +276,7 @@ impl MetaCxt {
                 MetaEntry::Solved { .. } => None,
                 MetaEntry::Unsolved {
                     introduced_span, ..
-                } => Some(introduced_span.clone()),
+                } => Some(*introduced_span),
             })
             .unwrap()
     }
@@ -290,7 +290,7 @@ impl MetaCxt {
     ) -> Result<(), MetaSolveError> {
         // smalltt does eta-contraction here, but I don't think that's necessary, especially without explicit meta spines in most cases
 
-        let (scope, bounds, _intro_span) = self
+        let (scope, bounds, intro_span) = self
             .metas
             .get(meta.0 as usize)
             .and_then(|x| match x {
@@ -324,7 +324,7 @@ impl MetaCxt {
                     Ok(names
                         .into_iter()
                         .map(|name| Par {
-                            name,
+                            name: (name, *intro_span),
                             // TODO is this type ever used? can we actually find the type of this?
                             ty: Expr::Error,
                         })

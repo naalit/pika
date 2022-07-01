@@ -47,12 +47,13 @@ impl Scope {
         }
     }
 
-    fn define(&mut self, name: Name, var: Var<Lvl>, ty: Val) {
-        self.names.insert(name, (var, ty));
+    fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val) {
+        // TODO we probably want to keep the spans
+        self.names.insert(name.0, (var, ty));
     }
 
-    fn define_local(&mut self, name: Name, ty: Val) {
-        self.define(name, Var::Local(name, self.size.next_lvl()), ty);
+    fn define_local(&mut self, name: SName, ty: Val) {
+        self.define(name, Var::Local(name.0, self.size.next_lvl()), ty);
         self.size = self.size.inc();
     }
 
@@ -118,7 +119,7 @@ impl Cxt<'_> {
         self.env.clone()
     }
 
-    pub fn define_local(&mut self, name: Name, ty: Val, value: Option<Val>) {
+    pub fn define_local(&mut self, name: SName, ty: Val, value: Option<Val>) {
         self.scope_mut().define_local(name, ty);
         self.env.push(value);
     }
@@ -132,7 +133,7 @@ impl Cxt<'_> {
     pub fn emit_errors(&self) -> Vec<Error> {
         self.errors
             .iter()
-            .map(|(x, span)| x.to_error(span.clone(), self.db))
+            .map(|(x, span)| x.to_error(*span, self.db))
             .collect()
     }
 
