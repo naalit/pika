@@ -259,7 +259,6 @@ impl MetaCxt {
 
     pub fn lookup_expr(&self, meta: Meta, size: Size) -> Option<Expr> {
         self.metas.get(meta.0 as usize).and_then(|x| match x {
-            // TODO combined eval-quote (that's why this function exists separately from lookup_val)
             MetaEntry::Solved { solution, env, .. } => Some(solution.clone().eval_quote(
                 &mut env.clone(),
                 size,

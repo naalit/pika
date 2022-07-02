@@ -5,31 +5,37 @@ pub struct DefCxt {
     scopes: Vec<ScopeState>,
 }
 impl DefCxt {
-    pub fn global(db: &(impl Elaborator + ?Sized)) -> Self {
+    pub fn global(file: File) -> Self {
         DefCxt {
-            scopes: vec![Scope::global(db).state()],
+            scopes: vec![ScopeState::Global(file)],
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ScopeState {
-    global: bool,
-    size: Size,
-    names: Vec<(Name, (Var<Lvl>, Val))>,
+enum VarDef {
+    Var(Var<Lvl>, Val),
+    Def(Def),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ScopeState {
+    Global(File),
+    Local {
+        size: Size,
+        names: Vec<(Name, VarDef)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Scope {
-    global: bool,
     size: Size,
-    names: HashMap<Name, (Var<Lvl>, Val)>,
+    names: HashMap<Name, VarDef>,
 }
 
 impl Scope {
     fn state(&self) -> ScopeState {
-        ScopeState {
-            global: self.global,
+        ScopeState::Local {
             size: self.size,
             names: self
                 .names
@@ -39,17 +45,19 @@ impl Scope {
         }
     }
 
-    fn from_state(state: ScopeState) -> Scope {
-        Scope {
-            global: state.global,
-            size: state.size,
-            names: HashMap::from_iter(state.names),
+    fn from_state(state: ScopeState, db: &dyn Elaborator) -> Scope {
+        match state {
+            ScopeState::Local { size, names } => Scope {
+                size,
+                names: HashMap::from_iter(names),
+            },
+            ScopeState::Global(file) => Scope::global(db, file),
         }
     }
 
     fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val) {
         // TODO we probably want to keep the spans
-        self.names.insert(name.0, (var, ty));
+        self.names.insert(name.0, VarDef::Var(var, ty));
     }
 
     fn define_local(&mut self, name: SName, ty: Val) {
@@ -57,8 +65,8 @@ impl Scope {
         self.size = self.size.inc();
     }
 
-    fn global(db: &(impl Elaborator + ?Sized)) -> Self {
-        let global_defs = HashMap::from_iter(
+    fn global(db: &(impl Elaborator + ?Sized), file: File) -> Self {
+        let mut global_defs = HashMap::from_iter(
             [
                 ("I8", Builtin::IntType(IntType::I8), Val::Type),
                 ("I16", Builtin::IntType(IntType::I16), Val::Type),
@@ -70,10 +78,20 @@ impl Scope {
                 ("U64", Builtin::IntType(IntType::U64), Val::Type),
             ]
             .iter()
-            .map(|(k, v, t)| (db.name(k.to_string()), (Var::Builtin(*v), t.clone()))),
+            .map(|(k, v, t)| {
+                (
+                    db.name(k.to_string()),
+                    VarDef::Var(Var::Builtin(*v), t.clone()),
+                )
+            }),
         );
+        for split in db.all_split_ids(file) {
+            let def = db.def(DefLoc::Root(file, split));
+            if let Some(name) = db.def_name(def) {
+                global_defs.insert(name, VarDef::Def(def));
+            }
+        }
         Scope {
-            global: true,
             size: Size::zero(),
             names: global_defs,
         }
@@ -81,7 +99,6 @@ impl Scope {
 
     fn new(size: Size) -> Self {
         Scope {
-            global: false,
             size,
             names: HashMap::new(),
         }
@@ -100,7 +117,11 @@ impl Cxt<'_> {
         let mut cxt = Cxt {
             db,
             env: Env::new(Size::zero()),
-            scopes: def_cxt.scopes.into_iter().map(Scope::from_state).collect(),
+            scopes: def_cxt
+                .scopes
+                .into_iter()
+                .map(|x| Scope::from_state(x, db))
+                .collect(),
             errors: Vec::new(),
             mcxt: MetaCxt::new(),
         };
@@ -163,19 +184,28 @@ impl Cxt<'_> {
             .iter()
             .rev()
             .find_map(|x| x.names.get(&name).cloned())
+            .map(|x| match x {
+                VarDef::Var(v, t) => (v, t),
+                VarDef::Def(d) => (
+                    Var::Def(d),
+                    self.db
+                        .def_type(d)
+                        .and_then(|x| x.result)
+                        .unwrap_or(Val::Error),
+                ),
+            })
     }
 
     pub fn local_ty(&self, lvl: Lvl) -> Val {
         self.scopes
             .iter()
             .find_map(|x| {
-                x.names
-                    .values()
-                    .find(|(v, _)| matches!(v, Var::Local(_, l) if *l == lvl))
+                x.names.values().find_map(|x| match x {
+                    VarDef::Var(Var::Local(_, l), t) if *l == lvl => Some(t.clone()),
+                    _ => None,
+                })
             })
             .unwrap()
-            .1
-            .clone()
     }
 
     pub fn error(&mut self, span: RelSpan, error: TypeError) {

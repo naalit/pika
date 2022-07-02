@@ -60,18 +60,25 @@ fn all_errors(db: &dyn Elaborator, file: File) -> Vec<(Error, SplitId)> {
     errors
 }
 
+fn def_file(db: &dyn Elaborator, def: Def) -> File {
+    match db.lookup_def(def) {
+        DefLoc::Root(file, _) => file,
+        DefLoc::Child(def, _) => def_file(db, def),
+    }
+}
+
 fn def_name(db: &dyn Elaborator, def: Def) -> Option<Name> {
     match db.lookup_def(def) {
         DefLoc::Root(_, SplitId::Named(name)) => Some(name),
         DefLoc::Child(_, SplitId::Named(name)) => Some(name),
         _ => {
             let def_node = db.to_def_node(def)?;
-            let (def, _) = db.lookup_def_node(def_node);
-            match def {
+            let (adef, _) = db.lookup_def_node(def_node);
+            match adef {
                 ast::Def::LetDef(x) => x
                     .pat()?
                     .expr()?
-                    .as_let_def_pat(&mut Cxt::new(db, DefCxt::global(db)))
+                    .as_let_def_pat(&mut Cxt::new(db, DefCxt::global(def_file(db, def))))
                     .0
                     .map(|x| x.0),
                 ast::Def::FunDef(x) => Some(x.name()?.name(db).0),
@@ -88,7 +95,7 @@ fn root_defs_n(db: &dyn Elaborator, file: File) -> Vec<(SplitId, DefNode)> {
         .into_iter()
         .filter_map(|split| {
             let def = db.ast(file, split)?.def()?;
-            let node = db.def_node((def, DefCxt::global(db)));
+            let node = db.def_node((def, DefCxt::global(file)));
             Some((split, node))
         })
         .collect()
@@ -353,16 +360,16 @@ impl ast::Def {
                 (_, Some(ty)) => Some(
                     ty.expr()?
                         .check(Val::Type, cxt, &CheckReason::UsedAsType)
-                        .eval_quote(&mut Env::new(cxt.size()), cxt.size(), Some(&cxt.mcxt))
-                        .eval(&mut Env::new(cxt.size())),
+                        .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                        .eval(&mut cxt.env()),
                 ),
                 _ => {
                     // Infer the type from the value if possible
                     let def = cxt.db.def_elab_n(def_node);
                     match def.result {
                         Some(Definition { ty, .. }) => Some(
-                            ty.eval_quote(&mut Env::new(cxt.size()), cxt.size(), Some(&cxt.mcxt))
-                                .eval(&mut Env::new(cxt.size())),
+                            ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                                .eval(&mut cxt.env()),
                         ),
                         _ => None,
                     }
@@ -411,7 +418,9 @@ impl ast::Def {
                         body: Box::new(ty),
                     });
                 }
-                let ty = ty.eval(&mut cxt.env());
+                let ty = ty
+                    .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                    .eval(&mut cxt.env());
 
                 Some(ty)
             }
@@ -1354,7 +1363,7 @@ impl ast::Expr {
                                     .unwrap();
                                 lhs = Expr::Elim(Box::new(lhs), Box::new(Elim::App(Impl, arg)));
                                 lhs_ty = rty;
-                                lhs_span.end = x.imp().unwrap().span().end;
+                                lhs_span.end = x.imp().map(|x| x.span()).unwrap_or(lhs_span).end;
                             }
                             _ => (),
                         }
