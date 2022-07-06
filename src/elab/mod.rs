@@ -1065,7 +1065,7 @@ impl ast::Expr {
                     Ok(term)
                 }
 
-                // Propagate through case
+                // Propagate through case/do/etc.
                 (ast::Expr::Case(case), ty) => {
                     let mut rty = Some((ty, reason.clone()));
                     let (scrutinee, case, cty) = case.elaborate(&mut rty, cxt);
@@ -1073,6 +1073,11 @@ impl ast::Expr {
                         Box::new(scrutinee),
                         Box::new(Elim::Case(case, cty)),
                     ))
+                }
+                (ast::Expr::Do(d), ty) => {
+                    let mut rty = Some((ty, reason.clone()));
+                    let expr = d.elaborate(&mut rty, cxt);
+                    Ok(expr)
                 }
 
                 (_, ty) => {
@@ -1398,7 +1403,12 @@ impl ast::Expr {
                             (lhs, lhs_ty)
                         }
                     }
-                    ast::Expr::Do(_) => todo!(),
+                    ast::Expr::Do(d) => {
+                        let mut rty = None;
+                        let expr = d.elaborate(&mut rty, cxt);
+                        let rty = rty.map(|(x, _)| x).unwrap_or(Val::Error);
+                        (expr, rty)
+                    }
                     ast::Expr::Hole(_) => {
                         let mty =
                             cxt.mcxt

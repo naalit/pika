@@ -133,7 +133,7 @@ mod input {
     use super::*;
 
     type SPattern = Spanned<Pattern>;
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub(super) enum Pattern {
         Cons(Cons, Vec<SPattern>),
         Pair(Box<SPattern>, Box<SPattern>),
@@ -142,7 +142,7 @@ mod input {
         Any,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub(super) struct Column {
         pub var: PVar,
         pub pat: SPattern,
@@ -156,7 +156,7 @@ mod input {
         No,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub(super) struct Row {
         pub columns: VecDeque<Column>,
         pub guard: Option<ast::Expr>,
@@ -484,7 +484,8 @@ impl CaseElabCxt<'_, '_> {
         if row.columns.is_empty() {
             let row = rows.remove(0);
             if reachable || !self.env_tys.contains_key(&row.body) {
-                self.env_tys.insert(row.body, (row.make_env(self), reachable));
+                self.env_tys
+                    .insert(row.body, (row.make_env(self), reachable));
             } else {
                 return DecNode {
                     ipats: Vec::new(),
@@ -708,7 +709,8 @@ pub(super) fn elab_case(
                 if !reachable {
                     // If there's no body we have a bigger problem
                     if let Some(span) = body.as_ref().map(|x| x.span()) {
-                        cxt.ecxt.warning(span, TypeError::Other(format!("unreachable case branch")));
+                        cxt.ecxt
+                            .warning(span, TypeError::Other(format!("unreachable case branch")));
                     }
                 }
                 cxt.ecxt.push();
@@ -779,6 +781,123 @@ impl ast::Case {
             ecxt,
         );
         (scrutinee, case_of, ty)
+    }
+}
+
+/// Desugars a `do` block to `case`, literally manufacturing a hierarchical AST and passing it to elab_case
+/// ```pika
+/// do
+///   let (x, y) = something ()
+///   do_stuff ()
+///   x + y
+/// -->
+/// case something () of
+///   (x, y) => case do_stuff () of
+///      _ => x + y
+/// ```
+fn elab_block(
+    block: &[ast::Stmt],
+    span: RelSpan,
+    rty: &mut Option<(Val, CheckReason)>,
+    ecxt: &mut Cxt,
+) -> Expr {
+    if block.is_empty() {
+        match rty {
+            Some((rty, reason)) => {
+                if let Err(e) = ecxt.mcxt.unify(
+                    rty.clone(),
+                    Val::var(Var::Builtin(Builtin::UnitType)),
+                    ecxt.size(),
+                    reason,
+                ) {
+                    ecxt.error(span, e.into());
+                }
+            }
+            None => {
+                *rty = Some((
+                    Val::var(Var::Builtin(Builtin::UnitType)),
+                    CheckReason::MustMatch(span),
+                ));
+            }
+        }
+        return Expr::var(Var::Builtin(Builtin::Unit));
+    }
+
+    let rest = rowan::GreenNode::new(
+        crate::parsing::SyntaxKind::Do.into(),
+        block
+            .iter()
+            .skip(1)
+            .map(|x| rowan::NodeOrToken::Node((*x.syntax().green()).to_owned()))
+            .collect::<Vec<_>>(),
+    );
+    let rest = ast::Expr::cast(rowan::SyntaxNode::new_root(rest)).unwrap();
+
+    match &block[0] {
+        ast::Stmt::Expr(e) if block.len() == 1 => match rty {
+            Some((rty, reason)) => e.check(rty.clone(), ecxt, reason),
+            None => {
+                let (expr, ty) = e.infer(ecxt);
+                *rty = Some((ty, CheckReason::MustMatch(e.span())));
+                expr
+            }
+        },
+        ast::Stmt::Expr(e) => {
+            let (s, sty) = e.infer(ecxt);
+            let (case, cty) = elab_case(
+                sty,
+                std::iter::once((None, e.span(), Some(rest))),
+                rty,
+                ecxt,
+            );
+            Expr::Elim(Box::new(s), Box::new(Elim::Case(case, cty)))
+        }
+        ast::Stmt::Def(d) => match d {
+            // only let is different in blocks
+            ast::Def::LetDef(d) => {
+                // TODO better way of getting type from pattern here
+                let ty = match d.pat().and_then(|x| x.expr()).and_then(|x| match x {
+                    ast::Expr::GroupedExpr(x) => x.expr(),
+                    x => Some(x),
+                }) {
+                    Some(ast::Expr::Binder(x)) => x
+                        .ty()
+                        .and_then(|x| x.expr())
+                        .map(|x| (x.span(), x))
+                        .map(|(s, x)| (x.check(Val::Type, ecxt, &CheckReason::UsedAsType), s))
+                        .map(|(x, s)| (x.eval(&mut ecxt.env()), s)),
+                    _ => None,
+                };
+                let (body, ty) = match ty {
+                    Some((ty, span)) => match d.body().and_then(|x| x.expr()) {
+                        Some(body) => {
+                            let body = body.check(ty.clone(), ecxt, &CheckReason::GivenType(span));
+                            (body, ty)
+                        }
+                        None => (Expr::Error, ty),
+                    },
+                    None => d
+                        .body()
+                        .and_then(|x| x.expr())
+                        .map(|x| x.infer(ecxt))
+                        .unwrap_or((Expr::Error, Val::Error)),
+                };
+                let (case, cty) = elab_case(
+                    ty,
+                    std::iter::once((d.pat().and_then(|x| x.expr()), d.span(), Some(rest))),
+                    rty,
+                    ecxt,
+                );
+                Expr::Elim(Box::new(body), Box::new(Elim::Case(case, cty)))
+            }
+            _ => todo!("add child defs"),
+        },
+    }
+}
+
+impl ast::Do {
+    pub(super) fn elaborate(&self, rty: &mut Option<(Val, CheckReason)>, ecxt: &mut Cxt) -> Expr {
+        elab_block(&self.block(), self.span(), rty, ecxt)
     }
 }
 
