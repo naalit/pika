@@ -13,11 +13,17 @@ pub fn node_span(node: &SyntaxNode) -> RelSpan {
     let start = node
         .children_with_tokens()
         .find(|x| x.as_token().map_or(true, |x| !x.kind().is_trivia()))
-        .map(|x| x.text_range().start());
+        .map(|x| match x {
+            rowan::NodeOrToken::Node(n) => node_span(&n).start,
+            rowan::NodeOrToken::Token(t) => t.text_range().start().into(),
+        });
     let end = node
         .children_with_tokens()
         .filter(|x| x.as_token().map_or(true, |x| !x.kind().is_trivia()))
-        .map(|x| x.text_range().end())
+        .map(|x| match x {
+            rowan::NodeOrToken::Node(n) => node_span(&n).end,
+            rowan::NodeOrToken::Token(t) => t.text_range().end().into(),
+        })
         .last();
     if start.is_none() || end.is_none() {
         node.text_range().into()

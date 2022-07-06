@@ -159,7 +159,7 @@ pub enum TypeError {
     Other(String),
 }
 impl TypeError {
-    fn to_error(&self, span: RelSpan, db: &dyn Elaborator) -> Error {
+    fn to_error(&self, severity: Severity, span: RelSpan, db: &dyn Elaborator) -> Error {
         let mut gen = ariadne::ColorGenerator::new();
         let ca = gen.next();
         let (msg, label, note) = match self {
@@ -188,7 +188,7 @@ impl TypeError {
             ),
         };
         Error {
-            severity: Severity::Error,
+            severity,
             message: msg,
             message_lsp: None,
             primary: Label {

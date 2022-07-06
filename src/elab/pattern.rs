@@ -431,7 +431,7 @@ struct DecNode<T: IsTerm> {
 
 struct CaseElabCxt<'a, 'b> {
     ecxt: &'a mut Cxt<'b>,
-    env_tys: HashMap<Body, PEnv>,
+    env_tys: HashMap<Body, (PEnv, bool)>,
     var_tys: Vec<Val>,
     bodies: Vec<Option<ast::Expr>>,
 }
@@ -468,7 +468,7 @@ impl CaseElabCxt<'_, '_> {
             .0
     }
 
-    fn compile_rows(&mut self, mut rows: Vec<input::Row>) -> DecNode<Expr> {
+    fn compile_rows(&mut self, mut rows: Vec<input::Row>, reachable: bool) -> DecNode<Expr> {
         if rows.is_empty() {
             // TODO find missing pattern and possibly emit error
             return DecNode {
@@ -483,7 +483,14 @@ impl CaseElabCxt<'_, '_> {
         // other rows are unreachable here, but may be reachable through another path so we figue that out later
         if row.columns.is_empty() {
             let row = rows.remove(0);
-            self.env_tys.insert(row.body, row.make_env(self));
+            if reachable || !self.env_tys.contains_key(&row.body) {
+                self.env_tys.insert(row.body, (row.make_env(self), reachable));
+            } else {
+                return DecNode {
+                    ipats: Vec::new(),
+                    dec: Dec::Failure,
+                };
+            }
 
             let dec = match &row.guard {
                 Some(guard) => {
@@ -495,6 +502,7 @@ impl CaseElabCxt<'_, '_> {
                     );
                     let mut size = self.ecxt.size();
                     let params = self.env_tys[&row.body]
+                        .0
                         .iter()
                         .map(|(n, ty)| Par {
                             name: *n,
@@ -512,12 +520,12 @@ impl CaseElabCxt<'_, '_> {
                             body: Box::new(guard),
                         },
                         row.body,
-                        Box::new(self.compile_rows(rows)),
+                        Box::new(self.compile_rows(rows, reachable)),
                     )
                 }
                 None => {
                     // We still want type errors in unreachable rows!
-                    let _ = self.compile_rows(rows);
+                    let _ = self.compile_rows(rows, false);
                     Dec::Success(row.body)
                 }
             };
@@ -607,10 +615,10 @@ impl CaseElabCxt<'_, '_> {
             }
         }
 
-        let mut yes = self.compile_rows(yes);
+        let mut yes = self.compile_rows(yes, reachable);
         match yes_cons {
             Some(yes_cons) => {
-                let no = self.compile_rows(no);
+                let no = self.compile_rows(no, reachable);
 
                 DecNode {
                     ipats: start_ipats,
@@ -692,11 +700,17 @@ pub(super) fn elab_case(
         .into_iter()
         .map(|(pat, span, body)| input::Row::new(svar, pat, span, body, &mut cxt))
         .collect();
-    let dec = cxt.compile_rows(rows);
+    let dec = cxt.compile_rows(rows, true);
     let mut rhs = Vec::new();
     for (i, body) in cxt.bodies.into_iter().enumerate() {
         match cxt.env_tys.get(&Body(i)) {
-            Some(env) => {
+            Some((env, reachable)) => {
+                if !reachable {
+                    // If there's no body we have a bigger problem
+                    if let Some(span) = body.as_ref().map(|x| x.span()) {
+                        cxt.ecxt.warning(span, TypeError::Other(format!("unreachable case branch")));
+                    }
+                }
                 cxt.ecxt.push();
                 let mut params = Vec::new();
                 for (name, ty) in env {
@@ -726,9 +740,7 @@ pub(super) fn elab_case(
                     body: Box::new(body),
                 });
             }
-            None => {
-                eprintln!("Warning: unreachable case branch!");
-            }
+            None => panic!("env_tys has no entry for body {}", i),
         }
     }
     (

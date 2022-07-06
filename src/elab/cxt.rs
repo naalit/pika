@@ -109,7 +109,7 @@ pub struct Cxt<'a> {
     pub db: &'a dyn Elaborator,
     scopes: Vec<Scope>,
     env: Env,
-    errors: Vec<Spanned<TypeError>>,
+    errors: Vec<(Severity, TypeError, RelSpan)>,
     pub mcxt: MetaCxt,
 }
 impl Cxt<'_> {
@@ -154,7 +154,7 @@ impl Cxt<'_> {
     pub fn emit_errors(&self) -> Vec<Error> {
         self.errors
             .iter()
-            .map(|(x, span)| x.to_error(*span, self.db))
+            .map(|(severity, x, span)| x.to_error(*severity, *span, self.db))
             .collect()
     }
 
@@ -209,6 +209,10 @@ impl Cxt<'_> {
     }
 
     pub fn error(&mut self, span: RelSpan, error: TypeError) {
-        self.errors.push((error, span));
+        self.errors.push((Severity::Error, error, span));
+    }
+
+    pub fn warning(&mut self, span: RelSpan, error: TypeError) {
+        self.errors.push((Severity::Warning, error, span));
     }
 }
