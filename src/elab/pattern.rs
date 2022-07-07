@@ -341,6 +341,7 @@ mod input {
                 ast::Expr::BinOp(x)
                     if x.op().map_or(false, |x| {
                         x.syntax()
+                            .unwrap()
                             .children_with_tokens()
                             .filter_map(|x| x.as_token().cloned())
                             .any(|x| x.kind() == crate::parsing::SyntaxKind::Bar)
@@ -760,7 +761,9 @@ pub(super) fn elab_case(
         //      ((a: I32, b: I32) => a + b) x
         //      : case x of { (a, b) => I32 }
         //      --> I32
-        rty.as_ref().unwrap().0.clone().quote(ecxt.size(), None),
+        rty.as_ref()
+            .map(|x| x.0.clone().quote(ecxt.size(), None))
+            .unwrap_or(Expr::Error),
     )
 }
 
@@ -805,8 +808,8 @@ fn elab_block(
         match rty {
             Some((rty, reason)) => {
                 if let Err(e) = ecxt.mcxt.unify(
-                    rty.clone(),
                     Val::var(Var::Builtin(Builtin::UnitType)),
+                    rty.clone(),
                     ecxt.size(),
                     reason,
                 ) {
@@ -823,15 +826,17 @@ fn elab_block(
         return Expr::var(Var::Builtin(Builtin::Unit));
     }
 
-    let rest = rowan::GreenNode::new(
-        crate::parsing::SyntaxKind::Do.into(),
-        block
-            .iter()
-            .skip(1)
-            .map(|x| rowan::NodeOrToken::Node((*x.syntax().green()).to_owned()))
-            .collect::<Vec<_>>(),
-    );
-    let rest = ast::Expr::cast(rowan::SyntaxNode::new_root(rest)).unwrap();
+    let rest = if block.len() > 1 {
+        Some(ast::Expr::Do(ast::Do::Val {
+            span: RelSpan::new(block[1].span().start, block.last().unwrap().span().end),
+            block: block[1..].to_vec(),
+        }))
+    } else {
+        Some(ast::Expr::Do(ast::Do::Val {
+            span: block[0].span(),
+            block: Vec::new(),
+        }))
+    };
 
     match &block[0] {
         ast::Stmt::Expr(e) if block.len() == 1 => match rty {
@@ -844,12 +849,7 @@ fn elab_block(
         },
         ast::Stmt::Expr(e) => {
             let (s, sty) = e.infer(ecxt);
-            let (case, cty) = elab_case(
-                sty,
-                std::iter::once((None, e.span(), Some(rest))),
-                rty,
-                ecxt,
-            );
+            let (case, cty) = elab_case(sty, std::iter::once((None, e.span(), rest)), rty, ecxt);
             Expr::Elim(Box::new(s), Box::new(Elim::Case(case, cty)))
         }
         ast::Stmt::Def(d) => match d {
@@ -884,7 +884,7 @@ fn elab_block(
                 };
                 let (case, cty) = elab_case(
                     ty,
-                    std::iter::once((d.pat().and_then(|x| x.expr()), d.span(), Some(rest))),
+                    std::iter::once((d.pat().and_then(|x| x.expr()), d.span(), rest)),
                     rty,
                     ecxt,
                 );

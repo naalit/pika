@@ -1454,6 +1454,7 @@ impl ast::Expr {
                             .ok_or_else(|| TypeError::Other(format!("missing operator")))?;
                         let tok = tok
                             .syntax()
+                            .unwrap()
                             .children_with_tokens()
                             .find_map(|x| x.as_token().map(|x| x.kind()).filter(|x| x.is_binop()))
                             .unwrap_or(crate::parsing::SyntaxKind::Error);

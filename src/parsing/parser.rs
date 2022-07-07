@@ -703,7 +703,7 @@ impl<'a> Parser<'a> {
 
                             match self.cur() {
                                 Tok::Newline => self.advance(),
-                                Tok::Dedent => {
+                                Tok::Dedent | Tok::Eof => {
                                     self.advance();
                                     break;
                                 }

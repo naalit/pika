@@ -2,10 +2,8 @@ use super::*;
 
 pub trait AstNode: Sized {
     fn cast(syntax: SyntaxNode) -> Option<Self>;
-    fn syntax(&self) -> &SyntaxNode;
-    fn span(&self) -> RelSpan {
-        node_span(self.syntax())
-    }
+    fn syntax(&self) -> Option<&SyntaxNode>;
+    fn span(&self) -> RelSpan;
 }
 
 pub fn node_span(node: &SyntaxNode) -> RelSpan {
@@ -32,32 +30,58 @@ pub fn node_span(node: &SyntaxNode) -> RelSpan {
     }
 }
 
+macro_rules! _make_ty {
+    ((!$ty:ident)) => {
+        Option<SyntaxToken>
+    };
+    (($n:literal $ty:ty)) => {
+        Option<std::boxed::Box<$ty>>
+    };
+    ([$ty:ty]) => {
+        Vec<$ty>
+    };
+    ($ty:ty) => {
+        Option<std::boxed::Box<$ty>>
+    };
+}
 macro_rules! _make_getter {
     ($name:ident: (!$ty:ident)) => {
         #[allow(unused)]
         pub fn $name(&self) -> Option<SyntaxToken> {
-            self.syntax
-                .children_with_tokens()
-                .filter_map(|x| x.as_token().cloned())
-                .find(|x| x.kind() == SyntaxKind::$ty)
+            match self {
+                Self::Node(s) => s
+                    .children_with_tokens()
+                    .filter_map(|x| x.as_token().cloned())
+                    .find(|x| x.kind() == SyntaxKind::$ty),
+                Self::Val { $name, .. } => $name.clone(),
+            }
         }
     };
     ($name:ident: ($n:literal $ty:ty)) => {
         #[allow(unused)]
         pub fn $name(&self) -> Option<$ty> {
-            self.syntax.children().filter_map(<$ty>::cast).nth($n)
+            match self {
+                Self::Node(s) => s.children().filter_map(<$ty>::cast).nth($n),
+                Self::Val { $name, .. } => $name.as_ref().map(|x| (**x).clone()),
+            }
         }
     };
     ($name:ident: [$ty:ty]) => {
         #[allow(unused)]
         pub fn $name(&self) -> Vec<$ty> {
-            self.syntax.children().filter_map(<$ty>::cast).collect()
+            match self {
+                Self::Node(s) => s.children().filter_map(<$ty>::cast).collect(),
+                Self::Val { $name, .. } => $name.clone(),
+            }
         }
     };
     ($name:ident: $ty:ty) => {
         #[allow(unused)]
         pub fn $name(&self) -> Option<$ty> {
-            self.syntax.children().find_map(<$ty>::cast)
+            match self {
+                Self::Node(s) => s.children().find_map(<$ty>::cast),
+                Self::Val { $name, .. } => $name.as_ref().map(|x| (**x).clone()),
+            }
         }
     };
 }
@@ -97,10 +121,18 @@ macro_rules! make_nodes {
                 None
             }
 
-            fn syntax(&self) -> &SyntaxNode {
+            fn syntax(&self) -> Option<&SyntaxNode> {
                 match self {
                     $(
                         Self::$variant(n) => n.syntax(),
+                    )*
+                }
+            }
+
+            fn span(&self) -> RelSpan {
+                match self {
+                    $(
+                        Self::$variant(n) => n.span(),
                     )*
                 }
             }
@@ -109,9 +141,16 @@ macro_rules! make_nodes {
         make_nodes!{ $($rest)* }
     };
     {$n:ident = $($param:ident: $param_ty:tt),*; $($rest:tt)*} => {
+        #[allow(unused)]
         #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-        pub struct $n {
-            pub syntax: SyntaxNode,
+        pub enum $n {
+            Node(SyntaxNode),
+            Val {
+                span: RelSpan,
+                $(
+                    $param: _make_ty!($param_ty),
+                )*
+            }
         }
         impl $n {
             $(
@@ -121,16 +160,24 @@ macro_rules! make_nodes {
         impl AstNode for $n {
             fn cast(syntax: SyntaxNode) -> Option<Self> {
                 if syntax.kind() == SyntaxKind::$n {
-                    Some(Self {
-                        syntax,
-                    })
+                    Some(Self::Node(syntax))
                 } else {
                     None
                 }
             }
 
-            fn syntax(&self) -> &SyntaxNode {
-                &self.syntax
+            fn syntax(&self) -> Option<&SyntaxNode> {
+                match self {
+                    Self::Node(s) => Some(s),
+                    _ => None,
+                }
+            }
+
+            fn span(&self) -> RelSpan {
+                match self {
+                    Self::Node(s) => node_span(s),
+                    Self::Val { span, .. } => *span,
+                }
             }
         }
 
@@ -455,7 +502,7 @@ impl Pretty for Stmt {
 
 impl Pretty for BinOpKind {
     fn pretty(&self) -> Doc {
-        Doc::start(self.syntax.text())
+        Doc::start(self.syntax().unwrap().text())
     }
 }
 
@@ -544,7 +591,7 @@ impl Pretty for Expr {
                     Doc::none().hardline(),
                 ))
                 .indent(),
-            Expr::Lit(l) => Doc::start(l.syntax().text()),
+            Expr::Lit(l) => Doc::start(l.syntax().unwrap().text()),
             Expr::BinOp(x) => x
                 .a()
                 .pretty()
@@ -568,6 +615,7 @@ impl Pretty for Expr {
             Expr::Box(x) => Doc::none()
                 .add(
                     x.syntax()
+                        .unwrap()
                         .children_with_tokens()
                         .find(|x| {
                             matches!(
