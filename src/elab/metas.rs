@@ -91,15 +91,16 @@ pub enum MetaSolveError {
 }
 impl MetaSolveError {
     pub fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
-        let ca = ariadne::ColorGenerator::new().next();
         match self {
             MetaSolveError::Occurs(m) => Doc::start("Solved meta ")
-                .add(m, ca)
+                .add(m, Doc::COLOR1)
                 .add("occurs in solution", ()),
-            MetaSolveError::Scope(n) => Doc::start("Variable ").add(db.lookup_name(*n), ca).add(
-                ", which is outside of the scope of the meta, occurs in solution",
-                (),
-            ),
+            MetaSolveError::Scope(n) => Doc::start("Variable ")
+                .add(db.lookup_name(*n), Doc::COLOR1)
+                .add(
+                    ", which is outside of the scope of the meta, occurs in solution",
+                    (),
+                ),
             MetaSolveError::SpineNonVariable(e) => {
                 Doc::start("Meta is applied to something other than a local variable: '")
                     .chain(e.pretty(db))
@@ -117,7 +118,7 @@ impl MetaSolveError {
                 ),
             MetaSolveError::SpineTooLong => Doc::start("Meta may only be applied to one argument"),
             MetaSolveError::SpineDuplicate(n) => Doc::start("Meta is applied to variable ")
-                .add(db.lookup_name(*n), ca)
+                .add(db.lookup_name(*n), Doc::COLOR1)
                 .add(" more than once", ()),
             MetaSolveError::BoundsNotInt(t) => Doc::start("Integer literal can't have type '")
                 .chain(t.pretty(db))

@@ -1,133 +1,4 @@
-// case f x of
-//   One (12, b) => b + 2
-//   One (a, b) => a * b
-//   Two q => q
-// -->
-// let! _s = f x in
-// case!
-//   One (12, b) <- _s => b + 2
-//   One (a, b) <- _s => a * b
-//   Two q => q
-// -->
-// let# _s = f x in
-// case# _s of
-//   One _a => case!
-//     (12, b) <- _a => b + 2
-//     (a, b) <- _a => a * b
-//   _ => case!
-//     Two _a <- _s; q <- _a => q
-// -->
-// let# _s = f x in
-// case# _s of
-//   One _a => let! (_b, _c) = _a in
-//             case!
-//               12 <- _b; b <- _c => b + 2
-//               a <- _b; b <- _c => a * b
-//   _ => case!
-//     Two _a <- _s; q <- _a => q
-// -->
-// let# _s = f x in
-// case# _s of
-//   One _a => let! (_b, _c) = _a in
-//             case!
-//               12 <- _b => let b = _c in b + 2
-//               _ => let a = _b; b = _c in a * b
-//   _ => case!
-//     Two _a <- _s => let q = _a in q
-// -->
-// let# _s = f x in
-// case# _s of
-//   One _a => let# (_b, _c) = _a in
-//             case# _b of
-//               12 => let# b = _c in ret# b + 2
-//               _ => let# a = _b; b = _c in ret# a * b
-//   _ => case# _s of
-//     Two _a => let# q = _a in ret# q
-// -->
-// let# _s = f x in
-// case# _s of
-//   One _a => let# (_b, _c) = _a in
-//             case# _b of
-//               12 => let# b = _c in ret# b + 2
-//               _  => let# a = _b; b = _c in ret# a * b
-//   Two _a => let# q = _a in ret# q
-//
-// but `let# a = _b` doesn't exist after elaboration, we just add a binding `a = Var::Local(_b.lvl)` or something
-// whereas `let# (_b, _c) = _a` does need to persist in the elaboration output
-
-// case x of
-//   NoArgs, HasArgs a => a
-//   HasArgs a, HasArgs b => a + b
-//   q => 84
-// -->
-// let! _s = x in
-// case!
-//   (NoArgs, HasArgs a) <- _s => a
-//   (HasArgs a, HasArgs b) <- _s => a + b
-//   q <- _s => 84
-// -->
-// let! _s = x; (_a, _b) = _s in
-// case!
-//   NoArgs <- _a; HasArgs _d <- _b => let a = _d in a
-//   HasArgs _c <- _a; HasArgs _d <- _b => let a = _c; b = _d in a + b
-//   _ => let q = _s in 84
-// -->
-// // Doing _b first makes sense, but would mess up var levels
-// // What if we have a special variable representation for this process that's translated to De Bruijn at the end?
-// // so
-
-// case x of
-//   NoArgs, HasArgs a => a
-//   HasArgs a, HasArgs b => a + b
-//   q => 84
-// -->
-// let! %0 = x in
-// case!
-//   (NoArgs, HasArgs a) <- %0 => a
-//   (HasArgs a, HasArgs b) <- %0 => a + b
-//   q <- %0 => 84
-// -->
-// let! %0 = x; (%1, %2) = %0 in
-// case!
-//   NoArgs <- %1; HasArgs %3 <- %2 => let a = %3 in a
-//   HasArgs %4 <- %1; HasArgs %5 <- %2 => let a = %4; b = %5 in a + b
-//   _ => let q = %0 in 84
-// -->
-// let# %0 = x; (%1, %2) = %0 in
-// case# %2 of
-//   HasArgs %3 => case!
-//     NoArgs <- %1 => let a = %3 in a
-//     HasArgs %4 <- %1 => let a = %4; b = %3 in a + b // %5 merged with %3
-//   _ => let q = %0 in ret# 84
-// -->
-// let# %0 = x; (%1, %2) = %0 in
-// case# %2 of
-//   HasArgs %3 => case# %1 of
-//     NoArgs => let# a = %3 in ret# a
-//     _ => case!
-//       HasArgs %4 <- %1 => let! a = %4; b = %3 in a + b
-//   _ => let# q = %0 in ret# 84
-// -->
-// let# %0 = x; (%1, %2) = %0 in
-// case# %2 of
-//   HasArgs %3 => case# %1 of
-//     NoArgs => let# a = %3 in ret# a
-//     _ => case# %1 of
-//       HasArgs %4 => let# a = %4; b = %3 in ret# a + b
-//   _ => let# q = %0 in ret# 84
-
-// That's actually fine as a final representation - the only variables that are actually
-//   added to the local context are ones in the source pattern.
-// I'll say that _ should probably be turned into a name pattern rather than an Any, so it can be used implicitly
-//   (e.g. existential types).
-// But because a decision tree is self-contained, the variables inside it don't need to have any special properties.
-// However, this might make it harder to use IPat in other contexts.
-// Actually, not really, we just store Vec<IPat> and run the whole thing in order (in some sort of container of course).
-// Or unify decision trees for case and patterns in pi/lam/sigma.
-
 use super::*;
-
-// INPUT
 
 mod input {
     use super::*;
@@ -318,7 +189,7 @@ mod input {
                     Ok(l) => Pattern::Cons(Cons::Lit(l), Vec::new()),
                     Err(e) => {
                         // TODO do we actually want to assume Any for malformed patterns?
-                        cxt.ecxt.error(self.span(), TypeError::Other(e));
+                        cxt.ecxt.error(self.span(), e);
                         Pattern::Any
                     }
                 },
@@ -360,10 +231,7 @@ mod input {
                 ast::Expr::EffPat(_) => todo!("eff patterns"),
 
                 _ => {
-                    cxt.ecxt.error(
-                        self.span(),
-                        TypeError::Other("expected pattern".to_string()),
-                    );
+                    cxt.ecxt.error(self.span(), "Expected pattern");
                     Pattern::Any
                 }
             };
@@ -697,6 +565,7 @@ pub(super) fn elab_case(
         var_tys: Vec::new(),
         bodies: Vec::new(),
     };
+    let outer_size = cxt.ecxt.size();
     let svar = cxt.pvar(sty);
     let rows = branches
         .into_iter()
@@ -710,8 +579,7 @@ pub(super) fn elab_case(
                 if !reachable {
                     // If there's no body we have a bigger problem
                     if let Some(span) = body.as_ref().map(|x| x.span()) {
-                        cxt.ecxt
-                            .warning(span, TypeError::Other(format!("unreachable case branch")));
+                        cxt.ecxt.warning(span, "Unreachable case branch");
                     }
                 }
                 cxt.ecxt.push();
@@ -730,6 +598,18 @@ pub(super) fn elab_case(
                     None => match body {
                         Some(body) => {
                             let (expr, ty) = body.infer(cxt.ecxt);
+                            let ty = ty
+                                .quote(cxt.ecxt.size(), Some(&cxt.ecxt.mcxt))
+                                .eval(&mut cxt.ecxt.env());
+                            let ty = if let Err(n) = ty.check_scope(outer_size) {
+                                // TODO make an actual type error so more info can be included in different parts
+                                cxt.ecxt.error(body.span(), Doc::start("Type of case branch result contains variable ")
+                                    .add(cxt.ecxt.db.lookup_name(n), Doc::COLOR1)
+                                    .add(", which isn't allowed to escape the case branch where it was bound", ()));
+                                Val::Error
+                            } else {
+                                ty
+                            };
                             *rty = Some((ty, CheckReason::MustMatch(body.span())));
                             expr
                         }
@@ -813,7 +693,7 @@ fn elab_block(
                     ecxt.size(),
                     reason,
                 ) {
-                    ecxt.error(span, e.into());
+                    ecxt.error(span, e);
                 }
             }
             None => {
@@ -946,7 +826,7 @@ impl CaseOf<Val> {
         let mut params = Vec::new();
         let body = self.dec.try_eval(&mut env, &mut params)?;
         let val = self.rhs[body.0].clone().apply_exact(params);
-        if val.check_scope(self.rhs[body.0].env.size) {
+        if val.check_scope(self.rhs[body.0].env.size).is_ok() {
             Some(val)
         } else {
             None

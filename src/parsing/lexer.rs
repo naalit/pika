@@ -455,20 +455,21 @@ pub fn lexer_entry(db: &dyn Parser, file: File, id: SplitId) -> Option<LexResult
 }
 
 pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
-    let mut gen = ariadne::ColorGenerator::default();
-    let a = gen.next();
-    let b = gen.next();
     let message = match lex {
-        LexError::InvalidToken(c) => Doc::start("Invalid token: '").add(c, b).add("'", ()),
-        LexError::InvalidLiteral(e) => Doc::start("Invalid literal: '").add(e, b).add("'", ()),
+        LexError::InvalidToken(c) => Doc::start("Invalid token: '")
+            .add(c, Doc::COLOR2)
+            .add("'", ()),
+        LexError::InvalidLiteral(e) => Doc::start("Invalid literal: '")
+            .add(e, Doc::COLOR2)
+            .add("'", ()),
         LexError::InvalidEscape(e) => Doc::start("Invalid escape sequence: '")
-            .add('\\', b)
-            .add(e, b)
+            .add('\\', Doc::COLOR2)
+            .add(e, Doc::COLOR2)
             .add("'", ()),
         LexError::UnclosedString => Doc::start("Unclosed ")
-            .add("string literal", a)
+            .add("string literal", Doc::COLOR1)
             .add(": expected a terminator '", ())
-            .add('"', b)
+            .add('"', Doc::COLOR2)
             .add("' here", ()),
         LexError::Other(s) => Doc::start(s),
     };
@@ -479,7 +480,7 @@ pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
         primary: Label {
             span,
             message,
-            color: Some(b),
+            color: Some(Doc::COLOR2),
         },
         secondary: Vec::new(),
         note: None,

@@ -13,22 +13,23 @@ enum ParseError {
 }
 impl ParseError {
     fn to_error(self, span: RelSpan) -> Error {
-        let mut gen = ariadne::ColorGenerator::default();
-        let _ = gen.next();
-        let a = gen.next();
         let message = match self {
-            ParseError::Expected(t, None) => {
-                Doc::start("expected ").add(t, a).space().add("here", ())
-            }
-            ParseError::Expected(t, Some(m)) => {
-                Doc::start("expected ").add(t, a).space().add(m, ())
-            }
-            ParseError::Unexpected(t, None) => {
-                Doc::start("unexpected ").add(t, a).space().add("here", ())
-            }
-            ParseError::Unexpected(t, Some(m)) => {
-                Doc::start("unexpected ").add(t, a).space().add(m, ())
-            }
+            ParseError::Expected(t, None) => Doc::start("expected ")
+                .add(t, Doc::COLOR1)
+                .space()
+                .add("here", ()),
+            ParseError::Expected(t, Some(m)) => Doc::start("expected ")
+                .add(t, Doc::COLOR1)
+                .space()
+                .add(m, ()),
+            ParseError::Unexpected(t, None) => Doc::start("unexpected ")
+                .add(t, Doc::COLOR1)
+                .space()
+                .add("here", ()),
+            ParseError::Unexpected(t, Some(m)) => Doc::start("unexpected ")
+                .add(t, Doc::COLOR1)
+                .space()
+                .add(m, ()),
             ParseError::Other(m) => Doc::start(m),
         };
         Error {
@@ -38,7 +39,7 @@ impl ParseError {
             primary: Label {
                 span,
                 message,
-                color: Some(a),
+                color: Some(Doc::COLOR1),
             },
             secondary: Vec::new(),
             note: None,
@@ -457,7 +458,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn params_inner(&mut self) -> Checkpoint {
+    /// Returns the checkpoint for explicit parameters, so they can be set as PatPar or TermPar as needed
+    fn params_inner(&mut self) -> Option<Checkpoint> {
         // First implicit params
         let cp = self.checkpoint();
         let mut had_imp = false;
@@ -479,23 +481,31 @@ impl<'a> Parser<'a> {
             self.push_at(cp, Tok::ImpPars);
             self.pop();
         }
-
-        // Then explicit
-        let cp = self.checkpoint();
-        self.atom();
-        cp
+        if matches!(self.cur(), Tok::Arrow | Tok::WideArrow) {
+            if !had_imp {
+                // Explicit parameters are required if implicit ones don't exist
+                self.expected("parameters", None);
+            }
+            None
+        } else {
+            // Explicit parameters
+            let cp = self.checkpoint();
+            self.atom();
+            Some(cp)
+        }
     }
 
     fn params(&mut self, pat: bool) {
-        let cp = self.params_inner();
-        if pat {
-            self.push_at(cp, Tok::PatPar);
-            self.push_at(cp, Tok::Pat);
+        if let Some(cp) = self.params_inner() {
+            if pat {
+                self.push_at(cp, Tok::PatPar);
+                self.push_at(cp, Tok::Pat);
+                self.pop();
+            } else {
+                self.push_at(cp, Tok::TermPar);
+            }
             self.pop();
-        } else {
-            self.push_at(cp, Tok::TermPar);
         }
-        self.pop();
     }
 
     fn arguments(&mut self) {
@@ -757,10 +767,12 @@ impl<'a> Parser<'a> {
                             Tok::WideArrow => {
                                 self.push_at(cp, Tok::Lam);
 
-                                self.push_at(par_cp, Tok::PatPar);
-                                self.push_at(par_cp, Tok::Pat);
-                                self.pop();
-                                self.pop();
+                                if let Some(par_cp) = par_cp {
+                                    self.push_at(par_cp, Tok::PatPar);
+                                    self.push_at(par_cp, Tok::Pat);
+                                    self.pop();
+                                    self.pop();
+                                }
 
                                 self.advance();
 
@@ -773,8 +785,10 @@ impl<'a> Parser<'a> {
                             Tok::Arrow => {
                                 self.push_at(cp, Tok::Pi);
 
-                                self.push_at(par_cp, Tok::TermPar);
-                                self.pop();
+                                if let Some(par_cp) = par_cp {
+                                    self.push_at(par_cp, Tok::TermPar);
+                                    self.pop();
+                                }
 
                                 self.advance();
 

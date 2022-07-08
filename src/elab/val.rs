@@ -495,36 +495,47 @@ impl Val {
         }
     }
 
-    pub fn check_scope(&self, size: Size) -> bool {
+    pub fn check_scope(&self, size: Size) -> Result<(), Name> {
         match self {
-            Val::Type => true,
+            Val::Type => Ok(()),
             Val::Neutral(n) => {
-                (match n.head() {
-                    Head::Var(Var::Local(_, l)) => l.in_scope(size),
-                    _ => true,
-                }) && n.spine().iter().all(|x| match x {
-                    Elim::App(_, x) => x.check_scope(size),
-                    Elim::Member(_) => todo!(),
-                    Elim::Case(case, ty) => {
-                        let mut all_good = true;
-                        case.visit(|x| {
-                            if all_good {
-                                all_good = x.check_scope(size);
-                            }
-                        });
-                        all_good && ty.check_scope(size)
+                match n.head() {
+                    Head::Var(Var::Local(n, l)) => {
+                        if !l.in_scope(size) {
+                            return Err(n);
+                        }
                     }
+                    _ => (),
+                }
+                n.spine().iter().fold(Ok(()), |acc, x| {
+                    acc.and_then(|()| match x {
+                        Elim::App(_, x) => x.check_scope(size),
+                        Elim::Member(_) => todo!(),
+                        Elim::Case(case, ty) => {
+                            let mut res = Ok(());
+                            case.visit(|x| {
+                                if res.is_ok() {
+                                    res = x.check_scope(size);
+                                }
+                            });
+                            res.and_then(|()| ty.check_scope(size))
+                        }
+                    })
                 })
             }
             Val::Fun(clos) => clos.check_scope(size),
-            Val::Lit(_) => true,
-            Val::Pair(a, b, t) => a.check_scope(size) && b.check_scope(size) && t.check_scope(size),
-            Val::Error => true,
+            Val::Lit(_) => Ok(()),
+            Val::Pair(a, b, t) => {
+                a.check_scope(size)?;
+                b.check_scope(size)?;
+                t.check_scope(size)
+            }
+            Val::Error => Ok(()),
         }
     }
 }
 impl VClos {
-    pub fn check_scope(&self, size: Size) -> bool {
+    pub fn check_scope(&self, size: Size) -> Result<(), Name> {
         let mut allowed = HashSet::new();
         for i in Size::zero().until(size) {
             allowed.insert(i.next_lvl());
@@ -537,9 +548,7 @@ impl VClos {
         let mut inner_size = Size::zero();
         let mut size = self.env.size;
         for i in &self.params {
-            if !i.ty.check_scope(&allowed, inner_size, size) {
-                return false;
-            }
+            i.ty.check_scope(&allowed, inner_size, size)?;
             inner_size += 1;
             size += 1;
         }
@@ -552,11 +561,9 @@ impl EClos {
         allowed: &HashSet<Lvl>,
         mut inner_size: Size,
         mut size: Size,
-    ) -> bool {
+    ) -> Result<(), Name> {
         for i in &self.params {
-            if !i.ty.check_scope(allowed, inner_size, size) {
-                return false;
-            }
+            i.ty.check_scope(allowed, inner_size, size)?;
             inner_size += 1;
             size += 1;
         }
@@ -564,38 +571,47 @@ impl EClos {
     }
 }
 impl Expr {
-    pub fn check_scope(&self, allowed: &HashSet<Lvl>, inner_size: Size, size: Size) -> bool {
+    pub fn check_scope(
+        &self,
+        allowed: &HashSet<Lvl>,
+        inner_size: Size,
+        size: Size,
+    ) -> Result<(), Name> {
         match self {
-            Expr::Type => true,
-            Expr::Head(Head::Var(Var::Local(_, i))) => {
-                i.in_scope(inner_size) || allowed.contains(&i.lvl(size))
+            Expr::Type => Ok(()),
+            Expr::Head(Head::Var(Var::Local(n, i))) => {
+                if i.in_scope(inner_size) || allowed.contains(&i.lvl(size)) {
+                    Ok(())
+                } else {
+                    Err(*n)
+                }
             }
-            Expr::Head(_) => true,
+            Expr::Head(_) => Ok(()),
             Expr::Elim(a, e) => {
                 a.check_scope(allowed, inner_size, size)
-                    && match &**e {
+                    .and_then(|()| match &**e {
                         Elim::App(_, x) => x.check_scope(allowed, inner_size, size),
                         Elim::Member(_) => todo!(),
                         Elim::Case(case, ty) => {
-                            let mut all_good = true;
-                            case.visit(|c| {
-                                if all_good {
-                                    all_good = c.check_scope(allowed, inner_size, size)
+                            let mut res = Ok(());
+                            case.visit(|x| {
+                                if res.is_ok() {
+                                    res = x.check_scope(allowed, inner_size, size);
                                 }
                             });
-                            ty.check_scope(allowed, inner_size, size)
+                            res.and_then(|()| ty.check_scope(allowed, inner_size, size))
                         }
-                    }
+                    })
             }
             Expr::Fun(c) => c.check_scope(allowed, inner_size, size),
-            Expr::Lit(_) => true,
+            Expr::Lit(_) => Ok(()),
             Expr::Pair(a, b, t) => {
-                a.check_scope(allowed, inner_size, size)
-                    && b.check_scope(allowed, inner_size, size)
-                    && t.check_scope(allowed, inner_size, size)
+                a.check_scope(allowed, inner_size, size)?;
+                b.check_scope(allowed, inner_size, size)?;
+                t.check_scope(allowed, inner_size, size)
             }
             Expr::Spanned(_, x) => x.check_scope(allowed, inner_size, size),
-            Expr::Error => true,
+            Expr::Error => Ok(()),
         }
     }
 }

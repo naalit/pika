@@ -208,11 +208,11 @@ impl Cxt<'_> {
             .unwrap()
     }
 
-    pub fn error(&mut self, span: RelSpan, error: TypeError) {
-        self.errors.push((Severity::Error, error, span));
+    pub fn error(&mut self, span: RelSpan, error: impl Into<TypeError>) {
+        self.errors.push((Severity::Error, error.into(), span));
     }
 
-    pub fn warning(&mut self, span: RelSpan, error: TypeError) {
-        self.errors.push((Severity::Warning, error, span));
+    pub fn warning(&mut self, span: RelSpan, error: impl Into<TypeError>) {
+        self.errors.push((Severity::Warning, error.into(), span));
     }
 }

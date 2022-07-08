@@ -86,10 +86,6 @@ pub enum UnifyErrorKind {
 }
 impl UnifyError {
     pub fn to_error(&self, span: RelSpan, db: &dyn Elaborator) -> Error {
-        let mut gen = ariadne::ColorGenerator::new();
-        let ca = gen.next();
-        let cb = gen.next();
-        let cc = gen.next();
         match &self.kind {
             UnifyErrorKind::Conversion => {
                 let (secondary, note) = match self.reason.clone() {
@@ -107,7 +103,7 @@ impl UnifyError {
                         Some(Label {
                             span,
                             message: Doc::start("The type is given here"),
-                            color: Some(cc),
+                            color: Some(Doc::COLOR3),
                         }),
                         None,
                     ),
@@ -117,7 +113,7 @@ impl UnifyError {
                             message: Doc::start(
                                 "Must have this type to pass as argument to this function",
                             ),
-                            color: Some(cc),
+                            color: Some(Doc::COLOR3),
                         }),
                         None,
                     ),
@@ -125,7 +121,7 @@ impl UnifyError {
                         Some(Label {
                             span,
                             message: Doc::start("Must have the same type as this"),
-                            color: Some(cc),
+                            color: Some(Doc::COLOR3),
                         }),
                         None,
                     ),
@@ -149,7 +145,7 @@ impl UnifyError {
                         message: Doc::start("Expected type '")
                             .chain(self.expected.pretty(db))
                             .add("'", ()),
-                        color: Some(ca),
+                        color: Some(Doc::COLOR1),
                     },
                     secondary: secondary.into_iter().collect(),
                     note,
@@ -157,22 +153,39 @@ impl UnifyError {
             }
             // TODO a lot of the time the Conversion message is actually more helpful here too
             // but including all the information from both would be far too long
-            UnifyErrorKind::MetaSolve(m, intro_span) => Error {
-                severity: Severity::Error,
-                message: Doc::start("Error solving metavariable: ").chain(m.pretty(db)),
-                message_lsp: None,
-                primary: Label {
-                    span: *intro_span,
-                    message: Doc::start("Meta introduced here"),
-                    color: Some(ca),
-                },
-                secondary: vec![Label {
-                    span,
-                    message: Doc::start("Meta solution found here"),
-                    color: Some(cb),
-                }],
-                note: None,
-            },
+            UnifyErrorKind::MetaSolve(m, intro_span) => {
+                let (primary, secondary) = if span == *intro_span {
+                    (
+                        Label {
+                            span,
+                            message: Doc::start("Meta solved here"),
+                            color: Some(Doc::COLOR1),
+                        },
+                        Vec::new(),
+                    )
+                } else {
+                    (
+                        Label {
+                            span: *intro_span,
+                            message: Doc::start("Meta introduced here"),
+                            color: Some(Doc::COLOR1),
+                        },
+                        vec![Label {
+                            span,
+                            message: Doc::start("Meta solution found here"),
+                            color: Some(Doc::COLOR2),
+                        }],
+                    )
+                };
+                Error {
+                    severity: Severity::Error,
+                    message: Doc::start("Error solving metavariable: ").chain(m.pretty(db)),
+                    message_lsp: None,
+                    primary,
+                    secondary,
+                    note: None,
+                }
+            }
         }
     }
 }

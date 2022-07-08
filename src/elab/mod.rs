@@ -156,20 +156,23 @@ pub enum TypeError {
     Unify(unify::UnifyError),
     NotFunction(Expr),
     InvalidPattern(String, Expr),
-    Other(String),
+    Other(Doc),
+}
+impl<T: Into<Doc>> From<T> for TypeError {
+    fn from(x: T) -> Self {
+        TypeError::Other(x.into())
+    }
 }
 impl TypeError {
     fn to_error(&self, severity: Severity, span: RelSpan, db: &dyn Elaborator) -> Error {
-        let mut gen = ariadne::ColorGenerator::new();
-        let ca = gen.next();
         let (msg, label, note) = match self {
             TypeError::NotFound(name) => (
-                Doc::start("Name not found: ").add(db.lookup_name(*name), ca),
+                Doc::start("Name not found: ").add(db.lookup_name(*name), Doc::COLOR1),
                 Doc::start("This name not found"),
                 None,
             ),
             TypeError::Unify(e) => return e.to_error(span, db),
-            TypeError::Other(msg) => (Doc::start(&msg), Doc::start(&msg), None),
+            TypeError::Other(msg) => (msg.clone(), msg.clone(), None),
             TypeError::InvalidPattern(msg, ty) => (
                 Doc::start("Invalid pattern: ")
                     .add(msg, ())
@@ -194,7 +197,7 @@ impl TypeError {
             primary: Label {
                 span,
                 message: label,
-                color: Some(ca),
+                color: Some(Doc::COLOR1),
             },
             secondary: Vec::new(),
             note,
@@ -339,10 +342,7 @@ impl ast::Expr {
                 if ty.is_some() {
                     cxt.error(
                         x.pat().unwrap().span(),
-                        TypeError::Other(
-                            "Binder (_:_) is not allowed to be nested in another binder"
-                                .to_string(),
-                        ),
+                        "Binder (_:_) is not allowed to be nested in another binder",
                     );
                 }
                 (name, x.ty())
@@ -497,10 +497,7 @@ impl ast::Def {
                             .and_then(|x| x.expr())
                             .map(|x| x.check(bty.clone(), cxt, &CheckReason::GivenType(span)))
                             .unwrap_or_else(|| {
-                                cxt.error(
-                                    self.span(),
-                                    TypeError::Other("Missing function body".to_string()),
-                                );
+                                cxt.error(self.span(), "Missing function body");
                                 Expr::Error
                             });
                         (body, bty)
@@ -510,10 +507,7 @@ impl ast::Def {
                         .and_then(|x| x.expr())
                         .map(|x| x.infer(cxt))
                         .unwrap_or_else(|| {
-                            cxt.error(
-                                self.span(),
-                                TypeError::Other("Missing function body".to_string()),
-                            );
+                            cxt.error(self.span(), "Missing function body");
                             (Expr::Error, Val::Error)
                         }),
                 };
@@ -649,10 +643,10 @@ impl ast::TermPar {
                             .unwrap_or((None, None));
                         let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), x.span()));
                         if ty.is_some() {
-                            cxt.error(x.pat().unwrap().span(), TypeError::Other("Binder '_: _' not allowed in pattern of another binder".to_string()));
+                            cxt.error(x.pat().unwrap().span(), "Binder '_: _' not allowed in pattern of another binder");
                         }
                         let ty = x.ty().and_then(|x| x.expr()).map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType)).unwrap_or_else(|| {
-                            cxt.error(x.span(), TypeError::Other("Binder '_: _' missing type on right-hand side; use '_' to infer type".to_string()));
+                            cxt.error(x.span(), "Binder '_: _' missing type on right-hand side; use '_' to infer type");
                             Expr::Error
                         });
                         Par {
@@ -740,7 +734,7 @@ impl ast::Pair {
                 let ty = x
                     .ty()
                     .and_then(|x| x.expr())
-                    .ok_or_else(|| TypeError::Other(format!("Expected type after ':' in binder")))?
+                    .ok_or("Expected type after ':' in binder")?
                     .check(Val::Type, cxt, &CheckReason::UsedAsType);
                 let vty = ty.clone().eval(&mut cxt.env());
 
@@ -749,9 +743,7 @@ impl ast::Pair {
                     cxt.define_local(name, vty, None);
                     let body = self
                         .rhs()
-                        .ok_or_else(|| {
-                            TypeError::Other(format!("Missing right-hand side type in pair type"))
-                        })?
+                        .ok_or("Missing right-hand side type in pair type")?
                         .check(Val::Type, cxt, &CheckReason::UsedAsType);
                     cxt.pop();
                     Ok(Expr::Fun(EClos {
@@ -795,9 +787,7 @@ impl ast::Pair {
                 cxt.define_local(name, va, None);
                 let b = self
                     .rhs()
-                    .ok_or_else(|| {
-                        TypeError::Other(format!("Missing right-hand side type in pair type"))
-                    })?
+                    .ok_or("Missing right-hand side type in pair type")?
                     .check(Val::Type, cxt, &CheckReason::UsedAsType);
                 cxt.pop();
                 Ok(Expr::Fun(EClos {
@@ -806,8 +796,8 @@ impl ast::Pair {
                     body: Box::new(b),
                 }))
             }
-            None => Err(TypeError::Other(format!(
-                "Missing left-hand side type in pair type"
+            None => Err(TypeError::Other(Doc::start(
+                "Missing left-hand side type in pair type",
             ))),
         }
     }
@@ -889,7 +879,7 @@ fn check_params(
                             let ty = ty.check(Val::Type, cxt, &CheckReason::UsedAsType);
                             cxt.mcxt
                                 .unify(ty.clone().eval(&mut cxt.env()), vety, cxt.size(), reason)
-                                .unwrap_or_else(|e| cxt.error(xspan, e.into()));
+                                .unwrap_or_else(|e| cxt.error(xspan, e));
                             ty
                         } else {
                             // This is fine since we keep cxt.size() at the level that the parameters expect
@@ -907,7 +897,7 @@ fn check_params(
                                 cxt.size(),
                                 reason,
                             )
-                            .unwrap_or_else(|e| cxt.error(span, e.into()));
+                            .unwrap_or_else(|e| cxt.error(span, e));
                         let name = (cxt.db.name("_".to_string()), span);
                         Par {
                             name,
@@ -918,19 +908,19 @@ fn check_params(
             }
             // TODO better error here (include type)
             None => {
+                let name = x
+                    .ok()
+                    .and_then(|x| x.as_simple_pat(cxt.db))
+                    .and_then(|x| x.0)
+                    .unwrap_or_else(|| (cxt.db.name("_".to_string()), xspan));
                 cxt.error(
                     xspan,
-                    TypeError::Other(
-                        "Lambda contains extra parameter which is not present in expected type"
-                            .to_string(),
-                    ),
+                    Doc::start("Lambda contains extra parameter ")
+                        .add(cxt.db.lookup_name(name.0), Doc::COLOR1)
+                        .add(" which is not present in expected type", ()),
                 );
                 Par {
-                    name: x
-                        .ok()
-                        .and_then(|x| x.as_simple_pat(cxt.db))
-                        .and_then(|x| x.0)
-                        .unwrap_or_else(|| (cxt.db.name("_".to_string()), xspan)),
+                    name,
                     ty: Expr::Error,
                 }
             }
@@ -960,20 +950,17 @@ impl ast::Expr {
                 (ast::Expr::Pair(x), Val::Fun(clos)) if clos.class == Sigma => {
                     assert_eq!(clos.params.len(), 1);
                     let ety = clos.clone().quote(cxt.size(), None);
-                    let a = x
-                        .lhs()
-                        .ok_or_else(|| {
-                            TypeError::Other(format!("Missing pair left-hand side value"))
-                        })?
-                        .check(clos.par_ty(), cxt, reason);
+                    let a = x.lhs().ok_or("Missing pair left-hand side value")?.check(
+                        clos.par_ty(),
+                        cxt,
+                        reason,
+                    );
                     // TODO make this lazy
                     let va = a.clone().eval(&mut cxt.env());
                     let bty = clos.apply(va);
                     let b = x
                         .rhs()
-                        .ok_or_else(|| {
-                            TypeError::Other(format!("Missing pair right-hand side value"))
-                        })?
+                        .ok_or("Missing pair right-hand side value")?
                         .check(bty, cxt, reason);
                     Ok(Expr::Pair(
                         Box::new(a),
@@ -1016,12 +1003,17 @@ impl ast::Expr {
                         // This is fine since we keep cxt.size() at the level that the parameters expect
                         match clos.body.eval(&mut cxt.env()) {
                             Val::Fun(c) => clos = *c,
-                            // TODO better error here (include type)
-                            _ => {
+                            body => {
                                 if x.exp_par().is_some() {
-                                    return Err(TypeError::Other(format!("Lambda contains explicit parameters which are not present in expected type")));
+                                    // TODO better error here (include type)
+                                    return Err("Lambda contains explicit parameters which are not present in expected type".into());
                                 } else {
-                                    todo!()
+                                    clos = VClos {
+                                        class: Pi(Expl),
+                                        params: Vec::new(),
+                                        env: cxt.env(),
+                                        body: body.quote(cxt.size(), None),
+                                    }
                                 }
                             }
                         }
@@ -1035,6 +1027,16 @@ impl ast::Expr {
                             reason,
                         )
                     } else {
+                        if !clos.params.is_empty() {
+                            return Err(Doc::start("Expected explicit parameters of type '")
+                                .chain(
+                                    clos.par_ty()
+                                        .quote(cxt.size(), Some(&cxt.mcxt))
+                                        .pretty(cxt.db),
+                                )
+                                .add("'", ())
+                                .into());
+                        }
                         Vec::new()
                     };
 
@@ -1042,7 +1044,7 @@ impl ast::Expr {
                     let body = x
                         .body()
                         .and_then(|x| x.expr())
-                        .ok_or_else(|| TypeError::Other("Missing body for lambda".to_string()))?
+                        .ok_or("Missing body for lambda")?
                         .check(bty, cxt, reason);
                     cxt.pop();
 
@@ -1177,7 +1179,7 @@ impl ast::Expr {
                         let (body, bty) = x
                             .body()
                             .and_then(|x| x.expr())
-                            .ok_or_else(|| TypeError::Other("Missing body for lambda".to_string()))?
+                            .ok_or("Missing body for lambda")?
                             .infer(cxt);
                         let bty = bty.quote(cxt.size(), None);
                         cxt.pop();
@@ -1244,9 +1246,7 @@ impl ast::Expr {
                         let body = x
                             .body()
                             .and_then(|x| x.expr())
-                            .ok_or_else(|| {
-                                TypeError::Other("Missing body for function type".to_string())
-                            })?
+                            .ok_or("Missing body for function type")?
                             .check(Val::Type, cxt, &CheckReason::UsedAsType);
                         if x.with().is_some() {
                             todo!("implement effects")
@@ -1274,11 +1274,7 @@ impl ast::Expr {
                     ast::Expr::App(x) => {
                         let (mut lhs, mut lhs_ty) = x
                             .lhs()
-                            .ok_or_else(|| {
-                                TypeError::Other(
-                                    "Missing left-hand side of application".to_string(),
-                                )
-                            })?
+                            .ok_or("Missing left-hand side of application")?
                             .infer(cxt);
                         let mut lhs_span = x.lhs().unwrap().span();
                         if x.member().is_some() {
@@ -1321,7 +1317,7 @@ impl ast::Expr {
                                                 cxt.size(),
                                                 &CheckReason::ArgOf(lhs_span),
                                             ) {
-                                                cxt.error(span, e.into());
+                                                cxt.error(span, e);
                                                 Val::Error
                                             } else {
                                                 targs.push(Expr::var(Var::Builtin(Builtin::Unit)));
@@ -1444,14 +1440,12 @@ impl ast::Expr {
                             },
                         ),
                         Err(e) => {
-                            cxt.error(self.span(), TypeError::Other(e));
+                            cxt.error(self.span(), e);
                             (Expr::Error, Val::Error)
                         }
                     },
                     ast::Expr::BinOp(x) => {
-                        let tok = x
-                            .op()
-                            .ok_or_else(|| TypeError::Other(format!("missing operator")))?;
+                        let tok = x.op().ok_or("missing operator")?;
                         let tok = tok
                             .syntax()
                             .unwrap()
@@ -1463,19 +1457,19 @@ impl ast::Expr {
                             let (a, ty) = x
                                 .a()
                                 .ok_or_else(|| {
-                                    TypeError::Other(format!(
-                                        "missing left operand for operator {}",
-                                        tok
-                                    ))
+                                    TypeError::Other(
+                                        Doc::start("missing left operand for operator ")
+                                            .add(tok, Doc::COLOR1),
+                                    )
                                 })?
                                 .infer(cxt);
                             let b = x
                                 .b()
                                 .ok_or_else(|| {
-                                    TypeError::Other(format!(
-                                        "missing right operand for operator {}",
-                                        tok
-                                    ))
+                                    TypeError::Other(
+                                        Doc::start("missing right operand for operator ")
+                                            .add(tok, Doc::COLOR1),
+                                    )
                                 })?
                                 .check(
                                     ty.clone(),
@@ -1512,19 +1506,19 @@ impl ast::Expr {
                             let (a, ty) = x
                                 .a()
                                 .ok_or_else(|| {
-                                    TypeError::Other(format!(
-                                        "missing left operand for operator {}",
-                                        tok
-                                    ))
+                                    TypeError::Other(
+                                        Doc::start("missing left operand for operator ")
+                                            .add(tok, Doc::COLOR1),
+                                    )
                                 })?
                                 .infer(cxt);
                             let b = x
                                 .b()
                                 .ok_or_else(|| {
-                                    TypeError::Other(format!(
-                                        "missing right operand for operator {}",
-                                        tok
-                                    ))
+                                    TypeError::Other(
+                                        Doc::start("missing right operand for operator ")
+                                            .add(tok, Doc::COLOR1),
+                                    )
                                 })?
                                 .check(
                                     ty.clone(),
@@ -1556,7 +1550,9 @@ impl ast::Expr {
                                 Val::var(Var::Builtin(Builtin::BoolType)),
                             )
                         } else {
-                            return Err(TypeError::Other(format!("invalid operator: {}", tok)));
+                            return Err(TypeError::Other(
+                                Doc::start("invalid operator ").add(tok, Doc::COLOR1),
+                            ));
                         }
                     }
                     ast::Expr::If(_) => todo!(),
@@ -1576,16 +1572,8 @@ impl ast::Expr {
                             return Ok((term, Val::Type));
                         }
                         // Infer a simple non-dependent pair type by default; inference is undecidable with sigma types
-                        let (a, aty) = x
-                            .lhs()
-                            .ok_or_else(|| TypeError::Other(format!("missing left value in pair")))?
-                            .infer(cxt);
-                        let (b, bty) = x
-                            .rhs()
-                            .ok_or_else(|| {
-                                TypeError::Other(format!("missing right value in pair"))
-                            })?
-                            .infer(cxt);
+                        let (a, aty) = x.lhs().ok_or("missing left value in pair")?.infer(cxt);
+                        let (b, bty) = x.rhs().ok_or("missing right value in pair")?.infer(cxt);
                         let aty = aty.quote(cxt.size(), None);
                         // bty is quoted inside of the sigma scope
                         let bty = bty.quote(cxt.size().inc(), None);
@@ -1602,8 +1590,8 @@ impl ast::Expr {
                     }
                     ast::Expr::EffPat(_) => todo!(),
                     ast::Expr::Binder(_) => {
-                        return Err(TypeError::Other(format!(
-                            "Binder '_: _' not allowed in this context"
+                        return Err(TypeError::Other(Doc::start(
+                            "Binder '_: _' not allowed in this context",
                         )))
                     }
                     ast::Expr::StructInit(_) => todo!(),
