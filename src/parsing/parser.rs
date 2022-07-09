@@ -264,6 +264,8 @@ impl<'a> Parser<'a> {
 
                 self.params(true);
 
+                // Allow newline before the colon, for long parameter lists
+                self.maybe(Tok::Newline);
                 if self.maybe(Tok::Colon) {
                     self.push(Tok::Ty);
                     self.expr(());
@@ -490,7 +492,7 @@ impl<'a> Parser<'a> {
         } else {
             // Explicit parameters
             let cp = self.checkpoint();
-            self.atom();
+            self.expr(Prec::Arrow);
             Some(cp)
         }
     }
@@ -510,6 +512,7 @@ impl<'a> Parser<'a> {
 
     fn arguments(&mut self) {
         // First implicit args
+        let indent = self.maybe(Tok::Indent);
         let cp = self.checkpoint();
         let mut had_imp = false;
         while self.cur() == Tok::SOpen {
@@ -519,6 +522,9 @@ impl<'a> Parser<'a> {
             self.expr(());
             self.expect(Tok::SClose);
             self.pop();
+            if indent {
+                self.maybe(Tok::Newline);
+            }
         }
         if had_imp {
             self.push_at(cp, Tok::ImpArgs);
@@ -527,81 +533,14 @@ impl<'a> Parser<'a> {
 
         // Then explicit
         if self.cur().starts_atom() {
-            self.atom();
-        }
-    }
-
-    fn argument_block(&mut self) {
-        // Implicit arguments
-        let cp = self.checkpoint();
-        let mut had_imp = false;
-        while self.cur() == Tok::SOpen {
-            had_imp = true;
-            self.push(Tok::ImpArg);
-            self.advance();
-            self.expr(());
-            self.expect(Tok::SClose);
-            self.pop();
-            self.maybe(Tok::Newline);
-        }
-        if had_imp {
-            self.push_at(cp, Tok::ImpArgs);
-            self.pop();
-        }
-
-        // Explicit
-        if !had_imp || self.cur().starts_atom() {
-            let mut cp = self.checkpoint();
-            let mut ntuples = 0;
-            loop {
-                let cp2 = self.checkpoint();
-                self.expr(());
-                if self.maybe(Tok::Comma) {
-                    match self.cur() {
-                        Tok::Newline => {
-                            self.push_at(cp, Tok::Pair);
-                            ntuples += 1;
-                            cp = cp2;
-                            self.advance()
-                        }
-                        Tok::Dedent => {
-                            self.advance();
-                            break;
-                        }
-                        _ => {
-                            self.expected("newline or dedent", "after comma");
-                            while !matches!(self.cur(), Tok::Newline | Tok::Dedent | Tok::Eof) {
-                                self.advance();
-                            }
-                            if self.maybe(Tok::Newline) {
-                                continue;
-                            } else {
-                                self.advance();
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    if !self.maybe(Tok::Dedent) {
-                        self.expected("dedent, or comma", "to continue argument list");
-                        if self.maybe(Tok::Newline) {
-                            // Pretend there was a comma
-                            self.push_at(cp, Tok::Pair);
-                            ntuples += 1;
-                            cp = cp2;
-                            continue;
-                        } else {
-                            while !self.maybe(Tok::Dedent) {
-                                self.advance();
-                            }
-                        }
-                    }
-                    break;
-                }
+            if indent {
+                self.expr(Prec::Indented);
+                self.expect(Tok::Dedent);
+            } else {
+                self.atom();
             }
-            for _ in 0..ntuples {
-                self.pop();
-            }
+        } else if !had_imp {
+            self.expected("arguments", None);
         }
     }
 
@@ -621,7 +560,7 @@ impl<'a> Parser<'a> {
                     Tok::Indent => {
                         self.push(Tok::GroupedExpr);
                         self.advance();
-                        self.expr(());
+                        self.expr(Prec::Indented);
                         self.expect(Tok::Dedent);
                         self.pop();
                     }
@@ -846,24 +785,30 @@ impl<'a> Parser<'a> {
                     self.var();
                     self.pop();
 
-                    if self.maybe(Tok::Indent) {
-                        self.argument_block();
-                    } else {
-                        self.arguments();
-                    }
+                    self.arguments();
                     self.pop();
                 }
                 // , is right associative
                 Tok::Comma if Prec::Comma >= min_prec => {
                     // Trailing comma special case
-                    if matches!(self.peek(1), Tok::Newline | Tok::Dedent) {
-                        return;
+                    match self.peek(1) {
+                        Tok::Newline | Tok::Dedent if min_prec != Prec::Indented => return,
+                        Tok::Dedent => {
+                            // Consume the comma but don't generate a pair
+                            self.advance();
+                            return;
+                        }
+                        _ => (),
                     }
 
                     self.push_at(lhs, Tok::Pair);
 
                     self.advance();
-                    self.expr(Prec::Comma);
+                    if self.maybe(Tok::Newline) {
+                        self.expr(Prec::Indented);
+                    } else {
+                        self.expr(Prec::Comma);
+                    }
 
                     self.pop();
                 }
@@ -899,31 +844,31 @@ impl<'a> Parser<'a> {
                 // So implement operator chaining
                 // If we're not at the outermost expression, though, pass control back there
                 Tok::Indent => {
-                    if min_prec == Prec::Min {
-                        self.advance();
-                        loop {
-                            // Handle application
-                            if self.cur().starts_atom() || self.cur() == Tok::SOpen {
-                                self.push_at(lhs, Tok::App);
-                                self.argument_block();
-                                self.pop();
-                                break;
-                            }
-                            // Each line has an operator + rhs, then a newline
-                            self.expr((Prec::Min, Some(lhs)));
-                            match self.cur() {
-                                // don't allow more operators after dedent
-                                Tok::Dedent => {
-                                    self.advance();
-                                    return;
-                                }
-                                Tok::Newline => {
-                                    self.advance();
-                                    continue;
-                                }
-                                _ => {
-                                    self.expected("dedent", None);
-                                    break;
+                    if min_prec <= Prec::Min {
+                        // Handle application
+                        if self.peek(1).starts_atom() || self.peek(1) == Tok::SOpen {
+                            self.push_at(lhs, Tok::App);
+                            self.arguments();
+                            self.pop();
+                        } else {
+                            self.advance();
+                            loop {
+                                // Each line has an operator + rhs, then a newline
+                                self.expr((Prec::Min, Some(lhs)));
+                                match self.cur() {
+                                    // don't allow more operators after dedent
+                                    Tok::Dedent => {
+                                        self.advance();
+                                        return;
+                                    }
+                                    Tok::Newline => {
+                                        self.advance();
+                                        continue;
+                                    }
+                                    _ => {
+                                        self.expected("dedent", None);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -932,7 +877,9 @@ impl<'a> Parser<'a> {
                     }
                 }
                 // Lambda time
-                Tok::WideArrow if allow_lambda && Prec::Binder > min_prec => {
+                // Precedence chosen to allow
+                // f <| x, y => x + y
+                Tok::WideArrow if allow_lambda && Prec::Comma > min_prec => {
                     self.push_at(lhs, Tok::Lam);
 
                     self.push_at(lhs, Tok::PatPar);
@@ -1096,6 +1043,8 @@ enum Prec {
     Binder,
     /// Synthetic minimum precedence to allow all operators
     Min,
+    /// Synthetic precedence even lower than that, which allows newlines without indent (after commas)
+    Indented,
 }
 impl Prec {
     /// The precedence of comparison operators, used by `Prec::Bitwise` because it has higher precedence than this and below.
@@ -1116,6 +1065,9 @@ impl Prec {
 impl PartialOrd for Prec {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
+            (Prec::Indented, Prec::Indented) => return Some(Ordering::Equal),
+            (Prec::Indented, _) => return Some(Ordering::Less),
+            (_, Prec::Indented) => return Some(Ordering::Greater),
             (Prec::Min, Prec::Min) => return Some(Ordering::Equal),
             (Prec::Min, _) => return Some(Ordering::Less),
             (_, Prec::Min) => return Some(Ordering::Greater),

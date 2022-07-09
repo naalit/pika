@@ -1,5 +1,7 @@
 use super::*;
 
+const LINE_START_PATS: &'static [&'static str] = &["where", "else", ")", ":"];
+
 pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
     let source = db.input_file(file);
 
@@ -8,7 +10,7 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
     let mut next_started = false;
     let mut split_start = 0;
     let mut char_pos = 0;
-    for line in source.lines() {
+    'next_line: for line in source.lines() {
         char_pos += line.len_chars();
         match line.chars().next() {
             // Attach to previous split
@@ -26,11 +28,21 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
             Some('#' | '@') => next_started = true,
             // Start a new split
             _ => {
-                if line.to_string().starts_with("where") {
-                    if !next_started && split_start != 0 {
-                        split_start = char_pos;
+                for pat in LINE_START_PATS {
+                    if line.len_chars() > pat.len() {
+                        let sub = line.slice(0..pat.len());
+                        let matches = if let Some(sub) = sub.as_str() {
+                            sub == *pat
+                        } else {
+                            sub.chars().zip(pat.chars()).all(|(x, y)| x == y)
+                        };
+                        if matches {
+                            if !next_started && split_start != 0 {
+                                split_start = char_pos;
+                            }
+                            continue 'next_line;
+                        }
                     }
-                    continue;
                 }
                 next_started = false;
                 if split_start != 0 {
