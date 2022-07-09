@@ -743,13 +743,25 @@ impl<'a> Parser<'a> {
                         self.expr(Prec::If);
 
                         // then branch
-                        let indent = self.maybe(Tok::Indent);
+                        let mut indent = self.maybe(Tok::Indent);
                         self.expect(Tok::ThenKw);
                         self.expr(());
 
                         // else branch
-                        if indent {
-                            self.expect(Tok::Newline);
+                        // we allow else to be on the same level as the if:
+                        //
+                        // if a then do
+                        //     ....
+                        // else if a
+                        //   then ()
+                        // else 3
+                        if !self.maybe(Tok::Newline) && indent {
+                            if self.maybe(Tok::Dedent) {
+                                self.expect(Tok::Newline);
+                                indent = false;
+                            } else {
+                                self.expected("newline", " after indented then branch");
+                            }
                         }
                         self.expect(Tok::ElseKw);
                         self.expr(());
@@ -920,7 +932,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 // Lambda time
-                Tok::WideArrow if allow_lambda => {
+                Tok::WideArrow if allow_lambda && Prec::Binder > min_prec => {
                     self.push_at(lhs, Tok::Lam);
 
                     self.push_at(lhs, Tok::PatPar);
