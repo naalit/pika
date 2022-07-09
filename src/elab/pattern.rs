@@ -10,6 +10,7 @@ mod input {
         Pair(Box<SPattern>, Box<SPattern>),
         Or(Vec<SPattern>),
         Var(SName),
+        Typed(Box<SPattern>, Box<Val>),
         Any,
     }
 
@@ -60,7 +61,7 @@ mod input {
             for (var, pat) in self.ty_ipats.iter().chain(&self.end_ipats) {
                 match pat {
                     IPat::Var(n) => {
-                        let ty = cxt.var_tys[var.0].clone();
+                        let ty = cxt.var_tys[var.0].0.clone();
                         env.push((*n, ty));
                     }
                     _ => (),
@@ -82,6 +83,7 @@ mod input {
             row: &mut Row,
             var: PVar,
             ty: &Val,
+            reason: &CheckReason,
             target_cons: &mut Option<Cons>,
         ) -> RemovedColumn {
             match row.columns.iter().position(|c| c.var == var) {
@@ -111,6 +113,15 @@ mod input {
                             }
                         }
                     },
+                    Pattern::Typed(pat, pty) => {
+                        self.ecxt
+                            .mcxt
+                            .unify((**pty).clone(), ty.clone(), self.ecxt.size(), reason)
+                            .unwrap_or_else(|e| self.ecxt.error(row.columns[i].pat.1, e));
+                        let pat = (**pat).clone();
+                        row.columns[i].pat = pat;
+                        self.remove_column(row, var, ty, reason, target_cons)
+                    }
                     Pattern::Pair(_, _) => {
                         let (a, b, span) = match row.columns.remove(i).unwrap() {
                             Column {
@@ -132,14 +143,18 @@ mod input {
                                 assert_eq!(clos.params.len(), 1);
                                 let ta = clos.par_ty();
                                 let tb = clos.clone().open(row.tyvars_size);
-                                let va = self.pvar(ta);
-                                let vb = self.pvar(tb);
+                                let va = self.pvar(ta, reason.clone());
+                                let vb = self.pvar(tb, reason.clone());
                                 row.tyvars_size += clos.params.len();
                                 row.ty_ipats.push((va, IPat::Var(clos.params[0].name)));
                                 (va, vb)
                             }
-                            Val::Error => (self.pvar(Val::Error), self.pvar(Val::Error)),
+                            Val::Error => (
+                                self.pvar(Val::Error, reason.clone()),
+                                self.pvar(Val::Error, reason.clone()),
+                            ),
                             ty => {
+                                // TODO include reason
                                 self.ecxt.error(
                                     span,
                                     TypeError::InvalidPattern(
@@ -147,7 +162,10 @@ mod input {
                                         ty.clone().quote(row.tyvars_size, Some(&self.ecxt.mcxt)),
                                     ),
                                 );
-                                (self.pvar(Val::Error), self.pvar(Val::Error))
+                                (
+                                    self.pvar(Val::Error, reason.clone()),
+                                    self.pvar(Val::Error, reason.clone()),
+                                )
                             }
                         };
                         row.columns.push_front(Column { var: vb, pat: b });
@@ -193,11 +211,17 @@ mod input {
                         Pattern::Any
                     }
                 },
-                // TODO verify that this actually has type ()
                 ast::Expr::GroupedExpr(x) => {
-                    return x
-                        .expr()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt))
+                    return x.expr().map_or(
+                        (
+                            Pattern::Typed(
+                                Box::new((Pattern::Any, self.span())),
+                                Box::new(Val::var(Var::Builtin(Builtin::UnitType))),
+                            ),
+                            self.span(),
+                        ),
+                        |x| x.to_pattern(cxt),
+                    )
                 }
                 ast::Expr::Pair(x) => {
                     let a = x
@@ -226,7 +250,23 @@ mod input {
                         .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
                     Pattern::Or(vec![a, b])
                 }
-                ast::Expr::Binder(_) => todo!("binder patterns"),
+                ast::Expr::Binder(x) => {
+                    let pat = x
+                        .pat()
+                        .and_then(|x| x.expr())
+                        .map(|x| x.to_pattern(cxt))
+                        .unwrap_or((Pattern::Any, x.span()));
+                    match x
+                        .ty()
+                        .and_then(|x| x.expr())
+                        .map(|x| x.check(Val::Type, cxt.ecxt, &CheckReason::UsedAsType))
+                    {
+                        Some(ty) => {
+                            Pattern::Typed(Box::new(pat), Box::new(ty.eval(&mut cxt.ecxt.env())))
+                        }
+                        None => pat.0,
+                    }
+                }
 
                 ast::Expr::EffPat(_) => todo!("eff patterns"),
 
@@ -301,14 +341,14 @@ struct DecNode<T: IsTerm> {
 struct CaseElabCxt<'a, 'b> {
     ecxt: &'a mut Cxt<'b>,
     env_tys: HashMap<Body, (PEnv, bool)>,
-    var_tys: Vec<Val>,
+    var_tys: Vec<(Val, CheckReason)>,
     bodies: Vec<Option<ast::Expr>>,
 }
 
 impl CaseElabCxt<'_, '_> {
-    fn pvar(&mut self, ty: Val) -> PVar {
+    fn pvar(&mut self, ty: Val, reason: CheckReason) -> PVar {
         let l = self.var_tys.len();
-        self.var_tys.push(ty);
+        self.var_tys.push((ty, reason));
         PVar(l)
     }
 
@@ -407,7 +447,7 @@ impl CaseElabCxt<'_, '_> {
         }
 
         let switch_var = self.column_select_heuristic(row, &rows);
-        let sty = self.var_tys[switch_var.0].clone();
+        let (sty, sreason) = self.var_tys[switch_var.0].clone();
 
         if rows.iter().any(|x| {
             x.columns
@@ -452,7 +492,7 @@ impl CaseElabCxt<'_, '_> {
         let mut start_ipats = Vec::new();
 
         for mut row in rows.iter().cloned() {
-            match self.remove_column(&mut row, switch_var, &sty, &mut yes_cons) {
+            match self.remove_column(&mut row, switch_var, &sty, &sreason, &mut yes_cons) {
                 input::RemovedColumn::Yes(_cons, cargs) => {
                     if args.is_empty() {
                         todo!("find args types");
@@ -555,6 +595,7 @@ impl CaseOf<Expr> {
 
 pub(super) fn elab_case(
     sty: Val,
+    sreason: CheckReason,
     branches: impl IntoIterator<Item = (Option<ast::Expr>, RelSpan, Option<ast::Expr>)>,
     rty: &mut Option<(Val, CheckReason)>,
     ecxt: &mut Cxt,
@@ -566,7 +607,7 @@ pub(super) fn elab_case(
         bodies: Vec::new(),
     };
     let outer_size = cxt.ecxt.size();
-    let svar = cxt.pvar(sty);
+    let svar = cxt.pvar(sty, sreason);
     let rows = branches
         .into_iter()
         .map(|(pat, span, body)| input::Row::new(svar, pat, span, body, &mut cxt))
@@ -659,6 +700,7 @@ impl ast::Case {
             .unwrap_or((Expr::Error, Val::Error));
         let (case_of, ty) = elab_case(
             sty,
+            CheckReason::MustMatch(self.scrutinee().map(|x| x.span()).unwrap_or(self.span())),
             self.branches().into_iter().map(|x| x.as_row()),
             rty,
             ecxt,
@@ -729,7 +771,13 @@ fn elab_block(
         },
         ast::Stmt::Expr(e) => {
             let (s, sty) = e.infer(ecxt);
-            let (case, cty) = elab_case(sty, std::iter::once((None, e.span(), rest)), rty, ecxt);
+            let (case, cty) = elab_case(
+                sty,
+                CheckReason::MustMatch(e.span()),
+                std::iter::once((None, e.span(), rest)),
+                rty,
+                ecxt,
+            );
             Expr::Elim(Box::new(s), Box::new(Elim::Case(case, cty)))
         }
         ast::Stmt::Def(d) => match d {
@@ -748,22 +796,30 @@ fn elab_block(
                         .map(|(x, s)| (x.eval(&mut ecxt.env()), s)),
                     _ => None,
                 };
-                let (body, ty) = match ty {
+                let (body, ty, reason) = match ty {
                     Some((ty, span)) => match d.body().and_then(|x| x.expr()) {
                         Some(body) => {
                             let body = body.check(ty.clone(), ecxt, &CheckReason::GivenType(span));
-                            (body, ty)
+                            (body, ty, CheckReason::GivenType(span))
                         }
-                        None => (Expr::Error, ty),
+                        None => (Expr::Error, ty, CheckReason::GivenType(span)),
                     },
-                    None => d
-                        .body()
-                        .and_then(|x| x.expr())
-                        .map(|x| x.infer(ecxt))
-                        .unwrap_or((Expr::Error, Val::Error)),
+                    None => {
+                        let (term, ty) = d
+                            .body()
+                            .and_then(|x| x.expr())
+                            .map(|x| x.infer(ecxt))
+                            .unwrap_or((Expr::Error, Val::Error));
+                        (
+                            term,
+                            ty,
+                            CheckReason::MustMatch(d.body().map(|x| x.span()).unwrap_or(d.span())),
+                        )
+                    }
                 };
                 let (case, cty) = elab_case(
                     ty,
+                    reason,
                     std::iter::once((d.pat().and_then(|x| x.expr()), d.span(), rest)),
                     rty,
                     ecxt,

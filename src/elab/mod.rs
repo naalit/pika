@@ -758,6 +758,7 @@ impl ast::Pair {
                     cxt.define_local(name, vty.clone(), None);
                     let (case, cty) = self::pattern::elab_case(
                         vty,
+                        CheckReason::GivenType(x.ty().map(|x| x.span()).unwrap_or(x.span())),
                         std::iter::once((
                             x.pat().and_then(|x| x.expr()),
                             x.pat().map(|x| x.span()).unwrap_or(x.span()),
