@@ -166,7 +166,7 @@ impl Env {
     }
 
     pub fn reset_to_size(&mut self, size: Size) {
-        for _ in self.size.until(size) {
+        for _ in size.until(self.size) {
             if self.vals.pop_front().is_none() {
                 break;
             }

@@ -42,8 +42,11 @@ impl MetaBounds {
                 let mut val = val.clone();
                 val.inline_head(&mut Env::new(size), mcxt);
                 match val {
-                    Val::Neutral(n)
-                        if matches!(n.head(), Head::Var(Var::Builtin(Builtin::IntType(_)))) =>
+                    Val::Neutral(ref n)
+                        if matches!(
+                            n.head(),
+                            Head::Var(Var::Builtin(Builtin::IntType(_))) | Head::Var(Var::Meta(_))
+                        ) =>
                     {
                         match n.head() {
                             Head::Var(Var::Builtin(Builtin::IntType(t))) => {
@@ -52,6 +55,21 @@ impl MetaBounds {
                                 } else {
                                     Err(MetaSolveError::BoundsWrongIntSize(t))
                                 }
+                            }
+                            Head::Var(Var::Meta(m)) => {
+                                match &mcxt.metas[m.0 as usize] {
+                                    MetaEntry::Unsolved { bounds, .. } => {
+                                        // TODO actually merge bounds
+                                        if matches!(
+                                            &bounds.special,
+                                            Some(SpecialBound::IntType { .. })
+                                        ) {
+                                            return Ok(());
+                                        }
+                                    }
+                                    MetaEntry::Solved { .. } => (),
+                                }
+                                Err(MetaSolveError::BoundsNotInt(val.quote(size, None)))
                             }
                             _ => unreachable!(),
                         }
@@ -94,7 +112,7 @@ impl MetaSolveError {
         match self {
             MetaSolveError::Occurs(m) => Doc::start("Solved meta ")
                 .add(m, Doc::COLOR1)
-                .add("occurs in solution", ()),
+                .add(" occurs in solution", ()),
             MetaSolveError::Scope(n) => Doc::start("Variable ")
                 .add(db.lookup_name(*n), Doc::COLOR1)
                 .add(

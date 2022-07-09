@@ -1338,31 +1338,26 @@ impl ast::Expr {
                                     }
                                 });
                                 let ty = par_ty.quote(cxt.size(), None);
-                                let arg = targs
-                                    .into_iter()
-                                    .rfold((None, ty), |(a, ty), b| match a {
-                                        Some(a) => {
-                                            let p = Some(Expr::Pair(
-                                                Box::new(a),
-                                                Box::new(b),
-                                                Box::new(ty.clone()),
-                                            ));
-                                            let ty = match ty {
-                                                Expr::Fun(EClos {
-                                                    class: Sigma, body, ..
-                                                }) => {
-                                                    let mut env = cxt.env();
-                                                    env.push(None);
-                                                    body.eval_quote(&mut env, cxt.size(), None)
-                                                }
-                                                _ => Expr::Error,
-                                            };
-                                            (p, ty)
+                                fn make_arg(mut v: impl Iterator<Item=Expr>, ty: Expr, cxt: &Cxt) -> Option<Expr> {
+                                    let a = v.next()?;
+                                    a.pretty(cxt.db).emit_stderr();
+                                    ty.pretty(cxt.db).emit_stderr();
+                                    let ty2 = match ty.clone() {
+                                        Expr::Fun(EClos {
+                                            class: Sigma, body, ..
+                                        }) => {
+                                            let mut env = cxt.env();
+                                            env.push(Some(a.clone().eval(&mut cxt.env())));
+                                            body.eval_quote(&mut env, cxt.size(), None)
                                         }
-                                        None => (Some(b), ty),
-                                    })
-                                    .0
-                                    .unwrap();
+                                        _ => Expr::Error,
+                                    };
+                                    match make_arg(v, ty2, cxt) {
+                                        Some(b) => Some(Expr::Pair(Box::new(a), Box::new(b), Box::new(ty))),
+                                        None => Some(a),
+                                    }
+                                }
+                                let arg = make_arg(targs.into_iter(), ty, cxt).unwrap();
                                 lhs = Expr::Elim(Box::new(lhs), Box::new(Elim::App(Impl, arg)));
                                 lhs_ty = rty;
                                 lhs_span.end = x.imp().map(|x| x.span()).unwrap_or(lhs_span).end;

@@ -182,7 +182,7 @@ impl VClos {
                     name,
                     ty: ty.eval_quote(&mut env, size, inline_metas),
                 };
-                env.push(None);
+                env.push(Some(Val::var(Var::Local(name, size.next_lvl()))));
                 size += 1;
                 par
             })
@@ -358,7 +358,7 @@ impl EClos {
         let state = env.state();
         for i in &mut self.params {
             i.ty._eval_quote(env, size, inline_metas);
-            env.push(None);
+            env.push(Some(Val::var(Var::Local(i.name, size.next_lvl()))));
             size += 1;
         }
         self.body._eval_quote(env, size, inline_metas);
