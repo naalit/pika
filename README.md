@@ -1,6 +1,6 @@
 # Pika
 Pika is a small, performance-oriented, dependently typed ML with algebraic effects and unboxed types.
-This is the rewritten (again, although some code was copied over) version of the compiler, as a language server/VSCode extension first, since it wasn't really working to add that part on later.
+This is the rewritten (again, although some code was copied over) version of the compiler, as a language server/VSCode extension first, since it wasn't really working to add that part on later. A more complete (but obsolete) version can be found [in the master branch](https://github.com/tolziplohu/pika/tree/master).
 The typechecker is heavily inspired by [smalltt](https://github.com/AndrasKovacs/smalltt).
 
 The VSCode extension is in `editors/code`, but currently only supports being run from the development environment (press F5).
