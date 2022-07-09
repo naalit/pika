@@ -199,10 +199,6 @@ mod input {
                 // TODO type constructors
                 ast::Expr::Var(v) => Pattern::Var(v.name(cxt.ecxt.db)),
                 ast::Expr::App(_) => todo!(),
-                // Manufacture a name instead of Pattern::Any, so type inference can use the value
-                ast::Expr::Hole(_) => {
-                    Pattern::Var((cxt.ecxt.db.name("_".to_string()), self.span()))
-                }
                 ast::Expr::Lit(l) => match l.to_literal(cxt.ecxt) {
                     Ok(l) => Pattern::Cons(Cons::Lit(l), Vec::new()),
                     Err(e) => {

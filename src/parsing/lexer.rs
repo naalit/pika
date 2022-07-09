@@ -239,11 +239,13 @@ impl<'i> Lexer<'i> {
             '&' => {
                 self.next();
                 if self.peek() == Some('&') {
+                    self.next();
                     self.errors.push((
                         LexError::Other("Invalid operator '&&': use 'and' for logical and".into()),
                         self.span(),
                     ));
-                    Some(self.tok_in_place(Tok::Error))
+                    // They meant 'and', so have the rest of the compiler treat it as 'and'
+                    Some(self.tok_in_place(Tok::AndKw))
                 } else {
                     Some(self.tok_in_place(Tok::BitAnd))
                 }
@@ -457,14 +459,14 @@ pub fn lexer_entry(db: &dyn Parser, file: File, id: SplitId) -> Option<LexResult
 pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
     let message = match lex {
         LexError::InvalidToken(c) => Doc::start("Invalid token: '")
-            .add(c, Doc::COLOR2)
+            .add(c, Doc::COLOR1)
             .add("'", ()),
         LexError::InvalidLiteral(e) => Doc::start("Invalid literal: '")
-            .add(e, Doc::COLOR2)
+            .add(e, Doc::COLOR1)
             .add("'", ()),
         LexError::InvalidEscape(e) => Doc::start("Invalid escape sequence: '")
-            .add('\\', Doc::COLOR2)
-            .add(e, Doc::COLOR2)
+            .add('\\', Doc::COLOR1)
+            .add(e, Doc::COLOR1)
             .add("'", ()),
         LexError::UnclosedString => Doc::start("Unclosed ")
             .add("string literal", Doc::COLOR1)
@@ -480,7 +482,7 @@ pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
         primary: Label {
             span,
             message,
-            color: Some(Doc::COLOR2),
+            color: Some(Doc::COLOR1),
         },
         secondary: Vec::new(),
         note: None,

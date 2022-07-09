@@ -105,7 +105,6 @@ pub enum SyntaxKind {
     WithClause,
     Pi,
     Do,
-    Hole,
     DotExpr,
     EffPat,
     Case,

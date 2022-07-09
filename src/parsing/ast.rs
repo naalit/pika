@@ -214,8 +214,6 @@ make_nodes! {
 
     Do = block: [Stmt];
 
-    Hole = ;
-
     CaseKw = ;
     CatchKw = ;
     enum CaseTy = CaseKw, CatchKw;
@@ -241,7 +239,6 @@ make_nodes! {
         Pi,
         App,
         Do,
-        Hole,
         Case,
         Lit,
         BinOp,
@@ -278,6 +275,29 @@ make_nodes! {
     enum Stmt = Expr, Def;
 
     Root = def: Def;
+}
+
+impl Root {
+    pub fn print_tree(&self) {
+        print_tree(self.syntax().unwrap(), 0)
+    }
+}
+fn print_tree(node: &SyntaxNode, indent: usize) {
+    for _ in 0..indent {
+        print!(" ");
+    }
+    println!("{:?}", node);
+    for i in node.children_with_tokens() {
+        match i {
+            rowan::NodeOrToken::Node(n) => print_tree(&n, indent + 2),
+            rowan::NodeOrToken::Token(t) => {
+                for _ in 0..indent + 2 {
+                    print!(" ");
+                }
+                println!("{:?}", t);
+            }
+        }
+    }
 }
 
 impl Var {
@@ -570,7 +590,6 @@ impl Pretty for Expr {
                     Doc::none().hardline(),
                 ))
                 .indent(),
-            Expr::Hole(_) => Doc::start("_"),
             Expr::Case(x) => Doc::none()
                 .add("case", Doc::style_keyword())
                 .space()

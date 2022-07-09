@@ -347,7 +347,6 @@ impl ast::Expr {
                 }
                 (name, x.ty())
             }
-            ast::Expr::Hole(_) => (Some((cxt.db.name("_".to_string()), self.span())), None),
             _ => (None, None),
         }
     }
@@ -722,7 +721,6 @@ impl ast::Pair {
                     .and_then(|x| x.expr())
                     .map(|x| match x {
                         ast::Expr::Var(x) => Some(x.name(cxt.db)),
-                        ast::Expr::Hole(_) => Some((cxt.db.name("_".to_string()), x.span())),
                         _ => None,
                     })
                     // Allow (: I32, I32) as (_: I32, I32)
@@ -1119,7 +1117,6 @@ impl ast::Expr {
     fn as_simple_pat(&self, db: &dyn Elaborator) -> Option<(Option<SName>, Option<ast::Expr>)> {
         match self {
             ast::Expr::Var(x) => Some((Some(x.name(db)), None)),
-            ast::Expr::Hole(_) => Some((Some((db.name("_".to_string()), self.span())), None)),
             ast::Expr::Binder(x) => {
                 let (name, old_ty) = x.pat()?.expr()?.as_simple_pat(db)?;
                 if old_ty.is_some() {
@@ -1150,8 +1147,21 @@ impl ast::Expr {
                 match self {
                     ast::Expr::Var(name) => {
                         let name = name.name(cxt.db);
-                        let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
-                        (Expr::var(v.cvt(cxt.size())), t)
+                        if name.0 == cxt.db.name("_".to_string()) {
+                            let mty = cxt
+                                .mcxt
+                                .new_meta(cxt.locals(), MetaBounds::new(Val::Type), self.span())
+                                .eval(&mut cxt.env());
+                            let meta = cxt.mcxt.new_meta(
+                                cxt.locals(),
+                                MetaBounds::new(mty.clone()),
+                                self.span(),
+                            );
+                            (meta, mty)
+                        } else {
+                            let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
+                            (Expr::var(v.cvt(cxt.size())), t)
+                        }
                     }
                     ast::Expr::Lam(x) => {
                         // [a, b] [c, d] (e, f) => ...
@@ -1403,18 +1413,6 @@ impl ast::Expr {
                         let rty = rty.map(|(x, _)| x).unwrap_or(Val::Error);
                         (expr, rty)
                     }
-                    ast::Expr::Hole(_) => {
-                        let mty = cxt
-                            .mcxt
-                            .new_meta(cxt.locals(), MetaBounds::new(Val::Type), self.span())
-                            .eval(&mut cxt.env());
-                        let meta = cxt.mcxt.new_meta(
-                            cxt.locals(),
-                            MetaBounds::new(mty.clone()),
-                            self.span(),
-                        );
-                        (meta, mty)
-                    }
                     ast::Expr::Case(case) => {
                         let mut rty = None;
                         let (scrutinee, case, cty) = case.elaborate(&mut rty, cxt);
@@ -1549,7 +1547,7 @@ impl ast::Expr {
                             )
                         } else {
                             return Err(TypeError::Other(
-                                Doc::start("invalid operator ").add(tok, Doc::COLOR1),
+                                Doc::start("Invalid operator ").add(tok, Doc::COLOR1),
                             ));
                         }
                     }

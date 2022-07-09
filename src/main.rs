@@ -322,6 +322,13 @@ fn main() {
 
     let mut cache = FileCache::new(&db);
     for file in files {
+        if config.flag(Flag::ShowParseTree) {
+            for split in db.all_split_ids(file) {
+                if let Some(ast) = db.ast(file, split) {
+                    ast.print_tree();
+                }
+            }
+        }
         for (e, split) in db.all_errors(file) {
             e.write_cli(&db.split_span(file, split).unwrap(), &mut cache);
         }

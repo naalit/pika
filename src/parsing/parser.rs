@@ -9,27 +9,50 @@ use crate::common::*;
 enum ParseError {
     Expected(Cow<'static, str>, Option<Cow<'static, str>>),
     Unexpected(Cow<'static, str>, Option<Cow<'static, str>>),
+    NonAssoc(Tok, Tok, RelSpan),
     Other(Cow<'static, str>),
 }
 impl ParseError {
     fn to_error(self, span: RelSpan) -> Error {
         let message = match self {
-            ParseError::Expected(t, None) => Doc::start("expected ")
+            ParseError::Expected(t, None) => Doc::start("Expected ")
                 .add(t, Doc::COLOR1)
                 .space()
                 .add("here", ()),
-            ParseError::Expected(t, Some(m)) => Doc::start("expected ")
+            ParseError::Expected(t, Some(m)) => Doc::start("Expected ")
                 .add(t, Doc::COLOR1)
                 .space()
                 .add(m, ()),
-            ParseError::Unexpected(t, None) => Doc::start("unexpected ")
+            ParseError::Unexpected(t, None) => Doc::start("Unexpected ")
                 .add(t, Doc::COLOR1)
                 .space()
                 .add("here", ()),
-            ParseError::Unexpected(t, Some(m)) => Doc::start("unexpected ")
+            ParseError::Unexpected(t, Some(m)) => Doc::start("Unexpected ")
                 .add(t, Doc::COLOR1)
                 .space()
                 .add(m, ()),
+            ParseError::NonAssoc(a, b, bspan) => {
+                return Error {
+                    severity: Severity::Error,
+                    message: Doc::start("Mixing ")
+                        .add(a, Doc::COLOR1)
+                        .add(" and ", ())
+                        .add(b, Doc::COLOR2)
+                        .add(" is ambiguous: try adding parentheses", ()),
+                    message_lsp: None,
+                    primary: Label {
+                        span,
+                        message: Doc::start("ambiguous operator precedence"),
+                        color: Some(Doc::COLOR1),
+                    },
+                    secondary: vec![Label {
+                        span: bspan,
+                        message: Doc::start("ambiguous operator precedence"),
+                        color: Some(Doc::COLOR2),
+                    }],
+                    note: None,
+                }
+            }
             ParseError::Other(m) => Doc::start(m),
         };
         Error {
@@ -764,6 +787,7 @@ impl<'a> Parser<'a> {
             Some(cp) => cp,
         };
 
+        let mut assoc = None;
         loop {
             match self.cur() {
                 Tok::SOpen | Tok::POpen => {
@@ -843,37 +867,32 @@ impl<'a> Parser<'a> {
                 // This indent appears before an operator (inc. application)
                 // So implement operator chaining
                 // If we're not at the outermost expression, though, pass control back there
-                Tok::Indent => {
-                    if min_prec <= Prec::Min {
-                        // Handle application
-                        if self.peek(1).starts_atom() || self.peek(1) == Tok::SOpen {
-                            self.push_at(lhs, Tok::App);
-                            self.arguments();
-                            self.pop();
-                        } else {
-                            self.advance();
-                            loop {
-                                // Each line has an operator + rhs, then a newline
-                                self.expr((Prec::Min, Some(lhs)));
-                                match self.cur() {
-                                    // don't allow more operators after dedent
-                                    Tok::Dedent => {
-                                        self.advance();
-                                        return;
-                                    }
-                                    Tok::Newline => {
-                                        self.advance();
-                                        continue;
-                                    }
-                                    _ => {
-                                        self.expected("dedent", None);
-                                        break;
-                                    }
+                Tok::Indent if min_prec <= Prec::Min => {
+                    if self.peek(1).starts_atom() || self.peek(1) == Tok::SOpen {
+                        self.push_at(lhs, Tok::App);
+                        self.arguments();
+                        self.pop();
+                    } else {
+                        self.advance();
+                        loop {
+                            // Each line has an operator + rhs, then a newline
+                            self.expr((Prec::Min, Some(lhs)));
+                            match self.cur() {
+                                // don't allow more operators after dedent
+                                Tok::Dedent => {
+                                    self.advance();
+                                    return;
+                                }
+                                Tok::Newline => {
+                                    self.advance();
+                                    continue;
+                                }
+                                _ => {
+                                    self.expected("dedent", None);
+                                    break;
                                 }
                             }
                         }
-                    } else {
-                        break;
                     }
                 }
                 // Lambda time
@@ -914,6 +933,24 @@ impl<'a> Parser<'a> {
                 op if op.binop_prec().is_some() => {
                     let prec = op.binop_prec().unwrap();
                     if prec > min_prec {
+                        // Make sure the operators are allowed to associate
+                        // In `a {op1} b {op2} c`, three scenarios:
+                        // - prec(op1) < prec(op2) --> `a {op1} (b {op2} c)`, handled by recursion
+                        // - prec(op1) > prec(op2) --> `(a {op1} b) {op2} c`, we end up here and
+                        //     ignore the associativity check because `p > prec`
+                        // - else --> `(a {op1} b) {op2} c`, but only if the operators (left-)associate with each other
+                        if let Some((assoc, aspan)) = assoc {
+                            if !op.associates_with(assoc)
+                                && !assoc.binop_prec().map_or(true, |p| p > prec)
+                            {
+                                self.errors.push((
+                                    ParseError::NonAssoc(op, assoc, aspan),
+                                    self.tok_span(),
+                                ));
+                            }
+                        }
+                        assoc = Some((op, self.tok_span()));
+
                         self.push(Tok::BinOpKind.into());
                         self.advance_no_ws();
                         self.pop();
@@ -1142,7 +1179,7 @@ impl Tok {
 
     /// Whether this token and another token can be used together left-associatively in expressions like `a + b - c`.
     /// Arithmetic operators return `true` if `other` has the same precedence; otherwise, most return `false`.
-    fn associates_with(&self, other: &Tok) -> bool {
+    fn associates_with(self, other: Tok) -> bool {
         // Arithmetic operators associate with each other if they have the same precedence
         if let Some(p) = self.binop_prec().and_then(|x| x.arith_prec()) {
             if p > Prec::COMP_PREC {

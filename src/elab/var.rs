@@ -1,5 +1,5 @@
 use super::{metas::Meta, val::Val};
-use crate::common::{Def, Name, SName};
+use crate::common::{Def, SName};
 use std::collections::VecDeque;
 
 // De Brujin indices and levels

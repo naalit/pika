@@ -45,6 +45,7 @@ pub enum Flag {
     EmitDurin,
     EmitLLVM,
     Release,
+    ShowParseTree,
 }
 impl Flag {
     fn short(c: char) -> Option<Self> {
@@ -59,6 +60,7 @@ impl Flag {
             "emit-durin" => Some(Flag::EmitDurin),
             "emit-llvm" => Some(Flag::EmitLLVM),
             "release" => Some(Flag::Release),
+            "show-parse-tree" => Some(Flag::ShowParseTree),
             _ => None,
         }
     }
