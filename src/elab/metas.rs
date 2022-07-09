@@ -85,14 +85,12 @@ impl MetaBounds {
 
 pub enum MetaEntry {
     Solved {
-        /// The solution can have free local variables, so its environment is stored with it similar to a Clos
-        env: Env,
+        /// A lambda term with no free variables
         solution: Expr,
         occurs_cache: RwLock<Option<Meta>>,
     },
     Unsolved {
         bounds: MetaBounds,
-        scope: Size,
         introduced_span: RelSpan,
     },
 }
@@ -239,14 +237,48 @@ impl MetaCxt {
         MetaCxt { metas: Vec::new() }
     }
 
-    pub fn new_meta(&mut self, scope: Size, bounds: MetaBounds, introduced_span: RelSpan) -> Meta {
+    /// Creates a new meta which can't use any free variables; mostly for e.g. int types
+    pub fn unscoped_meta(&mut self, bounds: MetaBounds, introduced_span: RelSpan) -> Meta {
         let m = Meta(self.metas.len() as u32);
         self.metas.push(MetaEntry::Unsolved {
             bounds,
-            scope,
             introduced_span,
         });
         m
+    }
+
+    pub fn new_meta(
+        &mut self,
+        scope: Vec<(Name, Lvl)>,
+        bounds: MetaBounds,
+        introduced_span: RelSpan,
+    ) -> Expr {
+        let m = Meta(self.metas.len() as u32);
+        self.metas.push(MetaEntry::Unsolved {
+            bounds,
+            introduced_span,
+        });
+        let size = Size::zero() + scope.len();
+        // The order of arguments shouldn't matter as long as they're all there
+        let arg = scope.into_iter().fold(None, |rest, (n, l)| {
+            let x = Expr::var(Var::Local((n, RelSpan::empty()), l.idx(size)));
+            match rest {
+                // TODO do we ever need these types?
+                Some(rest) => Some(Expr::Pair(
+                    Box::new(x),
+                    Box::new(rest),
+                    Box::new(Expr::Error),
+                )),
+                None => Some(x),
+            }
+        });
+        match arg {
+            None => Expr::var(Var::Meta(m)),
+            Some(arg) => Expr::Elim(
+                Box::new(Expr::var(Var::Meta(m))),
+                Box::new(Elim::App(Expl, arg)),
+            ),
+        }
     }
 
     pub fn is_solved(&self, meta: Meta) -> bool {
@@ -267,22 +299,9 @@ impl MetaCxt {
         })
     }
 
-    pub fn lookup_val(&self, meta: Meta) -> Option<Val> {
+    pub fn lookup(&self, meta: Meta) -> Option<Expr> {
         self.metas.get(meta.0 as usize).and_then(|x| match x {
-            MetaEntry::Solved { solution, env, .. } => {
-                Some(solution.clone().eval(&mut env.clone()))
-            }
-            MetaEntry::Unsolved { .. } => None,
-        })
-    }
-
-    pub fn lookup_expr(&self, meta: Meta, size: Size) -> Option<Expr> {
-        self.metas.get(meta.0 as usize).and_then(|x| match x {
-            MetaEntry::Solved { solution, env, .. } => Some(solution.clone().eval_quote(
-                &mut env.clone(),
-                size,
-                Some(self),
-            )),
+            MetaEntry::Solved { solution, .. } => Some(solution.clone()),
             MetaEntry::Unsolved { .. } => None,
         })
     }
@@ -303,21 +322,20 @@ impl MetaCxt {
         &mut self,
         start_size: Size,
         meta: Meta,
-        mut spine: Vec<Elim<Val>>,
+        spine: Vec<Elim<Val>>,
         solution: Val,
     ) -> Result<(), MetaSolveError> {
-        // smalltt does eta-contraction here, but I don't think that's necessary, especially without explicit meta spines in most cases
+        // TODO smalltt does eta-contraction here
 
-        let (scope, bounds, intro_span) = self
+        let (bounds, _intro_span) = self
             .metas
             .get(meta.0 as usize)
             .and_then(|x| match x {
                 MetaEntry::Solved { .. } => None,
                 MetaEntry::Unsolved {
-                    scope,
                     bounds,
                     introduced_span,
-                } => Some((scope, bounds, introduced_span)),
+                } => Some((bounds, introduced_span)),
             })
             .unwrap();
         bounds.check(&solution, start_size, self)?;
@@ -326,44 +344,52 @@ impl MetaCxt {
             meta,
             vars: HashMap::new(),
         };
-        // Map all locals in the meta's scope to themselves (they must still be bound)
-        for i in Size::zero().until(*scope) {
-            rename.vars.insert(i.next_lvl(), i.next_lvl());
-        }
-        // Inspect the spine to allow user-defined variable dependencies
-        if spine.len() > 1 {
-            return Err(MetaSolveError::SpineTooLong);
-        }
-        let params: Option<Vec<_>> = spine
-            .pop()
-            .map(|elim| match elim {
-                Elim::App(Expl, arg) => {
-                    let names = rename.add_arg(arg, start_size, self)?;
-                    Ok(names
-                        .into_iter()
-                        .map(|name| Par {
-                            name: (name, *intro_span),
-                            // TODO is this type ever used? can we actually find the type of this?
-                            ty: Expr::Error,
-                        })
-                        .collect())
-                }
-                i => Err(MetaSolveError::SpineNonApp(i.quote(start_size, Some(self)))),
-            })
-            .transpose()?;
-        let inner_size = start_size + params.as_ref().map_or(0, |x| x.len());
-        let inner_size_scope = *scope + params.as_ref().map_or(0, |x| x.len());
+        let params: Vec<Vec<_>> = {
+            // The spine can have two curried arguments to allow user-defined variable dependencies
+            if spine.len() > 2 {
+                return Err(MetaSolveError::SpineTooLong);
+            }
+            let mut size_to = Size::zero();
+            spine
+                .into_iter()
+                .map(|elim| match elim {
+                    Elim::App(Expl, arg) => {
+                        let names = rename.add_arg(arg, size_to, self)?;
+                        size_to += names.len();
+                        Ok(names
+                            .into_iter()
+                            .map(|name| Par {
+                                name: (name, RelSpan::empty()),
+                                // TODO is this type ever used? can we actually find the type of this?
+                                ty: Expr::Error,
+                            })
+                            .collect())
+                    }
+                    i => Err(MetaSolveError::SpineNonApp(i.quote(start_size, Some(self)))),
+                })
+                .collect::<Result<_, _>>()?
+        };
+        let inner_size_from = start_size + params.iter().map(|x| x.len()).sum();
+        let inner_size_to = Size::zero() + params.iter().map(|x| x.len()).sum();
 
-        // Don't inline metas in the solution to keep it small
-        let mut solution = solution.quote(inner_size, None);
-        solution.check_solution(
-            self,
-            &SolutionCheckMode::Full(rename),
-            inner_size,
-            inner_size_scope,
-        )?;
+        // Try to avoid inlining metas in the solution to keep it small
+        let mut solution = solution.quote(inner_size_from, None);
+        let solution2 = solution.clone();
+        let mode = SolutionCheckMode::Full(rename);
+        match solution.check_solution(self, &mode, inner_size_from, inner_size_to) {
+            Ok(()) => (),
+            Err(_) => {
+                // Inline metas if we have to
+                solution = solution2.eval_quote(
+                    &mut Env::new(inner_size_from),
+                    inner_size_from,
+                    Some(self),
+                );
+                solution.check_solution(self, &mode, inner_size_from, inner_size_to)?;
+            }
+        };
 
-        if let Some(params) = params {
+        for params in params {
             solution = Expr::Fun(EClos {
                 class: Lam(Expl),
                 params,
@@ -372,7 +398,6 @@ impl MetaCxt {
         }
 
         self.metas[meta.0 as usize] = MetaEntry::Solved {
-            env: Env::new(*scope),
             solution,
             occurs_cache: RwLock::new(None),
         };
@@ -439,8 +464,7 @@ impl Expr {
                     }
                     MetaEntry::Unsolved { .. } => (),
                 },
-                // TODO we don't currently do any unfolding during solution checking
-                // this is sound, but we miss possible solutions (smalltt's example is `?0 = const true y` where y is not in the meta scope)
+                // TODO unfold here instead of in solve()
                 _ => (),
             },
             Expr::Elim(a, b) => {

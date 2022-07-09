@@ -61,8 +61,8 @@ impl Neutral {
             let head: Val = match self.head {
                 Head::Var(Var::Local(_, _)) => return Err(self),
                 Head::Var(Var::Builtin(_)) => return Err(self),
-                Head::Var(Var::Meta(m)) => match mcxt.lookup_val(m) {
-                    Some(v) => v,
+                Head::Var(Var::Meta(m)) => match mcxt.lookup(m) {
+                    Some(e) => e.eval(&mut env.clone()),
                     None => return Err(self),
                 },
                 Head::Var(Var::Def(_, _)) => return Err(self),
@@ -397,18 +397,27 @@ impl Expr {
                 Head::Var(Var::Local(n, i)) => *self = env.val(*n, *i).quote(size, inline_metas),
                 Head::Var(Var::Meta(m)) => match inline_metas {
                     Some(mcxt) => {
-                        if let Some(expr) = mcxt.lookup_expr(*m, size) {
+                        if let Some(expr) = mcxt.lookup(*m) {
                             *self = expr;
+                            self._eval_quote(env, size, inline_metas);
                         }
                     }
                     None => (),
                 },
                 _ => (),
             },
-            Expr::Elim(x, e) => {
-                x._eval_quote(env, size, inline_metas);
+            Expr::Elim(f, e) => {
+                f._eval_quote(env, size, inline_metas);
                 match &mut **e {
-                    Elim::App(_, x) => x._eval_quote(env, size, inline_metas),
+                    // beta-reduce if possible
+                    Elim::App(_, x) => match &**f {
+                        Expr::Fun(clos) if matches!(clos.class, Lam(_)) => {
+                            // TODO avoid these clones
+                            let x = x.clone().eval(env);
+                            *self = clos.clone().eval(env).apply(x).quote(size, inline_metas);
+                        }
+                        _ => x._eval_quote(env, size, inline_metas),
+                    },
                     Elim::Member(_) => todo!(),
                     Elim::Case(case, ty) => {
                         case.visit_mut(|x| x._eval_quote(env, size, inline_metas));
@@ -420,7 +429,7 @@ impl Expr {
             Expr::Lit(Literal::Int(val, Err((_, meta)))) => match inline_metas {
                 Some(mcxt) => {
                     if let Some(Expr::Head(Head::Var(Var::Builtin(Builtin::IntType(i))))) =
-                        mcxt.lookup_expr(*meta, size)
+                        mcxt.lookup(*meta)
                     {
                         *self = Expr::Lit(Literal::Int(*val, Ok(i)));
                     }
@@ -453,20 +462,28 @@ impl Val {
                 // Don't resolve the neutral, we want the smallest term when quoting
                 // TODO: we may want to inline metas though
                 let (head, spine) = neutral.into_parts();
+                let mut inlined_meta = false;
                 let head = match head {
                     Head::Var(Var::Def(n, d)) => Expr::var(Var::Def(n, d)),
                     Head::Var(Var::Local(n, i)) => Expr::var(Var::Local(n, i.idx(size))),
                     Head::Var(Var::Builtin(b)) => Expr::var(Var::Builtin(b)),
-                    Head::Var(Var::Meta(m)) => {
-                        match inline_metas.and_then(|mcxt| mcxt.lookup_expr(m, size)) {
-                            Some(t) => t,
-                            None => Expr::var(Var::Meta(m)),
+                    Head::Var(Var::Meta(m)) => match inline_metas.and_then(|mcxt| mcxt.lookup(m)) {
+                        Some(t) => {
+                            inlined_meta = true;
+                            t
                         }
-                    }
+                        None => Expr::var(Var::Meta(m)),
+                    },
                 };
-                spine.into_iter().fold(head, |head, elim| {
+                let res = spine.into_iter().fold(head, |head, elim| {
                     Expr::Elim(Box::new(head), Box::new(elim.quote(size, inline_metas)))
-                })
+                });
+                if inlined_meta {
+                    // Beta reduce + inline more metas
+                    res.eval_quote(&mut Env::new(size), size, inline_metas)
+                } else {
+                    res
+                }
             }
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),

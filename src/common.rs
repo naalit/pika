@@ -62,6 +62,10 @@ pub struct RelSpan {
     pub end: u32,
 }
 impl RelSpan {
+    pub fn empty() -> RelSpan {
+        RelSpan::new(0, 0)
+    }
+
     pub fn new(start: u32, end: u32) -> RelSpan {
         RelSpan { start, end }
     }

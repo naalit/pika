@@ -601,17 +601,15 @@ impl ast::Lit {
             let num = lex_number(l.text()).map_err(|e| format!("Invalid literal: {}", e))?;
             match num {
                 NumLiteral::IPositive(i) => {
-                    let meta =
-                        cxt.mcxt
-                            .new_meta(cxt.size(), MetaBounds::int_type(false, i), self.span());
+                    let meta = cxt
+                        .mcxt
+                        .unscoped_meta(MetaBounds::int_type(false, i), self.span());
                     Ok(Literal::Int(i, Err((false, meta))))
                 }
                 NumLiteral::INegative(i) => {
-                    let meta = cxt.mcxt.new_meta(
-                        cxt.size(),
-                        MetaBounds::int_type(true, i as u64),
-                        self.span(),
-                    );
+                    let meta = cxt
+                        .mcxt
+                        .unscoped_meta(MetaBounds::int_type(true, i as u64), self.span());
                     Ok(Literal::Int(i as u64, Err((true, meta))))
                 }
                 NumLiteral::Float(_) => todo!(),
@@ -694,11 +692,11 @@ impl ast::PatPar {
                         let ty = ty
                             .map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType))
                             .unwrap_or_else(|| {
-                                Expr::var(Var::Meta(cxt.mcxt.new_meta(
-                                    cxt.size(),
+                                cxt.mcxt.new_meta(
+                                    cxt.locals(),
                                     MetaBounds::new(Val::Type),
                                     x.unwrap().span(),
-                                )))
+                                )
                             });
                         Par { name, ty }
                     }
@@ -1328,20 +1326,22 @@ impl ast::Expr {
                                     },
                                     None => {
                                         // Apply a new metavariable
-                                        let meta = cxt.mcxt.new_meta(
-                                            cxt.size(),
+                                        let e = cxt.mcxt.new_meta(
+                                            cxt.locals(),
                                             MetaBounds::new(aty),
                                             self.span(),
                                         );
-                                        targs.push(Expr::var(Var::Meta(meta)));
-                                        Val::var(Var::Meta(meta))
+                                        targs.push(e.clone());
+                                        e.eval(&mut cxt.env())
                                     }
                                 });
                                 let ty = par_ty.quote(cxt.size(), None);
-                                fn make_arg(mut v: impl Iterator<Item=Expr>, ty: Expr, cxt: &Cxt) -> Option<Expr> {
+                                fn make_arg(
+                                    mut v: impl Iterator<Item = Expr>,
+                                    ty: Expr,
+                                    cxt: &Cxt,
+                                ) -> Option<Expr> {
                                     let a = v.next()?;
-                                    a.pretty(cxt.db).emit_stderr();
-                                    ty.pretty(cxt.db).emit_stderr();
                                     let ty2 = match ty.clone() {
                                         Expr::Fun(EClos {
                                             class: Sigma, body, ..
@@ -1353,7 +1353,9 @@ impl ast::Expr {
                                         _ => Expr::Error,
                                     };
                                     match make_arg(v, ty2, cxt) {
-                                        Some(b) => Some(Expr::Pair(Box::new(a), Box::new(b), Box::new(ty))),
+                                        Some(b) => {
+                                            Some(Expr::Pair(Box::new(a), Box::new(b), Box::new(ty)))
+                                        }
                                         None => Some(a),
                                     }
                                 }
@@ -1402,16 +1404,16 @@ impl ast::Expr {
                         (expr, rty)
                     }
                     ast::Expr::Hole(_) => {
-                        let mty =
-                            cxt.mcxt
-                                .new_meta(cxt.size(), MetaBounds::new(Val::Type), self.span());
-                        let mty = Val::var(Var::Meta(mty));
+                        let mty = cxt
+                            .mcxt
+                            .new_meta(cxt.locals(), MetaBounds::new(Val::Type), self.span())
+                            .eval(&mut cxt.env());
                         let meta = cxt.mcxt.new_meta(
-                            cxt.size(),
+                            cxt.locals(),
                             MetaBounds::new(mty.clone()),
                             self.span(),
                         );
-                        (Expr::var(Var::Meta(meta)), mty)
+                        (meta, mty)
                     }
                     ast::Expr::Case(case) => {
                         let mut rty = None;

@@ -349,7 +349,7 @@ impl Expr {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
                     Var::Meta(m) => match cxt.mcxt.meta_ty(*m) {
                         Some(t) => t,
-                        None => match cxt.mcxt.lookup_expr(*m, cxt.size()) {
+                        None => match cxt.mcxt.lookup(*m) {
                             Some(e) => e.ty(cxt),
                             None => {
                                 eprintln!("WARNING: could not get meta type!");

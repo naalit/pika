@@ -208,6 +208,18 @@ impl Cxt<'_> {
             .unwrap()
     }
 
+    pub fn locals(&self) -> Vec<(Name, Lvl)> {
+        self.scopes
+            .iter()
+            .flat_map(|x| {
+                x.names.iter().filter_map(|(n, v)| match v {
+                    VarDef::Var(Var::Local(_, l), _) => Some((*n, *l)),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
     pub fn error(&mut self, span: RelSpan, error: impl Into<TypeError>) {
         self.errors.push((Severity::Error, error.into(), span));
     }
