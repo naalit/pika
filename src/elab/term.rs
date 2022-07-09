@@ -358,7 +358,7 @@ impl Expr {
                         },
                     },
                     Var::Builtin(b) => b.ty(),
-                    Var::Def(d) => cxt
+                    Var::Def(_, d) => cxt
                         .db
                         .def_type(*d)
                         .and_then(|x| x.result)
@@ -418,16 +418,11 @@ impl Pretty for Expr {
             Expr::Type => Doc::none().add("Type", Doc::style_keyword()),
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
-                    Var::Local(name, _i) => Doc::start(db.lookup_name(*name)), //.add('.', ()).add(_i.as_u32(), ()),
+                    Var::Local(name, _i) => Doc::start(db.lookup_name(name.0)), //.add('.', ()).add(_i.as_u32(), ()),
                     Var::Meta(m) => Doc::start(m).style(Doc::style_literal()),
                     Var::Builtin(b) => Doc::start(b),
-                    // TODO better way of doing this - e.g. take into account module paths
-                    // also get rid of fallback
-                    Var::Def(d) => Doc::start(
-                        db.def_name(*d)
-                            .map(|x| db.lookup_name(x))
-                            .unwrap_or_else(|| format!("?{}", d.fallback_repr(db))),
-                    ),
+                    // TODO take into account module paths etc.
+                    Var::Def(n, _) => n.pretty(db),
                 },
             },
             Expr::Elim(a, b) => match &**b {

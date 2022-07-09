@@ -61,7 +61,7 @@ impl Scope {
     }
 
     fn define_local(&mut self, name: SName, ty: Val) {
-        self.define(name, Var::Local(name.0, self.size.next_lvl()), ty);
+        self.define(name, Var::Local(name, self.size.next_lvl()), ty);
         self.size = self.size.inc();
     }
 
@@ -179,15 +179,15 @@ impl Cxt<'_> {
         self.env.reset_to_size(self.size());
     }
 
-    pub fn lookup(&self, name: Name) -> Option<(Var<Lvl>, Val)> {
+    pub fn lookup(&self, name: SName) -> Option<(Var<Lvl>, Val)> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|x| x.names.get(&name).cloned())
+            .find_map(|x| x.names.get(&name.0).cloned())
             .map(|x| match x {
-                VarDef::Var(v, t) => (v, t),
+                VarDef::Var(v, t) => (v.with_sname(name), t),
                 VarDef::Def(d) => (
-                    Var::Def(d),
+                    Var::Def(name, d),
                     self.db
                         .def_type(d)
                         .and_then(|x| x.result)

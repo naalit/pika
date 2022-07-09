@@ -1,7 +1,7 @@
 use super::*;
 
 pub enum FindSpanResult<'a> {
-    Name(SName, &'a Expr),
+    Name(SName, Cow<'a, Expr>),
     Expr(&'a Expr, RelSpan),
 }
 
@@ -11,7 +11,7 @@ impl EClos {
         for i in &self.params {
             i.ty.find_span(span, cxt)?;
             if i.name.1.superset(span) {
-                return Err(FindSpanResult::Name(i.name, &i.ty));
+                return Err(FindSpanResult::Name(i.name, Cow::Borrowed(&i.ty)));
             }
             cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None);
         }
@@ -25,6 +25,15 @@ impl Expr {
     pub fn find_span(&self, span: RelSpan, cxt: &mut Cxt) -> Result<(), FindSpanResult> {
         match self {
             Expr::Type => (),
+            &Expr::Head(Head::Var(Var::Local(n @ (_, s), _) | Var::Def(n @ (_, s), _))) => {
+                if s.superset(span) {
+                    eprintln!("here");
+                    return Err(FindSpanResult::Name(
+                        n,
+                        Cow::Owned(self.ty(cxt).quote(cxt.size(), Some(&cxt.mcxt))),
+                    ));
+                }
+            }
             Expr::Head(_) => (),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(_, x) => {
@@ -78,7 +87,7 @@ pub fn hover_type(
         if name.1.contains(pos) {
             result = Some(FindSpanResult::Name(
                 name,
-                &*def.result.as_ref().unwrap().ty,
+                Cow::Borrowed(&*def.result.as_ref().unwrap().ty),
             ))
         }
     };

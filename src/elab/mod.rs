@@ -772,7 +772,7 @@ impl ast::Pair {
                         class: Sigma,
                         params: vec![Par { name, ty }],
                         body: Box::new(Expr::Elim(
-                            Box::new(Expr::var(Var::Local(name.0, Idx::zero()))),
+                            Box::new(Expr::var(Var::Local(name, Idx::zero()))),
                             Box::new(Elim::Case(case, cty)),
                         )),
                     }))
@@ -1151,8 +1151,8 @@ impl ast::Expr {
             Ok({
                 match self {
                     ast::Expr::Var(name) => {
-                        let name = name.name(cxt.db).0;
-                        let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name))?;
+                        let name = name.name(cxt.db);
+                        let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
                         (Expr::var(v.cvt(cxt.size())), t)
                     }
                     ast::Expr::Lam(x) => {

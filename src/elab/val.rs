@@ -65,7 +65,7 @@ impl Neutral {
                     Some(v) => v,
                     None => return Err(self),
                 },
-                Head::Var(Var::Def(_)) => return Err(self),
+                Head::Var(Var::Def(_, _)) => return Err(self),
             };
             let mut env = env.clone();
             let mut val = self
@@ -210,7 +210,7 @@ impl VClos {
             body,
         } = self;
         for par in &params {
-            env.push(Some(Val::var(Var::Local(par.name.0, size.next_lvl()))));
+            env.push(Some(Val::var(Var::Local(par.name, size.next_lvl()))));
             size += 1;
         }
         body.eval(&mut env)
@@ -220,7 +220,7 @@ impl VClos {
         let (arg, _size, _ty) = self.params.iter().fold(
             (None, size, self.par_ty()),
             |(term, size, ty), Par { name, ty: _ }| {
-                let var = Box::new(Val::var(Var::Local(name.0, size.next_lvl())));
+                let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
                 let term = match term {
                     Some(term) => Box::new(Val::Pair(var, term, Box::new(ty.clone()))),
                     None => var,
@@ -372,7 +372,7 @@ impl Expr {
         match self {
             Expr::Type => Val::Type,
             Expr::Head(h) => match h {
-                Head::Var(Var::Def(d)) => Val::var(Var::Def(d)),
+                Head::Var(Var::Def(n, d)) => Val::var(Var::Def(n, d)),
                 Head::Var(Var::Local(n, i)) => env.val(n, i),
                 Head::Var(Var::Builtin(b)) => Val::var(Var::Builtin(b)),
                 Head::Var(Var::Meta(m)) => Val::var(Var::Meta(m)),
@@ -454,7 +454,7 @@ impl Val {
                 // TODO: we may want to inline metas though
                 let (head, spine) = neutral.into_parts();
                 let head = match head {
-                    Head::Var(Var::Def(d)) => Expr::var(Var::Def(d)),
+                    Head::Var(Var::Def(n, d)) => Expr::var(Var::Def(n, d)),
                     Head::Var(Var::Local(n, i)) => Expr::var(Var::Local(n, i.idx(size))),
                     Head::Var(Var::Builtin(b)) => Expr::var(Var::Builtin(b)),
                     Head::Var(Var::Meta(m)) => {
@@ -502,7 +502,9 @@ impl Val {
                 match n.head() {
                     Head::Var(Var::Local(n, l)) => {
                         if !l.in_scope(size) {
-                            return Err(n);
+                            // The span on the name likely wouldn't help, since check_scope is
+                            // generally used for inferred types
+                            return Err(n.0);
                         }
                     }
                     _ => (),
@@ -583,7 +585,7 @@ impl Expr {
                 if i.in_scope(inner_size) || allowed.contains(&i.lvl(size)) {
                     Ok(())
                 } else {
-                    Err(*n)
+                    Err(n.0)
                 }
             }
             Expr::Head(_) => Ok(()),

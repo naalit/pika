@@ -1,5 +1,5 @@
 use super::{metas::Meta, val::Val};
-use crate::common::{Def, Name};
+use crate::common::{Def, Name, SName};
 use std::collections::VecDeque;
 
 // De Brujin indices and levels
@@ -93,10 +93,19 @@ impl std::ops::AddAssign<usize> for Size {
 
 #[derive(Debug, Copy, Clone, Eq, Hash)]
 pub enum Var<L> {
-    Local(Name, L),
+    Local(SName, L),
     Meta(Meta),
     Builtin(super::term::Builtin),
-    Def(Def),
+    Def(SName, Def),
+}
+impl<T> Var<T> {
+    pub fn with_sname(self, n: SName) -> Var<T> {
+        match self {
+            Var::Local(_, l) => Var::Local(n, l),
+            Var::Def(_, d) => Var::Def(n, d),
+            Var::Meta(_) | Var::Builtin(_) => self,
+        }
+    }
 }
 impl Var<Lvl> {
     pub fn cvt(self, size: Size) -> Var<Idx> {
@@ -104,7 +113,7 @@ impl Var<Lvl> {
             Var::Local(n, l) => Var::Local(n, l.idx(size)),
             Var::Meta(m) => Var::Meta(m),
             Var::Builtin(b) => Var::Builtin(b),
-            Var::Def(d) => Var::Def(d),
+            Var::Def(n, d) => Var::Def(n, d),
         }
     }
 }
@@ -114,7 +123,7 @@ impl Var<Idx> {
             Var::Local(n, l) => Var::Local(n, l.lvl(size)),
             Var::Meta(m) => Var::Meta(m),
             Var::Builtin(b) => Var::Builtin(b),
-            Var::Def(d) => Var::Def(d),
+            Var::Def(n, d) => Var::Def(n, d),
         }
     }
 }
@@ -124,7 +133,7 @@ impl<L: PartialEq> PartialEq for Var<L> {
             (Self::Local(_, l1), Self::Local(_, r1)) => l1 == r1,
             (Self::Meta(l0), Self::Meta(r0)) => l0 == r0,
             (Self::Builtin(l0), Self::Builtin(r0)) => l0 == r0,
-            (Self::Def(l0), Self::Def(r0)) => l0 == r0,
+            (Self::Def(_, l0), Self::Def(_, r0)) => l0 == r0,
             _ => false,
         }
     }
@@ -170,7 +179,7 @@ impl Env {
     }
 
     /// If it's not present, returns a local variable value
-    pub fn val(&self, n: Name, i: Idx) -> Val {
+    pub fn val(&self, n: SName, i: Idx) -> Val {
         self.vals
             .get(i.0 as usize)
             .cloned()

@@ -180,7 +180,7 @@ impl PartialRename {
                 };
                 self.vars.insert(l, inner_size.next_lvl());
 
-                Ok(vec![n])
+                Ok(vec![n.0])
             }
             // only right-associative pairs are allowed
             // TODO when box patterns are stabilized switch to that instead of nested matches!()
@@ -202,7 +202,7 @@ impl PartialRename {
                 self.vars.insert(l, inner_size.next_lvl());
 
                 let mut rhs = self.add_arg(*b, inner_size.inc(), mcxt)?;
-                rhs.insert(0, n);
+                rhs.insert(0, n.0);
                 Ok(rhs)
             }
             // TODO handle Val::Error without creating more errors?
@@ -396,7 +396,7 @@ impl Expr {
                 Head::Var(Var::Local(n, i)) if mode.should_rename() => {
                     match mode.renamed(i.lvl(s_from)) {
                         Some(l) => *i = l.idx(s_to),
-                        None => return Err(MetaSolveError::Scope(*n)),
+                        None => return Err(MetaSolveError::Scope(n.0)),
                     }
                 }
                 Head::Var(Var::Meta(m)) if *m == mode.occurs_meta() => {
