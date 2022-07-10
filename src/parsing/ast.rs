@@ -18,11 +18,11 @@ pub fn node_span(node: &SyntaxNode) -> RelSpan {
     let end = node
         .children_with_tokens()
         .filter(|x| x.as_token().map_or(true, |x| !x.kind().is_trivia()))
+        .last()
         .map(|x| match x {
             rowan::NodeOrToken::Node(n) => node_span(&n).end,
             rowan::NodeOrToken::Token(t) => t.text_range().end().into(),
-        })
-        .last();
+        });
     if start.is_none() || end.is_none() {
         node.text_range().into()
     } else {
@@ -656,6 +656,6 @@ impl Pretty for Expr {
                 .space()
                 .chain(x.b().pretty()),
         };
-        Doc::start('[').chain(p).add(']', ())
+        Doc::start('{').chain(p).add('}', ())
     }
 }

@@ -515,7 +515,7 @@ impl<'a> Parser<'a> {
         } else {
             // Explicit parameters
             let cp = self.checkpoint();
-            self.expr(Prec::Arrow);
+            self.expr(Prec::App);
             Some(cp)
         }
     }
@@ -1101,30 +1101,32 @@ impl Prec {
 }
 impl PartialOrd for Prec {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self == other {
+            return Some(Ordering::Equal);
+        }
         match (self, other) {
-            (Prec::Indented, Prec::Indented) => return Some(Ordering::Equal),
             (Prec::Indented, _) => return Some(Ordering::Less),
             (_, Prec::Indented) => return Some(Ordering::Greater),
-            (Prec::Min, Prec::Min) => return Some(Ordering::Equal),
+
             (Prec::Min, _) => return Some(Ordering::Less),
             (_, Prec::Min) => return Some(Ordering::Greater),
+
             // Application has the highest precedence
-            (Prec::App, Prec::App) => return Some(Ordering::Equal),
             (Prec::App, _) => return Some(Ordering::Greater),
             (_, Prec::App) => return Some(Ordering::Less),
+
             // And if has the lowest precedence
-            (Prec::If, Prec::If) => return Some(Ordering::Equal),
             (Prec::If, _) => return Some(Ordering::Less),
             (_, Prec::If) => return Some(Ordering::Greater),
+
             // Next is pipe
-            (Prec::Pipe, Prec::Pipe) => return Some(Ordering::Equal),
             (Prec::Pipe, _) => return Some(Ordering::Less),
             (_, Prec::Pipe) => return Some(Ordering::Greater),
+
             // Next lowest precedence is comma, then binder
-            (Prec::Comma, Prec::Comma) => return Some(Ordering::Equal),
             (Prec::Comma, _) => return Some(Ordering::Less),
             (_, Prec::Comma) => return Some(Ordering::Greater),
-            (Prec::Binder, Prec::Binder) => return Some(Ordering::Equal),
+
             (Prec::Binder, _) => return Some(Ordering::Less),
             (_, Prec::Binder) => return Some(Ordering::Greater),
             _ => (),

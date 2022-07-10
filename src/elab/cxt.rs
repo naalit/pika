@@ -30,7 +30,7 @@ enum ScopeState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Scope {
     size: Size,
-    names: HashMap<Name, VarDef>,
+    names: Vec<(Name, VarDef)>,
 }
 
 impl Scope {
@@ -47,17 +47,14 @@ impl Scope {
 
     fn from_state(state: ScopeState, db: &dyn Elaborator) -> Scope {
         match state {
-            ScopeState::Local { size, names } => Scope {
-                size,
-                names: HashMap::from_iter(names),
-            },
+            ScopeState::Local { size, names } => Scope { size, names },
             ScopeState::Global(file) => Scope::global(db, file),
         }
     }
 
     fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val) {
         // TODO we probably want to keep the spans
-        self.names.insert(name.0, VarDef::Var(var, ty));
+        self.names.push((name.0, VarDef::Var(var, ty)));
     }
 
     fn define_local(&mut self, name: SName, ty: Val) {
@@ -65,8 +62,15 @@ impl Scope {
         self.size = self.size.inc();
     }
 
+    fn lookup(&self, name: Name) -> Option<&VarDef> {
+        self.names
+            .iter()
+            .rfind(|&&(n, _)| n == name)
+            .map(|(_, d)| d)
+    }
+
     fn global(db: &(impl Elaborator + ?Sized), file: File) -> Self {
-        let mut global_defs = HashMap::from_iter(
+        let mut global_defs = Vec::from_iter(
             [
                 ("I8", Builtin::IntType(IntType::I8), Val::Type),
                 ("I16", Builtin::IntType(IntType::I16), Val::Type),
@@ -88,7 +92,7 @@ impl Scope {
         for split in db.all_split_ids(file) {
             let def = db.def(DefLoc::Root(file, split));
             if let Some(name) = db.def_name(def) {
-                global_defs.insert(name, VarDef::Def(def));
+                global_defs.push((name, VarDef::Def(def)));
             }
         }
         Scope {
@@ -100,7 +104,7 @@ impl Scope {
     fn new(size: Size) -> Self {
         Scope {
             size,
-            names: HashMap::new(),
+            names: Vec::new(),
         }
     }
 }
@@ -110,7 +114,7 @@ pub struct Cxt<'a> {
     scopes: Vec<Scope>,
     env: Env,
     errors: Vec<(Severity, TypeError, RelSpan)>,
-    pub mcxt: MetaCxt,
+    pub mcxt: MetaCxt<'a>,
 }
 impl Cxt<'_> {
     pub fn new(db: &dyn Elaborator, def_cxt: DefCxt) -> Cxt {
@@ -123,7 +127,7 @@ impl Cxt<'_> {
                 .map(|x| Scope::from_state(x, db))
                 .collect(),
             errors: Vec::new(),
-            mcxt: MetaCxt::new(),
+            mcxt: MetaCxt::new(db),
         };
         cxt.env = Env::new(cxt.size());
         cxt
@@ -183,7 +187,7 @@ impl Cxt<'_> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|x| x.names.get(&name.0).cloned())
+            .find_map(|x| x.lookup(name.0).cloned())
             .map(|x| match x {
                 VarDef::Var(v, t) => (v.with_sname(name), t),
                 VarDef::Def(d) => (
@@ -200,7 +204,7 @@ impl Cxt<'_> {
         self.scopes
             .iter()
             .find_map(|x| {
-                x.names.values().find_map(|x| match x {
+                x.names.iter().find_map(|(_, x)| match x {
                     VarDef::Var(Var::Local(_, l), t) if *l == lvl => Some(t.clone()),
                     _ => None,
                 })

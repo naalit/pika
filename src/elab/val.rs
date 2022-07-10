@@ -65,7 +65,10 @@ impl Neutral {
                     Some(e) => e.eval(&mut env.clone()),
                     None => return Err(self),
                 },
-                Head::Var(Var::Def(_, _)) => return Err(self),
+                Head::Var(Var::Def(_, d)) => match mcxt.db.def_elab(d).and_then(|x| x.result) {
+                    Some(res) => res.body.eval(&mut env.clone()),
+                    None => todo!(),
+                },
             };
             let mut env = env.clone();
             let mut val = self
@@ -410,7 +413,7 @@ impl Expr {
                 f._eval_quote(env, size, inline_metas);
                 match &mut **e {
                     // beta-reduce if possible
-                    Elim::App(_, x) => match &**f {
+                    Elim::App(_, x) => match f.unspanned() {
                         Expr::Fun(clos) if matches!(clos.class, Lam(_)) => {
                             // TODO avoid these clones
                             let x = x.clone().eval(env);
@@ -452,6 +455,13 @@ impl Expr {
         self._eval_quote(env, size, inline_metas);
         self
     }
+
+    fn unspanned(&self) -> &Expr {
+        match self {
+            Expr::Spanned(_, x) => x.unspanned(),
+            x => x,
+        }
+    }
 }
 
 impl Val {
@@ -459,11 +469,10 @@ impl Val {
         match self {
             Val::Type => Expr::Type,
             Val::Neutral(neutral) => {
-                // Don't resolve the neutral, we want the smallest term when quoting
-                // TODO: we may want to inline metas though
                 let (head, spine) = neutral.into_parts();
                 let mut inlined_meta = false;
                 let head = match head {
+                    // Don't resolve the neutral, we want the smallest term when quoting
                     Head::Var(Var::Def(n, d)) => Expr::var(Var::Def(n, d)),
                     Head::Var(Var::Local(n, i)) => Expr::var(Var::Local(n, i.idx(size))),
                     Head::Var(Var::Builtin(b)) => Expr::var(Var::Builtin(b)),

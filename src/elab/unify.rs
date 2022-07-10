@@ -62,8 +62,8 @@ impl UnfoldState {
     }
 }
 
-struct UnifyCxt<'a> {
-    meta_cxt: &'a mut MetaCxt,
+struct UnifyCxt<'a, 'b> {
+    meta_cxt: &'a mut MetaCxt<'b>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -190,7 +190,7 @@ impl UnifyError {
     }
 }
 
-impl MetaCxt {
+impl MetaCxt<'_> {
     /// When possible, (inferred, expected)
     pub fn unify(
         &mut self,
@@ -211,7 +211,7 @@ impl MetaCxt {
     }
 }
 
-impl UnifyCxt<'_> {
+impl UnifyCxt<'_, '_> {
     fn unify_spines(
         &mut self,
         a: &[Elim<Val>],
@@ -342,11 +342,11 @@ impl UnifyCxt<'_> {
                 // Unfold as much as possible first
                 if state.can_unfold() {
                     // TODO allow inlining local definitions
-                    match a.resolve(&mut Env::new(size), &self.meta_cxt) {
+                    match a.resolve(&mut Env::new(size), self.meta_cxt) {
                         Ok(a) => return self.unify(a, Val::Neutral(b), size, state),
                         Err(a2) => a = a2,
                     }
-                    match b.resolve(&mut Env::new(size), &self.meta_cxt) {
+                    match b.resolve(&mut Env::new(size), self.meta_cxt) {
                         Ok(b) => return self.unify(Val::Neutral(a), b, size, state),
                         Err(b2) => b = b2,
                     }
@@ -376,20 +376,20 @@ impl UnifyCxt<'_> {
                 }
             }
 
-            // If a neutral still hasn't unified with anything, try unfolding it if possible
-            (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
-                match n.resolve(&mut Env::new(size), &self.meta_cxt) {
-                    Ok(n) => self.unify(n, x, size, state),
-                    Err(_) => Err(UnifyErrorKind::Conversion),
-                }
-            }
-
             // Eta-expand if there's a lambda on one side
             (Val::Fun(clos), x) | (x, Val::Fun(clos)) if matches!(clos.class, Lam(_)) => {
                 let new_size = size + clos.params.len();
                 let elim = Elim::App(clos.class.icit().unwrap(), clos.synthesize_args(size));
                 let a = clos.open(size);
                 self.unify(a, x.app(elim, &mut Env::new(new_size)), new_size, state)
+            }
+
+            // If a neutral still hasn't unified with anything, try unfolding it if possible
+            (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
+                match n.resolve(&mut Env::new(size), self.meta_cxt) {
+                    Ok(n) => self.unify(n, x, size, state),
+                    Err(_) => Err(UnifyErrorKind::Conversion),
+                }
             }
 
             _ => Err(UnifyErrorKind::Conversion),

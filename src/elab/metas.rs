@@ -100,7 +100,6 @@ pub enum MetaSolveError {
     Scope(Name),
     SpineNonVariable(Expr),
     SpineNonApp(Elim<Expr>),
-    SpineTooLong,
     SpineDuplicate(Name),
     BoundsNotInt(Expr),
     BoundsWrongIntSize(IntType),
@@ -132,7 +131,6 @@ impl MetaSolveError {
                     },
                     (),
                 ),
-            MetaSolveError::SpineTooLong => Doc::start("Meta may only be applied to one argument"),
             MetaSolveError::SpineDuplicate(n) => Doc::start("Meta is applied to variable ")
                 .add(db.lookup_name(*n), Doc::COLOR1)
                 .add(" more than once", ()),
@@ -150,27 +148,36 @@ impl MetaSolveError {
 
 enum SolutionCheckMode {
     Occurs(Meta),
-    Full(PartialRename),
+    Full(PartialRename, Size),
 }
 impl SolutionCheckMode {
     fn occurs_meta(&self) -> Meta {
         match self {
             SolutionCheckMode::Occurs(m) => *m,
-            SolutionCheckMode::Full(m) => m.meta,
+            SolutionCheckMode::Full(m, _) => m.meta,
         }
     }
 
     fn should_rename(&self) -> bool {
         match self {
             SolutionCheckMode::Occurs(_) => false,
-            SolutionCheckMode::Full(_) => true,
+            SolutionCheckMode::Full(_, _) => true,
         }
     }
 
-    fn renamed(&self, l: Lvl) -> Option<Lvl> {
+    fn renamed(&self, i: Idx, s_from: Size, s_to: Size) -> Option<Idx> {
+        let l = i.lvl(s_from);
         match self {
-            SolutionCheckMode::Occurs(_) => Some(l),
-            SolutionCheckMode::Full(r) => r.vars.get(&l).copied(),
+            SolutionCheckMode::Occurs(_) => Some(l.idx(s_to)),
+            SolutionCheckMode::Full(r, s) => {
+                if l.in_scope(*s) {
+                    r.vars.get(&l).copied().map(|l| l.idx(s_to))
+                } else {
+                    // This var was introduced by an abstraction within the solution, it's fine
+                    // We need to preserve the *index*, not the *level*, from the solution
+                    Some(i)
+                }
+            }
         }
     }
 }
@@ -194,7 +201,9 @@ impl PartialRename {
                     Head::Var(Var::Local(n, l)) => (n, l),
                     _ => unreachable!(),
                 };
-                self.vars.insert(l, inner_size.next_lvl());
+                if self.vars.insert(l, inner_size.next_lvl()).is_some() {
+                    return Err(MetaSolveError::SpineDuplicate(n.0));
+                }
 
                 Ok(vec![n.0])
             }
@@ -215,7 +224,9 @@ impl PartialRename {
                     Head::Var(Var::Local(n, l)) => (n, l),
                     _ => unreachable!(),
                 };
-                self.vars.insert(l, inner_size.next_lvl());
+                if self.vars.insert(l, inner_size.next_lvl()).is_some() {
+                    return Err(MetaSolveError::SpineDuplicate(n.0));
+                }
 
                 let mut rhs = self.add_arg(*b, inner_size.inc(), mcxt)?;
                 rhs.insert(0, n.0);
@@ -229,12 +240,16 @@ impl PartialRename {
     }
 }
 
-pub struct MetaCxt {
+pub struct MetaCxt<'a> {
+    pub db: &'a dyn Elaborator,
     metas: Vec<MetaEntry>,
 }
-impl MetaCxt {
-    pub fn new() -> Self {
-        MetaCxt { metas: Vec::new() }
+impl MetaCxt<'_> {
+    pub fn new(db: &dyn Elaborator) -> MetaCxt {
+        MetaCxt {
+            db,
+            metas: Vec::new(),
+        }
     }
 
     /// Creates a new meta which can't use any free variables; mostly for e.g. int types
@@ -344,38 +359,37 @@ impl MetaCxt {
             meta,
             vars: HashMap::new(),
         };
-        let params: Vec<Vec<_>> = {
-            // The spine can have two curried arguments to allow user-defined variable dependencies
-            if spine.len() > 2 {
-                return Err(MetaSolveError::SpineTooLong);
-            }
+        let params: Vec<(Vec<_>, Icit)> = {
             let mut size_to = Size::zero();
             spine
                 .into_iter()
                 .map(|elim| match elim {
-                    Elim::App(Expl, arg) => {
+                    Elim::App(icit, arg) => {
                         let names = rename.add_arg(arg, size_to, self)?;
                         size_to += names.len();
-                        Ok(names
-                            .into_iter()
-                            .map(|name| Par {
-                                name: (name, RelSpan::empty()),
-                                // TODO is this type ever used? can we actually find the type of this?
-                                ty: Expr::Error,
-                            })
-                            .collect())
+                        Ok((
+                            names
+                                .into_iter()
+                                .map(|name| Par {
+                                    name: (name, RelSpan::empty()),
+                                    // TODO is this type ever used? can we actually find the type of this?
+                                    ty: Expr::Error,
+                                })
+                                .collect(),
+                            icit,
+                        ))
                     }
                     i => Err(MetaSolveError::SpineNonApp(i.quote(start_size, Some(self)))),
                 })
                 .collect::<Result<_, _>>()?
         };
-        let inner_size_from = start_size + params.iter().map(|x| x.len()).sum();
-        let inner_size_to = Size::zero() + params.iter().map(|x| x.len()).sum();
+        let inner_size_from = start_size + params.iter().map(|(x, _)| x.len()).sum();
+        let inner_size_to = Size::zero() + params.iter().map(|(x, _)| x.len()).sum();
 
         // Try to avoid inlining metas in the solution to keep it small
         let mut solution = solution.quote(inner_size_from, None);
         let solution2 = solution.clone();
-        let mode = SolutionCheckMode::Full(rename);
+        let mode = SolutionCheckMode::Full(rename, inner_size_to);
         match solution.check_solution(self, &mode, inner_size_from, inner_size_to) {
             Ok(()) => (),
             Err(_) => {
@@ -389,9 +403,9 @@ impl MetaCxt {
             }
         };
 
-        for params in params {
+        for (params, icit) in params.into_iter().rev() {
             solution = Expr::Fun(EClos {
-                class: Lam(Expl),
+                class: Lam(icit),
                 params,
                 body: Box::new(solution),
             })
@@ -437,8 +451,8 @@ impl Expr {
             Expr::Spanned(_, x) => x.check_solution(cxt, mode, s_from, s_to)?,
             Expr::Head(h) => match h {
                 Head::Var(Var::Local(n, i)) if mode.should_rename() => {
-                    match mode.renamed(i.lvl(s_from)) {
-                        Some(l) => *i = l.idx(s_to),
+                    match mode.renamed(*i, s_from, s_to) {
+                        Some(l) => *i = l,
                         None => return Err(MetaSolveError::Scope(n.0)),
                     }
                 }

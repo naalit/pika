@@ -154,7 +154,7 @@ fn def_elab(db: &dyn Elaborator, def: Def) -> Option<DefElabResult> {
 pub enum TypeError {
     NotFound(Name),
     Unify(unify::UnifyError),
-    NotFunction(Expr),
+    NotFunction(Expr, RelSpan),
     InvalidPattern(String, Expr),
     Other(Doc),
 }
@@ -164,7 +164,7 @@ impl<T: Into<Doc>> From<T> for TypeError {
     }
 }
 impl TypeError {
-    fn to_error(&self, severity: Severity, span: RelSpan, db: &dyn Elaborator) -> Error {
+    fn to_error(&self, severity: Severity, mut span: RelSpan, db: &dyn Elaborator) -> Error {
         let (msg, label, note) = match self {
             TypeError::NotFound(name) => (
                 Doc::start("Name not found: ").add(db.lookup_name(*name), Doc::COLOR1),
@@ -180,15 +180,18 @@ impl TypeError {
                 Doc::start(msg),
                 None,
             ),
-            TypeError::NotFunction(ty) => (
-                Doc::start("Expected function type in application, got '")
-                    .chain(ty.pretty(db))
-                    .add("'", ()),
-                Doc::start("This has type '")
-                    .chain(ty.pretty(db))
-                    .add("'", ()),
-                None,
-            ),
+            TypeError::NotFunction(ty, fspan) => {
+                span = *fspan;
+                (
+                    Doc::start("Expected function type in application, got '")
+                        .chain(ty.pretty(db))
+                        .add("'", ()),
+                    Doc::start("This has type '")
+                        .chain(ty.pretty(db))
+                        .add("'", ()),
+                    None,
+                )
+            }
         };
         Error {
             severity,
@@ -928,8 +931,91 @@ fn check_params(
     .collect()
 }
 
+impl Expr {
+    /// If `term` of type `ty` takes implicit parameters, insert metas to apply them.
+    fn insert_metas(
+        self,
+        ty: Val,
+        imp_args: Option<ast::ImpArgs>,
+        span: RelSpan,
+        cxt: &mut Cxt,
+    ) -> (Expr, Val) {
+        match ty {
+            Val::Fun(clos) if clos.class == Pi(Impl) => {
+                let mut args: VecDeque<_> = imp_args
+                    .into_iter()
+                    .flat_map(|x| x.args())
+                    .flat_map(|x| x.expr().map(|x| x.as_args()).unwrap_or(vec![Err(x.span())]))
+                    .collect();
+                let mut targs: Vec<Expr> = Vec::new();
+                let par_ty = clos.par_ty();
+                let rty = clos.elab_with(|aty| match args.pop_front() {
+                    Some(arg) => match arg {
+                        Ok(arg) => {
+                            let arg = arg.check(aty, cxt, &CheckReason::ArgOf(span));
+                            targs.push(arg.clone());
+                            arg.eval(&mut cxt.env())
+                        }
+                        Err(span) => {
+                            if let Err(e) = cxt.mcxt.unify(
+                                Val::var(Var::Builtin(Builtin::UnitType)),
+                                aty,
+                                cxt.size(),
+                                &CheckReason::ArgOf(span),
+                            ) {
+                                cxt.error(span, e);
+                                Val::Error
+                            } else {
+                                targs.push(Expr::var(Var::Builtin(Builtin::Unit)));
+                                Val::var(Var::Builtin(Builtin::Unit))
+                            }
+                        }
+                    },
+                    None => {
+                        // Apply a new metavariable
+                        let e = cxt.mcxt.new_meta(cxt.locals(), MetaBounds::new(aty), span);
+                        targs.push(e.clone());
+                        e.eval(&mut cxt.env())
+                    }
+                });
+                let ty = par_ty.quote(cxt.size(), None);
+
+                fn make_arg(
+                    mut v: impl Iterator<Item = Expr>,
+                    ty: Expr,
+                    cxt: &Cxt,
+                ) -> Option<Expr> {
+                    let a = v.next()?;
+                    let ty2 = match ty.clone() {
+                        Expr::Fun(EClos {
+                            class: Sigma, body, ..
+                        }) => {
+                            let mut env = cxt.env();
+                            env.push(Some(a.clone().eval(&mut cxt.env())));
+                            body.eval_quote(&mut env, cxt.size(), None)
+                        }
+                        _ => Expr::Error,
+                    };
+                    match make_arg(v, ty2, cxt) {
+                        Some(b) => Some(Expr::Pair(Box::new(a), Box::new(b), Box::new(ty))),
+                        None => Some(a),
+                    }
+                }
+                let arg = make_arg(targs.into_iter(), ty, cxt).unwrap();
+
+                (
+                    Expr::Elim(Box::new(self), Box::new(Elim::App(Impl, arg))),
+                    rty,
+                )
+            }
+            _ => (self, ty),
+        }
+    }
+}
+
 impl ast::Expr {
-    fn check(&self, ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Expr {
+    fn check(&self, mut ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Expr {
+        ty.inline_head(&mut cxt.env(), &cxt.mcxt);
         let result = || {
             match (self, ty) {
                 (ast::Expr::GroupedExpr(x), ty) if x.expr().is_some() => {
@@ -997,9 +1083,17 @@ impl ast::Expr {
                         implicit.push(par.clone());
                     }
                     if !implicit.is_empty() {
-                        // This is fine since we keep cxt.size() at the level that the parameters expect
-                        match clos.body.eval(&mut cxt.env()) {
-                            Val::Fun(c) => clos = *c,
+                        // This is all fine since we keep cxt.size() at the level that the parameters expect
+                        assert_eq!(cxt.size(), clos.env.size + clos.params.len());
+                        let mut body = clos.body.eval(&mut cxt.env());
+                        body.inline_head(&mut cxt.env(), &cxt.mcxt);
+                        match body {
+                            Val::Fun(c) if c.class == Pi(Expl) => {
+                                clos = *c;
+                                if clos.env.size != cxt.size() {
+                                    clos = clos.move_env(&mut cxt.env());
+                                }
+                            }
                             body => {
                                 if x.exp_par().is_some() {
                                     // TODO better error here (include type)
@@ -1037,6 +1131,7 @@ impl ast::Expr {
                         Vec::new()
                     };
 
+                    assert_eq!(cxt.size(), clos.env.size + clos.params.len());
                     let bty = clos.body.eval(&mut cxt.env());
                     let body = x
                         .body()
@@ -1079,8 +1174,39 @@ impl ast::Expr {
                     Ok(expr)
                 }
 
+                // Insert implicit lambdas when checking against an implicit function type
+                // TODO this should probably be off by default, or at least more restricted
+                // But unfortunately it's kind of required for certain fancy dependent type things
+                // (like dependent composition)
+                (_, Val::Fun(clos)) if clos.class == Pi(Impl) => {
+                    let clos = clos.move_env(&mut cxt.env());
+                    let mut params = clos.params.clone();
+                    let bty = clos.open(cxt.size());
+
+                    cxt.push();
+                    for i in &mut params {
+                        i.name.0 = i.name.0.inaccessible(cxt.db);
+                        cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None);
+                    }
+
+                    let body = self.check(bty, cxt, reason);
+
+                    let clos = EClos {
+                        class: Lam(Impl),
+                        params,
+                        body: Box::new(body),
+                    };
+
+                    cxt.pop();
+                    Ok(Expr::Fun(clos))
+                }
+
                 (_, ty) => {
                     let (a, ity) = self.infer(cxt);
+                    let (a, ity) = match &ty {
+                        Val::Fun(clos) if clos.class == Pi(Impl) => (a, ity),
+                        _ => a.insert_metas(ity, None, self.span(), cxt),
+                    };
                     cxt.mcxt.unify(ity, ty, cxt.size(), reason)?;
                     Ok(a)
                 }
@@ -1281,101 +1407,20 @@ impl ast::Expr {
                         (term, Val::Type)
                     }
                     ast::Expr::App(x) => {
-                        let (mut lhs, mut lhs_ty) = x
+                        let (lhs, mut lhs_ty) = x
                             .lhs()
                             .ok_or("Missing left-hand side of application")?
                             .infer(cxt);
+                        lhs_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
                         let mut lhs_span = x.lhs().unwrap().span();
                         if x.member().is_some() {
                             todo!("implement members")
                         }
-                        // First handle implicit parameters, then curry and apply explicits
-                        match lhs_ty {
-                            Val::Fun(clos) if clos.class == Pi(Impl) => {
-                                // Note that applying implicit arguments is weird
-                                // for f :: [a, b, c, d] -> A:
-                                //
-                                // f [x] --> f [x, _, _, _]
-                                // f [x, y] --> f [x, y, _, _]
-                                // f [x] [y] --> f [x, y, _, _]
-                                // f [x, y] [z, w] --> f [x, y, z, w]
-                                // f [x] [y, z] --> f [x, y, z, _]
-                                // TODO make sure this is what we want and document it somewhere
-                                let mut args: VecDeque<_> = x
-                                    .imp()
-                                    .into_iter()
-                                    .flat_map(|x| x.args())
-                                    .flat_map(|x| {
-                                        x.expr().map(|x| x.as_args()).unwrap_or(vec![Err(x.span())])
-                                    })
-                                    .collect();
-                                let mut targs: Vec<Expr> = Vec::new();
-                                let par_ty = clos.par_ty();
-                                let rty = clos.elab_with(|aty| match args.pop_front() {
-                                    Some(arg) => match arg {
-                                        Ok(arg) => {
-                                            let arg =
-                                                arg.check(aty, cxt, &CheckReason::ArgOf(lhs_span));
-                                            targs.push(arg.clone());
-                                            arg.eval(&mut cxt.env())
-                                        }
-                                        Err(span) => {
-                                            if let Err(e) = cxt.mcxt.unify(
-                                                Val::var(Var::Builtin(Builtin::UnitType)),
-                                                aty,
-                                                cxt.size(),
-                                                &CheckReason::ArgOf(lhs_span),
-                                            ) {
-                                                cxt.error(span, e);
-                                                Val::Error
-                                            } else {
-                                                targs.push(Expr::var(Var::Builtin(Builtin::Unit)));
-                                                Val::var(Var::Builtin(Builtin::Unit))
-                                            }
-                                        }
-                                    },
-                                    None => {
-                                        // Apply a new metavariable
-                                        let e = cxt.mcxt.new_meta(
-                                            cxt.locals(),
-                                            MetaBounds::new(aty),
-                                            self.span(),
-                                        );
-                                        targs.push(e.clone());
-                                        e.eval(&mut cxt.env())
-                                    }
-                                });
-                                let ty = par_ty.quote(cxt.size(), None);
-                                fn make_arg(
-                                    mut v: impl Iterator<Item = Expr>,
-                                    ty: Expr,
-                                    cxt: &Cxt,
-                                ) -> Option<Expr> {
-                                    let a = v.next()?;
-                                    let ty2 = match ty.clone() {
-                                        Expr::Fun(EClos {
-                                            class: Sigma, body, ..
-                                        }) => {
-                                            let mut env = cxt.env();
-                                            env.push(Some(a.clone().eval(&mut cxt.env())));
-                                            body.eval_quote(&mut env, cxt.size(), None)
-                                        }
-                                        _ => Expr::Error,
-                                    };
-                                    match make_arg(v, ty2, cxt) {
-                                        Some(b) => {
-                                            Some(Expr::Pair(Box::new(a), Box::new(b), Box::new(ty)))
-                                        }
-                                        None => Some(a),
-                                    }
-                                }
-                                let arg = make_arg(targs.into_iter(), ty, cxt).unwrap();
-                                lhs = Expr::Elim(Box::new(lhs), Box::new(Elim::App(Impl, arg)));
-                                lhs_ty = rty;
-                                lhs_span.end = x.imp().map(|x| x.span()).unwrap_or(lhs_span).end;
-                            }
-                            _ => (),
-                        }
+
+                        // First handle implicit arguments, then curry and apply explicits
+                        let (lhs, lhs_ty) = lhs.insert_metas(lhs_ty, x.imp(), lhs_span, cxt);
+                        lhs_span.end = x.imp().map(|x| x.span()).unwrap_or(lhs_span).end;
+
                         // Apply explicit arguments
                         if let Some(exp) = x.exp() {
                             match lhs_ty {
@@ -1400,6 +1445,7 @@ impl ast::Expr {
                                 lhs_ty => {
                                     return Err(TypeError::NotFunction(
                                         lhs_ty.quote(cxt.size(), Some(&cxt.mcxt)),
+                                        lhs_span,
                                     ))
                                 }
                             }
