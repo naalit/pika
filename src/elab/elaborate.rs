@@ -50,48 +50,13 @@ impl ast::Def {
                 }
             },
             ast::Def::FunDef(x) => {
-                // [a, b] [c, d] (e, f) => ...
-                // -->
-                // [a, b, c, d] => ((e, f) => ...)
-
-                cxt.push();
-                let implicit: Vec<_> = x
-                    .imp_par()
-                    .into_iter()
-                    .flat_map(|x| x.pars())
-                    .flat_map(|x| {
-                        // [] means [_: ()]
-                        x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
-                            vec![Par {
-                                name: (cxt.db.name("_".to_string()), x.span()),
-                                ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-                            }]
-                        })
-                    })
-                    .collect();
-                let explicit: Vec<_> = x.exp_par().map(|x| x.infer(cxt)).unwrap_or(Vec::new());
-                let bty = x.ret_ty().and_then(|x| x.expr())?;
-                let bty = bty.check(Val::Type, cxt, &CheckReason::UsedAsType);
-                let bty = bty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
-                cxt.pop();
-
-                // We have to evaluate this outside of the scope
-                let mut ty = if explicit.is_empty() {
-                    bty
-                } else {
-                    Expr::Fun(EClos {
-                        class: Pi(Expl),
-                        params: explicit.clone(),
-                        body: Box::new(bty),
-                    })
-                };
-                if !implicit.is_empty() {
-                    ty = Expr::Fun(EClos {
-                        class: Pi(Impl),
-                        params: implicit.clone(),
-                        body: Box::new(ty),
-                    });
-                }
+                let (_, ty) = infer_fun(
+                    x.imp_par(),
+                    x.exp_par().as_par(),
+                    x.ret_ty().and_then(|x| x.expr()),
+                    None,
+                    cxt,
+                );
                 let ty = ty
                     .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                     .eval(&mut cxt.env());
@@ -141,329 +106,325 @@ impl ast::Def {
                 }
             }
             ast::Def::FunDef(x) => {
-                // [a, b] [c, d] (e, f) => ...
-                // -->
-                // [a, b, c, d] => ((e, f) => ...)
-
-                cxt.push();
-                let implicit: Vec<_> = x
-                    .imp_par()
-                    .into_iter()
-                    .flat_map(|x| x.pars())
-                    .flat_map(|x| {
-                        // [] means [_: ()]
-                        x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
-                            vec![Par {
-                                name: (cxt.db.name("_".to_string()), x.span()),
-                                ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-                            }]
-                        })
-                    })
-                    .collect();
-                let explicit: Vec<_> = x.exp_par().map(|x| x.infer(cxt)).unwrap_or(Vec::new());
-                let (body, bty) = match x.ret_ty().and_then(|x| x.expr()) {
-                    Some(bty) => {
-                        let span = bty.span();
-                        let bty = bty.check(Val::Type, cxt, &CheckReason::UsedAsType);
-                        let bty = bty.eval(&mut cxt.env());
-                        let body = x
-                            .body()
-                            .and_then(|x| x.expr())
-                            .map(|x| x.check(bty.clone(), cxt, &CheckReason::GivenType(span)))
-                            .unwrap_or_else(|| {
-                                cxt.error(self.span(), "Missing function body");
-                                Expr::Error
-                            });
-                        (body, bty)
-                    }
-                    None => x
-                        .body()
-                        .and_then(|x| x.expr())
-                        .map(|x| x.infer(cxt))
-                        .unwrap_or_else(|| {
-                            cxt.error(self.span(), "Missing function body");
-                            (Expr::Error, Val::Error)
-                        }),
-                };
-                let bty = bty.quote(cxt.size(), None);
-                cxt.pop();
-
-                // We have to evaluate this outside of the scope
-                let mut ty = if explicit.is_empty() {
-                    bty
-                } else {
-                    Expr::Fun(EClos {
-                        class: Pi(Expl),
-                        params: explicit.clone(),
-                        body: Box::new(bty),
-                    })
-                };
-                if !implicit.is_empty() {
-                    ty = Expr::Fun(EClos {
-                        class: Pi(Impl),
-                        params: implicit.clone(),
-                        body: Box::new(ty),
-                    });
+                if x.body().is_none() {
+                    cxt.error(self.span(), "Function declarations aren't allowed in this context, a function body is required");
                 }
-                let ty = ty.eval(&mut cxt.env());
-                let mut term = if explicit.is_empty() {
-                    body
-                } else {
-                    Expr::Fun(EClos {
-                        class: Lam(Expl),
-                        params: explicit,
-                        body: Box::new(body),
-                    })
-                };
-                if !implicit.is_empty() {
-                    term = Expr::Fun(EClos {
-                        class: Lam(Impl),
-                        params: implicit,
-                        body: Box::new(term),
-                    });
-                }
+
+                let (term, ty) = infer_fun(
+                    x.imp_par(),
+                    x.exp_par().as_par(),
+                    x.ret_ty().and_then(|x| x.expr()),
+                    x.body(),
+                    cxt,
+                );
 
                 Some(Definition {
                     name: x.name()?.name(cxt.db),
-                    ty: Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
+                    ty: Box::new(ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))),
                     body: Box::new(term.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))),
                 })
             }
-            ast::Def::TypeDef(_) => todo!(),
+            ast::Def::TypeDef(_) => todo!("this"),
             ast::Def::TypeDefShort(_) => todo!(),
             ast::Def::TypeDefStruct(_) => todo!(),
         }
     }
 }
 
-impl ast::Lit {
-    pub(super) fn to_literal(&self, cxt: &mut Cxt) -> Result<Literal, String> {
-        if let Some(l) = self.string() {
-            // Process escape sequences to get the string's actual contents
-            // This work is also done by the lexer, which then throws it away;
-            // TODO move all error checking here and simplify the lexer code (same for numbers)
-            let mut buf = String::new();
-            let mut chars = l.text().chars().skip_while(|x| x.is_whitespace());
-            loop {
-                match chars.next() {
-                    Some('"') => break,
-                    Some('\\') => {
-                        // Escape
-                        match chars.next() {
-                            Some('\\') => {
-                                buf.push('\\');
-                            }
-                            Some('n') => {
-                                buf.push('\n');
-                            }
-                            Some('t') => {
-                                buf.push('\t');
-                            }
-                            _ => {
-                                panic!("Invalid escape should have been caught in lexer");
-                            }
-                        }
-                    }
-                    Some(c) => buf.push(c),
-                    None => {
-                        panic!("Unclosed string should have been caught in lexer")
-                    }
-                }
-            }
-            Ok(Literal::String(cxt.db.name(buf)))
-        } else if let Some(l) = self.int().or(self.float()) {
-            let num = lex_number(l.text()).map_err(|e| format!("Invalid literal: {}", e))?;
-            match num {
-                NumLiteral::IPositive(i) => {
-                    let meta = cxt
-                        .mcxt
-                        .unscoped_meta(MetaBounds::int_type(false, i), self.span());
-                    Ok(Literal::Int(i, Err((false, meta))))
-                }
-                NumLiteral::INegative(i) => {
-                    let meta = cxt
-                        .mcxt
-                        .unscoped_meta(MetaBounds::int_type(true, i as u64), self.span());
-                    Ok(Literal::Int(i as u64, Err((true, meta))))
-                }
-                NumLiteral::Float(_) => todo!(),
-            }
-        } else {
-            todo!("invalid literal: {:?}", self.syntax());
+fn infer_fun(
+    implicit: Option<ast::ImpPars>,
+    explicit: Option<SomePar>,
+    ret_ty: Option<ast::Expr>,
+    body: Option<ast::Body>,
+    cxt: &mut Cxt,
+) -> (Expr, Expr) {
+    // [a, b] [c, d] (e, f) => ...
+    // -->
+    // [a, b, c, d] => ((e, f) => ...)
+
+    cxt.push();
+    let implicit = check_params(
+        implicit
+            .into_iter()
+            .flat_map(|x| x.pars())
+            .flat_map(
+                |x| match x.par().and_then(|x| x.pat()).and_then(|x| x.expr()) {
+                    Some(x) => x.as_args(),
+                    None => vec![Err(x.span())],
+                },
+            )
+            .collect(),
+        true,
+        ParamTys::Inferred,
+        &CheckReason::UsedAsType,
+        cxt,
+    );
+    let explicit = explicit.map_or(Vec::new(), |x| {
+        check_params(
+            x.par.as_args(),
+            x.pat,
+            ParamTys::Inferred,
+            &CheckReason::UsedAsType,
+            cxt,
+        )
+    });
+
+    let (body, bty) = match ret_ty {
+        Some(bty) => {
+            let span = bty.span();
+            let bty = bty.check(Val::Type, cxt, &CheckReason::UsedAsType);
+            let bty = bty.eval(&mut cxt.env());
+            let body = body
+                .and_then(|x| x.expr())
+                .map(|x| x.check(bty.clone(), cxt, &CheckReason::GivenType(span)))
+                .unwrap_or_else(|| {
+                    // cxt.error(span, "Missing function body");
+                    Expr::Error
+                });
+            (body, bty)
         }
-    }
-}
-
-impl ast::Expr {
-    fn elab_pars(self, pat: bool, cxt: &mut Cxt) -> Vec<Par> {
-        self
-            .as_args()
-            .into_iter()
-            .map(|x| {
-                let par = match x {
-                    Ok(ast::Expr::Binder(x)) => {
-                        let (name, ty) = x
-                            .pat()
-                            .and_then(|x| x.expr())
-                            .map(|x| {
-                                x.as_simple_pat(cxt.db).unwrap_or_else(|| {
-                                        todo!("move non-trivial pats to rhs")
-                                })
-                            })
-                            .unwrap_or((None, None));
-                        let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), x.span()));
-                        if ty.is_some() {
-                            cxt.error(x.pat().unwrap().span(), "Binder '_: _' not allowed in pattern of another binder");
-                        }
-                        let ty = x.ty().and_then(|x| x.expr()).map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType)).unwrap_or_else(|| {
-                            cxt.error(x.span(), "Binder '_: _' missing type on right-hand side; use '_' to infer type");
-                            Expr::Error
-                        });
-                        Par {
-                            name,
-                            ty,
-                        }
-                    }
-                    Ok(x) if pat => {
-                        let (name, ty) = x.as_simple_pat(cxt.db)
-                                .unwrap_or_else(|| todo!("move non-trivial pats to rhs"));
-                        let name = name.unwrap_or_else(|| {
-                            (cxt.db.name("_".to_string()), x.span())
-                        });
-                        let ty = ty
-                            .map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType))
-                            .unwrap_or_else(|| {
-                                cxt.mcxt.new_meta(
-                                    cxt.locals(),
-                                    MetaBounds::new(Val::Type),
-                                    x.span(),
-                                )
-                            });
-                        Par { name, ty }
-                    }
-                    Ok(x) => {
-                        let ty = x.check(Val::Type, cxt, &CheckReason::UsedAsType);
-                        Par {
-                            name: (cxt.db.name("_".to_string()), x.span()),
-                            ty,
-                        }
-                    }
-                    Err(span) => Par {
-                        name: (cxt.db.name("_".to_string()), span),
-                        ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-                    },
-                };
-                // Define each parameter so it can be used by the types of the rest
-                cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
-                par
-            })
-            .collect()
-    }
-}
-
-impl ast::TermPar {
-    fn elab(&self, cxt: &mut Cxt) -> Vec<Par> {
-        self.expr()
-            .into_iter()
-            .flat_map(|x| x.elab_pars(false, cxt))
-            .collect()
-    }
-}
-
-impl ast::PatPar {
-    fn infer(&self, cxt: &mut Cxt) -> Vec<Par> {
-        self.pat()
+        None => body
             .and_then(|x| x.expr())
-            .into_iter()
-            .flat_map(|x| x.elab_pars(true, cxt))
-            .collect()
+            .map(|x| x.infer(cxt))
+            .unwrap_or_else(|| {
+                // cxt.error(span, "Missing function body");
+                (Expr::Error, Val::Error)
+            }),
+    };
+    let bty = bty.quote(cxt.size(), None);
+    cxt.pop();
+
+    // We have to evaluate this outside of the scope
+    let mut ty = if explicit.is_empty() {
+        bty
+    } else {
+        Expr::Fun(EClos {
+            class: Pi(Expl),
+            params: explicit.clone(),
+            body: Box::new(bty),
+        })
+    };
+    if !implicit.is_empty() {
+        ty = Expr::Fun(EClos {
+            class: Pi(Impl),
+            params: implicit.clone(),
+            body: Box::new(ty),
+        });
     }
+    let mut term = if explicit.is_empty() {
+        body
+    } else {
+        Expr::Fun(EClos {
+            class: Lam(Expl),
+            params: explicit,
+            body: Box::new(body),
+        })
+    };
+    if !implicit.is_empty() {
+        term = Expr::Fun(EClos {
+            class: Lam(Impl),
+            params: implicit,
+            body: Box::new(term),
+        });
+    }
+
+    (term, ty)
+}
+
+struct SomePar {
+    par: ast::Expr,
+    pat: bool,
+}
+trait IsPar {
+    fn as_par(self) -> Option<SomePar>;
+}
+impl IsPar for ast::PatPar {
+    fn as_par(self) -> Option<SomePar> {
+        Some(SomePar {
+            par: self.pat()?.expr()?,
+            pat: true,
+        })
+    }
+}
+impl IsPar for ast::TermPar {
+    fn as_par(self) -> Option<SomePar> {
+        Some(SomePar {
+            par: self.expr()?,
+            pat: false,
+        })
+    }
+}
+impl<T: IsPar> IsPar for Option<T> {
+    fn as_par(self) -> Option<SomePar> {
+        self.and_then(T::as_par)
+    }
+}
+
+fn check_params(
+    pars: Vec<Result<ast::Expr, RelSpan>>,
+    pat: bool,
+    tys: ParamTys,
+    reason: &CheckReason,
+    cxt: &mut Cxt,
+) -> Vec<Par> {
+    let err_missing = tys.err_missing();
+    tys.zip_with(
+        pars.into_iter()
+            .flat_map(|x| match x {
+                Ok(x) => x.as_args(),
+                e => vec![e],
+            })
+            .collect::<Vec<_>>()
+            .into_iter(),
+    )
+    .into_iter()
+    .map(|(ty, mut x)| {
+        let x = match x.len() {
+            1 => x.pop().unwrap(),
+            _ => todo!("probably should do pattern elaboration"),
+        };
+        if ty.is_none() && err_missing {
+            let span = match x.as_ref() {
+                Ok(x) => x.span(),
+                Err(span) => *span,
+            };
+            let name = x
+                .as_ref()
+                .ok()
+                .and_then(|x| x.as_simple_pat(cxt.db))
+                .and_then(|x| x.0)
+                .unwrap_or_else(|| (cxt.db.name("_".to_string()), span));
+            cxt.error(
+                span,
+                Doc::start("Lambda contains extra parameter ")
+                    .add(cxt.db.lookup_name(name.0), Doc::COLOR1)
+                    .add(" which is not present in expected type", ()),
+            );
+        }
+        check_par(x, pat, ty.map(|x| (x, reason)), cxt)
+    })
+    .collect()
+}
+
+fn check_par(
+    x: Result<ast::Expr, RelSpan>,
+    pat: bool,
+    expected_ty: Option<(Expr, &CheckReason)>,
+    cxt: &mut Cxt,
+) -> Par {
+    let par = match x {
+        Ok(ast::Expr::Binder(x)) => {
+            let (name, ty) = x
+                .pat()
+                .and_then(|x| x.expr())
+                .map(|x| {
+                    x.as_simple_pat(cxt.db)
+                        .unwrap_or_else(|| todo!("move non-trivial pats to rhs"))
+                })
+                .unwrap_or((None, None));
+            let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), x.span()));
+            if ty.is_some() {
+                cxt.error(
+                    x.pat().unwrap().span(),
+                    "Binder '_: _' not allowed in pattern of another binder",
+                );
+            }
+            let ty = x
+                .ty()
+                .and_then(|x| x.expr())
+                .map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType))
+                .unwrap_or_else(|| {
+                    cxt.error(
+                        x.span(),
+                        "Binder '_: _' missing type on right-hand side; use '_' to infer type",
+                    );
+                    Expr::Error
+                });
+            if let Some((expected_ty, reason)) = expected_ty {
+                let ty = ty.clone().eval(&mut cxt.env());
+                let expected_ty = expected_ty.clone().eval(&mut cxt.env());
+                cxt.mcxt
+                    .unify(ty, expected_ty, cxt.size(), reason)
+                    .unwrap_or_else(|e| cxt.error(x.span(), e));
+            }
+            Par { name, ty }
+        }
+        Ok(x) if pat => {
+            let (name, ty) = x
+                .as_simple_pat(cxt.db)
+                .unwrap_or_else(|| todo!("move non-trivial pats to rhs"));
+            let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), x.span()));
+            let ty = match ty.map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType)) {
+                Some(ty) => {
+                    if let Some((expected_ty, reason)) = expected_ty {
+                        let ty = ty.clone().eval(&mut cxt.env());
+                        let expected_ty = expected_ty.clone().eval(&mut cxt.env());
+                        cxt.mcxt
+                            .unify(ty, expected_ty, cxt.size(), reason)
+                            .unwrap_or_else(|e| cxt.error(x.span(), e));
+                    }
+                    ty
+                }
+                None => expected_ty.map(|(x, _)| x).unwrap_or_else(|| {
+                    cxt.mcxt
+                        .new_meta(cxt.locals(), MetaBounds::new(Val::Type), x.span())
+                }),
+            };
+            Par { name, ty }
+        }
+        Ok(x) => {
+            let ty = x.check(Val::Type, cxt, &CheckReason::UsedAsType);
+            Par {
+                name: (cxt.db.name("_".to_string()), x.span()),
+                ty,
+            }
+        }
+        Err(span) => {
+            if let Some((ty, reason)) = expected_ty {
+                let ty = ty.eval(&mut cxt.env());
+                cxt.mcxt
+                    .unify(
+                        Val::var(Var::Builtin(Builtin::UnitType)),
+                        ty,
+                        cxt.size(),
+                        reason,
+                    )
+                    .unwrap_or_else(|e| cxt.error(span, e));
+            }
+            Par {
+                name: (cxt.db.name("_".to_string()), span),
+                ty: Expr::var(Var::Builtin(Builtin::UnitType)),
+            }
+        }
+    };
+    // Define each parameter so it can be used by the types of the rest
+    cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
+    par
 }
 
 impl ast::Pair {
     fn elab_sigma(&self, cxt: &mut Cxt) -> Result<Expr, TypeError> {
-        match self.lhs() {
-            Some(ast::Expr::Binder(x)) => {
-                let name = x
-                    .pat()
-                    .and_then(|x| x.expr())
-                    .map(|x| match x {
-                        ast::Expr::Var(x) => Some(x.name(cxt.db)),
-                        _ => None,
-                    })
-                    // Allow (: I32, I32) as (_: I32, I32)
-                    // this is mostly useful to disambiguate between pair and sigma in inferred context
-                    .unwrap_or_else(|| Some((cxt.db.name("_".to_string()), x.span())));
-
-                let ty = x
-                    .ty()
-                    .and_then(|x| x.expr())
-                    .ok_or("Expected type after ':' in binder")?
-                    .check(Val::Type, cxt, &CheckReason::UsedAsType);
-                let vty = ty.clone().eval(&mut cxt.env());
-
-                if let Some(name) = name {
-                    cxt.push();
-                    cxt.define_local(name, vty, None);
-                    let body = self
-                        .rhs()
-                        .ok_or("Missing right-hand side type in pair type")?
-                        .check(Val::Type, cxt, &CheckReason::UsedAsType);
-                    cxt.pop();
-                    Ok(Expr::Fun(EClos {
-                        class: Sigma,
-                        params: vec![Par { name, ty }],
-                        body: Box::new(body),
-                    }))
-                } else {
-                    // We have a more complicated pattern on the lhs, so move it to a case on the rhs
-                    let name = (cxt.db.name("_".to_string()), x.pat().unwrap().span());
-                    cxt.push();
-                    cxt.define_local(name, vty.clone(), None);
-                    let (case, cty) = self::pattern::elab_case(
-                        vty,
-                        CheckReason::GivenType(x.ty().map(|x| x.span()).unwrap_or(x.span())),
-                        std::iter::once((
-                            x.pat().and_then(|x| x.expr()),
-                            x.pat().map(|x| x.span()).unwrap_or(x.span()),
-                            self.rhs(),
-                        )),
-                        &mut Some((Val::Type, CheckReason::UsedAsType)),
-                        cxt,
-                    );
-                    cxt.pop();
-                    Ok(Expr::Fun(EClos {
-                        class: Sigma,
-                        params: vec![Par { name, ty }],
-                        body: Box::new(Expr::Elim(
-                            Box::new(Expr::var(Var::Local(name, Idx::zero()))),
-                            Box::new(Elim::Case(case, cty)),
-                        )),
-                    }))
+        {
+            let (_, ty) = infer_fun(
+                None,
+                self.lhs().map(|par| SomePar { par, pat: false }),
+                self.rhs(),
+                None,
+                cxt,
+            );
+            match ty {
+                Expr::Fun(mut clos) => {
+                    if clos.params.len() != 1 {
+                        panic!(
+                            "not supported for now: more than one parameter in sigma type; got {}",
+                            clos.params.len()
+                        );
+                    }
+                    clos.class = Sigma;
+                    return Ok(Expr::Fun(clos));
                 }
+                _ => unreachable!(),
             }
-            Some(pa) => {
-                let a = pa.check(Val::Type, cxt, &CheckReason::UsedAsType);
-                // We need to elaborate b at the proper size so the indices are correct
-                let name = (cxt.db.name("_".to_string()), pa.span());
-                let va = a.clone().eval(&mut cxt.env());
-                cxt.push();
-                // TODO can we just use Val::Error or something? it should be impossible to use this...?
-                cxt.define_local(name, va, None);
-                let b = self
-                    .rhs()
-                    .ok_or("Missing right-hand side type in pair type")?
-                    .check(Val::Type, cxt, &CheckReason::UsedAsType);
-                cxt.pop();
-                Ok(Expr::Fun(EClos {
-                    class: Sigma,
-                    params: vec![Par { name, ty: a }],
-                    body: Box::new(b),
-                }))
-            }
-            None => Err(TypeError::Other(Doc::start(
-                "Missing left-hand side type in pair type",
-            ))),
         }
     }
 }
@@ -471,10 +432,16 @@ impl ast::Pair {
 enum ParamTys<'a, 'b> {
     Impl(&'a mut VecDeque<&'b Par>),
     Expl(Expr),
+    Inferred,
 }
-impl<'b> ParamTys<'_, 'b> {
+impl ParamTys<'_, '_> {
+    fn err_missing(&self) -> bool {
+        !matches!(self, ParamTys::Inferred)
+    }
+
     fn zip_with<T>(self, it: impl ExactSizeIterator<Item = T>) -> Vec<(Option<Expr>, Vec<T>)> {
         match self {
+            ParamTys::Inferred => it.map(|x| (None, vec![x])).collect(),
             ParamTys::Impl(v) => it
                 .map(|x| (v.pop_front().map(|par| par.ty.clone()), vec![x]))
                 .collect(),
@@ -509,91 +476,6 @@ impl<'b> ParamTys<'_, 'b> {
             }
         }
     }
-}
-
-fn check_params(
-    pars: impl Iterator<Item = (Option<ast::PatPar>, RelSpan)>,
-    tys: ParamTys,
-    cxt: &mut Cxt,
-    reason: &CheckReason,
-) -> Vec<Par> {
-    tys.zip_with(
-        pars.flat_map(|(x, span)| {
-            x.and_then(|x| x.pat())
-                .and_then(|x| x.expr())
-                .map(|x| x.as_args())
-                .unwrap_or_else(|| vec![Err(span)])
-        })
-        .collect::<Vec<_>>()
-        .into_iter(),
-    )
-    .into_iter()
-    .map(|(ty, mut xs)| {
-        // [] means [_: ()]
-        let x = match xs.len() {
-            1 => xs.pop().unwrap(),
-            _ => todo!("probably should do pattern elaboration"),
-        };
-        let xspan = x.as_ref().map_or_else(|x| *x, |x| x.span());
-        let par = match ty {
-            Some(ety) => {
-                let vety = ety.clone().eval(&mut cxt.env());
-                match x.map(|x| x.as_simple_pat(cxt.db)) {
-                    Ok(Some((name, ty))) => {
-                        let ty = if let Some(ty) = ty {
-                            let ty = ty.check(Val::Type, cxt, &CheckReason::UsedAsType);
-                            cxt.mcxt
-                                .unify(ty.clone().eval(&mut cxt.env()), vety, cxt.size(), reason)
-                                .unwrap_or_else(|e| cxt.error(xspan, e));
-                            ty
-                        } else {
-                            // This is fine since we keep cxt.size() at the level that the parameters expect
-                            ety
-                        };
-                        let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), xspan));
-                        Par { name, ty }
-                    }
-                    Ok(None) => todo!("move non-trivial patterns to rhs"),
-                    Err(span) => {
-                        cxt.mcxt
-                            .unify(
-                                Val::var(Var::Builtin(Builtin::UnitType)),
-                                vety,
-                                cxt.size(),
-                                reason,
-                            )
-                            .unwrap_or_else(|e| cxt.error(span, e));
-                        let name = (cxt.db.name("_".to_string()), span);
-                        Par {
-                            name,
-                            ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-                        }
-                    }
-                }
-            }
-            // TODO better error here (include type)
-            None => {
-                let name = x
-                    .ok()
-                    .and_then(|x| x.as_simple_pat(cxt.db))
-                    .and_then(|x| x.0)
-                    .unwrap_or_else(|| (cxt.db.name("_".to_string()), xspan));
-                cxt.error(
-                    xspan,
-                    Doc::start("Lambda contains extra parameter ")
-                        .add(cxt.db.lookup_name(name.0), Doc::COLOR1)
-                        .add(" which is not present in expected type", ()),
-                );
-                Par {
-                    name,
-                    ty: Expr::Error,
-                }
-            }
-        };
-        cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
-        par
-    })
-    .collect()
 }
 
 impl Expr {
@@ -732,10 +614,17 @@ impl ast::Expr {
                         x.imp_par()
                             .into_iter()
                             .flat_map(|x| x.pars())
-                            .map(|x| (x.par(), x.span())),
+                            .map(|x| {
+                                x.par()
+                                    .and_then(|x| x.pat())
+                                    .and_then(|x| x.expr())
+                                    .ok_or_else(|| x.span())
+                            })
+                            .collect(),
+                        true,
                         ParamTys::Impl(&mut implicit_tys),
-                        cxt,
                         reason,
+                        cxt,
                     );
                     // Add any implicit parameters in the type but not the lambda to the lambda
                     // Make sure, however, that they can't actually be accessed by name by code in the lambda
@@ -777,10 +666,11 @@ impl ast::Expr {
 
                     let explicit = if let Some(e) = x.exp_par() {
                         check_params(
-                            std::iter::once((Some(e), x.span())),
+                            vec![e.pat().and_then(|e| e.expr()).ok_or_else(|| x.span())],
+                            true,
                             ParamTys::Expl(clos.par_ty().quote(cxt.size(), None)),
-                            cxt,
                             reason,
+                            cxt,
                         )
                     } else {
                         if !clos.params.is_empty() {
@@ -955,121 +845,19 @@ impl ast::Expr {
                         }
                     }
                     ast::Expr::Lam(x) => {
-                        // [a, b] [c, d] (e, f) => ...
-                        // -->
-                        // [a, b, c, d] => ((e, f) => ...)
-
-                        cxt.push();
-                        let implicit: Vec<_> = x
-                            .imp_par()
-                            .into_iter()
-                            .flat_map(|x| x.pars())
-                            .flat_map(|x| {
-                                // [] means [_: ()]
-                                x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
-                                    vec![Par {
-                                        name: (cxt.db.name("_".to_string()), x.span()),
-                                        ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-                                    }]
-                                })
-                            })
-                            .collect();
-                        let explicit: Vec<_> =
-                            x.exp_par().map(|x| x.infer(cxt)).unwrap_or(Vec::new());
-                        let (body, bty) = x
-                            .body()
-                            .and_then(|x| x.expr())
-                            .ok_or("Missing body for lambda")?
-                            .infer(cxt);
-                        let bty = bty.quote(cxt.size(), None);
-                        cxt.pop();
-
-                        // We have to evaluate this outside of the scope
-                        let mut ty = if explicit.is_empty() {
-                            bty
-                        } else {
-                            Expr::Fun(EClos {
-                                class: Pi(Expl),
-                                params: explicit.clone(),
-                                body: Box::new(bty),
-                            })
-                        };
-                        if !implicit.is_empty() {
-                            ty = Expr::Fun(EClos {
-                                class: Pi(Impl),
-                                params: implicit.clone(),
-                                body: Box::new(ty),
-                            });
-                        }
-                        let ty = ty.eval(&mut cxt.env());
-                        let mut term = if explicit.is_empty() {
-                            body
-                        } else {
-                            Expr::Fun(EClos {
-                                class: Lam(Expl),
-                                params: explicit,
-                                body: Box::new(body),
-                            })
-                        };
-                        if !implicit.is_empty() {
-                            term = Expr::Fun(EClos {
-                                class: Lam(Impl),
-                                params: implicit,
-                                body: Box::new(term),
-                            });
-                        }
-
-                        (term, ty)
+                        let (term, ty) =
+                            infer_fun(x.imp_par(), x.exp_par().as_par(), None, x.body(), cxt);
+                        (term, ty.eval(&mut cxt.env()))
                     }
                     ast::Expr::Pi(x) => {
-                        // [a, b] [c, d] (e: A, f: B) -> ...
-                        // -->
-                        // [a, b, c, d] -> ((e: A, f: B) -> ...)
-
-                        cxt.push();
-                        let implicit: Vec<_> = x
-                            .imp_par()
-                            .into_iter()
-                            .flat_map(|x| x.pars())
-                            .flat_map(|x| {
-                                // [] means [_: ()]
-                                x.par().map(|x| x.infer(cxt)).unwrap_or_else(|| {
-                                    vec![Par {
-                                        name: (cxt.db.name("_".to_string()), x.span()),
-                                        ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-                                    }]
-                                })
-                            })
-                            .collect();
-                        let explicit: Vec<_> =
-                            x.exp_par().map(|x| x.elab(cxt)).unwrap_or(Vec::new());
-                        let body = x
-                            .body()
-                            .and_then(|x| x.expr())
-                            .ok_or("Missing body for function type")?
-                            .check(Val::Type, cxt, &CheckReason::UsedAsType);
-                        if x.with().is_some() {
-                            todo!("implement effects")
-                        }
-                        cxt.pop();
-
-                        let mut term = if explicit.is_empty() {
-                            body
-                        } else {
-                            Expr::Fun(EClos {
-                                class: Pi(Expl),
-                                params: explicit.clone(),
-                                body: Box::new(body),
-                            })
-                        };
-                        if !implicit.is_empty() {
-                            term = Expr::Fun(EClos {
-                                class: Pi(Impl),
-                                params: implicit.clone(),
-                                body: Box::new(term),
-                            });
-                        }
-                        (term, Val::Type)
+                        let (_, pi) = infer_fun(
+                            x.imp_par(),
+                            x.exp_par().as_par(),
+                            x.body().and_then(|x| x.expr()),
+                            None,
+                            cxt,
+                        );
+                        (pi, Val::Type)
                     }
                     ast::Expr::App(x) => {
                         let (lhs, mut lhs_ty) = x
@@ -1152,7 +940,7 @@ impl ast::Expr {
                         }
                     },
                     ast::Expr::BinOp(x) => {
-                        let tok = x.op().ok_or("missing operator")?;
+                        let tok = x.op().ok_or("Missing operator")?;
                         let tok = tok
                             .syntax()
                             .unwrap()
@@ -1160,106 +948,75 @@ impl ast::Expr {
                             .find_map(|x| x.as_token().map(|x| x.kind()).filter(|x| x.is_binop()))
                             .unwrap_or(crate::parsing::SyntaxKind::Error);
 
-                        if let Some(op) = ArithOp::from_tok(tok) {
-                            let (a, ty) = x
-                                .a()
-                                .ok_or_else(|| {
-                                    TypeError::Other(
-                                        Doc::start("missing left operand for operator ")
-                                            .add(tok, Doc::COLOR1),
-                                    )
-                                })?
-                                .infer(cxt);
-                            let b = x
-                                .b()
-                                .ok_or_else(|| {
-                                    TypeError::Other(
-                                        Doc::start("missing right operand for operator ")
-                                            .add(tok, Doc::COLOR1),
-                                    )
-                                })?
-                                .check(
-                                    ty.clone(),
-                                    cxt,
-                                    &CheckReason::MustMatch(x.a().unwrap().span()),
-                                );
-                            (
-                                Expr::Elim(
-                                    Box::new(Expr::var(Var::Builtin(Builtin::ArithOp(op)))),
-                                    Box::new(Elim::App(
-                                        Expl,
-                                        Expr::Pair(
-                                            Box::new(a),
-                                            Box::new(b),
-                                            Box::new(Expr::Fun(EClos {
-                                                class: Sigma,
-                                                params: vec![Par {
-                                                    name: (
-                                                        cxt.db.name("_".into()),
-                                                        x.a().unwrap().span(),
+                        match tok {
+                            tok if ArithOp::from_tok(tok).is_some()
+                                || CompOp::from_tok(tok).is_some() =>
+                            {
+                                let (a, ty) = x
+                                    .a()
+                                    .ok_or_else(|| {
+                                        TypeError::Other(
+                                            Doc::start("Missing left operand for operator ")
+                                                .add(tok, Doc::COLOR1),
+                                        )
+                                    })?
+                                    .infer(cxt);
+                                let b = x
+                                    .b()
+                                    .ok_or_else(|| {
+                                        TypeError::Other(
+                                            Doc::start("Missing right operand for operator ")
+                                                .add(tok, Doc::COLOR1),
+                                        )
+                                    })?
+                                    .check(
+                                        ty.clone(),
+                                        cxt,
+                                        &CheckReason::MustMatch(x.a().unwrap().span()),
+                                    );
+                                let (builtin, ret_ty) = ArithOp::from_tok(tok)
+                                    .map(|x| (Builtin::ArithOp(x), ty.clone()))
+                                    .or_else(|| {
+                                        CompOp::from_tok(tok).map(|x| {
+                                            (
+                                                Builtin::CompOp(x),
+                                                Val::var(Var::Builtin(Builtin::BoolType)),
+                                            )
+                                        })
+                                    })
+                                    .unwrap();
+                                (
+                                    Expr::Elim(
+                                        Box::new(Expr::var(Var::Builtin(builtin))),
+                                        Box::new(Elim::App(
+                                            Expl,
+                                            Expr::Pair(
+                                                Box::new(a),
+                                                Box::new(b),
+                                                Box::new(Expr::Fun(EClos {
+                                                    class: Sigma,
+                                                    params: vec![Par {
+                                                        name: (
+                                                            cxt.db.name("_".into()),
+                                                            x.a().unwrap().span(),
+                                                        ),
+                                                        ty: ty.clone().quote(cxt.size(), None),
+                                                    }],
+                                                    body: Box::new(
+                                                        ty.clone().quote(cxt.size().inc(), None),
                                                     ),
-                                                    ty: ty.clone().quote(cxt.size(), None),
-                                                }],
-                                                body: Box::new(
-                                                    ty.clone().quote(cxt.size().inc(), None),
-                                                ),
-                                            })),
-                                        ),
-                                    )),
-                                ),
-                                ty,
-                            )
-                        } else if let Some(op) = CompOp::from_tok(tok) {
-                            let (a, ty) = x
-                                .a()
-                                .ok_or_else(|| {
-                                    TypeError::Other(
-                                        Doc::start("missing left operand for operator ")
-                                            .add(tok, Doc::COLOR1),
-                                    )
-                                })?
-                                .infer(cxt);
-                            let b = x
-                                .b()
-                                .ok_or_else(|| {
-                                    TypeError::Other(
-                                        Doc::start("missing right operand for operator ")
-                                            .add(tok, Doc::COLOR1),
-                                    )
-                                })?
-                                .check(
-                                    ty.clone(),
-                                    cxt,
-                                    &CheckReason::MustMatch(x.a().unwrap().span()),
-                                );
-                            (
-                                Expr::Elim(
-                                    Box::new(Expr::var(Var::Builtin(Builtin::CompOp(op)))),
-                                    Box::new(Elim::App(
-                                        Expl,
-                                        Expr::Pair(
-                                            Box::new(a),
-                                            Box::new(b),
-                                            Box::new(Expr::Fun(EClos {
-                                                class: Sigma,
-                                                params: vec![Par {
-                                                    name: (
-                                                        cxt.db.name("_".into()),
-                                                        x.a().unwrap().span(),
-                                                    ),
-                                                    ty: ty.clone().quote(cxt.size(), None),
-                                                }],
-                                                body: Box::new(ty.quote(cxt.size().inc(), None)),
-                                            })),
-                                        ),
-                                    )),
-                                ),
-                                Val::var(Var::Builtin(Builtin::BoolType)),
-                            )
-                        } else {
-                            return Err(TypeError::Other(
-                                Doc::start("Invalid operator ").add(tok, Doc::COLOR1),
-                            ));
+                                                })),
+                                            ),
+                                        )),
+                                    ),
+                                    ret_ty,
+                                )
+                            }
+                            tok => {
+                                return Err(TypeError::Other(
+                                    Doc::start("Invalid operator ").add(tok, Doc::COLOR1),
+                                ))
+                            }
                         }
                     }
                     ast::Expr::If(_) => todo!(),
@@ -1312,6 +1069,64 @@ impl ast::Expr {
                 cxt.error(self.span(), e);
                 (Expr::Error, Val::Error)
             }
+        }
+    }
+}
+
+impl ast::Lit {
+    pub(super) fn to_literal(&self, cxt: &mut Cxt) -> Result<Literal, String> {
+        if let Some(l) = self.string() {
+            // Process escape sequences to get the string's actual contents
+            // This work is also done by the lexer, which then throws it away;
+            // TODO move all error checking here and simplify the lexer code (same for numbers)
+            let mut buf = String::new();
+            let mut chars = l.text().chars().skip_while(|x| x.is_whitespace());
+            loop {
+                match chars.next() {
+                    Some('"') => break,
+                    Some('\\') => {
+                        // Escape
+                        match chars.next() {
+                            Some('\\') => {
+                                buf.push('\\');
+                            }
+                            Some('n') => {
+                                buf.push('\n');
+                            }
+                            Some('t') => {
+                                buf.push('\t');
+                            }
+                            _ => {
+                                panic!("Invalid escape should have been caught in lexer");
+                            }
+                        }
+                    }
+                    Some(c) => buf.push(c),
+                    None => {
+                        panic!("Unclosed string should have been caught in lexer")
+                    }
+                }
+            }
+            Ok(Literal::String(cxt.db.name(buf)))
+        } else if let Some(l) = self.int().or(self.float()) {
+            let num = lex_number(l.text()).map_err(|e| format!("Invalid literal: {}", e))?;
+            match num {
+                NumLiteral::IPositive(i) => {
+                    let meta = cxt
+                        .mcxt
+                        .unscoped_meta(MetaBounds::int_type(false, i), self.span());
+                    Ok(Literal::Int(i, Err((false, meta))))
+                }
+                NumLiteral::INegative(i) => {
+                    let meta = cxt
+                        .mcxt
+                        .unscoped_meta(MetaBounds::int_type(true, i as u64), self.span());
+                    Ok(Literal::Int(i as u64, Err((true, meta))))
+                }
+                NumLiteral::Float(_) => todo!(),
+            }
+        } else {
+            todo!("invalid literal: {:?}", self.syntax());
         }
     }
 }
