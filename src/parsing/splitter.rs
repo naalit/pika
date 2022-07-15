@@ -9,19 +9,19 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
     let mut psplits = Vec::new();
     let mut next_started = false;
     let mut split_start = 0;
-    let mut char_pos = 0;
+    let mut byte_pos = 0;
     'next_line: for line in source.lines() {
-        char_pos += line.len_chars();
+        byte_pos += line.len_bytes();
         match line.chars().next() {
             // Attach to previous split
             None => {
                 if !next_started && split_start != 0 {
-                    split_start = char_pos;
+                    split_start = byte_pos;
                 }
             }
             Some(x) if x.is_whitespace() => {
                 if !next_started && split_start != 0 {
-                    split_start = char_pos;
+                    split_start = byte_pos;
                 }
             }
             // Attach to next split
@@ -29,7 +29,7 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
             // Start a new split
             _ => {
                 for pat in LINE_START_PATS {
-                    if line.len_chars() > pat.len() {
+                    if line.len_bytes() > pat.len() {
                         let sub = line.slice(0..pat.len());
                         let matches = if let Some(sub) = sub.as_str() {
                             sub == *pat
@@ -38,7 +38,7 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
                         };
                         if matches {
                             if !next_started && split_start != 0 {
-                                split_start = char_pos;
+                                split_start = byte_pos;
                             }
                             continue 'next_line;
                         }
@@ -48,17 +48,17 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
                 if split_start != 0 {
                     psplits.push(split_start);
                 }
-                split_start = char_pos;
+                split_start = byte_pos;
             }
         }
     }
-    psplits.push(char_pos);
+    psplits.push(byte_pos);
 
     let mut splits = Vec::new();
-    char_pos = 0;
+    byte_pos = 0;
     let mut start_line = 0;
     for i in psplits {
-        let text: Rope = source.slice(char_pos..i).into();
+        let text: Rope = source.byte_slice(byte_pos..i).into();
         let lines = text.len_lines() - 1;
 
         let mut name = None;
@@ -97,10 +97,10 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
         splits.push(TextSplit {
             name,
             start_line,
-            abs_span: AbsSpan(file, char_pos as u32..i as u32),
+            abs_span: AbsSpan(file, byte_pos as u32..i as u32),
             text,
         });
-        char_pos = i;
+        byte_pos = i;
         start_line += lines;
     }
 

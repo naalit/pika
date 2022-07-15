@@ -115,15 +115,15 @@ impl<'a> Parser<'a> {
             return;
         }
         let tok = self.lex_result.kind[self.tok_idx];
-        let start = self.lex_result.start[self.tok_idx].min(self.text.len_chars() as u32);
+        let start = self.lex_result.start[self.tok_idx].min(self.text.len_bytes() as u32);
         let end = self
             .lex_result
             .start
             .get(self.tok_idx + 1)
             .copied()
-            .unwrap_or(self.text.len_chars() as u32)
-            .min(self.text.len_chars() as u32);
-        let slice = self.text.slice(start as usize..end as usize);
+            .unwrap_or(self.text.len_bytes() as u32)
+            .min(self.text.len_bytes() as u32);
+        let slice = self.text.byte_slice(start as usize..end as usize);
         self.builder
             .token(tok.into(), &std::borrow::Cow::<'a, str>::from(slice));
         self.tok_idx += 1;
@@ -152,13 +152,13 @@ impl<'a> Parser<'a> {
             .start
             .get(self.tok_idx)
             .copied()
-            .unwrap_or_else(|| self.text.len_chars() as u32);
+            .unwrap_or_else(|| self.text.len_bytes() as u32);
         let end = self
             .lex_result
             .start
             .get(self.tok_idx + 1)
             .copied()
-            .unwrap_or_else(|| self.text.len_chars() as u32);
+            .unwrap_or_else(|| self.text.len_bytes() as u32);
         RelSpan::new(start, end)
     }
 

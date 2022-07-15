@@ -56,6 +56,7 @@ impl Def {
     }
 }
 
+/// Uses byte positions
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RelSpan {
     pub start: u32,
@@ -107,6 +108,7 @@ impl Pretty for SName {
     }
 }
 
+/// Uses byte positions
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AbsSpan(pub File, pub std::ops::Range<u32>);
 impl AbsSpan {
@@ -117,25 +119,37 @@ impl AbsSpan {
         )
     }
 
+    pub fn chars(self, db: &(impl crate::parsing::Parser + ?Sized)) -> CharSpan {
+        let text = db.input_file(self.0);
+        let start = text.byte_to_char(self.1.start as usize) as u32;
+        let end = text.byte_to_char(self.1.end as usize) as u32;
+        CharSpan(self.0, start..end)
+    }
+
     pub fn lsp_range(&self, files: &HashMap<File, ropey::Rope>) -> lsp_types::Range {
         let text = files.get(&self.0).unwrap();
-        let start_line = text.char_to_line(self.1.start as usize);
+        let start = text.byte_to_char(self.1.start as usize) as u32;
+        let end = text.byte_to_char(self.1.end as usize) as u32;
+        let start_line = text.char_to_line(start as usize);
         let start_line_start = text.line_to_char(start_line);
-        let end_line = text.char_to_line(self.1.end as usize);
+        let end_line = text.char_to_line(end as usize);
         let end_line_start = text.line_to_char(end_line);
         lsp_types::Range {
             start: lsp_types::Position {
                 line: start_line as u32,
-                character: self.1.start - start_line_start as u32,
+                character: start - start_line_start as u32,
             },
             end: lsp_types::Position {
                 line: end_line as u32,
-                character: self.1.end - end_line_start as u32,
+                character: end - end_line_start as u32,
             },
         }
     }
 }
-impl ariadne::Span for AbsSpan {
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CharSpan(pub File, pub std::ops::Range<u32>);
+impl ariadne::Span for CharSpan {
     type SourceId = File;
 
     fn source(&self) -> &Self::SourceId {
@@ -179,8 +193,12 @@ pub struct Label {
     pub color: Option<Color>,
 }
 impl Label {
-    fn ariadne(self, split_span: &AbsSpan) -> ariadne::Label<AbsSpan> {
-        let span = split_span.add(self.span);
+    fn ariadne(
+        self,
+        split_span: &AbsSpan,
+        db: &(impl crate::parsing::Parser + ?Sized),
+    ) -> ariadne::Label<CharSpan> {
+        let span = split_span.add(self.span).chars(db);
         let mut l = ariadne::Label::new(span).with_message(self.message.to_string(true));
         if let Some(color) = self.color {
             l = l.with_color(color);
@@ -209,8 +227,12 @@ impl Error {
         )
         .with_message(self.message.to_string(true))
         // The primary label appears first since it's the most important
-        .with_label(self.primary.ariadne(split_span).with_order(-1));
-        r.add_labels(self.secondary.into_iter().map(|x| x.ariadne(split_span)));
+        .with_label(self.primary.ariadne(split_span, cache.db).with_order(-1));
+        r.add_labels(
+            self.secondary
+                .into_iter()
+                .map(|x| x.ariadne(split_span, cache.db)),
+        );
         if let Some(note) = self.note {
             r.set_note(note.to_string(true));
         }

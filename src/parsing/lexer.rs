@@ -62,7 +62,7 @@ impl<'i> Lexer<'i> {
     }
 
     fn next(&mut self) -> Option<char> {
-        self.pos += 1;
+        self.pos += self.chars.peek().map_or(0, |x| x.len_utf8() as u32);
         self.chars.next()
     }
 
@@ -70,7 +70,8 @@ impl<'i> Lexer<'i> {
         RelSpan::new(self.tok_start, self.pos)
     }
     fn slice(&self) -> RopeSlice<'i> {
-        self.input.slice(self.tok_start as usize..self.pos as usize)
+        self.input
+            .byte_slice(self.tok_start as usize..self.pos as usize)
     }
 
     fn process_trivia(&mut self) {
@@ -271,7 +272,7 @@ impl<'i> Lexer<'i> {
             // This seems to be the best way to access the next character
             '-' if self
                 .input
-                .slice(self.pos as usize + 1..)
+                .byte_slice(self.pos as usize + 1..)
                 .chars()
                 .next()
                 .map_or(true, |x| !x.is_ascii_digit()) =>

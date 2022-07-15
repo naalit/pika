@@ -103,7 +103,9 @@ impl Server {
                 ));
                 let pos = params.text_document_position_params.position;
                 let source = self.source.get(&file).unwrap();
-                let pos = source.line_to_char(pos.line as usize) as u32 + pos.character;
+                let pos = source
+                    .char_to_byte(source.line_to_char(pos.line as usize) + pos.character as usize)
+                    as u32;
                 if let Some(split) = self.db.split_at(file, pos) {
                     let aspan = self.db.split_span(file, split).unwrap();
                     if let Some((ty, span)) = crate::elab::ide_support::hover_type(
