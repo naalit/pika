@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use super::*;
 
@@ -10,10 +10,12 @@ impl std::fmt::Display for Meta {
     }
 }
 
+#[derive(Clone)]
 pub enum SpecialBound {
     IntType { must_fit: i128 },
 }
 
+#[derive(Clone)]
 pub struct MetaBounds {
     ty: Val,
     special: Option<SpecialBound>,
@@ -83,11 +85,12 @@ impl MetaBounds {
     }
 }
 
+#[derive(Clone)]
 pub enum MetaEntry {
     Solved {
         /// A lambda term with no free variables
         solution: Expr,
-        occurs_cache: RwLock<Option<Meta>>,
+        occurs_cache: Arc<RwLock<Option<Meta>>>,
     },
     Unsolved {
         bounds: MetaBounds,
@@ -240,6 +243,7 @@ impl PartialRename {
     }
 }
 
+#[derive(Clone)]
 pub struct MetaCxt<'a> {
     pub db: &'a dyn Elaborator,
     metas: Vec<MetaEntry>,
@@ -413,7 +417,7 @@ impl MetaCxt<'_> {
 
         self.metas[meta.0 as usize] = MetaEntry::Solved {
             solution,
-            occurs_cache: RwLock::new(None),
+            occurs_cache: Arc::new(RwLock::new(None)),
         };
 
         Ok(())

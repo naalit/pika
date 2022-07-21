@@ -927,6 +927,7 @@ mod coverage {
             &self,
             mut cov: HashMap<PVar, Cov>,
             cxt: &CaseElabCxt,
+            mut size: Size,
         ) -> Vec<HashMap<PVar, Cov>> {
             for (v, p) in &self.ipats {
                 match p {
@@ -940,7 +941,7 @@ mod coverage {
                         ),
                         None => (),
                     },
-                    IPat::Var(_) => (),
+                    IPat::Var(_) => size += 1,
                 }
             }
             match &self.dec {
@@ -948,10 +949,11 @@ mod coverage {
                 Dec::Failure => {
                     vec![cov]
                 }
-                Dec::Guard(_, _, fallback) => fallback.uncovered(cov, cxt),
+                Dec::Guard(_, _, fallback) => fallback.uncovered(cov, cxt, size),
                 Dec::Switch(v, branches, fallback) => {
                     assert!(!branches.is_empty());
                     let cons = branches[0].cons;
+                    let (vty, vreason) = &cxt.var_tys[v.0];
                     let existing_cons = match cov.get(v) {
                         Some(Cov::Cons(cons, _, _)) => Some(vec![*cons]),
                         Some(Cov::ConsSet(no)) => Some(no.iter().map(|(c, _)| *c).collect()),
@@ -960,7 +962,7 @@ mod coverage {
                     match cons {
                         PCons::Lit(_) => fallback
                             .as_ref()
-                            .map(|x| x.uncovered(cov.clone(), cxt))
+                            .map(|x| x.uncovered(cov.clone(), cxt, size))
                             .unwrap_or_else(|| vec![cov]),
                         PCons::Cons(cons) => {
                             let (def, _) = cxt.ecxt.db.lookup_cons_id(cons);
@@ -973,21 +975,44 @@ mod coverage {
                             {
                                 Some(DefBody::Type(ctors)) => ctors
                                     .into_iter()
-                                    .map(|(s, _, ty)| {
-                                        (
-                                            PCons::Cons(cxt.ecxt.db.cons_id(def, s)),
-                                            // Find whether it has an explicit argument (show `Some _` or `None`)
-                                            match ty {
-                                                Val::Fun(x) if x.class == Pi(Impl) => {
-                                                    match x.body {
-                                                        Expr::Fun(x) if x.class == Pi(Expl) => true,
-                                                        _ => false,
+                                    .filter_map(|(s, _, ty)| {
+                                        let mut size = size;
+                                        let (rty, has_args) = match ty {
+                                            Val::Fun(x) if matches!(x.class, Pi(_)) => {
+                                                let class = x.class;
+                                                let new_size = size + x.params.len();
+                                                let rty = x.open(size);
+                                                size = new_size;
+                                                match rty {
+                                                    Val::Fun(e) if e.class == Pi(Expl) => {
+                                                        size += e.params.len();
+                                                        (e.open(new_size), true)
                                                     }
+                                                    rty => (rty, class == Pi(Expl)),
                                                 }
-                                                Val::Fun(x) if x.class == Pi(Expl) => true,
-                                                _ => false,
-                                            },
-                                        )
+                                            }
+                                            ty => (ty, false),
+                                        };
+                                        if cxt
+                                            .ecxt
+                                            .mcxt
+                                            .clone()
+                                            .local_unify(
+                                                rty,
+                                                vty.clone(),
+                                                size,
+                                                &mut Env::new(size),
+                                                vreason,
+                                            )
+                                            .is_err()
+                                        {
+                                            return None;
+                                        }
+                                        Some((
+                                            PCons::Cons(cxt.ecxt.db.cons_id(def, s)),
+                                            // Whether it has an explicit argument (show `Some _` or `None`)
+                                            has_args,
+                                        ))
                                     })
                                     .collect(),
                                 // Should be caught already
@@ -1011,7 +1036,11 @@ mod coverage {
                                         *v,
                                         Cov::Cons(branch.cons, branch.iargs.clone(), branch.eargs),
                                     );
-                                    cases.extend(branch.then.uncovered(cov, cxt));
+                                    cases.extend(branch.then.uncovered(
+                                        cov,
+                                        cxt,
+                                        size + branch.iargs.len() + branch.eargs.is_some() as _,
+                                    ));
                                 } else {
                                     no.push((cons, has_args));
                                 }
@@ -1022,7 +1051,7 @@ mod coverage {
                                 if let Some(fallback) = fallback {
                                     let mut cov = cov.clone();
                                     cov.insert(*v, Cov::ConsSet(no));
-                                    cases.extend(fallback.uncovered(cov, cxt));
+                                    cases.extend(fallback.uncovered(cov, cxt, size));
                                 }
                             }
                             cases
@@ -1033,7 +1062,7 @@ mod coverage {
         }
 
         pub fn missing_patterns(&self, svar: PVar, cxt: &CaseElabCxt) -> Vec<Doc> {
-            self.uncovered(HashMap::new(), &cxt)
+            self.uncovered(HashMap::new(), &cxt, cxt.ecxt.size())
                 .into_iter()
                 .map(|cov| svar.pretty_cov(&cov, &cxt).nest(crate::pretty::Prec::App))
                 .collect()
@@ -1467,7 +1496,7 @@ impl DecNode<Expr> {
                             ))
                             .add(']', ())
                             .space()
-                            .chain(x.eargs.map_or(Doc::none(), Doc::start))
+                            .chain(x.eargs.map_or(Doc::none(), |x| Doc::start(x).space()))
                             .add("=>", ())
                             .space()
                             .chain(x.then.pretty(db).indent())

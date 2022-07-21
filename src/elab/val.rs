@@ -57,33 +57,41 @@ impl Neutral {
             Ok(v.clone())
         } else {
             drop(guard);
-            let head: Val = match self.head {
+            let (head, cache) = match self.head {
                 Head::Var(Var::Local(_, l)) => match env.get(l.idx(env.size)) {
-                    Some(v) => v.clone(),
+                    // Don't cache inlined locals since they're context-dependent
+                    Some(v) => (v.clone(), false),
                     None => return Err(self),
                 },
                 // TODO resolve applicable builtins
                 Head::Var(Var::Builtin(_)) => return Err(self),
                 Head::Var(Var::Cons(_, _)) => return Err(self),
                 Head::Var(Var::Meta(m)) => match mcxt.lookup(m) {
-                    Some(e) => e.eval(&mut env.clone()),
+                    Some(e) => (e.eval(&mut env.clone()), true),
                     None => return Err(self),
                 },
                 Head::Var(Var::Def(_, d)) => {
                     match mcxt.db.def_elab(d).and_then(|x| x.result).map(|x| x.body) {
-                        Some(DefBody::Let(body)) => body.eval(&mut env.clone()),
+                        Some(DefBody::Let(body)) => (body.eval(&mut env.clone()), true),
                         _ => return Err(self),
                     }
                 }
             };
-            let mut env = env.clone();
+            let mut env = if !cache {
+                env.clone()
+            } else {
+                // If we're caching it, it can't depend on context at all
+                Env::new(env.size)
+            };
             let mut val = self
                 .spine
                 .into_iter()
                 .fold(head, |head, elim| head.app(elim, &mut env));
             val.inline_head(&mut env, mcxt);
-            let mut guard = self.unfolded.write().unwrap();
-            *guard = Some(val.clone());
+            if cache {
+                let mut guard = self.unfolded.write().unwrap();
+                *guard = Some(val.clone());
+            }
             Ok(val)
         }
     }
