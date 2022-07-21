@@ -464,7 +464,7 @@ mod input {
                     let new_size = *size;
                     *size = old_size;
                     let b = x
-                        .a()
+                        .b()
                         .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
                     if *size != new_size {
                         // TODO actually check that the variables have the same names and types
@@ -538,7 +538,7 @@ enum IPat {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct Body(usize);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PCons {
     Lit(Literal),
     Cons(Cons),
@@ -547,7 +547,8 @@ enum PCons {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Branch<T: IsTerm> {
     cons: PCons,
-    args: Vec<PVar>,
+    iargs: Vec<PVar>,
+    eargs: Option<PVar>,
     then: Box<DecNode<T>>,
 }
 
@@ -612,7 +613,6 @@ impl CaseElabCxt<'_, '_> {
         env: &Env,
     ) -> DecNode<Expr> {
         if rows.is_empty() {
-            // TODO find missing pattern and possibly emit error
             return DecNode {
                 ipats: Vec::new(),
                 dec: Dec::Failure,
@@ -687,7 +687,6 @@ impl CaseElabCxt<'_, '_> {
                 .any(|x| x.var == switch_var && matches!(x.pat.0, input::Pattern::Or(_)))
         }) {
             rows = rows
-                .to_vec()
                 .into_iter()
                 .flat_map(|x| {
                     match x
@@ -703,9 +702,10 @@ impl CaseElabCxt<'_, '_> {
                                     if c.var == switch_var {
                                         match &mut c.pat.0 {
                                             input::Pattern::Or(v) => {
-                                                c.pat = v.remove(i);
+                                                c.pat = v.swap_remove(i);
+                                                break;
                                             }
-                                            _ => (),
+                                            _ => unreachable!(),
                                         };
                                     }
                                 }
@@ -721,40 +721,42 @@ impl CaseElabCxt<'_, '_> {
         let mut yes_cons = None;
         let mut yes_env = None;
         let (mut yes, mut no): (Vec<input::Row>, Vec<input::Row>) = Default::default();
-        let mut args = Vec::new();
+        let mut iargs = Vec::new();
+        let mut eargs = None;
         let mut start_ipats = Vec::new();
 
         for mut row in rows.iter().cloned() {
             match self.remove_column(&mut row, switch_var, &sty, &sreason, &mut yes_cons, env) {
-                input::RemovedColumn::Yes(_cons, iargs, eargs, env) => {
-                    if args.is_empty() && yes_env.is_none() {
-                        args.extend(
-                            iargs
+                input::RemovedColumn::Yes(_cons, iargs2, eargs2, env) => {
+                    if iargs.is_empty() && eargs.is_none() && yes_env.is_none() {
+                        iargs.extend(
+                            iargs2
                                 .iter()
                                 .map(|(_, ty)| self.pvar(ty.clone(), sreason.clone())),
                         );
-                        eargs
+                        eargs2
                             .as_deref()
-                            .map(|(_, ty)| args.push(self.pvar(ty.clone(), sreason.clone())));
+                            .map(|(_, ty)| eargs = Some(self.pvar(ty.clone(), sreason.clone())));
                         yes_env = env;
                     }
                     row.columns.extend(
-                        iargs
+                        iargs2
                             .into_iter()
-                            .zip(&args)
+                            .zip(&iargs)
                             .map(|((pat, _), &var)| input::Column { pat, var }),
                     );
-                    eargs.map(|b| {
+                    eargs2.map(|b| {
                         row.columns.push_back(input::Column {
                             pat: b.0,
-                            var: *args.last().unwrap(),
+                            var: eargs.unwrap(),
                         })
                     });
                     yes.push(row);
                 }
                 input::RemovedColumn::Pair(a, b, size, span) => {
                     // Make sure to share the PVars for all patterns that match on the same pair
-                    if args.is_empty() {
+                    assert!(yes_cons.is_none());
+                    if iargs.is_empty() && eargs.is_none() {
                         let (va, vb) = match &sty {
                             Val::Fun(clos) if clos.class == Sigma => {
                                 assert_eq!(clos.params.len(), 1);
@@ -783,8 +785,8 @@ impl CaseElabCxt<'_, '_> {
                                 )
                             }
                         };
-                        args.push(va);
-                        args.push(vb);
+                        iargs.push(va);
+                        iargs.push(vb);
                         start_ipats.push((switch_var, IPat::Pair(va, vb)));
                     }
                     // the sigma closure can capture the lhs, but it might not be a source-level variable in the pattern, e.g.
@@ -794,15 +796,15 @@ impl CaseElabCxt<'_, '_> {
                     // there `x: a.someType`, so we need to materialize `a` as a "real" var, not just a PVar
                     // we do this by adding a '_' var IPat to the pattern
                     row.end_ipats.push_back((
-                        args[0],
+                        iargs[0],
                         IPat::Var((self.ecxt.db.name("_".into()), RelSpan::empty())),
                     ));
                     row.columns.push_front(input::Column {
-                        var: args[1],
+                        var: iargs[1],
                         pat: *b,
                     });
                     row.columns.push_front(input::Column {
-                        var: args[0],
+                        var: iargs[0],
                         pat: *a,
                     });
                     yes.push(row);
@@ -831,7 +833,8 @@ impl CaseElabCxt<'_, '_> {
                         switch_var,
                         vec![Branch {
                             cons: yes_cons,
-                            args,
+                            iargs,
+                            eargs,
                             then: Box::new(yes),
                         }],
                         Some(Box::new(no)),
@@ -846,6 +849,194 @@ impl CaseElabCxt<'_, '_> {
                 yes.ipats = start_ipats;
                 yes
             }
+        }
+    }
+}
+
+mod coverage {
+    use super::*;
+
+    /// Represents a set of values that must be covered
+    #[derive(Debug, Clone)]
+    enum Cov {
+        Any,
+        Pair(PVar, PVar),
+        Cons(PCons, Vec<PVar>, Option<PVar>),
+        ConsSet(Vec<(PCons, bool)>),
+    }
+    impl PVar {
+        fn pretty_cov(self, cov: &HashMap<PVar, Cov>, cxt: &CaseElabCxt) -> Doc {
+            let c = cov.get(&self).unwrap_or(&Cov::Any);
+            match c {
+                Cov::Any => Doc::start('_'),
+                Cov::Pair(a, b) => a
+                    .pretty_cov(cov, cxt)
+                    .nest(crate::pretty::Prec::App)
+                    .add(',', ())
+                    .space()
+                    .chain(b.pretty_cov(cov, cxt).nest(crate::pretty::Prec::Pair))
+                    .prec(crate::pretty::Prec::Pair),
+                Cov::Cons(cons, iargs, eargs) => cons
+                    .pretty(cxt.ecxt.db)
+                    .chain(if iargs.is_empty() {
+                        Doc::none()
+                    } else {
+                        Doc::none()
+                            .space()
+                            .add('[', ())
+                            .chain(Doc::intersperse(
+                                iargs.iter().map(|v| {
+                                    v.pretty_cov(cov, cxt).nest(crate::pretty::Prec::Atom)
+                                }),
+                                Doc::start(',').space(),
+                            ))
+                            .add(']', ())
+                    })
+                    .chain(eargs.map_or(Doc::none(), |v| {
+                        Doc::none()
+                            .space()
+                            .chain(v.pretty_cov(cov, cxt).nest(crate::pretty::Prec::Atom))
+                    }))
+                    .prec(crate::pretty::Prec::App),
+                Cov::ConsSet(no) => {
+                    let mut v: Vec<_> = no
+                        .iter()
+                        .map(|(c, has_args)| {
+                            c.pretty(cxt.ecxt.db).chain(if *has_args {
+                                Doc::none().space().add('_', ())
+                            } else {
+                                Doc::none()
+                            })
+                        })
+                        .collect();
+                    if v.len() > 1 {
+                        Doc::intersperse(v, Doc::none().space().add('|', ()).space())
+                    } else {
+                        v.pop().unwrap().prec(crate::pretty::Prec::App)
+                    }
+                }
+            }
+        }
+    }
+    impl<T: IsTerm> DecNode<T> {
+        /// Returns all possible sets of values that this DecNode *doesn't* cover.
+        /// This basically works by recursing through the tree until it finds a success, which
+        /// returns the empty set, or a failure, which returns the "path" to the current node,
+        /// which is stored in `cov`.
+        fn uncovered(
+            &self,
+            mut cov: HashMap<PVar, Cov>,
+            cxt: &CaseElabCxt,
+        ) -> Vec<HashMap<PVar, Cov>> {
+            for (v, p) in &self.ipats {
+                match p {
+                    IPat::Pair(a, b) => match cov.insert(*v, Cov::Pair(*a, *b)) {
+                        Some(Cov::Pair(x, y)) if *a == x && *b == y => (),
+                        Some(c) => panic!(
+                            "Conflicting Cov for {}: old {:?} and {:?}",
+                            *v,
+                            c,
+                            Cov::Pair(*a, *b)
+                        ),
+                        None => (),
+                    },
+                    IPat::Var(_) => (),
+                }
+            }
+            match &self.dec {
+                Dec::Success(_) => Vec::new(),
+                Dec::Failure => {
+                    vec![cov]
+                }
+                Dec::Guard(_, _, fallback) => fallback.uncovered(cov, cxt),
+                Dec::Switch(v, branches, fallback) => {
+                    assert!(!branches.is_empty());
+                    let cons = branches[0].cons;
+                    let existing_cons = match cov.get(v) {
+                        Some(Cov::Cons(cons, _, _)) => Some(vec![*cons]),
+                        Some(Cov::ConsSet(no)) => Some(no.iter().map(|(c, _)| *c).collect()),
+                        _ => None,
+                    };
+                    match cons {
+                        PCons::Lit(_) => fallback
+                            .as_ref()
+                            .map(|x| x.uncovered(cov.clone(), cxt))
+                            .unwrap_or_else(|| vec![cov]),
+                        PCons::Cons(cons) => {
+                            let (def, _) = cxt.ecxt.db.lookup_cons_id(cons);
+                            let all_ctors: Vec<_> = match cxt
+                                .ecxt
+                                .db
+                                .def_elab(def)
+                                .and_then(|d| d.result)
+                                .map(|d| d.body)
+                            {
+                                Some(DefBody::Type(ctors)) => ctors
+                                    .into_iter()
+                                    .map(|(s, _, ty)| {
+                                        (
+                                            PCons::Cons(cxt.ecxt.db.cons_id(def, s)),
+                                            // Find whether it has an explicit argument (show `Some _` or `None`)
+                                            match ty {
+                                                Val::Fun(x) if x.class == Pi(Impl) => {
+                                                    match x.body {
+                                                        Expr::Fun(x) if x.class == Pi(Expl) => true,
+                                                        _ => false,
+                                                    }
+                                                }
+                                                Val::Fun(x) if x.class == Pi(Expl) => true,
+                                                _ => false,
+                                            },
+                                        )
+                                    })
+                                    .collect(),
+                                // Should be caught already
+                                _ => Vec::new(),
+                            };
+                            let mut cases = Vec::new();
+                            let mut no = Vec::new();
+                            // Go through all possible constructors, and for each one add uncovered values
+                            // from either the corresponding branch or the fallback if no branch exists
+                            for (cons, has_args) in all_ctors {
+                                if let Some(existing_cons) = &existing_cons {
+                                    if !existing_cons.contains(&cons) {
+                                        continue;
+                                    }
+                                }
+                                if let Some(branch) =
+                                    branches.iter().find(|branch| branch.cons == cons)
+                                {
+                                    let mut cov = cov.clone();
+                                    cov.insert(
+                                        *v,
+                                        Cov::Cons(branch.cons, branch.iargs.clone(), branch.eargs),
+                                    );
+                                    cases.extend(branch.then.uncovered(cov, cxt));
+                                } else {
+                                    no.push((cons, has_args));
+                                }
+                            }
+                            // However, we only process the fallback once, using Cov::ConsSet which
+                            // represents a union of several constructors
+                            if !no.is_empty() {
+                                if let Some(fallback) = fallback {
+                                    let mut cov = cov.clone();
+                                    cov.insert(*v, Cov::ConsSet(no));
+                                    cases.extend(fallback.uncovered(cov, cxt));
+                                }
+                            }
+                            cases
+                        }
+                    }
+                }
+            }
+        }
+
+        pub fn missing_patterns(&self, svar: PVar, cxt: &CaseElabCxt) -> Vec<Doc> {
+            self.uncovered(HashMap::new(), &cxt)
+                .into_iter()
+                .map(|cov| svar.pretty_cov(&cov, &cxt).nest(crate::pretty::Prec::App))
+                .collect()
         }
     }
 }
@@ -890,6 +1081,7 @@ impl CaseOf<Expr> {
 
 pub(super) fn elab_case(
     sty: Val,
+    s_span: RelSpan,
     sreason: CheckReason,
     branches: impl IntoIterator<Item = (Option<ast::Expr>, RelSpan, Option<ast::Expr>)>,
     rty: &mut Option<(Val, CheckReason)>,
@@ -909,7 +1101,7 @@ pub(super) fn elab_case(
         .collect();
     let dec = cxt.compile_rows(rows, true, &cxt.ecxt.env());
     let mut rhs = Vec::new();
-    for (i, body) in cxt.bodies.into_iter().enumerate() {
+    for (i, body) in cxt.bodies.iter().enumerate() {
         match cxt.env_tys.get(&Body(i)) {
             Some((penv, reachable, env)) => {
                 if !reachable {
@@ -934,9 +1126,9 @@ pub(super) fn elab_case(
                 }
                 cxt.ecxt.set_env(env);
                 let body = match rty {
-                    Some((rty, reason)) => {
-                        body.map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, reason))
-                    }
+                    Some((rty, reason)) => body
+                        .as_ref()
+                        .map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, reason)),
                     None => match body {
                         Some(body) => {
                             let (expr, ty) = body.infer(cxt.ecxt);
@@ -969,6 +1161,18 @@ pub(super) fn elab_case(
             None => panic!("env_tys has no entry for body {}", i),
         }
     }
+    let missing = dec.missing_patterns(svar, &cxt);
+    if !missing.is_empty() {
+        cxt.ecxt.error(
+            s_span,
+            Doc::start("Missing patterns:")
+                .space()
+                .chain(Doc::intersperse(
+                    missing,
+                    Doc::none().space().add('|', ()).space(),
+                )),
+        );
+    }
     (
         CaseOf { dec, svar, rhs },
         rty.as_ref()
@@ -989,6 +1193,7 @@ impl ast::Case {
             .unwrap_or((Expr::Error, Val::Error));
         let (case_of, ty) = elab_case(
             sty,
+            self.scrutinee().map_or_else(|| self.span(), |s| s.span()),
             CheckReason::MustMatch(self.scrutinee().map(|x| x.span()).unwrap_or(self.span())),
             self.branches().into_iter().map(|x| x.as_row()),
             rty,
@@ -1061,6 +1266,7 @@ fn elab_block(
             let (s, sty) = e.infer(ecxt);
             let (case, cty) = elab_case(
                 sty,
+                e.span(),
                 CheckReason::MustMatch(e.span()),
                 std::iter::once((None, e.span(), rest)),
                 rty,
@@ -1107,6 +1313,7 @@ fn elab_block(
                 };
                 let (case, cty) = elab_case(
                     ty,
+                    d.pat().map_or_else(|| d.span(), |s| s.span()),
                     reason,
                     std::iter::once((d.pat().and_then(|x| x.expr()), d.span(), rest)),
                     rty,
@@ -1253,11 +1460,14 @@ impl DecNode<Expr> {
                         x.cons
                             .pretty(db)
                             .space()
+                            .add('[', ())
                             .chain(Doc::intersperse(
-                                x.args.iter().map(|x| Doc::start(x)),
+                                x.iargs.iter().map(|x| Doc::start(x)),
                                 Doc::none().space(),
                             ))
+                            .add(']', ())
                             .space()
+                            .chain(x.eargs.map_or(Doc::none(), Doc::start))
                             .add("=>", ())
                             .space()
                             .chain(x.then.pretty(db).indent())
@@ -1265,7 +1475,10 @@ impl DecNode<Expr> {
                     Doc::none().hardline(),
                 ))
                 .chain(fallback.as_ref().map_or(Doc::none(), |x| {
-                    Doc::start("_ => ").chain(x.pretty(db).indent())
+                    Doc::none()
+                        .hardline()
+                        .add("_ => ", ())
+                        .chain(x.pretty(db).indent())
                 }))
                 .indent(),
         })
@@ -1382,10 +1595,16 @@ impl<T: IsTerm> DecNode<T> {
 }
 impl<T: IsTerm> Branch<T> {
     fn map<U: IsTerm>(self, func: &mut impl FnMut(T::Clos) -> U::Clos) -> Branch<U> {
-        let Branch { cons, args, then } = self;
+        let Branch {
+            cons,
+            iargs,
+            eargs,
+            then,
+        } = self;
         Branch {
             cons,
-            args,
+            iargs,
+            eargs,
             then: Box::new(then.map(func)),
         }
     }
