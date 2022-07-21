@@ -64,6 +64,8 @@ impl UnfoldState {
 
 struct UnifyCxt<'a, 'b> {
     meta_cxt: &'a mut MetaCxt<'b>,
+    solve_locals: bool,
+    env: &'a mut Env,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -191,27 +193,120 @@ impl UnifyError {
 }
 
 impl MetaCxt<'_> {
-    /// When possible, (inferred, expected)
+    /// When possible, (inferred, expected).
+    /// Note that it's possible for `env.size != size`.
     pub fn unify(
         &mut self,
         a: Val,
         b: Val,
         size: Size,
+        mut env: Env,
         reason: &CheckReason,
     ) -> Result<(), UnifyError> {
-        UnifyCxt { meta_cxt: self }
-            // TODO any way to avoid this clone?
-            .unify(a.clone(), b.clone(), size, UnfoldState::default())
-            .map_err(|kind| UnifyError {
-                kind,
-                inferred: a.quote(size, Some(self)),
-                expected: b.quote(size, Some(self)),
-                reason: reason.clone(),
-            })
+        UnifyCxt {
+            meta_cxt: self,
+            solve_locals: false,
+            env: &mut env,
+        }
+        // TODO any way to avoid this clone?
+        .unify(a.clone(), b.clone(), size, UnfoldState::default())
+        .map_err(|kind| UnifyError {
+            kind,
+            inferred: a.quote(size, Some(self)),
+            expected: b.quote(size, Some(self)),
+            reason: reason.clone(),
+        })
+    }
+
+    /// When possible, (inferred, expected).
+    /// Will attempt to solve all locals in addition to metas, and store the solutions in `env`.
+    pub fn local_unify(
+        &mut self,
+        a: Val,
+        b: Val,
+        size: Size,
+        env: &mut Env,
+        reason: &CheckReason,
+    ) -> Result<(), UnifyError> {
+        UnifyCxt {
+            meta_cxt: self,
+            solve_locals: true,
+            env,
+        }
+        // TODO any way to avoid this clone?
+        .unify(a.clone(), b.clone(), size, UnfoldState::default())
+        .map_err(|kind| UnifyError {
+            kind,
+            inferred: a.quote(size, Some(self)),
+            expected: b.quote(size, Some(self)),
+            reason: reason.clone(),
+        })
     }
 }
 
 impl UnifyCxt<'_, '_> {
+    fn can_solve(&self, h: Head<Lvl>) -> bool {
+        match h {
+            Head::Var(v) => match v {
+                Var::Local(_, l) => {
+                    self.solve_locals
+                        && l.in_scope(self.env.size)
+                        && self.env.get(l.idx(self.env.size)).is_none()
+                }
+                Var::Meta(m) => !self.meta_cxt.is_solved(m),
+                _ => false,
+            },
+        }
+    }
+
+    fn solve(
+        &mut self,
+        start_size: Size,
+        head: Head<Lvl>,
+        spine: Vec<Elim<Val>>,
+        solution: Val,
+    ) -> Result<(), UnifyErrorKind> {
+        match head {
+            Head::Var(v) => match v {
+                Var::Local(_, l) => {
+                    assert!(self.solve_locals);
+                    if !spine.is_empty() {
+                        return Err(UnifyErrorKind::Conversion);
+                    }
+                    // Make sure to inline local variables in solutions, but not metas
+                    let solution = solution
+                        .quote(start_size, None)
+                        .eval(&mut self.env(start_size));
+                    self.env.replace(l.idx(self.env.size), solution);
+                    Ok(())
+                }
+                Var::Meta(meta) => {
+                    // Make sure to inline local variables in solutions, but not metas
+                    let solution = solution
+                        .quote(start_size, None)
+                        .eval(&mut self.env(start_size));
+                    self.meta_cxt
+                        .solve(start_size, meta, spine, solution)
+                        .map_err(|e| {
+                            UnifyErrorKind::MetaSolve(e, self.meta_cxt.introduced_span(meta))
+                        })
+                }
+                _ => unreachable!(),
+            },
+        }
+    }
+
+    fn env(&self, size: Size) -> Env {
+        // Expand or shrink the environment to the given size
+        let mut env = self.env.clone();
+        env.reset_to_size(size);
+        while env.size < size {
+            env.push(None);
+        }
+        assert_eq!(env.size, size);
+        env
+    }
+
     fn unify_spines(
         &mut self,
         a: &[Elim<Val>],
@@ -286,67 +381,62 @@ impl UnifyCxt<'_, '_> {
             {
                 self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
             }
+            // Similar for solving locals, but solving the outermost (lowest level) first works better in practice
+            (Val::Neutral(a), Val::Neutral(b))
+                if state.can_solve_metas()
+                    && self.solve_locals
+                    && matches!((a.head(), b.head()), (Head::Var(Var::Local(_, a)), Head::Var(Var::Local(_, b)))
+                        if a > b) =>
+            {
+                self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
+            }
+            // If we could solve a meta *or* a local, solve the meta
+            (Val::Neutral(a), Val::Neutral(b))
+                if state.can_solve_metas()
+                    && self.solve_locals
+                    && matches!((a.head(), b.head()), (Head::Var(Var::Local(_, _)), Head::Var(Var::Meta(m)))
+                        if !self.meta_cxt.is_solved(m)) =>
+            {
+                self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
+            }
 
             // There are multiple cases for two neutrals which need to be handled in sequence
             // basically we need to try one after another and they're not simple enough to disambiguate with guards
             (Val::Neutral(mut a), Val::Neutral(mut b)) => {
                 // Try solving metas; if both are metas, solve whichever is possible
                 if state.can_solve_metas() && a.head() != b.head() {
-                    if let Head::Var(Var::Meta(m)) = a.head() {
-                        if !self.meta_cxt.is_solved(m) {
-                            let bc = match b.head() {
-                                Head::Var(Var::Meta(m)) if !self.meta_cxt.is_solved(m) => {
-                                    Some((m, b.spine().clone(), a.clone()))
+                    if self.can_solve(a.head()) {
+                        let bc = if self.can_solve(b.head()) {
+                            Some((b.head(), b.spine().clone(), a.clone()))
+                        } else {
+                            None
+                        };
+                        match self.solve(size, a.head(), a.into_parts().1, Val::Neutral(b)) {
+                            Ok(()) => return Ok(()),
+                            Err(e) => match bc {
+                                Some((b, bsp, a)) => {
+                                    match self.solve(size, b, bsp, Val::Neutral(a)) {
+                                        Ok(()) => return Ok(()),
+                                        Err(_) => return Err(e),
+                                    }
                                 }
-                                _ => None,
-                            };
-                            match self
-                                .meta_cxt
-                                .solve(size, m, a.into_parts().1, Val::Neutral(b))
-                            {
-                                Ok(()) => return Ok(()),
-                                Err(e) => match bc {
-                                    Some((m, bsp, a)) if !self.meta_cxt.is_solved(m) => {
-                                        match self.meta_cxt.solve(size, m, bsp, Val::Neutral(a)) {
-                                            Ok(()) => return Ok(()),
-                                            Err(_) => {
-                                                return Err(UnifyErrorKind::MetaSolve(
-                                                    e,
-                                                    self.meta_cxt.introduced_span(m),
-                                                ))
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        return Err(UnifyErrorKind::MetaSolve(
-                                            e,
-                                            self.meta_cxt.introduced_span(m),
-                                        ))
-                                    }
-                                },
-                            }
+                                _ => return Err(e),
+                            },
                         }
                     }
-                    if let Head::Var(Var::Meta(m)) = b.head() {
-                        if !self.meta_cxt.is_solved(m) {
-                            return self
-                                .meta_cxt
-                                .solve(size, m, b.into_parts().1, Val::Neutral(a))
-                                .map_err(|e| {
-                                    UnifyErrorKind::MetaSolve(e, self.meta_cxt.introduced_span(m))
-                                });
-                        }
+                    if self.can_solve(b.head()) {
+                        return self.solve(size, b.head(), b.into_parts().1, Val::Neutral(a));
                     }
                 }
 
                 // Unfold as much as possible first
                 if state.can_unfold() {
                     // TODO allow inlining local definitions
-                    match a.resolve(&mut Env::new(size), self.meta_cxt) {
+                    match a.resolve(&self.env(size), self.meta_cxt) {
                         Ok(a) => return self.unify(a, Val::Neutral(b), size, state),
                         Err(a2) => a = a2,
                     }
-                    match b.resolve(&mut Env::new(size), self.meta_cxt) {
+                    match b.resolve(&self.env(size), self.meta_cxt) {
                         Ok(b) => return self.unify(Val::Neutral(a), b, size, state),
                         Err(b2) => b = b2,
                     }
@@ -364,16 +454,9 @@ impl UnifyCxt<'_, '_> {
 
             // If only one side is a solvable meta, solve without unfolding the other side
             (Val::Neutral(n), x) | (x, Val::Neutral(n))
-                if state.can_solve_metas()
-                    && matches!(n.head(), Head::Var(Var::Meta(m)) if !self.meta_cxt.is_solved(m)) =>
+                if state.can_solve_metas() && self.can_solve(n.head()) =>
             {
-                if let Head::Var(Var::Meta(m)) = n.head() {
-                    self.meta_cxt
-                        .solve(size, m, n.into_parts().1, x)
-                        .map_err(|e| UnifyErrorKind::MetaSolve(e, self.meta_cxt.introduced_span(m)))
-                } else {
-                    unreachable!()
-                }
+                self.solve(size, n.head(), n.into_parts().1, x)
             }
 
             // Eta-expand if there's a lambda on one side
@@ -386,7 +469,7 @@ impl UnifyCxt<'_, '_> {
 
             // If a neutral still hasn't unified with anything, try unfolding it if possible
             (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
-                match n.resolve(&mut Env::new(size), self.meta_cxt) {
+                match n.resolve(&self.env(size), self.meta_cxt) {
                     Ok(n) => self.unify(n, x, size, state),
                     Err(_) => Err(UnifyErrorKind::Conversion),
                 }

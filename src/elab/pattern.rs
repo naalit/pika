@@ -1,17 +1,75 @@
 use super::*;
 
 mod input {
+    use crate::elab::elaborate::resolve_member;
+
     use super::*;
 
     type SPattern = Spanned<Pattern>;
     #[derive(Clone, Debug)]
     pub(super) enum Pattern {
-        Cons(Cons, Vec<SPattern>),
-        Pair(Box<SPattern>, Box<SPattern>),
+        /// (constructor, implicit args, explicit arg, return type, size at return type)
+        Cons(
+            PCons,
+            Vec<(SPattern, Val)>,
+            Option<Box<(SPattern, Val)>>,
+            Val,
+            Size,
+        ),
+        Pair(Box<SPattern>, Box<SPattern>, Size),
         Or(Vec<SPattern>),
         Var(SName),
         Typed(Box<SPattern>, Box<Val>),
         Any,
+    }
+    impl Pattern {
+        pub(super) fn to_term(&self, db: &(impl Elaborator + ?Sized), size: &mut Size) -> Val {
+            match self {
+                Pattern::Cons(cons, iargs, eargs, _, _) => {
+                    let mut term = match cons {
+                        PCons::Lit(l) => Val::Lit(*l),
+                        PCons::Cons(cons) => {
+                            Val::var(Var::Cons((db.name("_".into()), RelSpan::empty()), *cons))
+                        }
+                    };
+                    let iarg =
+                        iargs
+                            .iter()
+                            .map(|x| x.0 .0.to_term(db, size))
+                            .rfold(None, |acc, x| match acc {
+                                None => Some(x),
+                                Some(y) => {
+                                    Some(Val::Pair(Box::new(x), Box::new(y), Box::new(Val::Error)))
+                                }
+                            });
+                    if let Some(iarg) = iarg {
+                        term = term.app(Elim::App(Impl, iarg), &mut Env::new(*size));
+                    }
+                    if let Some(earg) = eargs {
+                        term = term.app(
+                            Elim::App(Expl, earg.0 .0.to_term(db, size)),
+                            &mut Env::new(*size),
+                        );
+                    }
+                    term
+                }
+                Pattern::Pair(a, b, _) => {
+                    *size += 1;
+                    Val::Pair(
+                        Box::new(a.0.to_term(db, size)),
+                        Box::new(b.0.to_term(db, size)),
+                        Box::new(Val::Error),
+                    )
+                }
+                Pattern::Or(_) => Val::Error,
+                Pattern::Var(n) => {
+                    *size += 1;
+                    Val::var(Var::Local(*n, size.dec().next_lvl()))
+                }
+                Pattern::Typed(a, _) => a.0.to_term(db, size),
+                Pattern::Any => Val::Error,
+            }
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -22,9 +80,14 @@ mod input {
 
     pub(super) enum RemovedColumn {
         Nothing,
-        IPat(IPat),
+        Pair(Box<SPattern>, Box<SPattern>, Size, RelSpan),
         // TODO is this cons necessary?
-        Yes(Cons, Vec<SPattern>),
+        Yes(
+            PCons,
+            Vec<(SPattern, Val)>,
+            Option<Box<(SPattern, Val)>>,
+            Option<Env>,
+        ),
         No,
     }
 
@@ -32,8 +95,6 @@ mod input {
     pub(super) struct Row {
         pub columns: VecDeque<Column>,
         pub guard: Option<ast::Expr>,
-        pub tyvars_size: Size,
-        pub ty_ipats: Vec<(PVar, IPat)>,
         pub end_ipats: VecDeque<(PVar, IPat)>,
         pub body: Body,
     }
@@ -45,12 +106,12 @@ mod input {
             body: Option<ast::Expr>,
             cxt: &mut CaseElabCxt,
         ) -> Row {
-            let pat = pat.map_or((Pattern::Any, span), |x| x.to_pattern(cxt));
+            let pat = pat.map_or((Pattern::Any, span), |x| {
+                x.to_pattern(cxt, &mut cxt.ecxt.size())
+            });
             Row {
                 columns: VecDeque::from(vec![Column { var, pat }]),
                 guard: None,
-                tyvars_size: cxt.ecxt.size(),
-                ty_ipats: Vec::new(),
                 end_ipats: VecDeque::new(),
                 body: cxt.add_body(body),
             }
@@ -58,7 +119,7 @@ mod input {
 
         pub fn make_env(&self, cxt: &CaseElabCxt) -> PEnv {
             let mut env = Vec::new();
-            for (var, pat) in self.ty_ipats.iter().chain(&self.end_ipats) {
+            for (var, pat) in &self.end_ipats {
                 match pat {
                     IPat::Var(n) => {
                         let ty = cxt.var_tys[var.0].0.clone();
@@ -69,12 +130,6 @@ mod input {
             }
             env
         }
-
-        pub fn ipats(&self) -> Vec<(PVar, IPat)> {
-            let mut vec = self.ty_ipats.clone();
-            vec.extend(self.end_ipats.iter().cloned());
-            vec
-        }
     }
 
     impl CaseElabCxt<'_, '_> {
@@ -84,94 +139,79 @@ mod input {
             var: PVar,
             ty: &Val,
             reason: &CheckReason,
-            target_cons: &mut Option<Cons>,
+            target_cons: &mut Option<PCons>,
+            env: &Env,
         ) -> RemovedColumn {
             match row.columns.iter().position(|c| c.var == var) {
                 Some(i) => match &row.columns[i].pat.0 {
-                    Pattern::Cons(cons, _args) => match target_cons {
-                        Some(tcons) => {
-                            if tcons == cons {
-                                match row.columns.remove(i).unwrap() {
-                                    Column {
-                                        pat: (Pattern::Cons(cons, args), _),
-                                        ..
-                                    } => RemovedColumn::Yes(cons, args),
-                                    _ => unreachable!(),
-                                }
-                            } else {
-                                RemovedColumn::No
+                    Pattern::Cons(cons, _iargs, _eargs, _rty, _) => {
+                        if target_cons.is_none()
+                            || matches!(target_cons, Some(tcons) if tcons == cons)
+                        {
+                            if target_cons.is_none() {
+                                *target_cons = Some(cons.clone());
                             }
-                        }
-                        None => {
-                            *target_cons = Some(cons.clone());
                             match row.columns.remove(i).unwrap() {
                                 Column {
-                                    pat: (Pattern::Cons(cons, args), _),
+                                    pat: (Pattern::Cons(cons, iargs, eargs, rty, rsize), span),
                                     ..
-                                } => RemovedColumn::Yes(cons, args),
+                                } => {
+                                    let mut env = env.clone();
+                                    env.reset_to_size(rsize);
+                                    while env.size < rsize {
+                                        env.push(None);
+                                    }
+                                    match (&rty, &ty) {
+                                        (Val::Neutral(a), Val::Neutral(b))
+                                            if a.head() == b.head() =>
+                                        {
+                                            self.ecxt
+                                                .mcxt
+                                                .local_unify(
+                                                    rty,
+                                                    ty.clone(),
+                                                    rsize,
+                                                    &mut env,
+                                                    reason,
+                                                )
+                                                .unwrap_or_else(|e| self.ecxt.error(span, e))
+                                        }
+                                        _ => self
+                                            .ecxt
+                                            .mcxt
+                                            .unify(
+                                                rty.clone(),
+                                                ty.clone(),
+                                                rsize,
+                                                env.clone(),
+                                                reason,
+                                            )
+                                            .unwrap_or_else(|e| self.ecxt.error(span, e)),
+                                    }
+                                    RemovedColumn::Yes(cons, iargs, eargs, Some(env))
+                                }
                                 _ => unreachable!(),
                             }
+                        } else {
+                            RemovedColumn::No
                         }
-                    },
+                    }
                     Pattern::Typed(pat, pty) => {
                         self.ecxt
                             .mcxt
-                            .unify((**pty).clone(), ty.clone(), self.ecxt.size(), reason)
+                            .unify((**pty).clone(), ty.clone(), env.size, env.clone(), reason)
                             .unwrap_or_else(|e| self.ecxt.error(row.columns[i].pat.1, e));
                         let pat = (**pat).clone();
                         row.columns[i].pat = pat;
-                        self.remove_column(row, var, ty, reason, target_cons)
+                        self.remove_column(row, var, ty, reason, target_cons, env)
                     }
-                    Pattern::Pair(_, _) => {
-                        let (a, b, span) = match row.columns.remove(i).unwrap() {
-                            Column {
-                                pat: (Pattern::Pair(a, b), span),
-                                ..
-                            } => (*a, *b, span),
-                            _ => unreachable!(),
-                        };
-                        let (va, vb) = match ty {
-                            Val::Fun(clos) if clos.class == Sigma => {
-                                // the sigma closure can capture the lhs, but it might not be a source-level variable in the pattern, e.g.
-                                //     let x: (a: SomeStruct, a.someType) = ...
-                                //     case x of
-                                //         (SomeStruct { someType }, x) => ...
-                                // there `x: a.someType`, so we need to materialize `a` as a "real" var, not just a PVar
-                                // we do this by adding an IPat with the name from the sigma (`a` in this case) to the pattern
-                                // however, these must go in order but before any other variables (since the types of those variables
-                                // can depend on the values of earlier ones.) Hence `row.ty_ipats`.
-                                assert_eq!(clos.params.len(), 1);
-                                let ta = clos.par_ty();
-                                let tb = clos.clone().open(row.tyvars_size);
-                                let va = self.pvar(ta, reason.clone());
-                                let vb = self.pvar(tb, reason.clone());
-                                row.tyvars_size += clos.params.len();
-                                row.ty_ipats.push((va, IPat::Var(clos.params[0].name)));
-                                (va, vb)
-                            }
-                            Val::Error => (
-                                self.pvar(Val::Error, reason.clone()),
-                                self.pvar(Val::Error, reason.clone()),
-                            ),
-                            ty => {
-                                // TODO include reason
-                                self.ecxt.error(
-                                    span,
-                                    TypeError::InvalidPattern(
-                                        "Tuple pattern invalid for type ".to_string(),
-                                        ty.clone().quote(row.tyvars_size, Some(&self.ecxt.mcxt)),
-                                    ),
-                                );
-                                (
-                                    self.pvar(Val::Error, reason.clone()),
-                                    self.pvar(Val::Error, reason.clone()),
-                                )
-                            }
-                        };
-                        row.columns.push_front(Column { var: vb, pat: b });
-                        row.columns.push_front(Column { var: va, pat: a });
-                        RemovedColumn::IPat(IPat::Pair(va, vb))
-                    }
+                    Pattern::Pair(_, _, _) => match row.columns.remove(i).unwrap() {
+                        Column {
+                            pat: (Pattern::Pair(a, b, size), span),
+                            ..
+                        } => RemovedColumn::Pair(a, b, size, span),
+                        _ => unreachable!(),
+                    },
                     Pattern::Or(_) => {
                         unreachable!("or patterns should have been removed before remove_column()")
                     }
@@ -179,7 +219,7 @@ mod input {
                         // The variable can't be used in the rest of the pattern
                         // and we don't want to define "real" variables that aren't used in other patterns
                         // so we push it to the end of the row
-                        row.end_ipats.push_front((var, IPat::Var(*v)));
+                        row.end_ipats.push_back((var, IPat::Var(*v)));
                         row.columns.remove(i);
                         RemovedColumn::Nothing
                     }
@@ -194,13 +234,189 @@ mod input {
     }
 
     impl ast::Expr {
-        fn to_pattern(&self, cxt: &mut CaseElabCxt) -> SPattern {
+        fn to_pattern(&self, cxt: &mut CaseElabCxt, size: &mut Size) -> SPattern {
             let pat = match self {
-                // TODO type constructors
-                ast::Expr::Var(v) => Pattern::Var(v.name(cxt.ecxt.db)),
-                ast::Expr::App(_) => todo!(),
+                // TODO datatype constructors
+                ast::Expr::Var(v) => {
+                    *size += 1;
+                    Pattern::Var(v.name(cxt.ecxt.db))
+                }
+                ast::Expr::App(x) => {
+                    let (mut lhs, mut lhs_ty) = x
+                        .lhs()
+                        .map(|x| x.infer(cxt.ecxt))
+                        .unwrap_or((Expr::Error, Val::Error));
+                    if let Some(member) = x.member() {
+                        (lhs, lhs_ty) = resolve_member(lhs, lhs_ty, member, cxt.ecxt);
+                    }
+                    let cons = match lhs {
+                        Expr::Head(Head::Var(Var::Cons(_, cons))) => cons,
+                        Expr::Error => return (Pattern::Any, self.span()),
+                        _ => {
+                            cxt.ecxt.error(
+                                x.lhs().unwrap().span(),
+                                "Expected a constructor in pattern",
+                            );
+                            return (Pattern::Any, self.span());
+                        }
+                    };
+                    let start_size = *size;
+                    let implicit = if let Some(args) = x.imp() {
+                        match lhs_ty {
+                            Val::Fun(clos) if clos.class == Pi(Impl) => {
+                                let args: Vec<_> = args
+                                    .args()
+                                    .into_iter()
+                                    .flat_map(|x| match x.expr() {
+                                        Some(x) => x.as_args(),
+                                        None => vec![Err(x.span())],
+                                    })
+                                    .collect();
+                                if args.len() > clos.params.len() {
+                                    cxt.ecxt.error(
+                                        x.span(),
+                                        "Extra implicit arguments to constructor in pattern",
+                                    );
+                                }
+                                let args: Vec<_> = args
+                                    .into_iter()
+                                    .map(Some)
+                                    .chain(std::iter::repeat(None))
+                                    .zip(&clos.params)
+                                    .map(|(a, b)| match a {
+                                        Some(Ok(e)) => (
+                                            (e.to_pattern(cxt, size)),
+                                            (b.ty.clone().eval(&mut Env::new(*size))),
+                                        ),
+                                        Some(Err(span)) => {
+                                            cxt.ecxt
+                                                .unify(
+                                                    Val::var(Var::Builtin(Builtin::UnitType)),
+                                                    b.ty.clone().eval(&mut Env::new(*size)),
+                                                    &CheckReason::ArgOf(x.lhs().unwrap().span()),
+                                                )
+                                                .unwrap_or_else(|e| cxt.ecxt.error(span, e));
+                                            (
+                                                (Pattern::Any, span),
+                                                (Val::var(Var::Builtin(Builtin::UnitType))),
+                                            )
+                                        }
+                                        None => {
+                                            *size += 1;
+                                            (
+                                                (
+                                                    Pattern::Var((
+                                                        cxt.ecxt.db.name("_".into()),
+                                                        RelSpan::empty(),
+                                                    )),
+                                                    RelSpan::empty(),
+                                                ),
+                                                (b.ty.clone().eval(&mut Env::new(*size))),
+                                            )
+                                        }
+                                    })
+                                    .collect();
+                                let arg = args
+                                    .iter()
+                                    .map(|x| x.0 .0.to_term(cxt.ecxt.db, &mut start_size.clone()))
+                                    .rfold(None, |acc, x| match acc {
+                                        None => Some(x),
+                                        Some(y) => Some(Val::Pair(
+                                            Box::new(x),
+                                            Box::new(y),
+                                            Box::new(Val::Error),
+                                        )),
+                                    })
+                                    .unwrap();
+                                lhs_ty = clos.apply(arg);
+                                args
+                            }
+                            Val::Error => {
+                                lhs_ty = Val::Error;
+                                Vec::new()
+                            }
+                            lty => {
+                                cxt.ecxt.error(
+                                    args.span(),
+                                    "Extra implicit arguments to constructor in pattern",
+                                );
+                                lhs_ty = lty;
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        match lhs_ty {
+                            Val::Fun(clos) if clos.class == Pi(Impl) => {
+                                let args: Vec<_> = clos
+                                    .params
+                                    .iter()
+                                    .map(|b| {
+                                        *size += 1;
+                                        (
+                                            (
+                                                Pattern::Var((
+                                                    cxt.ecxt.db.name("_".into()),
+                                                    RelSpan::empty(),
+                                                )),
+                                                RelSpan::empty(),
+                                            ),
+                                            (b.ty.clone().eval(&mut Env::new(*size))),
+                                        )
+                                    })
+                                    .collect();
+                                // This is correct since they're all var patterns
+                                lhs_ty = clos.open(start_size);
+                                args
+                            }
+                            _ => Vec::new(),
+                        }
+                    };
+                    let start_size = *size;
+                    let explicit = match (x.exp(), lhs_ty) {
+                        (Some(args), Val::Fun(clos)) if clos.class == Pi(Expl) => {
+                            let r = Some(Box::new((args.to_pattern(cxt, size), clos.par_ty())));
+                            lhs_ty = clos.apply(
+                                r.as_ref()
+                                    .unwrap()
+                                    .0
+                                     .0
+                                    .to_term(cxt.ecxt.db, &mut start_size.clone()),
+                            );
+                            r
+                        }
+                        (None, Val::Fun(clos)) => {
+                            cxt.ecxt.error(
+                                self.span(),
+                                "Expected explicit arguments to constructor in pattern",
+                            );
+                            let r = Some(Box::new(((Pattern::Any, self.span()), clos.par_ty())));
+                            lhs_ty = clos.apply(Val::Error);
+                            r
+                        }
+                        (Some(_), lty) => {
+                            cxt.ecxt.error(
+                                self.span(),
+                                "Extra explicit arguments to constructor in pattern",
+                            );
+                            lhs_ty = lty;
+                            None
+                        }
+                        (_, lty) => {
+                            lhs_ty = lty;
+                            None
+                        }
+                    };
+                    lhs_ty = lhs_ty.quote(*size, None).eval(&mut Env::new(*size));
+                    Pattern::Cons(PCons::Cons(cons), implicit, explicit, lhs_ty, *size)
+                }
                 ast::Expr::Lit(l) => match l.to_literal(cxt.ecxt) {
-                    Ok(l) => Pattern::Cons(Cons::Lit(l), Vec::new()),
+                    Ok(l) => Pattern::Cons(
+                        PCons::Lit(l),
+                        Vec::new(),
+                        None,
+                        Expr::Lit(l).ty(cxt.ecxt),
+                        *size,
+                    ),
                     Err(e) => {
                         // TODO do we actually want to assume Any for malformed patterns?
                         cxt.ecxt.error(self.span(), e);
@@ -216,17 +432,20 @@ mod input {
                             ),
                             self.span(),
                         ),
-                        |x| x.to_pattern(cxt),
+                        |x| x.to_pattern(cxt, size),
                     )
                 }
                 ast::Expr::Pair(x) => {
+                    let start_size = *size;
+                    *size += 1;
                     let a = x
                         .lhs()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
+                    // We insert an extra variable so the type can depend on the lhs even if it's not bound in the pattern
                     let b = x
                         .rhs()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
-                    Pattern::Pair(Box::new(a), Box::new(b))
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
+                    Pattern::Pair(Box::new(a), Box::new(b), start_size)
                 }
                 // TODO are any other binops valid patterns?
                 ast::Expr::BinOp(x)
@@ -238,19 +457,30 @@ mod input {
                             .any(|x| x.kind() == crate::parsing::SyntaxKind::Bar)
                     }) =>
                 {
+                    let old_size = *size;
                     let a = x
                         .a()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
+                    let new_size = *size;
+                    *size = old_size;
                     let b = x
                         .a()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt));
+                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
+                    if *size != new_size {
+                        // TODO actually check that the variables have the same names and types
+                        cxt.ecxt.error(
+                            x.span(),
+                            "Both sides of `|` pattern must bind the same variables",
+                        );
+                        return a;
+                    }
                     Pattern::Or(vec![a, b])
                 }
                 ast::Expr::Binder(x) => {
                     let pat = x
                         .pat()
                         .and_then(|x| x.expr())
-                        .map(|x| x.to_pattern(cxt))
+                        .map(|x| x.to_pattern(cxt, size))
                         .unwrap_or((Pattern::Any, x.span()));
                     match x
                         .ty()
@@ -309,13 +539,14 @@ enum IPat {
 struct Body(usize);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Cons {
+enum PCons {
     Lit(Literal),
+    Cons(Cons),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Branch<T: IsTerm> {
-    cons: Cons,
+    cons: PCons,
     args: Vec<PVar>,
     then: Box<DecNode<T>>,
 }
@@ -336,7 +567,7 @@ struct DecNode<T: IsTerm> {
 
 struct CaseElabCxt<'a, 'b> {
     ecxt: &'a mut Cxt<'b>,
-    env_tys: HashMap<Body, (PEnv, bool)>,
+    env_tys: HashMap<Body, (PEnv, bool, Env)>,
     var_tys: Vec<(Val, CheckReason)>,
     bodies: Vec<Option<ast::Expr>>,
 }
@@ -356,24 +587,30 @@ impl CaseElabCxt<'_, '_> {
 
     fn column_select_heuristic(&self, top_row: &input::Row, rows: &[input::Row]) -> PVar {
         // Find the variable used by the most rows
-        // TODO switch to left-to-right if GADT constructors are involved
-        top_row
-            .columns
-            .iter()
-            .map(|c| {
-                (
-                    c.var,
-                    rows.iter()
-                        .filter(|x| x.columns.iter().any(|c2| c2.var == c.var))
-                        .count(),
-                )
-            })
-            .max_by_key(|&(_, b)| b)
-            .unwrap()
-            .0
+        // TODO only use to left-to-right if GADT constructors are involved
+        return top_row.columns[0].var;
+        // top_row
+        //     .columns
+        //     .iter()
+        //     .map(|c| {
+        //         (
+        //             c.var,
+        //             rows.iter()
+        //                 .filter(|x| x.columns.iter().any(|c2| c2.var == c.var))
+        //                 .count(),
+        //         )
+        //     })
+        //     .max_by_key(|&(_, b)| b)
+        //     .unwrap()
+        //     .0
     }
 
-    fn compile_rows(&mut self, mut rows: Vec<input::Row>, reachable: bool) -> DecNode<Expr> {
+    fn compile_rows(
+        &mut self,
+        mut rows: Vec<input::Row>,
+        reachable: bool,
+        env: &Env,
+    ) -> DecNode<Expr> {
         if rows.is_empty() {
             // TODO find missing pattern and possibly emit error
             return DecNode {
@@ -390,7 +627,7 @@ impl CaseElabCxt<'_, '_> {
             let row = rows.remove(0);
             if reachable || !self.env_tys.contains_key(&row.body) {
                 self.env_tys
-                    .insert(row.body, (row.make_env(self), reachable));
+                    .insert(row.body, (row.make_env(self), reachable, env.clone()));
             } else {
                 return DecNode {
                     ipats: Vec::new(),
@@ -426,18 +663,17 @@ impl CaseElabCxt<'_, '_> {
                             body: Box::new(guard),
                         },
                         row.body,
-                        Box::new(self.compile_rows(rows, reachable)),
+                        Box::new(self.compile_rows(rows, reachable, env)),
                     )
                 }
                 None => {
                     // We still want type errors in unreachable rows!
-                    let _ = self.compile_rows(rows, false);
+                    let _ = self.compile_rows(rows, false, env);
                     Dec::Success(row.body)
                 }
             };
             return DecNode {
-                // TODO is this the correct way to handle ty_ipats or should it be higher up in the tree?
-                ipats: row.ipats(),
+                ipats: row.end_ipats.into(),
                 dec,
             };
         }
@@ -483,34 +719,95 @@ impl CaseElabCxt<'_, '_> {
         }
 
         let mut yes_cons = None;
+        let mut yes_env = None;
         let (mut yes, mut no): (Vec<input::Row>, Vec<input::Row>) = Default::default();
         let mut args = Vec::new();
         let mut start_ipats = Vec::new();
 
         for mut row in rows.iter().cloned() {
-            match self.remove_column(&mut row, switch_var, &sty, &sreason, &mut yes_cons) {
-                input::RemovedColumn::Yes(_cons, cargs) => {
-                    if args.is_empty() {
-                        todo!("find args types");
-                        // args.extend((0..cargs.len()).map(|_| self.pvar()));
+            match self.remove_column(&mut row, switch_var, &sty, &sreason, &mut yes_cons, env) {
+                input::RemovedColumn::Yes(_cons, iargs, eargs, env) => {
+                    if args.is_empty() && yes_env.is_none() {
+                        args.extend(
+                            iargs
+                                .iter()
+                                .map(|(_, ty)| self.pvar(ty.clone(), sreason.clone())),
+                        );
+                        eargs
+                            .as_deref()
+                            .map(|(_, ty)| args.push(self.pvar(ty.clone(), sreason.clone())));
+                        yes_env = env;
                     }
                     row.columns.extend(
-                        cargs
+                        iargs
                             .into_iter()
                             .zip(&args)
-                            .map(|(pat, &var)| input::Column { pat, var }),
+                            .map(|((pat, _), &var)| input::Column { pat, var }),
                     );
+                    eargs.map(|b| {
+                        row.columns.push_back(input::Column {
+                            pat: b.0,
+                            var: *args.last().unwrap(),
+                        })
+                    });
+                    yes.push(row);
+                }
+                input::RemovedColumn::Pair(a, b, size, span) => {
+                    // Make sure to share the PVars for all patterns that match on the same pair
+                    if args.is_empty() {
+                        let (va, vb) = match &sty {
+                            Val::Fun(clos) if clos.class == Sigma => {
+                                assert_eq!(clos.params.len(), 1);
+                                let ta = clos.par_ty();
+                                let tb = clos.clone().open(size);
+                                let va = self.pvar(ta, sreason.clone());
+                                let vb = self.pvar(tb, sreason.clone());
+                                (va, vb)
+                            }
+                            Val::Error => (
+                                self.pvar(Val::Error, sreason.clone()),
+                                self.pvar(Val::Error, sreason.clone()),
+                            ),
+                            ty => {
+                                // TODO include reason
+                                self.ecxt.error(
+                                    span,
+                                    TypeError::InvalidPattern(
+                                        "Tuple pattern invalid for type ".to_string(),
+                                        ty.clone().quote(size, Some(&self.ecxt.mcxt)),
+                                    ),
+                                );
+                                (
+                                    self.pvar(Val::Error, sreason.clone()),
+                                    self.pvar(Val::Error, sreason.clone()),
+                                )
+                            }
+                        };
+                        args.push(va);
+                        args.push(vb);
+                        start_ipats.push((switch_var, IPat::Pair(va, vb)));
+                    }
+                    // the sigma closure can capture the lhs, but it might not be a source-level variable in the pattern, e.g.
+                    //     let x: (a: SomeStruct, a.someType) = ...
+                    //     case x of
+                    //         (SomeStruct { someType }, x) => ...
+                    // there `x: a.someType`, so we need to materialize `a` as a "real" var, not just a PVar
+                    // we do this by adding a '_' var IPat to the pattern
+                    row.end_ipats.push_back((
+                        args[0],
+                        IPat::Var((self.ecxt.db.name("_".into()), RelSpan::empty())),
+                    ));
+                    row.columns.push_front(input::Column {
+                        var: args[1],
+                        pat: *b,
+                    });
+                    row.columns.push_front(input::Column {
+                        var: args[0],
+                        pat: *a,
+                    });
                     yes.push(row);
                 }
                 input::RemovedColumn::No => {
-                    no.push(row);
-                }
-                input::RemovedColumn::IPat(ipat) => {
-                    // It has patterns involving the switch variable, but doesn't actually depend on it
-                    // However, columns after this one might depend on the pattern, so we can't put it at the end
-                    // This row will go in both the yes and no branches, so we add the ipat to the start of this node
-                    start_ipats.push((switch_var, ipat));
-                    yes.push(row.clone());
                     no.push(row);
                 }
                 input::RemovedColumn::Nothing => {
@@ -521,10 +818,12 @@ impl CaseElabCxt<'_, '_> {
             }
         }
 
-        let mut yes = self.compile_rows(yes, reachable);
+        let yes_env = yes_env.unwrap_or_else(|| env.clone());
+        let mut yes = self.compile_rows(yes, reachable, &yes_env);
+
         match yes_cons {
             Some(yes_cons) => {
-                let no = self.compile_rows(no, reachable);
+                let no = self.compile_rows(no, reachable, env);
 
                 DecNode {
                     ipats: start_ipats,
@@ -608,26 +907,32 @@ pub(super) fn elab_case(
         .into_iter()
         .map(|(pat, span, body)| input::Row::new(svar, pat, span, body, &mut cxt))
         .collect();
-    let dec = cxt.compile_rows(rows, true);
+    let dec = cxt.compile_rows(rows, true, &cxt.ecxt.env());
     let mut rhs = Vec::new();
     for (i, body) in cxt.bodies.into_iter().enumerate() {
         match cxt.env_tys.get(&Body(i)) {
-            Some((env, reachable)) => {
+            Some((penv, reachable, env)) => {
                 if !reachable {
                     // If there's no body we have a bigger problem
                     if let Some(span) = body.as_ref().map(|x| x.span()) {
                         cxt.ecxt.warning(span, "Unreachable case branch");
                     }
                 }
+                let old_env = cxt.ecxt.env();
                 cxt.ecxt.push();
                 let mut params = Vec::new();
-                for (name, ty) in env {
+                for (name, ty) in penv {
                     params.push(Par {
                         name: *name,
                         ty: ty.clone().quote(cxt.ecxt.size(), None),
                     });
                     cxt.ecxt.define_local(*name, ty.clone(), None);
                 }
+                let mut env = env.clone();
+                while env.size < cxt.ecxt.size() {
+                    env.push(None);
+                }
+                cxt.ecxt.set_env(env);
                 let body = match rty {
                     Some((rty, reason)) => {
                         body.map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, reason))
@@ -654,6 +959,7 @@ pub(super) fn elab_case(
                     },
                 };
                 cxt.ecxt.pop();
+                cxt.ecxt.set_env(old_env);
                 rhs.push(EClos {
                     class: Lam(Expl),
                     params,
@@ -665,19 +971,6 @@ pub(super) fn elab_case(
     }
     (
         CaseOf { dec, svar, rhs },
-        // TODO quote with scope constraint
-        // basically we need to reject this:
-        //      (x: (a: Type, a)) => case x of
-        //          (_, x) => x
-        // (technically also possible is to type it as
-        //      (x: (a: Type, a)) -> case x of
-        //          (a, _) => a
-        // but that falls apart when x is complicated; best to let the user check that if necessary.)
-        //
-        // it should also attempt to do e.g.
-        //      ((a: I32, b: I32) => a + b) x
-        //      : case x of { (a, b) => I32 }
-        //      --> I32
         rty.as_ref()
             .map(|x| x.0.clone().quote(ecxt.size(), None))
             .unwrap_or(Expr::Error),
@@ -725,10 +1018,9 @@ fn elab_block(
     if block.is_empty() {
         match rty {
             Some((rty, reason)) => {
-                if let Err(e) = ecxt.mcxt.unify(
+                if let Err(e) = ecxt.unify(
                     Val::var(Var::Builtin(Builtin::UnitType)),
                     rty.clone(),
-                    ecxt.size(),
                     reason,
                 ) {
                     ecxt.error(span, e);
@@ -899,10 +1191,18 @@ impl IPat {
         }
     }
 }
-impl Cons {
+impl PCons {
     pub(super) fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         match self {
-            Cons::Lit(l) => l.pretty(db),
+            PCons::Lit(l) => l.pretty(db),
+            PCons::Cons(c) => match db.lookup_cons_id(*c) {
+                (def, SplitId::Named(n)) => db
+                    .def_name(def)
+                    .map(|x| x.pretty(db).add('.', ()))
+                    .unwrap_or(Doc::none())
+                    .chain(n.pretty(db)),
+                _ => Doc::start("{constructor}"),
+            },
         }
     }
 }

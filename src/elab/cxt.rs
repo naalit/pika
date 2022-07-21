@@ -133,6 +133,16 @@ impl Cxt<'_> {
         cxt
     }
 
+    pub fn unify(
+        &mut self,
+        inferred: Val,
+        expected: Val,
+        reason: &CheckReason,
+    ) -> Result<(), super::unify::UnifyError> {
+        self.mcxt
+            .unify(inferred, expected, self.size(), self.env(), reason)
+    }
+
     pub fn env(&self) -> Env {
         if self.env.size != self.size() {
             panic!(
@@ -144,9 +154,21 @@ impl Cxt<'_> {
         self.env.clone()
     }
 
+    pub fn set_env(&mut self, env: Env) {
+        assert_eq!(env.size, self.size());
+        self.env = env;
+    }
+
     pub fn define_local(&mut self, name: SName, ty: Val, value: Option<Val>) {
         self.scope_mut().define_local(name, ty);
         self.env.push(value);
+    }
+
+    pub fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val) {
+        if matches!(var, Var::Local(_, _)) {
+            panic!("Call define_local() for local variables!");
+        }
+        self.scope_mut().define(name, var, ty);
     }
 
     pub fn def_cxt(&self) -> DefCxt {

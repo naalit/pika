@@ -26,11 +26,14 @@ pub trait Elaborator: crate::parsing::Parser {
     #[salsa::interned]
     fn def_node(&self, node: (ast::Def, DefCxt)) -> DefNode;
 
+    #[salsa::interned]
+    fn cons_id(&self, def: Def, cons: SplitId) -> Cons;
+
     fn root_defs_n(&self, file: File) -> Vec<(SplitId, DefNode)>;
 
-    fn def_type_n(&self, def: DefNode) -> DefTypeResult;
+    fn def_type_n(&self, def_id: Def, def_node: DefNode) -> DefTypeResult;
 
-    fn def_elab_n(&self, def: DefNode) -> DefElabResult;
+    fn def_elab_n(&self, def_id: Def, def_node: DefNode) -> DefElabResult;
 
     fn def_elab(&self, def: Def) -> Option<DefElabResult>;
 
@@ -79,7 +82,7 @@ fn def_name(db: &dyn Elaborator, def: Def) -> Option<Name> {
                 ast::Def::LetDef(x) => x
                     .pat()?
                     .expr()?
-                    .as_let_def_pat(&mut Cxt::new(db, DefCxt::global(def_file(db, def))))
+                    .as_let_def_pat(&mut Cxt::new(db, DefCxt::global(def_file(db, def))))?
                     .0
                     .map(|x| x.0),
                 ast::Def::FunDef(x) => Some(x.name()?.name(db).0),
@@ -122,10 +125,10 @@ fn to_def_node(db: &dyn Elaborator, def: Def) -> Option<DefNode> {
     }
 }
 
-fn def_type_n(db: &dyn Elaborator, def_node: DefNode) -> DefTypeResult {
+fn def_type_n(db: &dyn Elaborator, def_id: Def, def_node: DefNode) -> DefTypeResult {
     let (def, cxt) = db.lookup_def_node(def_node);
     let mut cxt = Cxt::new(db, cxt);
-    let result = def.elab_type(def_node, &mut cxt);
+    let result = def.elab_type(def_id, def_node, &mut cxt);
     DefTypeResult {
         result,
         errors: cxt.emit_errors(),
@@ -133,13 +136,13 @@ fn def_type_n(db: &dyn Elaborator, def_node: DefNode) -> DefTypeResult {
 }
 
 fn def_type(db: &dyn Elaborator, def: Def) -> Option<DefTypeResult> {
-    db.to_def_node(def).map(|x| db.def_type_n(x))
+    db.to_def_node(def).map(|x| db.def_type_n(def, x))
 }
 
-fn def_elab_n(db: &dyn Elaborator, def_node: DefNode) -> DefElabResult {
+fn def_elab_n(db: &dyn Elaborator, def_id: Def, def_node: DefNode) -> DefElabResult {
     let (def, cxt) = db.lookup_def_node(def_node);
     let mut cxt = Cxt::new(db, cxt);
-    let result = def.elab(def_node, &mut cxt);
+    let result = def.elab(def_id, def_node, &mut cxt);
     DefElabResult {
         result,
         errors: cxt.emit_errors(),
@@ -149,7 +152,7 @@ fn def_elab_n(db: &dyn Elaborator, def_node: DefNode) -> DefElabResult {
 }
 
 fn def_elab(db: &dyn Elaborator, def: Def) -> Option<DefElabResult> {
-    db.to_def_node(def).map(|x| db.def_elab_n(x))
+    db.to_def_node(def).map(|x| db.def_elab_n(def, x))
 }
 
 pub enum TypeError {
@@ -236,6 +239,7 @@ impl From<unify::UnifyError> for TypeError {
 // - elaborating types occurs in salsa
 // alternative B is the same as A except type elaboration isn't duplicated so it's just better
 intern_key!(DefNode);
+intern_key!(Cons);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefElabResult {

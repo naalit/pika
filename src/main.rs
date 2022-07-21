@@ -15,7 +15,7 @@ mod elab;
 mod parsing;
 mod pretty;
 
-use crate::elab::{Definition, ElabDatabase, Elaborator};
+use crate::elab::{DefBody, Definition, ElabDatabase, Elaborator};
 use crate::parsing::{Parser, ParserDatabase, ParserExt};
 use common::*;
 
@@ -266,7 +266,11 @@ fn main() {
             let def = db.def(DefLoc::Root(file, split));
             if let Some(def) = db.def_elab(def) {
                 match def.result {
-                    Some(Definition { name, ty, body }) => {
+                    Some(Definition {
+                        name,
+                        ty,
+                        body: DefBody::Let(body),
+                    }) => {
                         Doc::none()
                             .add("let", Doc::style_keyword())
                             .space()
@@ -278,6 +282,24 @@ fn main() {
                             .add('=', ())
                             .space()
                             .chain(body.pretty(&db))
+                            .emit_stderr();
+                    }
+                    Some(Definition {
+                        name,
+                        ty,
+                        body: DefBody::Type(_ctors),
+                    }) => {
+                        Doc::none()
+                            .add("type", Doc::style_keyword())
+                            .space()
+                            .chain(name.pretty(&db))
+                            .add(':', ())
+                            .space()
+                            .chain(ty.pretty(&db))
+                            .space()
+                            .add('=', ())
+                            .space()
+                            .add("...", ())
                             .emit_stderr();
                     }
                     None => todo!(),

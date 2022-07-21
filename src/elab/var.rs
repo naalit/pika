@@ -1,4 +1,4 @@
-use super::{metas::Meta, val::Val};
+use super::{metas::Meta, val::Val, Cons};
 use crate::common::{Def, SName};
 use std::collections::VecDeque;
 
@@ -29,7 +29,7 @@ impl Idx {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct Lvl(u32);
 impl Lvl {
     pub fn as_u32(self) -> u32 {
@@ -97,12 +97,14 @@ pub enum Var<L> {
     Meta(Meta),
     Builtin(super::term::Builtin),
     Def(SName, Def),
+    Cons(SName, Cons),
 }
 impl<T> Var<T> {
     pub fn with_sname(self, n: SName) -> Var<T> {
         match self {
             Var::Local(_, l) => Var::Local(n, l),
             Var::Def(_, d) => Var::Def(n, d),
+            Var::Cons(_, d) => Var::Cons(n, d),
             Var::Meta(_) | Var::Builtin(_) => self,
         }
     }
@@ -114,6 +116,7 @@ impl Var<Lvl> {
             Var::Meta(m) => Var::Meta(m),
             Var::Builtin(b) => Var::Builtin(b),
             Var::Def(n, d) => Var::Def(n, d),
+            Var::Cons(n, d) => Var::Cons(n, d),
         }
     }
 }
@@ -124,6 +127,7 @@ impl Var<Idx> {
             Var::Meta(m) => Var::Meta(m),
             Var::Builtin(b) => Var::Builtin(b),
             Var::Def(n, d) => Var::Def(n, d),
+            Var::Cons(n, d) => Var::Cons(n, d),
         }
     }
 }
@@ -171,7 +175,7 @@ impl Env {
                 break;
             }
         }
-        self.size = size;
+        self.size = size.min(self.size);
     }
 
     pub fn get(&self, i: Idx) -> Option<&Val> {
@@ -197,6 +201,14 @@ impl Env {
     pub fn pop(&mut self) {
         self.size = self.size.dec();
         self.vals.pop_front();
+    }
+
+    pub fn replace(&mut self, i: Idx, v: Val) {
+        assert!(i.in_scope(self.size));
+        while self.vals.len() <= i.as_u32() as usize {
+            self.vals.push_back(None);
+        }
+        self.vals[i.as_u32() as usize] = Some(v);
     }
 }
 impl Extend<Option<Val>> for Env {

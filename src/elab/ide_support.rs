@@ -2,7 +2,15 @@ use super::*;
 
 pub enum FindSpanResult<'a> {
     Name(SName, Cow<'a, Expr>),
-    Expr(&'a Expr, RelSpan),
+    Expr(Cow<'a, Expr>, RelSpan),
+}
+impl FindSpanResult<'_> {
+    fn into_owned(self) -> FindSpanResult<'static> {
+        match self {
+            FindSpanResult::Name(n, c) => FindSpanResult::Name(n, Cow::Owned(c.into_owned())),
+            FindSpanResult::Expr(c, s) => FindSpanResult::Expr(Cow::Owned(c.into_owned()), s),
+        }
+    }
 }
 
 impl EClos {
@@ -62,7 +70,7 @@ impl Expr {
             Expr::Spanned(espan, x) => {
                 if espan.superset(span) {
                     x.find_span(span, cxt)?;
-                    return Err(FindSpanResult::Expr(&*x, *espan));
+                    return Err(FindSpanResult::Expr(Cow::Borrowed(&*x), *espan));
                 }
             }
             Expr::Error => (),
@@ -94,22 +102,39 @@ pub fn hover_type(
     let mut cxt = Cxt::new(db, def_cxt);
     // Look in both the body and the type
     if result.is_none() {
-        result = Some(
-            match def
+        let res = match &def.result.as_ref()?.body {
+            DefBody::Let(body) => body.find_span(RelSpan::new(pos, pos), &mut cxt),
+            DefBody::Type(ctors) => {
+                let mut res = Ok(());
+                for (split, span, ty) in ctors {
+                    let ty = ty.clone().quote(cxt.size(), None);
+                    if span.contains(pos) {
+                        res = Err(FindSpanResult::Name(
+                            (split.name().unwrap(), *span),
+                            Cow::Owned(ty),
+                        ));
+                        break;
+                    }
+                    let e = ty
+                        .find_span(RelSpan::new(pos, pos), &mut cxt)
+                        .map_err(|e| e.into_owned());
+                    if e.is_err() {
+                        res = e;
+                        break;
+                    }
+                }
+                res
+            }
+        };
+        result = Some(match res {
+            Ok(()) => def
                 .result
                 .as_ref()?
-                .body
+                .ty
                 .find_span(RelSpan::new(pos, pos), &mut cxt)
-            {
-                Ok(()) => def
-                    .result
-                    .as_ref()?
-                    .ty
-                    .find_span(RelSpan::new(pos, pos), &mut cxt)
-                    .err()?,
-                Err(e) => e,
-            },
-        );
+                .err()?,
+            Err(e) => e,
+        });
     }
     match result? {
         FindSpanResult::Name((name, span), ty) => Some((

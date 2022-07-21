@@ -57,18 +57,24 @@ impl Neutral {
             Ok(v.clone())
         } else {
             drop(guard);
-            // TODO all these
             let head: Val = match self.head {
-                Head::Var(Var::Local(_, _)) => return Err(self),
+                Head::Var(Var::Local(_, l)) => match env.get(l.idx(env.size)) {
+                    Some(v) => v.clone(),
+                    None => return Err(self),
+                },
+                // TODO resolve applicable builtins
                 Head::Var(Var::Builtin(_)) => return Err(self),
+                Head::Var(Var::Cons(_, _)) => return Err(self),
                 Head::Var(Var::Meta(m)) => match mcxt.lookup(m) {
                     Some(e) => e.eval(&mut env.clone()),
                     None => return Err(self),
                 },
-                Head::Var(Var::Def(_, d)) => match mcxt.db.def_elab(d).and_then(|x| x.result) {
-                    Some(res) => res.body.eval(&mut env.clone()),
-                    None => todo!(),
-                },
+                Head::Var(Var::Def(_, d)) => {
+                    match mcxt.db.def_elab(d).and_then(|x| x.result).map(|x| x.body) {
+                        Some(DefBody::Let(body)) => body.eval(&mut env.clone()),
+                        _ => return Err(self),
+                    }
+                }
             };
             let mut env = env.clone();
             let mut val = self
@@ -375,10 +381,8 @@ impl Expr {
         match self {
             Expr::Type => Val::Type,
             Expr::Head(h) => match h {
-                Head::Var(Var::Def(n, d)) => Val::var(Var::Def(n, d)),
                 Head::Var(Var::Local(n, i)) => env.val(n, i),
-                Head::Var(Var::Builtin(b)) => Val::var(Var::Builtin(b)),
-                Head::Var(Var::Meta(m)) => Val::var(Var::Meta(m)),
+                Head::Var(v) => Val::var(v.cvt(Size::zero())),
             },
             Expr::Elim(x, e) => x.eval(env).app(e.eval(env), env),
             Expr::Fun(clos) => Val::Fun(Box::new(clos.eval(env))),
@@ -473,9 +477,6 @@ impl Val {
                 let mut inlined_meta = false;
                 let head = match head {
                     // Don't resolve the neutral, we want the smallest term when quoting
-                    Head::Var(Var::Def(n, d)) => Expr::var(Var::Def(n, d)),
-                    Head::Var(Var::Local(n, i)) => Expr::var(Var::Local(n, i.idx(size))),
-                    Head::Var(Var::Builtin(b)) => Expr::var(Var::Builtin(b)),
                     Head::Var(Var::Meta(m)) => match inline_metas.and_then(|mcxt| mcxt.lookup(m)) {
                         Some(t) => {
                             inlined_meta = true;
@@ -483,6 +484,7 @@ impl Val {
                         }
                         None => Expr::var(Var::Meta(m)),
                     },
+                    Head::Var(v) => Expr::var(v.cvt(size)),
                 };
                 let res = spine.into_iter().fold(head, |head, elim| {
                     Expr::Elim(Box::new(head), Box::new(elim.quote(size, inline_metas)))

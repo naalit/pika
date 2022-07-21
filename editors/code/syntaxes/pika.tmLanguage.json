@@ -2,15 +2,22 @@
 	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
 	"name": "Pika",
 	"patterns": [
-		{ "include": "#keywords" },
-		{ "include": "#symbols" },
-		{ "include": "#types" },
-		{ "include": "#vars" },
-		{ "include": "#literals" },
-		{ "include": "#comments" },
-		{ "include": "#strings" }
+		{ "include": "#expression" }
 	],
 	"repository": {
+		"expression": {
+			"patterns": [
+				{ "include": "#type-dec" },
+				{ "include": "#keywords" },
+				{ "include": "#symbols" },
+				{ "include": "#types" },
+				{ "include": "#function-call" },
+				{ "include": "#vars" },
+				{ "include": "#literals" },
+				{ "include": "#comments" },
+				{ "include": "#strings" }
+			]
+		},
 		"attributes": {
 			"begin": "\\@\\[",
 			"end": "\\]",
@@ -36,6 +43,28 @@
             "match": "\\b([A-Z][A-Za-z_0-9]*)",
             "name": "entity.name.class.pika"
         },
+		"function-call": {
+			"_comment": "This is an awful regex involving all four of {positive,negative}{lookahead,lookbehind} but it *mostly* works. Semantic tokens will be better of course",
+			"match": "(?<=(case|catch|if|then|else|let|fun|box|unbox|[^a-zA-Z_0-9)\\s]|^)\\s*)\\b([a-z_][a-zA-Z_0-9]*)\\b\\s*(?!of|then)(?=[\\(\\[a-zA-Z_0-9]|<\\|)",
+			"captures": {
+				"2": {
+					"name": "entity.name.function.pika"
+				}
+			}
+		},
+		"type-dec": {
+			"_comment": "This makes `of` highlight correctly if on the same line as `eff`/`type`",
+			"begin": "\\b(type|eff)\\b",
+			"end": "\\b($|of)\\b",
+			"captures": {
+				"1": {
+					"name": "keyword.other.pika"
+				}
+			},
+			"patterns": [
+				{"include": "#expression" }
+			]
+		},
 		"keywords": {
 			"patterns": [{
 				"name": "keyword.control.pika",
@@ -64,7 +93,7 @@
 			},
 			{
 				"match": "\\b(and|or)\\b",
-				"name": "keyword.control.logic.pika"
+				"name": "keyword.other.logic.pika"
 			},
 			{
 				"match": "=",

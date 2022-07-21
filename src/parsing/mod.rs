@@ -72,6 +72,14 @@ pub enum SplitId {
     Named(Name),
     Idx(usize),
 }
+impl SplitId {
+    pub fn name(self) -> Option<Name> {
+        match self {
+            SplitId::Named(n) => Some(n),
+            SplitId::Idx(_) => None,
+        }
+    }
+}
 
 #[salsa::query_group(ParserDatabase)]
 pub trait Parser {

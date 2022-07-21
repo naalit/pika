@@ -233,7 +233,13 @@ pub struct ConsDef {
 pub struct Definition {
     pub name: SName,
     pub ty: Box<Expr>,
-    pub body: Box<Expr>,
+    pub body: DefBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefBody {
+    Let(Box<Expr>),
+    Type(Vec<(SplitId, RelSpan, Val)>),
 }
 
 pub trait IsTerm {
@@ -363,6 +369,20 @@ impl Expr {
                         .def_type(*d)
                         .and_then(|x| x.result)
                         .unwrap_or(Val::Error),
+                    Var::Cons(_, c) => {
+                        let (d, split) = cxt.db.lookup_cons_id(*c);
+                        cxt.db
+                            .def_elab(d)
+                            .and_then(|x| x.result)
+                            .and_then(|x| match x.body {
+                                DefBody::Let(_) => None,
+                                DefBody::Type(v) => v
+                                    .into_iter()
+                                    .find(|(s, _, _)| *s == split)
+                                    .map(|(_, _, ty)| ty),
+                            })
+                            .unwrap_or(Val::Error)
+                    }
                 },
             },
             Expr::Elim(head, elim) => match &**elim {
@@ -423,6 +443,7 @@ impl Pretty for Expr {
                     Var::Builtin(b) => Doc::start(b),
                     // TODO take into account module paths etc.
                     Var::Def(n, _) => n.pretty(db),
+                    Var::Cons(n, _) => n.pretty(db),
                 },
             },
             Expr::Elim(a, b) => match &**b {

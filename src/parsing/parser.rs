@@ -376,7 +376,15 @@ impl<'a> Parser<'a> {
                                 break;
                             }
 
-                            self.params(false);
+                            if self.cur() != Tok::Colon {
+                                self.params(false);
+                            }
+
+                            if self.maybe(Tok::Colon) {
+                                self.push(Tok::Ty);
+                                self.expr(());
+                                self.pop();
+                            }
 
                             self.pop();
 
@@ -506,7 +514,7 @@ impl<'a> Parser<'a> {
             self.push_at(cp, Tok::ImpPars);
             self.pop();
         }
-        if matches!(self.cur(), Tok::Arrow | Tok::WideArrow) {
+        if !self.cur().starts_atom() {
             if !had_imp {
                 // Explicit parameters are required if implicit ones don't exist
                 self.expected("parameters", None);
@@ -809,7 +817,9 @@ impl<'a> Parser<'a> {
                     self.var();
                     self.pop();
 
-                    self.arguments();
+                    if self.cur().starts_atom() || self.cur() == Tok::SOpen {
+                        self.arguments();
+                    }
                     self.pop();
                 }
                 // , is right associative
@@ -1176,6 +1186,7 @@ impl Tok {
                 | Tok::CatchKw
                 | Tok::DoKw
                 | Tok::StringLit
+                | Tok::Indent
         )
     }
 
