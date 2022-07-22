@@ -146,6 +146,7 @@ impl ast::Def {
                 })
             }
             ast::Def::TypeDef(x) => {
+                cxt.push();
                 let (_, ty) = infer_fun(
                     x.imp_par(),
                     x.exp_par().as_par(),
@@ -315,6 +316,7 @@ impl ast::Def {
                     ctors.push((split, span, cty));
                 }
 
+                cxt.push_def_scope(def_id);
                 let mut i = 0;
                 let children = x
                     .block()
@@ -333,7 +335,9 @@ impl ast::Def {
                         (split, def_node)
                     })
                     .collect();
+                cxt.pop();
 
+                cxt.pop();
                 Some(Definition {
                     name: x.name()?.name(cxt.db),
                     // Inline metas in all types involved after elaborating the constructors
