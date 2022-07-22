@@ -270,6 +270,7 @@ fn main() {
                         name,
                         ty,
                         body: DefBody::Let(body),
+                        ..
                     }) => {
                         Doc::none()
                             .add("let", Doc::style_keyword())
@@ -288,6 +289,7 @@ fn main() {
                         name,
                         ty,
                         body: DefBody::Type(_ctors),
+                        ..
                     }) => {
                         Doc::none()
                             .add("type", Doc::style_keyword())

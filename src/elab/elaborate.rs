@@ -1,20 +1,20 @@
 use super::*;
 
 impl ast::Expr {
-    pub(super) fn as_let_def_pat(&self, cxt: &mut Cxt) -> Option<(Option<SName>, Option<ast::Ty>)> {
+    pub(super) fn as_let_def_pat(
+        &self,
+        db: &dyn Elaborator,
+    ) -> Option<(Option<SName>, Option<ast::Ty>)> {
         match self {
-            ast::Expr::Var(n) => Some((Some(n.name(cxt.db)), None)),
-            ast::Expr::GroupedExpr(x) => x.expr().and_then(|x| x.as_let_def_pat(cxt)),
+            ast::Expr::Var(n) => Some((Some(n.name(db)), None)),
+            ast::Expr::GroupedExpr(x) => x.expr().and_then(|x| x.as_let_def_pat(db)),
             ast::Expr::Binder(x) => {
                 let (name, ty) = x
                     .pat()
                     .and_then(|x| x.expr())
-                    .and_then(|x| x.as_let_def_pat(cxt))?;
+                    .and_then(|x| x.as_let_def_pat(db))?;
                 if ty.is_some() {
-                    cxt.error(
-                        x.pat().unwrap().span(),
-                        "Binder (_:_) is not allowed to be nested in another binder",
-                    );
+                    return None;
                 }
                 Some((name, x.ty()))
             }
@@ -26,7 +26,7 @@ impl ast::Expr {
 impl ast::Def {
     pub(super) fn elab_type(&self, def_id: Def, def_node: DefNode, cxt: &mut Cxt) -> Option<Val> {
         match self {
-            ast::Def::LetDef(l) => match l.pat()?.expr()?.as_let_def_pat(cxt) {
+            ast::Def::LetDef(l) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
                 Some((_, Some(ty))) => Some(
                     ty.expr()?
                         .check(Val::Type, cxt, &CheckReason::UsedAsType)
@@ -74,7 +74,7 @@ impl ast::Def {
     pub(super) fn elab(&self, def_id: Def, def_node: DefNode, cxt: &mut Cxt) -> Option<Definition> {
         match self {
             ast::Def::LetDef(x) => {
-                match x.pat()?.expr()?.as_let_def_pat(cxt) {
+                match x.pat()?.expr()?.as_let_def_pat(cxt.db) {
                     Some((Some(name), None)) => {
                         let (body, ty) = x.body()?.expr()?.infer(cxt);
                         // inline metas in the term
@@ -86,6 +86,7 @@ impl ast::Def {
                                 x.body().unwrap().span(),
                                 Box::new(body),
                             ))),
+                            children: Vec::new(),
                         })
                     }
                     Some((Some(name), Some(pty))) => {
@@ -107,6 +108,7 @@ impl ast::Def {
                                 x.body().unwrap().span(),
                                 Box::new(body),
                             ))),
+                            children: Vec::new(),
                         })
                     }
                     Some((None, _)) => None,
@@ -140,6 +142,7 @@ impl ast::Def {
                         cxt.size(),
                         Some(&cxt.mcxt),
                     ))),
+                    children: Vec::new(),
                 })
             }
             ast::Def::TypeDef(x) => {
@@ -223,6 +226,31 @@ impl ast::Def {
                             None,
                             cxt,
                         );
+                        fn head(t: &Expr) -> &Expr {
+                            match t {
+                                Expr::Elim(a, e) if matches!(&**e, Elim::App(_, _)) => head(a),
+                                t => t,
+                            }
+                        }
+                        let rty = match &cty {
+                            Expr::Fun(clos) if matches!(clos.class, Pi(_)) => match &*clos.body {
+                                Expr::Fun(clos2)
+                                    if clos.class == Pi(Impl) && clos2.class == Pi(Expl) =>
+                                {
+                                    &clos2.body
+                                }
+                                rty => rty,
+                            },
+                            rty => rty,
+                        };
+                        match head(rty) {
+                            Expr::Head(Head::Var(Var::Def(_, def))) if *def == def_id => (),
+                            Expr::Error => (),
+                            _ => cxt.error(
+                                c.ret_ty().unwrap().span(),
+                                Doc::start("Datatype constructor must return a value of its parent type, not").space().chain(rty.pretty(cxt.db))
+                            ),
+                        }
                         cty
                     } else {
                         cxt.push();
@@ -277,8 +305,34 @@ impl ast::Def {
 
                         ty
                     };
+                    if let Some(name) = c.name().map(|x| x.name(cxt.db)) {
+                        cxt.define(
+                            name,
+                            Var::Cons(name, cxt.db.cons_id(def_id, split)),
+                            cty.clone().eval(&mut cxt.env()),
+                        );
+                    }
                     ctors.push((split, span, cty));
                 }
+
+                let mut i = 0;
+                let children = x
+                    .block()
+                    .map(|x| x.defs())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|x| {
+                        let split = x
+                            .name(cxt.db)
+                            .map(|(n, _)| SplitId::Named(n))
+                            .unwrap_or_else(|| {
+                                i += 1;
+                                SplitId::Idx(i - 1)
+                            });
+                        let def_node = cxt.db.def_node((x, cxt.def_cxt()));
+                        (split, def_node)
+                    })
+                    .collect();
 
                 Some(Definition {
                     name: x.name()?.name(cxt.db),
@@ -298,10 +352,27 @@ impl ast::Def {
                             })
                             .collect(),
                     ),
+                    children,
                 })
             }
             ast::Def::TypeDefShort(_) => todo!(),
             ast::Def::TypeDefStruct(_) => todo!(),
+        }
+    }
+}
+
+impl ast::Def {
+    pub fn name(&self, db: &dyn Elaborator) -> Option<SName> {
+        match self {
+            ast::Def::LetDef(x) => x
+                .pat()
+                .and_then(|x| x.expr())
+                .and_then(|x| x.as_let_def_pat(db))
+                .and_then(|(n, _)| n),
+            ast::Def::FunDef(x) => x.name().map(|x| x.name(db)),
+            ast::Def::TypeDef(x) => x.name().map(|x| x.name(db)),
+            ast::Def::TypeDefShort(x) => x.name().map(|x| x.name(db)),
+            ast::Def::TypeDefStruct(x) => x.name().map(|x| x.name(db)),
         }
     }
 }
@@ -744,25 +815,44 @@ pub(super) fn resolve_member(
                 match lhs_val {
                     Val::Neutral(n) => match n.head() {
                         Head::Var(Var::Def(def_name, def)) => {
-                            match cxt.db.def_elab(def).and_then(|x| x.result).map(|x| x.body) {
+                            let edef = cxt.db.def_elab(def);
+                            match edef
+                                .as_ref()
+                                .and_then(|x| x.result.as_ref())
+                                .map(|x| &x.body)
+                            {
                                 Some(DefBody::Type(ctors)) => {
-                                    if let Some((split, _, ty)) = ctors
-                                        .into_iter()
-                                        .find(|(s, _, _)| *s == SplitId::Named(name.0))
+                                    if let Some((split, _, ty)) =
+                                        ctors.iter().find(|(s, _, _)| *s == SplitId::Named(name.0))
                                     {
                                         return (
-                                            Expr::var(Var::Cons(name, cxt.db.cons_id(def, split))),
-                                            ty,
+                                            Expr::var(Var::Cons(name, cxt.db.cons_id(def, *split))),
+                                            ty.clone(),
                                         );
+                                    } else if let Some((split, _)) = edef
+                                        .unwrap()
+                                        .result
+                                        .unwrap()
+                                        .children
+                                        .into_iter()
+                                        .find(|(s, _)| *s == SplitId::Named(name.0))
+                                    {
+                                        let def = cxt.db.def(DefLoc::Child(def, split));
+                                        let ty = cxt
+                                            .db
+                                            .def_type(def)
+                                            .and_then(|x| x.result)
+                                            .unwrap_or(Val::Error);
+                                        return (Expr::var(Var::Def(name, def)), ty);
                                     } else {
                                         cxt.error(
                                             member.span(),
                                             Doc::start("Type ")
                                                 .add(cxt.db.lookup_name(def_name.0), Doc::COLOR2)
-                                                .add(" has no member", ())
+                                                .add(" has no member ", ())
                                                 .add(cxt.db.lookup_name(name.0), Doc::COLOR1),
                                         );
-                                        return (lhs, lhs_ty);
+                                        return (Expr::Error, Val::Error);
                                     }
                                 }
                                 _ => (),
@@ -786,7 +876,7 @@ pub(super) fn resolve_member(
             )
             .add("' does not have members", ()),
     );
-    (lhs, lhs_ty)
+    (Expr::Error, Val::Error)
 }
 
 impl ast::Expr {

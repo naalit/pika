@@ -234,6 +234,7 @@ pub struct Definition {
     pub name: SName,
     pub ty: Box<Expr>,
     pub body: DefBody,
+    pub children: Vec<(SplitId, DefNode)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

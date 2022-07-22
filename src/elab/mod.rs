@@ -47,6 +47,23 @@ pub trait Elaborator: crate::parsing::Parser {
 }
 
 fn all_errors(db: &dyn Elaborator, file: File) -> Vec<(Error, SplitId)> {
+    fn def_errors(
+        db: &dyn Elaborator,
+        def: Def,
+        root: SplitId,
+        errors: &mut Vec<(Error, SplitId)>,
+    ) {
+        if let Some(res) = db.def_type(def) {
+            errors.extend(res.errors.into_iter().map(|x| (x, root)));
+        }
+        if let Some(res) = db.def_elab(def) {
+            errors.extend(res.errors.into_iter().map(|x| (x, root)));
+            for (split, _) in res.result.map(|x| x.children).unwrap_or_default() {
+                def_errors(db, db.def(DefLoc::Child(def, split)), root, errors)
+            }
+        }
+    }
+
     let splits = db.all_split_ids(file);
     let mut errors = Vec::new();
     for split in splits {
@@ -54,12 +71,7 @@ fn all_errors(db: &dyn Elaborator, file: File) -> Vec<(Error, SplitId)> {
             errors.extend(res.errors.into_iter().map(|x| (x, split)));
         }
         let def = db.def(DefLoc::Root(file, split));
-        if let Some(res) = db.def_type(def) {
-            errors.extend(res.errors.into_iter().map(|x| (x, split)));
-        }
-        if let Some(res) = db.def_elab(def) {
-            errors.extend(res.errors.into_iter().map(|x| (x, split)));
-        }
+        def_errors(db, def, split, &mut errors)
     }
     errors
 }
@@ -78,18 +90,7 @@ fn def_name(db: &dyn Elaborator, def: Def) -> Option<Name> {
         _ => {
             let def_node = db.to_def_node(def)?;
             let (adef, _) = db.lookup_def_node(def_node);
-            match adef {
-                ast::Def::LetDef(x) => x
-                    .pat()?
-                    .expr()?
-                    .as_let_def_pat(&mut Cxt::new(db, DefCxt::global(def_file(db, def))))?
-                    .0
-                    .map(|x| x.0),
-                ast::Def::FunDef(x) => Some(x.name()?.name(db).0),
-                ast::Def::TypeDef(x) => Some(x.name()?.name(db).0),
-                ast::Def::TypeDefShort(x) => Some(x.name()?.name(db).0),
-                ast::Def::TypeDefStruct(x) => Some(x.name()?.name(db).0),
-            }
+            adef.name(db).map(|(n, _)| n)
         }
     }
 }
@@ -112,14 +113,14 @@ fn to_def_node(db: &dyn Elaborator, def: Def) -> Option<DefNode> {
             .into_iter()
             .find(|(x, _)| *x == split)
             .map(|(_, x)| x),
-        DefLoc::Child(parent, _) => {
+        DefLoc::Child(parent, split) => {
             // We have to completely elaborate the parent to find the type of the child
             // which makes sense since we need all the type information in the body to determine the context for the child
-            let parent = db.def_elab(parent)?;
+            let parent = db.def_elab(parent)?.result?;
             parent
                 .children
                 .into_iter()
-                .find(|(x, _)| *x == def)
+                .find(|(x, _)| *x == split)
                 .map(|(_, x)| x)
         }
     }
@@ -146,8 +147,6 @@ fn def_elab_n(db: &dyn Elaborator, def_id: Def, def_node: DefNode) -> DefElabRes
     DefElabResult {
         result,
         errors: cxt.emit_errors(),
-        // TODO def children
-        children: Vec::new(),
     }
 }
 
@@ -245,7 +244,6 @@ intern_key!(Cons);
 pub struct DefElabResult {
     pub result: Option<Definition>,
     pub errors: Vec<Error>,
-    pub children: Vec<(Def, DefNode)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

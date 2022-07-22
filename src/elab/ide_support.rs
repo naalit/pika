@@ -79,16 +79,9 @@ impl Expr {
     }
 }
 
-pub fn hover_type(
-    db: &dyn Elaborator,
-    file: File,
-    split: SplitId,
-    pos: u32,
-) -> Option<(Doc, RelSpan)> {
-    // TODO visit child defs
-    let def = db.def(DefLoc::Root(file, split));
-    let (_, def_cxt) = db.lookup_def_node(db.to_def_node(def)?);
-    let def = db.def_elab(def)?;
+pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc, RelSpan)> {
+    let (_, def_cxt) = db.lookup_def_node(db.to_def_node(def_id)?);
+    let def = db.def_elab(def_id)?;
     // First try the def name
     let mut result = None;
     if let Some(name) = def.result.as_ref().map(|x| x.name) {
@@ -126,15 +119,23 @@ pub fn hover_type(
                 res
             }
         };
-        result = Some(match res {
+        result = match res {
             Ok(()) => def
                 .result
                 .as_ref()?
                 .ty
                 .find_span(RelSpan::new(pos, pos), &mut cxt)
-                .err()?,
-            Err(e) => e,
-        });
+                .err(),
+            Err(e) => Some(e),
+        };
+        if result.is_none() {
+            for (split, _) in &def.result.as_ref()?.children {
+                let res = def_hover_type(db, db.def(DefLoc::Child(def_id, *split)), pos);
+                if res.is_some() {
+                    return res;
+                }
+            }
+        }
     }
     match result? {
         FindSpanResult::Name((name, span), ty) => Some((
@@ -146,4 +147,14 @@ pub fn hover_type(
             Some((ty.pretty(db), span))
         }
     }
+}
+
+pub fn hover_type(
+    db: &dyn Elaborator,
+    file: File,
+    split: SplitId,
+    pos: u32,
+) -> Option<(Doc, RelSpan)> {
+    let def_id = db.def(DefLoc::Root(file, split));
+    def_hover_type(db, def_id, pos)
 }
