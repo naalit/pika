@@ -173,8 +173,8 @@ impl<'i> Lexer<'i> {
             "else" => Tok::ElseKw,
             "box" => Tok::BoxKw,
             "unbox" => Tok::UnboxKw,
-            // Where technically ends one block and starts another one, but we ignore that.
             "where" => Tok::WhereKw,
+            "mut" => Tok::MutKw,
             "eff" => Tok::EffKw,
             "do" => Tok::DoKw,
             "struct" => Tok::StructKw,
@@ -300,6 +300,23 @@ impl<'i> Lexer<'i> {
             '@' => self.tok(Tok::At),
             '\\' => self.tok(Tok::Backslash),
             ';' => self.tok(Tok::Newline),
+            '\'' => {
+                self.next();
+                if self.peek().map_or(true, |x| !x.is_alphabetic() || x == '_') {
+                    let err = (
+                        LexError::InvalidToken(self.peek().unwrap_or('\n')),
+                        self.span(),
+                    );
+                    self.errors.push(err);
+                }
+                while self
+                    .peek()
+                    .map_or(false, |x| x.is_alphanumeric() || x == '_')
+                {
+                    self.next();
+                }
+                self.tok_in_place(Tok::Dependency)
+            }
 
             '\n' => {
                 // We're going to emit one or more tokens which might include newline, indent, and dedent
@@ -515,6 +532,7 @@ impl<'i> fmt::Display for Tok {
             Tok::EffKw => "'eff'",
             Tok::BoxKw => "'box'",
             Tok::UnboxKw => "'unbox'",
+            Tok::MutKw => "'mut'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",
@@ -543,6 +561,7 @@ impl<'i> fmt::Display for Tok {
             Tok::FloatLit => "float literal",
             Tok::IntLit => "float literal",
             Tok::Name => "name",
+            Tok::Dependency => "dependency name",
             Tok::StringLit => "string literal",
             Tok::At => "'@'",
             Tok::POpen => "'('",

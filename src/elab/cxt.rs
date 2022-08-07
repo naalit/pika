@@ -110,38 +110,6 @@ impl LocalScope {
             .map(|(_, d)| d)
     }
 
-    fn global(db: &(impl Elaborator + ?Sized), file: File) -> Self {
-        let mut global_defs = Vec::from_iter(
-            [
-                ("I8", Builtin::IntType(IntType::I8), Val::Type),
-                ("I16", Builtin::IntType(IntType::I16), Val::Type),
-                ("I32", Builtin::IntType(IntType::I32), Val::Type),
-                ("I64", Builtin::IntType(IntType::I64), Val::Type),
-                ("U8", Builtin::IntType(IntType::U8), Val::Type),
-                ("U16", Builtin::IntType(IntType::U16), Val::Type),
-                ("U32", Builtin::IntType(IntType::U32), Val::Type),
-                ("U64", Builtin::IntType(IntType::U64), Val::Type),
-            ]
-            .iter()
-            .map(|(k, v, t)| {
-                (
-                    db.name(k.to_string()),
-                    VarDef::Var(Var::Builtin(*v), t.clone()),
-                )
-            }),
-        );
-        for split in db.all_split_ids(file) {
-            let def = db.def(DefLoc::Root(file, split));
-            if let Some(name) = db.def_name(def) {
-                global_defs.push((name, VarDef::Def(def)));
-            }
-        }
-        LocalScope {
-            size: Size::zero(),
-            names: global_defs,
-        }
-    }
-
     fn new(size: Size) -> Self {
         LocalScope {
             size,

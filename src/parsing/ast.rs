@@ -233,6 +233,10 @@ make_nodes! {
 
     GroupedExpr = expr: Expr;
 
+    // examine keyword to tell whether it's 'mut'
+    Reference = expr: Expr;
+    DepExpr = dep_tok: (!Dependency), expr: Expr;
+
     enum Expr =
         Var,
         Lam,
@@ -250,7 +254,9 @@ make_nodes! {
         // Patterns parse as expressions
         EffPat,
         Binder,
-        StructInit
+        StructInit,
+        Reference,
+        DepExpr
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -655,6 +661,30 @@ impl Pretty for Expr {
                 .chain(x.a().pretty())
                 .space()
                 .chain(x.b().pretty()),
+            Expr::Reference(x) => Doc::start('&')
+                .add(
+                    if x.syntax()
+                        .unwrap()
+                        .children_with_tokens()
+                        .any(|x| x.as_token().map(|x| x.kind()) == Some(SyntaxKind::MutKw))
+                    {
+                        "mut "
+                    } else {
+                        ""
+                    },
+                    Doc::style_keyword(),
+                )
+                .space()
+                .chain(x.expr().pretty()),
+            Expr::DepExpr(x) => Doc::none()
+                .add(
+                    x.dep_tok()
+                        .map(|x| x.text().to_string())
+                        .unwrap_or_else(|| "'?".to_string()),
+                    Doc::style_keyword(),
+                )
+                .space()
+                .chain(x.expr().pretty()),
         };
         Doc::start('{').chain(p).add('}', ())
     }

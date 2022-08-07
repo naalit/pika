@@ -514,17 +514,17 @@ impl<'a> Parser<'a> {
             self.push_at(cp, Tok::ImpPars);
             self.pop();
         }
-        if !self.cur().starts_atom() {
+        if self.cur().starts_atom() || self.cur() == Tok::Indent {
+            // Explicit parameters
+            let cp = self.checkpoint();
+            self.expr(Prec::App);
+            Some(cp)
+        } else {
             if !had_imp {
                 // Explicit parameters are required if implicit ones don't exist
                 self.expected("parameters", None);
             }
             None
-        } else {
-            // Explicit parameters
-            let cp = self.checkpoint();
-            self.expr(Prec::App);
-            Some(cp)
         }
     }
 
@@ -578,7 +578,7 @@ impl<'a> Parser<'a> {
     /// Parses an expression where all operators have at least the given precedence
     /// If `lhs` is `Some`, will only parse the operator and right hand side and add it to the provides lhs
     fn expr(&mut self, params: impl Into<ExprParams>) {
-        let ExprParams {
+        let params@ExprParams {
             min_prec,
             lhs,
             allow_lambda,
@@ -593,6 +593,19 @@ impl<'a> Parser<'a> {
                         self.advance();
                         self.expr(Prec::Indented);
                         self.expect(Tok::Dedent);
+                        self.pop();
+                    }
+                    Tok::Dependency => {
+                        self.push(Tok::DepExpr);
+                        self.advance();
+                        self.expr(params);
+                        self.pop();
+                    }
+                    Tok::BitAnd => {
+                        self.push(Tok::Reference);
+                        self.advance();
+                        self.maybe(Tok::MutKw);
+                        self.expr(params);
                         self.pop();
                     }
                     Tok::BoxKw | Tok::UnboxKw => {
@@ -704,7 +717,7 @@ impl<'a> Parser<'a> {
                     //   then b
                     //   else c
                     //
-                    // because Tok::Min > Tok::If > everything else
+                    // because Tok::Min < Tok::If < everything else
                     // (so operator chaining is not allowed in an if condition if it starts on the `if` line)
                     Tok::IfKw => {
                         self.push(Tok::If);
@@ -817,7 +830,10 @@ impl<'a> Parser<'a> {
                     self.var();
                     self.pop();
 
-                    if self.cur().starts_atom() || self.cur() == Tok::SOpen {
+                    if self.cur().starts_atom()
+                        || (self.cur() == Tok::Indent && min_prec <= Prec::Min)
+                        || self.cur() == Tok::SOpen
+                    {
                         self.arguments();
                     }
                     self.pop();
@@ -1186,7 +1202,6 @@ impl Tok {
                 | Tok::CatchKw
                 | Tok::DoKw
                 | Tok::StringLit
-                | Tok::Indent
         )
     }
 

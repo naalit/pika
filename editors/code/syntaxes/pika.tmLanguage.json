@@ -71,8 +71,11 @@
 				"match": "\\b(do|case|catch|of|if|then|else)\\b"
 			},  {
                 "name": "keyword.other.pika",
-                "match": "\\b(type|eff|with|struct|let|fun|where|impl|box|unbox)\\b"
-            }]
+                "match": "\\b(type|eff|with|struct|let|fun|where|impl|box|unbox|mut)\\b"
+            }, {
+				"name": "storage.modifier.dependency.pika",
+				"match": "['][a-zA-Z_][0-9a-zA-Z_]*(?!['])\\b"
+			}]
 		},
 		"symbols": {
 			"patterns": [{

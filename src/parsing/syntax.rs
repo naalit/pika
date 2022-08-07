@@ -26,6 +26,7 @@ pub enum SyntaxKind {
     EffKw,
     BoxKw,
     UnboxKw,
+    MutKw,
 
     // Symbols the lexer recognizes as a "binary operator"
     Colon,     // :
@@ -58,6 +59,7 @@ pub enum SyntaxKind {
     IntLit,
     FloatLit,
     Name,
+    Dependency,
     StringLit,
 
     // Other tokens
@@ -90,6 +92,10 @@ pub enum SyntaxKind {
     Binder,
     Pair,
     App,
+
+    /// An expression with a dependency annotation
+    DepExpr,
+    Reference,
 
     ImpArg,
     ImpArgs,
