@@ -381,6 +381,29 @@ impl ast::Def {
     }
 }
 
+impl ast::Expr {
+    fn add_deps(&self, v: &mut Vec<Par>, cxt: &mut Cxt) {
+        self.visit(&mut |x| match x {
+            ast::Expr::DepExpr(x) => {
+                let name = (
+                    cxt.db
+                        .name(x.dep_tok().map_or("_".into(), |x| x.text().into())),
+                    x.span(),
+                );
+                // TODO Dep type?
+                cxt.define_local(name, Val::Error, None);
+                v.push(Par {
+                    name,
+                    ty: Expr::Error,
+                });
+                true
+            }
+            ast::Expr::Pi(_) => false,
+            _ => true,
+        })
+    }
+}
+
 fn infer_fun(
     implicit: Option<ast::ImpPars>,
     explicit: Option<SomePar>,
@@ -393,7 +416,19 @@ fn infer_fun(
     // [a, b, c, d] => ((e, f) => ...)
 
     cxt.push();
-    let implicit = check_params(
+    let mut deps = Vec::new();
+    for i in implicit.iter().flat_map(|x| x.pars()) {
+        i.par()
+            .and_then(|x| x.pat()?.expr())
+            .map(|x| x.add_deps(&mut deps, cxt));
+    }
+    for i in &explicit {
+        i.par.add_deps(&mut deps, cxt);
+    }
+    if let Some(t) = &ret_ty {
+        t.add_deps(&mut deps, cxt);
+    }
+    let mut implicit = check_params(
         implicit
             .into_iter()
             .flat_map(|x| x.pars())
@@ -409,6 +444,10 @@ fn infer_fun(
         &CheckReason::UsedAsType,
         cxt,
     );
+    let implicit = {
+        deps.append(&mut implicit);
+        deps
+    };
     let explicit = explicit.map_or(Vec::new(), |x| {
         check_params(
             x.par.as_args(),
@@ -1181,6 +1220,27 @@ impl ast::Expr {
                             cxt,
                         );
                         (pi, Val::Type)
+                    }
+                    ast::Expr::Reference(x) => todo!(),
+                    ast::Expr::DepExpr(x) => {
+                        let name = cxt
+                            .db
+                            .name(x.dep_tok().ok_or("Missing dependency name")?.text().into());
+                        let (dep, _) = cxt
+                            .lookup((name, x.span()))
+                            .ok_or("Dependency annotation outside of function type")?;
+                        let term = x
+                            .expr()
+                            .ok_or("Missing expression after dependency")?
+                            .check(Val::Type, cxt, &CheckReason::UsedAsType);
+                        let term = match term {
+                            Expr::Dep(mut v, t) => {
+                                v.push(Expr::var(dep.cvt(cxt.size())));
+                                Expr::Dep(v, t)
+                            }
+                            term => Expr::Dep(vec![Expr::var(dep.cvt(cxt.size()))], Box::new(term)),
+                        };
+                        (term, Val::Type)
                     }
                     ast::Expr::App(x) => {
                         let (mut lhs, mut lhs_ty) = x

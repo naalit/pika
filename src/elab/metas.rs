@@ -494,6 +494,12 @@ impl Expr {
                 b.check_solution(cxt, mode, s_from, s_to)?;
                 t.check_solution(cxt, mode, s_from, s_to)?;
             }
+            Expr::Dep(v, t) => {
+                for i in v {
+                    i.check_solution(cxt, mode, s_from, s_to)?;
+                }
+                t.check_solution(cxt, mode, s_from, s_to)?;
+            }
             Expr::Fun(EClos {
                 class: _,
                 params,

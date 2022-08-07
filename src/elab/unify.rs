@@ -354,6 +354,18 @@ impl UnifyCxt<'_, '_> {
                 self.unify(a, b, new_size, state)
             }
 
+            (Val::Dep(va, ta), Val::Dep(vb, tb)) => {
+                // TODO solve meta dep to multiple concrete deps
+                if va.len() != vb.len() {
+                    return Err(UnifyErrorKind::Conversion);
+                }
+                // TODO allow reordered dependencies ('a 'b = 'b 'a)
+                for (a, b) in va.into_iter().zip(vb) {
+                    self.unify(a, b, size, state)?;
+                }
+                self.unify(*ta, *tb, size, state)
+            }
+
             // Now handle neutrals as directed by the unfolding state
             // If possible, try approximate conversion checking, unfolding if it fails (and if that's allowed)
             (Val::Neutral(a), Val::Neutral(b)) if state.try_approx() && a.head() == b.head() => {

@@ -261,6 +261,7 @@ pub enum Val {
     // Do(Vec<Stmt>),
     Lit(Literal),
     Pair(Box<Val>, Box<Val>, Box<Val>),
+    Dep(Vec<Val>, Box<Val>),
     Error,
 }
 impl IsTerm for Val {
@@ -400,6 +401,10 @@ impl Expr {
                 Box::new(b.eval(env)),
                 Box::new(t.eval(env)),
             ),
+            Expr::Dep(v, t) => Val::Dep(
+                v.into_iter().map(|x| x.eval(env)).collect(),
+                Box::new(t.eval(env)),
+            ),
             Expr::Error => Val::Error,
             Expr::Spanned(_, x) => x.eval(env),
         }
@@ -457,6 +462,12 @@ impl Expr {
                 b._eval_quote(env, size, inline_metas);
                 t._eval_quote(env, size, inline_metas);
             }
+            Expr::Dep(v, t) => {
+                for i in v {
+                    i._eval_quote(env, size, inline_metas);
+                }
+                t._eval_quote(env, size, inline_metas);
+            }
             Expr::Error => (),
             Expr::Spanned(_, x) => x._eval_quote(env, size, inline_metas),
         }
@@ -504,6 +515,10 @@ impl Val {
                     res
                 }
             }
+            Val::Dep(v, t) => Expr::Dep(
+                v.into_iter().map(|x| x.quote(size, inline_metas)).collect(),
+                Box::new(t.quote(size, inline_metas)),
+            ),
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),
             Val::Pair(a, b, t) => Expr::Pair(
@@ -566,6 +581,12 @@ impl Val {
             Val::Pair(a, b, t) => {
                 a.check_scope(size)?;
                 b.check_scope(size)?;
+                t.check_scope(size)
+            }
+            Val::Dep(v, t) => {
+                for i in v {
+                    i.check_scope(size)?;
+                }
                 t.check_scope(size)
             }
             Val::Error => Ok(()),
@@ -646,6 +667,12 @@ impl Expr {
             Expr::Pair(a, b, t) => {
                 a.check_scope(allowed, inner_size, size)?;
                 b.check_scope(allowed, inner_size, size)?;
+                t.check_scope(allowed, inner_size, size)
+            }
+            Expr::Dep(v, t) => {
+                for i in v {
+                    i.check_scope(allowed, inner_size, size)?;
+                }
                 t.check_scope(allowed, inner_size, size)
             }
             Expr::Spanned(_, x) => x.check_scope(allowed, inner_size, size),

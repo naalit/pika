@@ -315,6 +315,81 @@ impl Var {
     }
 }
 
+impl Expr {
+    pub fn visit(&self, f: &mut impl FnMut(&Self) -> bool) {
+        if f(self) {
+            match self {
+                Expr::Var(_) => (),
+                Expr::Lam(x) => {
+                    x.imp_par().map(|x| {
+                        x.pars().iter().for_each(|x| {
+                            x.par()
+                                .and_then(|x| x.pat()?.expr())
+                                .map(|x| x.visit(f));
+                        })
+                    });
+                    x.exp_par()
+                        .and_then(|x| x.pat()?.expr())
+                        .map(|x| x.visit(f));
+                    x.body().and_then(|x| x.expr()).map(|x| x.visit(f));
+                }
+                Expr::Pi(x) => {
+                    x.imp_par().map(|x| {
+                        x.pars().iter().for_each(|x| {
+                            x.par()
+                                .and_then(|x| x.pat()?.expr())
+                                .map(|x| x.visit(f));
+                        })
+                    });
+                    x.exp_par().and_then(|x| x.expr()).map(|x| x.visit(f));
+                    x.body().and_then(|x| x.expr()).map(|x| x.visit(f));
+                }
+                Expr::App(x) => {
+                    x.lhs().map(|x| x.visit(f));
+                    x.imp().map(|x| {
+                        x.args().iter().for_each(|x| {
+                            x.expr().map(|x| x.visit(f));
+                        })
+                    });
+                    x.exp().map(|x| x.visit(f));
+                }
+                Expr::BinOp(x) => {
+                    x.a().map(|x| x.visit(f));
+                    x.b().map(|x| x.visit(f));
+                }
+                Expr::Pair(x) => {
+                    x.lhs().map(|x| x.visit(f));
+                    x.rhs().map(|x| x.visit(f));
+                }
+                Expr::Box(x) => {
+                    x.expr().map(|x| x.visit(f));
+                }
+                Expr::GroupedExpr(x) => {
+                    x.expr().map(|x| x.visit(f));
+                }
+                Expr::Binder(x) => {
+                    x.ty().and_then(|x| x.expr()).map(|x| x.visit(f));
+                }
+                Expr::Reference(x) => {
+                    x.expr().map(|x| x.visit(f));
+                }
+                Expr::DepExpr(x) => {
+                    x.expr().map(|x| x.visit(f));
+                }
+                // Don't recurse into non-expressions
+                Expr::Do(_) => (),
+                // These also count
+                Expr::Case(_) => (),
+                Expr::Lit(_) => (),
+                Expr::If(_) => (),
+                Expr::Type(_) => (),
+                Expr::EffPat(_) => (),
+                Expr::StructInit(_) => todo!(),
+            }
+        }
+    }
+}
+
 pub trait Pretty {
     fn pretty(&self) -> Doc;
 }

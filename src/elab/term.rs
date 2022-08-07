@@ -297,6 +297,7 @@ pub enum Expr {
     /// (consider `(I32, 3)`, which may be `(Type, I32)` or `(a: Type, a)`)
     Pair(Box<Expr>, Box<Expr>, Box<Expr>),
     Spanned(RelSpan, Box<Expr>),
+    Dep(Vec<Expr>, Box<Expr>),
     Error,
 }
 impl PartialEq for Expr {
@@ -351,6 +352,7 @@ impl Expr {
     pub fn ty(&self, cxt: &mut Cxt) -> Val {
         match self {
             Expr::Type => Val::Type,
+            Expr::Dep(_, _) => Val::Type,
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
@@ -447,6 +449,12 @@ impl Pretty for Expr {
                     Var::Cons(n, _) => n.pretty(db),
                 },
             },
+            Expr::Dep(d, t) => Doc::intersperse(
+                d.iter().map(|x| x.pretty(db).style(Doc::style_keyword())),
+                Doc::none().space(),
+            )
+            .space()
+            .chain(t.pretty(db)),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)
