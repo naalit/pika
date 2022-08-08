@@ -94,6 +94,7 @@ impl std::ops::AddAssign<usize> for Size {
 #[derive(Debug, Copy, Clone, Eq, Hash)]
 pub enum Var<L> {
     Local(SName, L),
+    DepLocal(SName, L),
     Meta(Meta),
     Builtin(super::term::Builtin),
     Def(SName, Def),
@@ -103,6 +104,7 @@ impl<T> Var<T> {
     pub fn with_sname(self, n: SName) -> Var<T> {
         match self {
             Var::Local(_, l) => Var::Local(n, l),
+            Var::DepLocal(_, l) => Var::DepLocal(n, l),
             Var::Def(_, d) => Var::Def(n, d),
             Var::Cons(_, d) => Var::Cons(n, d),
             Var::Meta(_) | Var::Builtin(_) => self,
@@ -113,6 +115,7 @@ impl Var<Lvl> {
     pub fn cvt(self, size: Size) -> Var<Idx> {
         match self {
             Var::Local(n, l) => Var::Local(n, l.idx(size)),
+            Var::DepLocal(n, l) => Var::DepLocal(n, l.idx(size)),
             Var::Meta(m) => Var::Meta(m),
             Var::Builtin(b) => Var::Builtin(b),
             Var::Def(n, d) => Var::Def(n, d),
@@ -124,6 +127,7 @@ impl Var<Idx> {
     pub fn cvt(self, size: Size) -> Var<Lvl> {
         match self {
             Var::Local(n, l) => Var::Local(n, l.lvl(size)),
+            Var::DepLocal(n, l) => Var::DepLocal(n, l.lvl(size)),
             Var::Meta(m) => Var::Meta(m),
             Var::Builtin(b) => Var::Builtin(b),
             Var::Def(n, d) => Var::Def(n, d),
@@ -138,6 +142,8 @@ impl<L: PartialEq> PartialEq for Var<L> {
             (Self::Meta(l0), Self::Meta(r0)) => l0 == r0,
             (Self::Builtin(l0), Self::Builtin(r0)) => l0 == r0,
             (Self::Def(_, l0), Self::Def(_, r0)) => l0 == r0,
+            (Self::Cons(_, l0), Self::Cons(_, r0)) => l0 == r0,
+            (Self::DepLocal(_, l0), Self::DepLocal(_, r0)) => l0 == r0,
             _ => false,
         }
     }
@@ -189,6 +195,20 @@ impl Env {
             .cloned()
             .flatten()
             .unwrap_or_else(|| Val::var(Var::Local(n, i.lvl(self.size))))
+    }
+    pub fn lval(&self, i: Idx) -> Lvl {
+        self.vals
+            .get(i.0 as usize)
+            .cloned()
+            .flatten()
+            .and_then(|x| match x {
+                Val::Neutral(n) if n.spine().is_empty() => match n.head() {
+                    super::Head::Var(Var::Local(_, l)) => Some(l),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| i.lvl(self.size))
     }
 
     pub fn push(&mut self, v: Option<Val>) {

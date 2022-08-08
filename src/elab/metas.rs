@@ -43,8 +43,8 @@ impl MetaBounds {
             Some(SpecialBound::IntType { must_fit }) => {
                 let mut val = val.clone();
                 val.inline_head(&mut Env::new(size), mcxt);
-                match val {
-                    Val::Neutral(ref n)
+                match val.no_deps() {
+                    Val::Neutral(n)
                         if matches!(
                             n.head(),
                             Head::Var(Var::Builtin(Builtin::IntType(_))) | Head::Var(Var::Meta(_))
@@ -77,7 +77,7 @@ impl MetaBounds {
                         }
                     }
                     Val::Error => Ok(()),
-                    val => Err(MetaSolveError::BoundsNotInt(val.quote(size, None))),
+                    _ => Err(MetaSolveError::BoundsNotInt(val.quote(size, None))),
                 }
             }
             None => Ok(()),

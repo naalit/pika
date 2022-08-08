@@ -356,6 +356,7 @@ impl Expr {
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
+                    Var::DepLocal(_, _) => Val::Error, // TODO Dep type?
                     Var::Meta(m) => match cxt.mcxt.meta_ty(*m) {
                         Some(t) => t,
                         None => match cxt.mcxt.lookup(*m) {
@@ -442,6 +443,9 @@ impl Pretty for Expr {
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(name, _i) => Doc::start(db.lookup_name(name.0)), //.add('.', ()).add(_i.as_u32(), ()),
+                    Var::DepLocal(name, _i) => Doc::start("'{")
+                        .add(db.lookup_name(name.0), ())
+                        .add("}", ()),
                     Var::Meta(m) => Doc::start(m).style(Doc::style_literal()),
                     Var::Builtin(b) => Doc::start(b),
                     // TODO take into account module paths etc.

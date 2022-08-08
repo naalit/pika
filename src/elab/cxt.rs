@@ -165,6 +165,13 @@ impl Cxt<'_> {
     }
 
     pub fn define_local(&mut self, name: SName, ty: Val, value: Option<Val>) {
+        let ty = match ty {
+            ty @ Val::Dep(_, _) => ty,
+            ty => Val::Dep(
+                vec![Val::var(Var::DepLocal(name, self.size().next_lvl()))],
+                Box::new(ty),
+            ),
+        };
         self.scope_mut().unwrap().define_local(name, ty);
         self.env.push(value);
     }

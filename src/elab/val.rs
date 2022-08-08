@@ -63,6 +63,8 @@ impl Neutral {
                     Some(v) => (v.clone(), false),
                     None => return Err(self),
                 },
+                // TODO do we need to try to inline here?
+                Head::Var(Var::DepLocal(_, _)) => return Err(self),
                 // TODO resolve applicable builtins
                 Head::Var(Var::Builtin(_)) => return Err(self),
                 Head::Var(Var::Cons(_, _)) => return Err(self),
@@ -391,6 +393,7 @@ impl Expr {
             Expr::Type => Val::Type,
             Expr::Head(h) => match h {
                 Head::Var(Var::Local(n, i)) => env.val(n, i),
+                Head::Var(Var::DepLocal(n, i)) => Val::var(Var::DepLocal(n, env.lval(i))),
                 Head::Var(v) => Val::var(v.cvt(Size::zero())),
             },
             Expr::Elim(x, e) => x.eval(env).app(e.eval(env), env),
@@ -415,6 +418,9 @@ impl Expr {
             Expr::Type => (),
             Expr::Head(h) => match h {
                 Head::Var(Var::Local(n, i)) => *self = env.val(*n, *i).quote(size, inline_metas),
+                Head::Var(Var::DepLocal(_, i)) => {
+                    *i = env.lval(*i).idx(size);
+                }
                 Head::Var(Var::Meta(m)) => match inline_metas {
                     Some(mcxt) => {
                         if let Some(expr) = mcxt.lookup(*m) {
@@ -527,6 +533,13 @@ impl Val {
                 Box::new(t.quote(size, inline_metas)),
             ),
             Val::Error => Expr::Error,
+        }
+    }
+
+    pub fn no_deps(&self) -> &Val {
+        match self {
+            Val::Dep(_, t) => t.no_deps(),
+            _ => self,
         }
     }
 
