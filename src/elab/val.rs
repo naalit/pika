@@ -374,14 +374,19 @@ impl EClos {
         }
     }
 
-    fn _eval_quote(&mut self, env: &mut Env, mut size: Size, inline_metas: Option<&MetaCxt>) {
+    pub fn eval_quote_in_place(
+        &mut self,
+        env: &mut Env,
+        mut size: Size,
+        inline_metas: Option<&MetaCxt>,
+    ) {
         let state = env.state();
         for i in &mut self.params {
-            i.ty._eval_quote(env, size, inline_metas);
+            i.ty.eval_quote_in_place(env, size, inline_metas);
             env.push(Some(Val::var(Var::Local(i.name, size.next_lvl()))));
             size += 1;
         }
-        self.body._eval_quote(env, size, inline_metas);
+        self.body.eval_quote_in_place(env, size, inline_metas);
         env.reset(state);
     }
 }
@@ -413,7 +418,12 @@ impl Expr {
         }
     }
 
-    fn _eval_quote(&mut self, env: &mut Env, size: Size, inline_metas: Option<&MetaCxt>) {
+    pub fn eval_quote_in_place(
+        &mut self,
+        env: &mut Env,
+        size: Size,
+        inline_metas: Option<&MetaCxt>,
+    ) {
         match self {
             Expr::Type => (),
             Expr::Head(h) => match h {
@@ -425,7 +435,7 @@ impl Expr {
                     Some(mcxt) => {
                         if let Some(expr) = mcxt.lookup(*m) {
                             *self = expr;
-                            self._eval_quote(env, size, inline_metas);
+                            self.eval_quote_in_place(env, size, inline_metas);
                         }
                     }
                     None => (),
@@ -433,7 +443,7 @@ impl Expr {
                 _ => (),
             },
             Expr::Elim(f, e) => {
-                f._eval_quote(env, size, inline_metas);
+                f.eval_quote_in_place(env, size, inline_metas);
                 match &mut **e {
                     // beta-reduce if possible
                     Elim::App(_, x) => match f.unspanned() {
@@ -442,16 +452,16 @@ impl Expr {
                             let x = x.clone().eval(env);
                             *self = clos.clone().eval(env).apply(x).quote(size, inline_metas);
                         }
-                        _ => x._eval_quote(env, size, inline_metas),
+                        _ => x.eval_quote_in_place(env, size, inline_metas),
                     },
                     Elim::Member(_) => todo!(),
                     Elim::Case(case, ty) => {
-                        case.visit_mut(|x| x._eval_quote(env, size, inline_metas));
-                        ty._eval_quote(env, size, inline_metas);
+                        case.visit_mut(|x| x.eval_quote_in_place(env, size, inline_metas));
+                        ty.eval_quote_in_place(env, size, inline_metas);
                     }
                 }
             }
-            Expr::Fun(clos) => clos._eval_quote(env, size, inline_metas),
+            Expr::Fun(clos) => clos.eval_quote_in_place(env, size, inline_metas),
             Expr::Lit(Literal::Int(val, Err((_, meta)))) => match inline_metas {
                 Some(mcxt) => {
                     if let Some(Expr::Head(Head::Var(Var::Builtin(Builtin::IntType(i))))) =
@@ -464,24 +474,24 @@ impl Expr {
             },
             Expr::Lit(_) => (),
             Expr::Pair(a, b, t) => {
-                a._eval_quote(env, size, inline_metas);
-                b._eval_quote(env, size, inline_metas);
-                t._eval_quote(env, size, inline_metas);
+                a.eval_quote_in_place(env, size, inline_metas);
+                b.eval_quote_in_place(env, size, inline_metas);
+                t.eval_quote_in_place(env, size, inline_metas);
             }
             Expr::Dep(v, t) => {
                 for i in v {
-                    i._eval_quote(env, size, inline_metas);
+                    i.eval_quote_in_place(env, size, inline_metas);
                 }
-                t._eval_quote(env, size, inline_metas);
+                t.eval_quote_in_place(env, size, inline_metas);
             }
             Expr::Error => (),
-            Expr::Spanned(_, x) => x._eval_quote(env, size, inline_metas),
+            Expr::Spanned(_, x) => x.eval_quote_in_place(env, size, inline_metas),
         }
     }
 
     /// More or less like `self.eval().quote()`, but doesn't beta-reduce.
     pub fn eval_quote(mut self, env: &mut Env, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
-        self._eval_quote(env, size, inline_metas);
+        self.eval_quote_in_place(env, size, inline_metas);
         self
     }
 

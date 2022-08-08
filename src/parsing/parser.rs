@@ -598,14 +598,14 @@ impl<'a> Parser<'a> {
                     Tok::Dependency => {
                         self.push(Tok::DepExpr);
                         self.advance();
-                        self.expr(params);
+                        self.expr(params.max(Prec::App));
                         self.pop();
                     }
                     Tok::BitAnd => {
                         self.push(Tok::Reference);
                         self.advance();
                         self.maybe(Tok::MutKw);
-                        self.expr(params);
+                        self.expr(params.max(Prec::App));
                         self.pop();
                     }
                     Tok::BoxKw | Tok::UnboxKw => {
@@ -1009,6 +1009,12 @@ impl ExprParams {
             allow_lambda: false,
             ..Self::new()
         }
+    }
+    fn max(mut self, prec: Prec) -> ExprParams {
+        if prec > self.min_prec {
+            self.min_prec = prec;
+        }
+        self
     }
 }
 impl From<()> for ExprParams {

@@ -50,6 +50,7 @@ impl ast::Def {
                     x.ret_ty().and_then(|x| x.expr()),
                     None,
                     cxt,
+                    true,
                 );
                 let ty = ty
                     .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
@@ -133,6 +134,7 @@ impl ast::Def {
                     x.ret_ty().and_then(|x| x.expr()),
                     x.body(),
                     cxt,
+                    true,
                 );
 
                 Some(Definition {
@@ -157,6 +159,7 @@ impl ast::Def {
                     })),
                     None,
                     cxt,
+                    false,
                 );
 
                 let name = if let Some(name) = x.name() {
@@ -220,13 +223,14 @@ impl ast::Def {
                     // If a return type is not given, the type arguments are added as implicit parameters
                     // and all of them are applied to the type constructor for the return type.
                     // If the return type is given, nothing is implied and the types and parameters are as given.
-                    let cty = if c.ret_ty().is_some() {
+                    let mut cty = if c.ret_ty().is_some() {
                         let (_, cty) = infer_fun(
                             c.imp_par(),
                             c.exp_par().as_par(),
                             c.ret_ty().and_then(|x| x.expr()),
                             None,
                             cxt,
+                            false,
                         );
                         fn head(t: &Expr) -> &Expr {
                             match t {
@@ -307,6 +311,14 @@ impl ast::Def {
 
                         ty
                     };
+                    cty.add_cons_deps(
+                        cxt,
+                        if c.ret_ty().is_none() {
+                            ty_params.len()
+                        } else {
+                            0
+                        },
+                    );
                     if let Some(name) = c.name().map(|x| x.name(cxt.db)) {
                         cxt.define(
                             name,
@@ -366,6 +378,102 @@ impl ast::Def {
     }
 }
 
+impl Expr {
+    fn add_cons_dep_params(&mut self, mut skip: usize, deps: &mut Vec<Par>, cxt: &mut Cxt) {
+        match self {
+            Expr::Fun(clos) => {
+                for i in &mut clos.params {
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    let name = (
+                        cxt.db.name(format!("'{}", cxt.db.lookup_name(i.name.0))),
+                        i.name.1,
+                    );
+                    deps.push(Par {
+                        name,
+                        ty: Expr::Error,
+                    });
+                }
+                clos.body.add_cons_dep_params(skip, deps, cxt);
+            }
+            _ => (),
+        }
+    }
+
+    fn apply_cons_deps(
+        &mut self,
+        deps: &[Par],
+        mut idx: usize,
+        mut skip: usize,
+        mut size: Size,
+        cxt: &mut Cxt,
+    ) {
+        match self {
+            Expr::Fun(clos) => {
+                for i in &mut clos.params {
+                    if skip > 0 {
+                        skip -= 1;
+                        size += 1;
+                        continue;
+                    }
+                    i.ty = Expr::Dep(
+                        vec![Expr::var(Var::Local(
+                            deps[idx].name,
+                            (cxt.size() + idx).next_lvl().idx(size),
+                        ))],
+                        Box::new(i.ty.clone()),
+                    );
+                    idx += 1;
+                    size += 1;
+                }
+                clos.body.apply_cons_deps(deps, idx, skip, size, cxt);
+            }
+            _ if !deps.is_empty() => {
+                // Add dependencies on return type
+                let mut x = Expr::Error;
+                std::mem::swap(&mut x, self);
+                let mut top_size = cxt.size();
+                *self = Expr::Dep(
+                    deps.iter()
+                        .map(|x| {
+                            let i = top_size.next_lvl().idx(size);
+                            top_size += 1;
+                            Expr::var(Var::Local(x.name, i))
+                        })
+                        .collect(),
+                    Box::new(x),
+                );
+            }
+            _ => (),
+        }
+    }
+
+    fn add_cons_deps(&mut self, cxt: &mut Cxt, skip: usize) {
+        let mut deps = Vec::new();
+        self.add_cons_dep_params(skip, &mut deps, cxt);
+        self.eval_quote_in_place(&mut cxt.env(), cxt.size() + deps.len(), None);
+        self.apply_cons_deps(&deps, 0, skip, cxt.size() + deps.len(), cxt);
+        match self {
+            Expr::Fun(clos) if clos.class == Pi(Impl) => {
+                std::mem::swap(&mut deps, &mut clos.params);
+                clos.params.append(&mut deps);
+            }
+            _ if !deps.is_empty() => {
+                let mut x = Expr::Error;
+                std::mem::swap(&mut x, self);
+                *self = Expr::Fun(EClos {
+                    class: Pi(Impl),
+                    params: deps,
+                    body: Box::new(x),
+                });
+            }
+            _ => (),
+        }
+    }
+}
+
 impl ast::Def {
     pub fn name(&self, db: &dyn Elaborator) -> Option<SName> {
         match self {
@@ -411,6 +519,7 @@ fn infer_fun(
     ret_ty: Option<ast::Expr>,
     body: Option<ast::Body>,
     cxt: &mut Cxt,
+    dep_scope: bool,
 ) -> (Expr, Expr) {
     // [a, b] [c, d] (e, f) => ...
     // -->
@@ -418,16 +527,18 @@ fn infer_fun(
 
     cxt.push();
     let mut deps = Vec::new();
-    for i in implicit.iter().flat_map(|x| x.pars()) {
-        i.par()
-            .and_then(|x| x.pat()?.expr())
-            .map(|x| x.add_deps(&mut deps, cxt));
-    }
-    for i in &explicit {
-        i.par.add_deps(&mut deps, cxt);
-    }
-    if let Some(t) = &ret_ty {
-        t.add_deps(&mut deps, cxt);
+    if dep_scope {
+        for i in implicit.iter().flat_map(|x| x.pars()) {
+            i.par()
+                .and_then(|x| x.pat()?.expr())
+                .map(|x| x.add_deps(&mut deps, cxt));
+        }
+        for i in &explicit {
+            i.par.add_deps(&mut deps, cxt);
+        }
+        if let Some(t) = &ret_ty {
+            t.add_deps(&mut deps, cxt);
+        }
     }
     let mut implicit = check_params(
         implicit
@@ -694,6 +805,7 @@ impl ast::Pair {
                 self.rhs(),
                 None,
                 cxt,
+                false,
             );
             match ty {
                 Expr::Fun(mut clos) => {
@@ -1238,8 +1350,14 @@ impl ast::Expr {
                         }
                     }
                     ast::Expr::Lam(x) => {
-                        let (term, ty) =
-                            infer_fun(x.imp_par(), x.exp_par().as_par(), None, x.body(), cxt);
+                        let (term, ty) = infer_fun(
+                            x.imp_par(),
+                            x.exp_par().as_par(),
+                            None,
+                            x.body(),
+                            cxt,
+                            false,
+                        );
                         (term, ty.eval(&mut cxt.env()))
                     }
                     ast::Expr::Pi(x) => {
@@ -1249,6 +1367,7 @@ impl ast::Expr {
                             x.body().and_then(|x| x.expr()),
                             None,
                             cxt,
+                            true,
                         );
                         (pi, Val::Type)
                     }
