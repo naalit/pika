@@ -145,7 +145,7 @@ impl Cxt<'_> {
         reason: &CheckReason,
     ) -> Result<(), super::unify::UnifyError> {
         self.mcxt
-            .unify(inferred, expected, self.size(), self.env(), reason)
+            .unify(inferred, expected, self.size(), self.env(), reason, false)
     }
 
     pub fn env(&self) -> Env {

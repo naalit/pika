@@ -578,7 +578,7 @@ impl<'a> Parser<'a> {
     /// Parses an expression where all operators have at least the given precedence
     /// If `lhs` is `Some`, will only parse the operator and right hand side and add it to the provides lhs
     fn expr(&mut self, params: impl Into<ExprParams>) {
-        let params@ExprParams {
+        let params @ ExprParams {
             min_prec,
             lhs,
             allow_lambda,

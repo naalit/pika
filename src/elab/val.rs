@@ -485,7 +485,7 @@ impl Expr {
         self
     }
 
-    fn unspanned(&self) -> &Expr {
+    pub fn unspanned(&self) -> &Expr {
         match self {
             Expr::Spanned(_, x) => x.unspanned(),
             x => x,

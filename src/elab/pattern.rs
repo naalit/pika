@@ -1,3 +1,4 @@
+use super::elaborate::DepMode::*;
 use super::*;
 
 mod input {
@@ -185,6 +186,7 @@ mod input {
                                                 rsize,
                                                 env.clone(),
                                                 reason,
+                                                false,
                                             )
                                             .unwrap_or_else(|e| self.ecxt.error(span, e)),
                                     }
@@ -199,7 +201,16 @@ mod input {
                     Pattern::Typed(pat, pty) => {
                         self.ecxt
                             .mcxt
-                            .unify((**pty).clone(), ty.clone(), env.size, env.clone(), reason)
+                            .unify(
+                                (**pty).clone(),
+                                // Ignore dependencies, like with let, except that the type for the variable
+                                // comes from other code so it's already correct
+                                ty.no_deps().clone(),
+                                env.size,
+                                env.clone(),
+                                reason,
+                                false,
+                            )
                             .unwrap_or_else(|e| self.ecxt.error(row.columns[i].pat.1, e));
                         let pat = (**pat).clone();
                         row.columns[i].pat = pat;
@@ -482,11 +493,9 @@ mod input {
                         .and_then(|x| x.expr())
                         .map(|x| x.to_pattern(cxt, size))
                         .unwrap_or((Pattern::Any, x.span()));
-                    match x
-                        .ty()
-                        .and_then(|x| x.expr())
-                        .map(|x| x.check(Val::Type, cxt.ecxt, &CheckReason::UsedAsType))
-                    {
+                    match x.ty().and_then(|x| x.expr()).map(|x| {
+                        x.check(Val::Type, cxt.ecxt, &CheckReason::UsedAsType, &mut Ignore)
+                    }) {
                         Some(ty) => {
                             Pattern::Typed(Box::new(pat), Box::new(ty.eval(&mut cxt.ecxt.env())))
                         }
@@ -642,6 +651,7 @@ impl CaseElabCxt<'_, '_> {
                         Val::var(Var::Builtin(Builtin::BoolType)),
                         &mut self.ecxt,
                         &CheckReason::Condition,
+                        &mut Ignore,
                     );
                     let mut size = self.ecxt.size();
                     let params = self.env_tys[&row.body]
@@ -1157,7 +1167,10 @@ pub(super) fn elab_case(
                 let body = match rty {
                     Some((rty, reason)) => body
                         .as_ref()
-                        .map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, reason)),
+                        // TODO propagate DepMode?
+                        .map_or(Expr::Error, |x| {
+                            x.check(rty.clone(), cxt.ecxt, reason, &mut Exact)
+                        }),
                     None => match body {
                         Some(body) => {
                             let (expr, ty) = body.infer(cxt.ecxt);
@@ -1284,7 +1297,8 @@ fn elab_block(
 
     match &block[0] {
         ast::Stmt::Expr(e) if block.len() == 1 => match rty {
-            Some((rty, reason)) => e.check(rty.clone(), ecxt, reason),
+            // TODO propagate DepMode?
+            Some((rty, reason)) => e.check(rty.clone(), ecxt, reason, &mut Exact),
             None => {
                 let (expr, ty) = e.infer(ecxt);
                 *rty = Some((ty, CheckReason::MustMatch(e.span())));
@@ -1315,14 +1329,31 @@ fn elab_block(
                         .ty()
                         .and_then(|x| x.expr())
                         .map(|x| (x.span(), x))
-                        .map(|(s, x)| (x.check(Val::Type, ecxt, &CheckReason::UsedAsType), s))
+                        .map(|(s, x)| {
+                            (
+                                x.check(Val::Type, ecxt, &CheckReason::UsedAsType, &mut Ignore),
+                                s,
+                            )
+                        })
                         .map(|(x, s)| (x.eval(&mut ecxt.env()), s)),
                     _ => None,
                 };
                 let (body, ty, reason) = match ty {
                     Some((ty, span)) => match d.body().and_then(|x| x.expr()) {
                         Some(body) => {
-                            let body = body.check(ty.clone(), ecxt, &CheckReason::GivenType(span));
+                            let mut deps = Vec::new();
+                            let body = body.check(
+                                ty.clone(),
+                                ecxt,
+                                &CheckReason::GivenType(span),
+                                &mut Forward(&mut deps),
+                            );
+                            // Add dependencies implicitly
+                            let ty = if deps.is_empty() {
+                                ty
+                            } else {
+                                Val::Dep(deps, Box::new(ty))
+                            };
                             (body, ty, CheckReason::GivenType(span))
                         }
                         None => (Expr::Error, ty, CheckReason::GivenType(span)),

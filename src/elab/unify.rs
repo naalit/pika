@@ -66,6 +66,7 @@ struct UnifyCxt<'a, 'b> {
     meta_cxt: &'a mut MetaCxt<'b>,
     solve_locals: bool,
     env: &'a mut Env,
+    dependency_subtyping: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -202,11 +203,13 @@ impl MetaCxt<'_> {
         size: Size,
         mut env: Env,
         reason: &CheckReason,
+        dependency_subtyping: bool,
     ) -> Result<(), UnifyError> {
         UnifyCxt {
             meta_cxt: self,
             solve_locals: false,
             env: &mut env,
+            dependency_subtyping,
         }
         // TODO any way to avoid this clone?
         .unify(a.clone(), b.clone(), size, UnfoldState::default())
@@ -232,6 +235,7 @@ impl MetaCxt<'_> {
             meta_cxt: self,
             solve_locals: true,
             env,
+            dependency_subtyping: false, // TODO any reason to change this
         }
         // TODO any way to avoid this clone?
         .unify(a.clone(), b.clone(), size, UnfoldState::default())
@@ -364,6 +368,10 @@ impl UnifyCxt<'_, '_> {
                     self.unify(a, b, size, state)?;
                 }
                 self.unify(*ta, *tb, size, state)
+            }
+            // Dependency subtyping goes both ways
+            (Val::Dep(_, a), b) | (b, Val::Dep(_, a)) if self.dependency_subtyping => {
+                self.unify(*a, b, size, state)
             }
 
             // Now handle neutrals as directed by the unfolding state

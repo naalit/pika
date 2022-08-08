@@ -323,9 +323,7 @@ impl Expr {
                 Expr::Lam(x) => {
                     x.imp_par().map(|x| {
                         x.pars().iter().for_each(|x| {
-                            x.par()
-                                .and_then(|x| x.pat()?.expr())
-                                .map(|x| x.visit(f));
+                            x.par().and_then(|x| x.pat()?.expr()).map(|x| x.visit(f));
                         })
                     });
                     x.exp_par()
@@ -336,9 +334,7 @@ impl Expr {
                 Expr::Pi(x) => {
                     x.imp_par().map(|x| {
                         x.pars().iter().for_each(|x| {
-                            x.par()
-                                .and_then(|x| x.pat()?.expr())
-                                .map(|x| x.visit(f));
+                            x.par().and_then(|x| x.pat()?.expr()).map(|x| x.visit(f));
                         })
                     });
                     x.exp_par().and_then(|x| x.expr()).map(|x| x.visit(f));

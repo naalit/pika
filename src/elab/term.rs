@@ -454,11 +454,18 @@ impl Pretty for Expr {
                 },
             },
             Expr::Dep(d, t) => Doc::intersperse(
-                d.iter().map(|x| x.pretty(db).style(Doc::style_keyword())),
+                d.iter().map(|x| match x {
+                    // If the dependency is a meta, `'? T` is much more understandable than `?3 (a, b, c) T`.
+                    Expr::Elim(_, _) | Expr::Head(Head::Var(Var::Meta(_))) => {
+                        Doc::none().add("'?", Doc::style_keyword())
+                    }
+                    x => x.pretty(db).style(Doc::style_keyword()),
+                }),
                 Doc::none().space(),
             )
             .space()
-            .chain(t.pretty(db)),
+            .chain(t.pretty(db).nest(Prec::App))
+            .prec(Prec::Pi),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)
