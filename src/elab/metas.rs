@@ -204,9 +204,15 @@ impl PartialRename {
                     Head::Var(Var::Local(n, l)) => (n, l),
                     _ => unreachable!(),
                 };
-                if self.vars.insert(l, inner_size.next_lvl()).is_some() {
-                    return Err(MetaSolveError::SpineDuplicate(n.0));
-                }
+                // Non-linear meta spines arise because of the way we do local unification in patterns
+                // so unless that changes anytime soon we'll just have suboptimal meta solutions
+                // they're still "correct", just not 100% general, and we pick the first occurence of each var
+                // (old smalltt used to do this so it can't be that bad)
+                self.vars.entry(l).or_insert(inner_size.next_lvl());
+
+                // if self.vars.insert(l, inner_size.next_lvl()).is_some() {
+                //     return Err(MetaSolveError::SpineDuplicate(n.0));
+                // }
 
                 Ok(vec![n.0])
             }
@@ -227,9 +233,10 @@ impl PartialRename {
                     Head::Var(Var::Local(n, l)) => (n, l),
                     _ => unreachable!(),
                 };
-                if self.vars.insert(l, inner_size.next_lvl()).is_some() {
-                    return Err(MetaSolveError::SpineDuplicate(n.0));
-                }
+                self.vars.entry(l).or_insert(inner_size.next_lvl());
+                // if self.vars.insert(l, inner_size.next_lvl()).is_some() {
+                //     return Err(MetaSolveError::SpineDuplicate(n.0));
+                // }
 
                 let mut rhs = self.add_arg(*b, inner_size.inc(), mcxt)?;
                 rhs.insert(0, n.0);

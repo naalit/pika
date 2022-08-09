@@ -357,6 +357,10 @@ impl UnifyCxt<'_, '_> {
                 let b = b.open(size);
                 self.unify(a, b, new_size, state)
             }
+            (Val::Pair(a1, a2, _), Val::Pair(b1, b2, _)) => {
+                self.unify(*a1, *b1, size, state)?;
+                self.unify(*a2, *b2, size, state)
+            }
 
             (Val::Dep(va, ta), Val::Dep(vb, tb)) => {
                 // TODO solve meta dep to multiple concrete deps
