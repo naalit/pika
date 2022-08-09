@@ -162,7 +162,7 @@ mod input {
                                     while env.size < rsize {
                                         env.push(None);
                                     }
-                                    match (&rty, &ty) {
+                                    match (rty.no_deps(), ty.no_deps()) {
                                         (Val::Neutral(a), Val::Neutral(b))
                                             if a.head() == b.head() =>
                                         {
@@ -174,6 +174,7 @@ mod input {
                                                     rsize,
                                                     &mut env,
                                                     reason,
+                                                    true,
                                                 )
                                                 .unwrap_or_else(|e| self.ecxt.error(span, e))
                                         }
@@ -186,7 +187,7 @@ mod input {
                                                 rsize,
                                                 env.clone(),
                                                 reason,
-                                                false,
+                                                true,
                                             )
                                             .unwrap_or_else(|e| self.ecxt.error(span, e)),
                                     }
@@ -1013,6 +1014,7 @@ mod coverage {
                                                 size,
                                                 &mut Env::new(size),
                                                 vreason,
+                                                true,
                                             )
                                             .is_err()
                                         {

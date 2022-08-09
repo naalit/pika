@@ -1260,11 +1260,17 @@ impl ast::Expr {
                         _ => a.insert_metas(ity, None, self.span(), cxt),
                     };
                     let ity = match (&mut *mode, ity, &ty) {
+                        (_, ity, Val::Dep(_, _)) => ity,
                         (Forward(v), Val::Dep(mut v2, ity), _) => {
                             v.append(&mut v2);
                             *ity
                         }
                         (_, ity, _) => ity,
+                    };
+                    let ty = match (ty, &ity) {
+                        (ty, Val::Dep(_, _)) => ty,
+                        (Val::Dep(_, ty), _) => *ty,
+                        (ty, _) => ty,
                     };
                     cxt.mcxt
                         .unify(ity, ty, cxt.size(), cxt.env(), reason, *mode == Ignore)?;

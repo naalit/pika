@@ -459,6 +459,12 @@ impl Pretty for Expr {
                     Expr::Elim(_, _) | Expr::Head(Head::Var(Var::Meta(_))) => {
                         Doc::none().add("'?", Doc::style_keyword())
                     }
+                    // When the compiler makes local dependency variables, it often uses names like _
+                    // which is confusing since '_ is syntax for "no dependencies", so these names are replaced with '?
+                    Expr::Head(Head::Var(Var::Local(n, _))) => match &*db.lookup_name(n.0) {
+                        "_" | "'_" => Doc::none().add("'?", Doc::style_keyword()),
+                        s => Doc::none().add(s, Doc::style_keyword()),
+                    },
                     x => x.pretty(db).style(Doc::style_keyword()),
                 }),
                 Doc::none().space(),
