@@ -287,7 +287,7 @@ impl UnifyCxt<'_, '_> {
                             Head::Var(Var::Local(n2, l2)) if h.spine().is_empty() => {
                                 // If one variable is _, use the name of the other one
                                 // This way quality of errors doesn't depend on local solving order as much
-                                let name = if self.meta_cxt.db.lookup_name(n2.0) == "'_" {
+                                let name = if self.meta_cxt.db.lookup_name(n2.0) == "_" {
                                     n
                                 } else {
                                     n2
@@ -427,7 +427,7 @@ impl UnifyCxt<'_, '_> {
                 if state.can_solve_metas()
                     && self.solve_locals
                     && matches!((a.head(), b.head()), (Head::Var(Var::Local(_, a)), Head::Var(Var::Local(_, b)))
-                        if a > b) =>
+                        if a < b) =>
             {
                 self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
             }
