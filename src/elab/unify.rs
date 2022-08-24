@@ -353,6 +353,10 @@ impl UnifyCxt<'_, '_> {
                 let b = b.open(size);
                 self.unify(a, b, new_size, state)
             }
+            (Val::Pair(a1, a2, _), Val::Pair(b1, b2, _)) => {
+                self.unify(*a1, *b1, size, state)?;
+                self.unify(*a2, *b2, size, state)
+            }
 
             // Now handle neutrals as directed by the unfolding state
             // If possible, try approximate conversion checking, unfolding if it fails (and if that's allowed)

@@ -234,21 +234,19 @@ impl VClos {
     }
 
     pub fn synthesize_args(&self, size: Size) -> Val {
-        let (arg, _size, _ty) = self.params.iter().fold(
-            (None, size, self.par_ty()),
-            |(term, size, ty), Par { name, ty: _ }| {
-                let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
-                let term = match term {
-                    Some(term) => Box::new(Val::Pair(var, term, Box::new(ty.clone()))),
-                    None => var,
-                };
-                let ty = match ty {
-                    Val::Fun(clos) => clos.open(size),
-                    ty => ty,
-                };
-                (Some(term), size, ty)
-            },
-        );
+        let (arg, _size) =
+            self.params
+                .iter()
+                .rfold((None, size + self.params.len()), |(term, size), Par { name, ty: _ }| {
+                    let size = size.dec();
+                    let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
+                    let term = match term {
+                        // TODO get the actual type
+                        Some(term) => Box::new(Val::Pair(var, term, Box::new(Val::Error))),
+                        None => var,
+                    };
+                    (Some(term), size)
+                });
         *arg.unwrap()
     }
 }
