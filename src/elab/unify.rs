@@ -268,7 +268,7 @@ impl UnifyCxt<'_, '_> {
     ) -> Result<(), UnifyErrorKind> {
         match head {
             Head::Var(v) => match v {
-                Var::Local(_, l) => {
+                Var::Local(n, l) => {
                     assert!(self.solve_locals);
                     if !spine.is_empty() {
                         return Err(UnifyErrorKind::Conversion);
@@ -277,6 +277,22 @@ impl UnifyCxt<'_, '_> {
                     let solution = solution
                         .quote(start_size, None)
                         .eval(&mut self.env(start_size));
+                    let solution = match solution {
+                        Val::Neutral(h) => match h.head() {
+                            Head::Var(Var::Local(n2, l2)) if h.spine().is_empty() => {
+                                // If one variable is _, use the name of the other one
+                                // This way quality of errors doesn't depend on local solving order as much
+                                let name = if self.meta_cxt.db.lookup_name(n2.0) == "_" {
+                                    n
+                                } else {
+                                    n2
+                                };
+                                Val::var(Var::Local(name, l2))
+                            }
+                            _ => Val::Neutral(h),
+                        },
+                        x => x,
+                    };
                     self.env.replace(l.idx(self.env.size), solution);
                     Ok(())
                 }

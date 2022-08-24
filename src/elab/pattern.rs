@@ -283,42 +283,50 @@ mod input {
                                     .map(Some)
                                     .chain(std::iter::repeat(None))
                                     .zip(&clos.params)
-                                    .map(|(a, b)| match a {
-                                        Some(Ok(e)) => (
-                                            (e.to_pattern(cxt, size)),
-                                            (b.ty.clone().eval(&mut Env::new(*size))),
-                                        ),
-                                        Some(Err(span)) => {
-                                            cxt.ecxt
-                                                .unify(
-                                                    Val::var(Var::Builtin(Builtin::UnitType)),
-                                                    b.ty.clone().eval(&mut Env::new(*size)),
-                                                    &CheckReason::ArgOf(x.lhs().unwrap().span()),
-                                                )
-                                                .unwrap_or_else(|e| cxt.ecxt.error(span, e));
-                                            (
-                                                (Pattern::Any, span),
-                                                (Val::var(Var::Builtin(Builtin::UnitType))),
-                                            )
-                                        }
-                                        None => {
-                                            *size += 1;
-                                            (
+                                    .map(|(a, b)| {
+                                        let mut env = Env::new(*size);
+                                        match a {
+                                            Some(Ok(e)) => (
+                                                (e.to_pattern(cxt, size)),
+                                                (b.ty.clone().eval(&mut env)),
+                                            ),
+                                            Some(Err(span)) => {
+                                                cxt.ecxt
+                                                    .unify(
+                                                        Val::var(Var::Builtin(Builtin::UnitType)),
+                                                        b.ty.clone().eval(&mut env),
+                                                        &CheckReason::ArgOf(
+                                                            x.lhs().unwrap().span(),
+                                                        ),
+                                                    )
+                                                    .unwrap_or_else(|e| cxt.ecxt.error(span, e));
                                                 (
-                                                    Pattern::Var((
-                                                        cxt.ecxt.db.name("_".into()),
+                                                    (Pattern::Any, span),
+                                                    (Val::var(Var::Builtin(Builtin::UnitType))),
+                                                )
+                                            }
+                                            None => {
+                                                *size += 1;
+                                                (
+                                                    (
+                                                        Pattern::Var((
+                                                            cxt.ecxt.db.name("_".into()),
+                                                            RelSpan::empty(),
+                                                        )),
                                                         RelSpan::empty(),
-                                                    )),
-                                                    RelSpan::empty(),
-                                                ),
-                                                (b.ty.clone().eval(&mut Env::new(*size))),
-                                            )
+                                                    ),
+                                                    (b.ty.clone().eval(&mut env)),
+                                                )
+                                            }
                                         }
                                     })
                                     .collect();
+                                let mut tsize = start_size;
                                 let arg = args
                                     .iter()
-                                    .map(|x| x.0 .0.to_term(cxt.ecxt.db, &mut start_size.clone()))
+                                    .map(|x| x.0 .0.to_term(cxt.ecxt.db, &mut tsize))
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
                                     .rfold(None, |acc, x| match acc {
                                         None => Some(x),
                                         Some(y) => Some(Val::Pair(
@@ -622,7 +630,7 @@ impl CaseElabCxt<'_, '_> {
         let row = &rows[0];
 
         // If the first row has no patterns, it will definitely match (modulo guards)
-        // other rows are unreachable here, but may be reachable through another path so we figue that out later
+        // other rows are unreachable here, but may be reachable through another path so we figure that out later
         if row.columns.is_empty() {
             let row = rows.remove(0);
             if reachable || !self.env_tys.contains_key(&row.body) {
