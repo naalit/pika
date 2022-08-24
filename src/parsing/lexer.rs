@@ -173,7 +173,6 @@ impl<'i> Lexer<'i> {
             "else" => Tok::ElseKw,
             "box" => Tok::BoxKw,
             "unbox" => Tok::UnboxKw,
-            // Where technically ends one block and starts another one, but we ignore that.
             "where" => Tok::WhereKw,
             "eff" => Tok::EffKw,
             "do" => Tok::DoKw,

@@ -126,6 +126,10 @@ pub trait ParserExt: Parser {
         let result = self.parse(file, id)?;
         ast::Root::cast(SyntaxNode::new_root(result.green))
     }
+
+    fn inaccessible(&self, name: SName) -> SName {
+        (name.0.inaccessible(self), name.1)
+    }
 }
 impl<T: Parser + ?Sized> ParserExt for T {}
 
