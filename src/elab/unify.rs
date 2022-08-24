@@ -390,10 +390,6 @@ impl UnifyCxt<'_, '_> {
                 }
                 self.unify(*ta, *tb, size, state)
             }
-            // Dependency subtyping goes both ways
-            (Val::Dep(_, a), b) | (b, Val::Dep(_, a)) if self.dependency_subtyping => {
-                self.unify(*a, b, size, state)
-            }
 
             // Now handle neutrals as directed by the unfolding state
             // If possible, try approximate conversion checking, unfolding if it fails (and if that's allowed)
@@ -498,6 +494,11 @@ impl UnifyCxt<'_, '_> {
                 if state.can_solve_metas() && self.can_solve(n.head()) =>
             {
                 self.solve(size, n.head(), n.into_parts().1, x)
+            }
+
+            // Dependency subtyping goes both ways, and should be done *after* solving metas
+            (Val::Dep(_, a), b) | (b, Val::Dep(_, a)) if self.dependency_subtyping => {
+                self.unify(*a, b, size, state)
             }
 
             // Eta-expand if there's a lambda on one side

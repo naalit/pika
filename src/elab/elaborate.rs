@@ -387,6 +387,10 @@ impl Expr {
                         skip -= 1;
                         continue;
                     }
+                    // TODO do we need a further guard on this?
+                    if matches!(i.ty.unspanned(), Expr::Head(Head::Var(Var::Local(_, _)))) {
+                        continue;
+                    }
                     let name = (
                         cxt.db.name(format!("'{}", cxt.db.lookup_name(i.name.0))),
                         i.name.1,
@@ -415,6 +419,10 @@ impl Expr {
                 for i in &mut clos.params {
                     if skip > 0 {
                         skip -= 1;
+                        size += 1;
+                        continue;
+                    }
+                    if matches!(i.ty.unspanned(), Expr::Head(Head::Var(Var::Local(_, _)))) {
                         size += 1;
                         continue;
                     }
@@ -453,6 +461,9 @@ impl Expr {
     fn add_cons_deps(&mut self, cxt: &mut Cxt, skip: usize) {
         let mut deps = Vec::new();
         self.add_cons_dep_params(skip, &mut deps, cxt);
+        if deps.is_empty() {
+            return;
+        }
         self.eval_quote_in_place(&mut cxt.env(), cxt.size() + deps.len(), None);
         self.apply_cons_deps(&deps, 0, skip, cxt.size() + deps.len(), cxt);
         match self {
