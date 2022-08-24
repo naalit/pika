@@ -288,7 +288,7 @@ fn main() {
                     Some(Definition {
                         name,
                         ty,
-                        body: DefBody::Type(_ctors),
+                        body: DefBody::Type(ctors),
                         ..
                     }) => {
                         Doc::none()
@@ -299,10 +299,18 @@ fn main() {
                             .space()
                             .chain(ty.pretty(&db))
                             .space()
-                            .add('=', ())
-                            .space()
-                            .add("...", ())
+                            .add("of", Doc::style_keyword())
                             .emit_stderr();
+                        for (split, _, ty) in ctors {
+                            Doc::none()
+                                .add("  ", ())
+                                .chain(split.name().map_or(Doc::start("??"), |x| x.pretty(&db)))
+                                .add(':', ())
+                                .space()
+                                .chain(ty.quote(crate::elab::Size::zero(), None).pretty(&db))
+                                .space()
+                                .emit_stderr();
+                        }
                     }
                     None => todo!(),
                 }

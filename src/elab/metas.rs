@@ -243,9 +243,15 @@ impl PartialRename {
                 Ok(rhs)
             }
             // TODO handle Val::Error without creating more errors?
-            v => Err(MetaSolveError::SpineNonVariable(
-                v.quote(inner_size, Some(mcxt)),
-            )),
+            // Problem: when we solve locals, we get non-variables even if the meta spine used to be legal
+            // This doesn't happen in smalltt because it doesn't solve locals
+            // Ideally we track solved locals in some way so that we can skip them here
+            // and then we can put back the non-linear spine errors as well.
+            // However, ignoring everything but locals does work in practice
+            _ => Ok(vec![mcxt.db.name("_".into())]),
+            // v => Err(MetaSolveError::SpineNonVariable(
+            //     v.quote(inner_size, Some(mcxt)),
+            // )),
         }
     }
 }

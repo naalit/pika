@@ -14,7 +14,7 @@ use cxt::*;
 use metas::*;
 pub use term::*;
 use val::*;
-use var::*;
+pub use var::*;
 
 use self::unify::CheckReason;
 
