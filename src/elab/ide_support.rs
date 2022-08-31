@@ -67,6 +67,7 @@ impl Expr {
                 a.find_span(span, cxt)?;
                 b.find_span(span, cxt)?;
             }
+            Expr::Ref(x) => x.find_span(span, cxt)?,
             Expr::Spanned(espan, x) => {
                 if espan.superset(span) {
                     x.find_span(span, cxt)?;

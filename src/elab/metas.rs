@@ -498,6 +498,7 @@ impl Expr {
                 // TODO unfold here instead of in solve()
                 _ => (),
             },
+            Expr::Ref(x) => x.check_solution(cxt, mode, s_from, s_to)?,
             Expr::Elim(a, b) => {
                 a.check_solution(cxt, mode, s_from, s_to)?;
                 b.check_solution(cxt, mode, s_from, s_to)?;

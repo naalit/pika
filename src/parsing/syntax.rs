@@ -96,6 +96,8 @@ pub enum SyntaxKind {
     ImpPar,
     ImpPars,
 
+    Reference,
+
     StructInit,
     Var,
     Member,

@@ -231,6 +231,8 @@ make_nodes! {
     // ??? TODO what do we include as the token argument
     Box = expr: Expr;
 
+    Reference = expr: Expr;
+
     GroupedExpr = expr: Expr;
 
     enum Expr =
@@ -250,7 +252,8 @@ make_nodes! {
         // Patterns parse as expressions
         EffPat,
         Binder,
-        StructInit
+        StructInit,
+        Reference
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -655,6 +658,7 @@ impl Pretty for Expr {
                 .chain(x.a().pretty())
                 .space()
                 .chain(x.b().pretty()),
+            Expr::Reference(r) => Doc::start('&').chain(r.expr().pretty()),
         };
         Doc::start('{').chain(p).add('}', ())
     }

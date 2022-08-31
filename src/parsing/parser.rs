@@ -595,6 +595,12 @@ impl<'a> Parser<'a> {
                         self.expect(Tok::Dedent);
                         self.pop();
                     }
+                    Tok::BitAnd => {
+                        self.push(Tok::Reference);
+                        self.advance();
+                        self.expr(Prec::App);
+                        self.pop();
+                    }
                     Tok::BoxKw | Tok::UnboxKw => {
                         self.push(Tok::Box);
                         self.advance();

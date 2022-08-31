@@ -296,6 +296,7 @@ pub enum Expr {
     /// The last Expr is the type, which can't be inferred from the values
     /// (consider `(I32, 3)`, which may be `(Type, I32)` or `(a: Type, a)`)
     Pair(Box<Expr>, Box<Expr>, Box<Expr>),
+    Ref(Box<Expr>),
     Spanned(RelSpan, Box<Expr>),
     Error,
 }
@@ -307,6 +308,7 @@ impl PartialEq for Expr {
             (Self::Fun(l0), Self::Fun(r0)) => l0 == r0,
             (Self::Lit(l0), Self::Lit(r0)) => l0 == r0,
             (Self::Pair(l0, l1, l2), Self::Pair(r0, r1, r2)) => l0 == r0 && l1 == r1 && l2 == r2,
+            (Self::Ref(x), Self::Ref(y)) => x == y,
             // Ignore spans
             (Self::Spanned(_, l1), Self::Spanned(_, r1)) => l1 == r1,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
@@ -350,7 +352,7 @@ impl Expr {
 
     pub fn ty(&self, cxt: &mut Cxt) -> Val {
         match self {
-            Expr::Type => Val::Type,
+            Expr::Type | Expr::Ref(_) => Val::Type,
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
@@ -447,6 +449,9 @@ impl Pretty for Expr {
                     Var::Cons(n, _) => n.pretty(db),
                 },
             },
+            Expr::Ref(x) => Doc::start('&')
+                .chain(x.pretty(db).nest(Prec::App))
+                .prec(Prec::App),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)

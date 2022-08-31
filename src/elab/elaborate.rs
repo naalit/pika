@@ -1182,6 +1182,14 @@ impl ast::Expr {
                         );
                         (pi, Val::Type)
                     }
+                    ast::Expr::Reference(x) => {
+                        let x = x.expr().ok_or("Expected type of reference")?.check(
+                            Val::Type,
+                            cxt,
+                            &CheckReason::UsedAsType,
+                        );
+                        (Expr::Ref(Box::new(x)), Val::Type)
+                    }
                     ast::Expr::App(x) => {
                         let (mut lhs, mut lhs_ty) = x
                             .lhs()
