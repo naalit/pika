@@ -159,6 +159,7 @@ pub enum TypeError {
     Unify(unify::UnifyError),
     NotFunction(Expr, RelSpan),
     InvalidPattern(String, Expr),
+    UseAfterMove(RelSpan, Name, Expr),
     Other(Doc),
 }
 impl<T: Into<Doc>> From<T> for TypeError {
@@ -194,6 +195,32 @@ impl TypeError {
                         .add("'", ()),
                     None,
                 )
+            }
+            TypeError::UseAfterMove(old_span, name, ty) => {
+                return Error {
+                    severity,
+                    message: Doc::start("Variable ")
+                        .chain(name.pretty(db).style(Doc::COLOR1))
+                        .add(" used after move", ()),
+                    message_lsp: None,
+                    primary: Label {
+                        span,
+                        message: Doc::start("Variable has already been consumed"),
+                        color: Some(Doc::COLOR1),
+                    },
+                    secondary: vec![Label {
+                        span: *old_span,
+                        message: Doc::start("Variable was consumed here"),
+                        color: Some(Doc::COLOR2),
+                    }],
+                    note: Some(
+                        Doc::start("Move occurs because ")
+                            .chain(name.pretty(db))
+                            .add(" has type '", ())
+                            .chain(ty.pretty(db))
+                            .add("' which cannot be copied implicitly", ()),
+                    ),
+                }
             }
         };
         Error {

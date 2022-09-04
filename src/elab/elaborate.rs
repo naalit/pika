@@ -1163,8 +1163,25 @@ impl ast::Expr {
                             );
                             (meta, mty)
                         } else {
-                            let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
-                            (Expr::var(v.cvt(cxt.size())), t)
+                            let db = cxt.db;
+                            let mut entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
+                            let ty = entry.ty(db);
+                            let var = entry.var();
+
+                            if !ty.can_copy() {
+                                if let Err(span) = entry.try_move() {
+                                    cxt.error(
+                                        name.1,
+                                        TypeError::UseAfterMove(
+                                            span,
+                                            name.0,
+                                            ty.clone().quote(cxt.size(), Some(&cxt.mcxt)),
+                                        ),
+                                    );
+                                }
+                            }
+
+                            (Expr::var(var.cvt(cxt.size())), ty)
                         }
                     }
                     ast::Expr::Lam(x) => {

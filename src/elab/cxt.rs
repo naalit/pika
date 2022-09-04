@@ -44,7 +44,7 @@ enum Scope {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LocalScope {
     size: Size,
-    names: Vec<(Name, VarDef)>,
+    names: Vec<VarEntryDef>,
 }
 
 static PRELUDE_DEFS: AtomicOnceCell<HashMap<Name, VarDef>> = AtomicOnceCell::new();
@@ -72,22 +72,23 @@ fn prelude_defs(db: &dyn Elaborator) -> HashMap<Name, VarDef> {
 }
 
 impl Scope {
-    fn lookup(&self, name: Name, db: &dyn Elaborator) -> Option<Cow<VarDef>> {
+    fn lookup(&mut self, name: SName, db: &dyn Elaborator) -> Option<VarEntry> {
         match self {
             Scope::Prelude => PRELUDE_DEFS
                 .get_or_init(|| prelude_defs(db))
-                .get(&name)
-                .map(Cow::Borrowed),
+                .get(&name.0)
+                .map(Cow::Borrowed)
+                .map(|x| VarEntry::new(x, name)),
             Scope::Namespace(n) => {
-                let split = SplitId::Named(name);
+                let split = SplitId::Named(name.0);
                 let def = db.def(n.def_loc(split));
                 if let Some(_) = db.def_type(def) {
-                    Some(Cow::Owned(VarDef::Def(def)))
+                    Some(VarEntry::new(Cow::Owned(VarDef::Def(def)), name))
                 } else {
                     None
                 }
             }
-            Scope::Local(l) => l.lookup(name).map(Cow::Borrowed),
+            Scope::Local(l) => l.lookup(name),
         }
     }
 }
@@ -95,7 +96,8 @@ impl Scope {
 impl LocalScope {
     fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val) {
         // TODO we probably want to keep the spans
-        self.names.push((name.0, VarDef::Var(var, ty)));
+        self.names
+            .push(VarEntryDef::new(name.0, VarDef::Var(var, ty)));
     }
 
     fn define_local(&mut self, name: SName, ty: Val) {
@@ -103,17 +105,82 @@ impl LocalScope {
         self.size = self.size.inc();
     }
 
-    fn lookup(&self, name: Name) -> Option<&VarDef> {
+    fn lookup(&mut self, name: SName) -> Option<VarEntry> {
         self.names
-            .iter()
-            .rfind(|&&(n, _)| n == name)
-            .map(|(_, d)| d)
+            .iter_mut()
+            .rfind(|d| d.name == name.0)
+            .map(|d| d.entry(name))
     }
 
     fn new(size: Size) -> Self {
         LocalScope {
             size,
             names: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VarEntryDef {
+    name: Name,
+    var: VarDef,
+    moved: Option<RelSpan>,
+}
+impl VarEntryDef {
+    fn new(name: Name, var: VarDef) -> Self {
+        VarEntryDef {
+            name,
+            var,
+            moved: None,
+        }
+    }
+    fn entry(&mut self, name: SName) -> VarEntry {
+        VarEntry {
+            name,
+            var: Cow::Borrowed(&self.var),
+            moved: Some(&mut self.moved),
+        }
+    }
+}
+
+pub struct VarEntry<'a> {
+    name: SName,
+    var: Cow<'a, VarDef>,
+    moved: Option<&'a mut Option<RelSpan>>,
+}
+impl VarEntry<'_> {
+    fn new(var: Cow<VarDef>, name: SName) -> VarEntry {
+        VarEntry {
+            name,
+            var,
+            moved: None,
+        }
+    }
+
+    pub fn var(&self) -> Var<Lvl> {
+        match &*self.var {
+            VarDef::Var(v, _) => v.with_sname(self.name),
+            VarDef::Def(d) => (Var::Def(self.name, *d)),
+        }
+    }
+
+    pub fn ty(&self, db: &dyn Elaborator) -> Val {
+        match &*self.var {
+            VarDef::Var(_, t) => t.clone(),
+            VarDef::Def(d) => db.def_type(*d).and_then(|x| x.result).unwrap_or(Val::Error),
+        }
+    }
+
+    pub fn try_move(&mut self) -> Result<(), RelSpan> {
+        match &mut self.moved {
+            Some(old) => match *old {
+                Some(old) => Err(*old),
+                None => {
+                    **old = Some(self.name.1);
+                    Ok(())
+                }
+            },
+            None => panic!("Not a movable type of definition?"),
         }
     }
 }
@@ -220,28 +287,18 @@ impl Cxt<'_> {
         self.env.reset_to_size(self.size());
     }
 
-    pub fn lookup(&self, name: SName) -> Option<(Var<Lvl>, Val)> {
+    pub fn lookup(&mut self, name: SName) -> Option<VarEntry> {
         self.scopes
-            .iter()
+            .iter_mut()
             .rev()
-            .find_map(|x| x.lookup(name.0, self.db))
-            .map(|x| match x.into_owned() {
-                VarDef::Var(v, t) => (v.with_sname(name), t),
-                VarDef::Def(d) => (
-                    Var::Def(name, d),
-                    self.db
-                        .def_type(d)
-                        .and_then(|x| x.result)
-                        .unwrap_or(Val::Error),
-                ),
-            })
+            .find_map(|x| x.lookup(name, self.db))
     }
 
     pub fn local_ty(&self, lvl: Lvl) -> Val {
         self.scopes
             .iter()
             .find_map(|x| match x {
-                Scope::Local(x) => x.names.iter().find_map(|(_, x)| match x {
+                Scope::Local(x) => x.names.iter().find_map(|x| match &x.var {
                     VarDef::Var(Var::Local(_, l), t) if *l == lvl => Some(t.clone()),
                     _ => None,
                 }),
@@ -257,8 +314,8 @@ impl Cxt<'_> {
                 Scope::Local(x) => x
                     .names
                     .iter()
-                    .filter_map(|(n, v)| match v {
-                        VarDef::Var(Var::Local(_, l), _) => Some((*n, *l)),
+                    .filter_map(|x| match &x.var {
+                        VarDef::Var(Var::Local(_, l), _) => Some((x.name, *l)),
                         _ => None,
                     })
                     .collect::<Vec<_>>(),

@@ -543,6 +543,28 @@ impl Val {
         }
     }
 
+    pub fn can_copy(&self) -> bool {
+        match self {
+            Val::Type => true,
+            Val::Neutral(n) => match n.head() {
+                // Currently all builtin types are copyable
+                Head::Var(Var::Builtin(_)) => true,
+                _ => false,
+            }
+            Val::Fun(clos) => match clos.class {
+                // TODO check if all components can be copied; may require eval-ing
+                Sigma => false,
+
+                Lam(_) |
+                Pi(_) => false,
+            }
+            Val::Lit(_) |
+            Val::Pair(_, _, _) => unreachable!("not a type"),
+            Val::Ref(_) => true,
+            Val::Error => true,
+        }
+    }
+
     pub fn check_scope(&self, size: Size) -> Result<(), Name> {
         match self {
             Val::Type => Ok(()),
