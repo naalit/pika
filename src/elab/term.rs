@@ -408,7 +408,7 @@ impl Expr {
                 Lam(icit) => {
                     cxt.push();
                     for Par { name, ty } in params {
-                        cxt.define_local(*name, ty.clone().eval(&mut cxt.env()), None);
+                        cxt.define_local(*name, ty.clone().eval(&mut cxt.env()), None, Vec::new());
                     }
                     let ty = Expr::Fun(EClos {
                         class: Pi(*icit),

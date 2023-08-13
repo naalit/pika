@@ -100,6 +100,13 @@ pub enum Var<L> {
     Cons(SName, Cons),
 }
 impl<T> Var<T> {
+    pub fn as_local(self) -> Option<T> {
+        match self {
+            Var::Local(_, l) => Some(l),
+            _ => None,
+        }
+    }
+
     pub fn with_sname(self, n: SName) -> Var<T> {
         match self {
             Var::Local(_, l) => Var::Local(n, l),

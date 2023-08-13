@@ -1120,6 +1120,7 @@ pub(super) fn elab_case(
     sty: Val,
     s_span: RelSpan,
     sreason: CheckReason,
+    s_deps: Vec<(RelSpan, Lvl)>,
     branches: impl IntoIterator<Item = (Option<ast::Expr>, RelSpan, Option<ast::Expr>)>,
     rty: &mut Option<(Val, CheckReason)>,
     ecxt: &mut Cxt,
@@ -1155,7 +1156,8 @@ pub(super) fn elab_case(
                         name: *name,
                         ty: ty.clone().quote(cxt.ecxt.size(), None),
                     });
-                    cxt.ecxt.define_local(*name, ty.clone(), None);
+                    cxt.ecxt
+                        .define_local(*name, ty.clone(), None, s_deps.clone());
                 }
                 let mut env = env.clone();
                 while env.size < cxt.ecxt.size() {
@@ -1224,14 +1226,17 @@ impl ast::Case {
         rty: &mut Option<(Val, CheckReason)>,
         ecxt: &mut Cxt,
     ) -> (Expr, CaseOf<Expr>, Expr) {
+        ecxt.record_deps();
         let (scrutinee, sty) = self
             .scrutinee()
             .map(|x| x.infer(ecxt))
             .unwrap_or((Expr::Error, Val::Error));
+        let deps = ecxt.finish_deps();
         let (case_of, ty) = elab_case(
             sty,
             self.scrutinee().map_or_else(|| self.span(), |s| s.span()),
             CheckReason::MustMatch(self.scrutinee().map(|x| x.span()).unwrap_or(self.span())),
+            deps,
             self.branches().into_iter().map(|x| x.as_row()),
             rty,
             ecxt,
@@ -1305,6 +1310,7 @@ fn elab_block(
                 sty,
                 e.span(),
                 CheckReason::MustMatch(e.span()),
+                Vec::new(),
                 std::iter::once((None, e.span(), rest)),
                 rty,
                 ecxt,
@@ -1327,6 +1333,7 @@ fn elab_block(
                         .map(|(x, s)| (x.eval(&mut ecxt.env()), s)),
                     _ => None,
                 };
+                ecxt.record_deps();
                 let (body, ty, reason) = match ty {
                     Some((ty, span)) => match d.body().and_then(|x| x.expr()) {
                         Some(body) => {
@@ -1348,10 +1355,12 @@ fn elab_block(
                         )
                     }
                 };
+                let dependencies = ecxt.finish_deps();
                 let (case, cty) = elab_case(
                     ty,
                     d.pat().map_or_else(|| d.span(), |s| s.span()),
                     reason,
+                    dependencies,
                     std::iter::once((d.pat().and_then(|x| x.expr()), d.span(), rest)),
                     rty,
                     ecxt,

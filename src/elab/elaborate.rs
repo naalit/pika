@@ -258,7 +258,12 @@ impl ast::Def {
 
                         let mut implicit = ty_params.clone();
                         for par in &implicit {
-                            cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
+                            cxt.define_local(
+                                par.name,
+                                par.ty.clone().eval(&mut cxt.env()),
+                                None,
+                                Vec::new(),
+                            );
                         }
                         implicit.append(&mut check_params(
                             c.imp_par()
@@ -640,7 +645,12 @@ fn check_par(
         }
     };
     // Define each parameter so it can be used by the types of the rest
-    cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
+    cxt.define_local(
+        par.name,
+        par.ty.clone().eval(&mut cxt.env()),
+        None,
+        Vec::new(),
+    );
     par
 }
 
@@ -956,6 +966,7 @@ impl ast::Expr {
                             (par.name.0.inaccessible(cxt.db), par.name.1),
                             par.ty.clone().eval(&mut cxt.env()),
                             None,
+                            Vec::new(),
                         );
                         implicit.push(par.clone());
                     }
@@ -1064,7 +1075,12 @@ impl ast::Expr {
                     cxt.push();
                     for i in &mut params {
                         i.name.0 = i.name.0.inaccessible(cxt.db);
-                        cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None);
+                        cxt.define_local(
+                            i.name,
+                            i.ty.clone().eval(&mut cxt.env()),
+                            None,
+                            Vec::new(),
+                        );
                     }
 
                     let body = self.check(bty, cxt, reason);
@@ -1079,15 +1095,54 @@ impl ast::Expr {
                     Ok(Expr::Fun(clos))
                 }
 
-                (_, ty) => {
-                    let (a, ity) = self.infer(cxt);
-                    let (a, ity) = match &ty {
-                        Val::Fun(clos) if clos.class == Pi(Impl) => (a, ity),
-                        _ => a.insert_metas(ity, None, self.span(), cxt),
-                    };
-                    cxt.unify(ity, ty, reason)?;
-                    Ok(a)
+                // Autoref
+                (ast::Expr::Var(name), Val::Ref(ty)) => {
+                    let name = name.name(cxt.db);
+                    if name.0 == cxt.db.name("_".to_string()) {
+                        let meta = cxt.mcxt.new_meta(
+                            cxt.locals(),
+                            MetaBounds::new(Val::Ref(ty)),
+                            self.span(),
+                        );
+                        Ok(meta)
+                    } else {
+                        let entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
+                        match entry {
+                            VarEntry::Local { name, .. } => {
+                                let vty = entry.ty(cxt);
+                                let var = entry.var(cxt);
+
+                                if cxt.unify(vty, (*ty).clone(), reason).is_ok() {
+                                    match entry.try_borrow(cxt) {
+                                        Ok(_) => (),
+                                        Err(Some(err)) => cxt.error(
+                                            name.1,
+                                            TypeError::MoveError(
+                                                err,
+                                                name.0,
+                                                ty.clone().quote(cxt.size(), Some(&cxt.mcxt)),
+                                            ),
+                                        ),
+                                        Err(None) => {
+                                            return self.infer_check(Val::Ref(ty), cxt, reason)
+                                        }
+                                    }
+                                } else {
+                                    return self.infer_check(Val::Ref(ty), cxt, reason);
+                                }
+
+                                // TODO do we need to add the dependencies that this variable has?
+                                cxt.add_dep(self.span(), var.as_local().unwrap());
+
+                                // TODO does the backend need Expr::Ref or can it make do with the types?
+                                Ok(Expr::var(var.cvt(cxt.size())))
+                            }
+                            _ => self.infer_check(Val::Ref(ty), cxt, reason),
+                        }
+                    }
                 }
+
+                (_, ty) => self.infer_check(ty, cxt, reason),
             }
         };
         // TODO auto-applying implicits (probably? only allowing them on function calls is also an option to consider)
@@ -1098,6 +1153,16 @@ impl ast::Expr {
                 Expr::Error
             }
         }
+    }
+
+    fn infer_check(&self, ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Result<Expr, TypeError> {
+        let (a, ity) = self.infer(cxt);
+        let (a, ity) = match &ty {
+            Val::Fun(clos) if clos.class == Pi(Impl) => (a, ity),
+            _ => a.insert_metas(ity, None, self.span(), cxt),
+        };
+        cxt.unify(ity, ty, reason)?;
+        Ok(a)
     }
 
     pub fn as_args(self) -> Vec<Result<ast::Expr, RelSpan>> {
@@ -1163,25 +1228,28 @@ impl ast::Expr {
                             );
                             (meta, mty)
                         } else {
-                            let db = cxt.db;
                             let mut entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
-                            let ty = entry.ty(db);
-                            let var = entry.var();
+                            let ty = entry.ty(cxt);
 
-                            if !ty.can_copy() {
-                                if let Err(span) = entry.try_move() {
-                                    cxt.error(
-                                        name.1,
-                                        TypeError::UseAfterMove(
-                                            span,
-                                            name.0,
-                                            ty.clone().quote(cxt.size(), Some(&cxt.mcxt)),
-                                        ),
-                                    );
-                                }
+                            let err = if !ty.can_copy() {
+                                entry.try_move(cxt)
+                            } else if let Some(deps) = entry.deps(cxt) {
+                                cxt.check_deps(deps)
+                            } else {
+                                Ok(())
+                            };
+                            if let Err(err) = err {
+                                cxt.error(
+                                    name.1,
+                                    TypeError::MoveError(
+                                        err,
+                                        name.0,
+                                        ty.clone().quote(cxt.size(), Some(&cxt.mcxt)),
+                                    ),
+                                );
                             }
 
-                            (Expr::var(var.cvt(cxt.size())), ty)
+                            (Expr::var(entry.var(cxt).cvt(cxt.size())), ty)
                         }
                     }
                     ast::Expr::Lam(x) => {

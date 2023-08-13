@@ -549,17 +549,16 @@ impl Val {
             Val::Neutral(n) => match n.head() {
                 // Currently all builtin types are copyable
                 Head::Var(Var::Builtin(_)) => true,
+                Head::Var(Var::Meta(_)) => true, // TODO add a Copy constraint to the meta somehow
                 _ => false,
-            }
+            },
             Val::Fun(clos) => match clos.class {
                 // TODO check if all components can be copied; may require eval-ing
                 Sigma => false,
-
-                Lam(_) |
-                Pi(_) => false,
-            }
-            Val::Lit(_) |
-            Val::Pair(_, _, _) => unreachable!("not a type"),
+                // TODO separate function types for Fn, FnMut, FnOnce
+                Lam(_) | Pi(_) => true,
+            },
+            Val::Lit(_) | Val::Pair(_, _, _) => unreachable!("not a type"),
             Val::Ref(_) => true,
             Val::Error => true,
         }
