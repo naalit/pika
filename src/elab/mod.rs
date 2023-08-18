@@ -197,40 +197,33 @@ impl TypeError {
                 )
             }
             TypeError::MoveError(err, name, ty) => {
-                return Error {
-                    note: Some(
-                        Doc::start("Move occurs because ")
-                            .chain(name.pretty(db))
-                            .add(" has type '", ())
-                            .chain(ty.pretty(db))
-                            .add("' which cannot be copied implicitly", ()),
-                    ),
-                    ..match err {
-                        MoveError::Consumed(old_span) => Error {
-                            severity,
-                            message: Doc::start("Variable ")
-                                .chain(name.pretty(db).style(Doc::COLOR1))
-                                .add(" used after move", ()),
-                            message_lsp: None,
-                            primary: Label {
-                                span,
-                                message: Doc::start("Variable has already been consumed"),
-                                color: Some(Doc::COLOR1),
-                            },
-                            secondary: vec![Label {
-                                span: *old_span,
-                                message: Doc::start("Variable was consumed here"),
-                                color: Some(Doc::COLOR2),
-                            }],
-                            note: None,
+                let mut err = match err {
+                    MoveError::Consumed(old_span) => Error {
+                        severity,
+                        message: Doc::start("Variable ")
+                            .chain(name.pretty(db).style(Doc::COLOR1))
+                            .add(" used after move", ()),
+                        message_lsp: None,
+                        primary: Label {
+                            span,
+                            message: Doc::start("Variable has already been consumed"),
+                            color: Some(Doc::COLOR1),
                         },
-                        MoveError::DepConsumed(old_span, dname) => Error {
+                        secondary: vec![Label {
+                            span: *old_span,
+                            message: Doc::start("Variable was consumed here"),
+                            color: Some(Doc::COLOR2),
+                        }],
+                        note: None,
+                    },
+                    MoveError::DepConsumed(old_span, dname) => {
+                        return Error {
                             severity,
                             message: Doc::start("Variable ")
                                 .chain(name.pretty(db).style(Doc::COLOR1))
-                                .add(" borrows ", ())
+                                .add(" can't be used because it borrows ", ())
                                 .chain(dname.pretty(db).style(Doc::COLOR2))
-                                .add(" which was previously moved", ()),
+                                .add(", which was previously moved", ()),
                             message_lsp: None,
                             primary: Label {
                                 span,
@@ -245,45 +238,49 @@ impl TypeError {
                                 color: Some(Doc::COLOR2),
                             }],
                             note: None,
-                        },
-                        MoveError::Borrowed(old_span) => Error {
-                            severity,
-                            message: Doc::start("Variable ")
-                                .chain(name.pretty(db).style(Doc::COLOR1))
-                                .add(" moved while still borrowed", ()),
-                            message_lsp: None,
-                            primary: Label {
-                                span,
-                                message: Doc::start("Variable can't be moved while it is borrowed"),
-                                color: Some(Doc::COLOR1),
-                            },
-                            secondary: vec![Label {
-                                span: *old_span,
-                                message: Doc::start("Variable was borrowed here"),
-                                color: Some(Doc::COLOR2),
-                            }],
-                            note: None,
-                        },
-                        MoveError::InvalidMove(doc) => Error {
-                            severity,
-                            message: doc.clone(),
-                            message_lsp: None,
-                            primary: Label {
-                                span,
-                                message: doc.clone(),
-                                color: Some(Doc::COLOR1),
-                            },
-                            secondary: vec![],
-                            note: Some(
-                                Doc::start("Move occurs because ")
-                                    .chain(name.pretty(db))
-                                    .add(" has type '", ())
-                                    .chain(ty.pretty(db))
-                                    .add("' which cannot be copied implicitly", ()),
-                            ),
-                        },
+                        }
                     }
+                    MoveError::Borrowed(old_span) => Error {
+                        severity,
+                        message: Doc::start("Variable ")
+                            .chain(name.pretty(db).style(Doc::COLOR1))
+                            .add(" moved while still borrowed", ()),
+                        message_lsp: None,
+                        primary: Label {
+                            span,
+                            message: Doc::start("Variable can't be moved while it is borrowed"),
+                            color: Some(Doc::COLOR1),
+                        },
+                        secondary: vec![Label {
+                            span: *old_span,
+                            message: Doc::start("Variable was borrowed here"),
+                            color: Some(Doc::COLOR2),
+                        }],
+                        note: None,
+                    },
+                    MoveError::InvalidMove(doc) => Error {
+                        severity,
+                        message: doc.clone(),
+                        message_lsp: None,
+                        primary: Label {
+                            span,
+                            message: doc.clone(),
+                            color: Some(Doc::COLOR1),
+                        },
+                        secondary: vec![],
+                        note: None,
+                    },
+                };
+                if err.note.is_none() {
+                    err.note = Some(
+                        Doc::start("Move occurs because ")
+                            .chain(name.pretty(db))
+                            .add(" has type '", ())
+                            .chain(ty.pretty(db))
+                            .add("' which cannot be copied implicitly", ()),
+                    );
                 }
+                return err;
             }
         };
         Error {

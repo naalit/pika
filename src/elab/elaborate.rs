@@ -1131,7 +1131,8 @@ impl ast::Expr {
                                     return self.infer_check(Val::Ref(ty), cxt, reason);
                                 }
 
-                                // TODO do we need to add the dependencies that this variable has?
+                                // This expression depends on everything the variable depends on, plus the variable itself
+                                cxt.add_deps(entry.deps(cxt).cloned().unwrap_or(Vec::new()));
                                 cxt.add_dep(self.span(), var.as_local().unwrap());
 
                                 // TODO does the backend need Expr::Ref or can it make do with the types?
@@ -1248,6 +1249,8 @@ impl ast::Expr {
                                     ),
                                 );
                             }
+                            // This expression depends on everything the variable depends on
+                            cxt.add_deps(entry.deps(cxt).cloned().unwrap_or(Vec::new()));
 
                             (Expr::var(entry.var(cxt).cvt(cxt.size())), ty)
                         }

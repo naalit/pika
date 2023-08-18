@@ -307,6 +307,9 @@ impl Cxt<'_> {
     pub fn add_dep(&mut self, span: RelSpan, var: Lvl) {
         self.expr_dependencies.push((span, var));
     }
+    pub fn add_deps(&mut self, deps: impl IntoIterator<Item = (RelSpan, Lvl)>) {
+        self.expr_dependencies.extend(deps)
+    }
     pub fn check_deps(&self, deps: &[(RelSpan, Lvl)]) -> Result<(), MoveError> {
         for &(_, l) in deps {
             let def = self.local_def(l);
