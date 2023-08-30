@@ -259,7 +259,7 @@ pub enum Val {
     // Do(Vec<Stmt>),
     Lit(Literal),
     Pair(Box<Val>, Box<Val>, Box<Val>),
-    Ref(Box<Val>),
+    Ref(bool, Box<Val>),
     Error,
 }
 impl IsTerm for Val {
@@ -404,7 +404,7 @@ impl Expr {
                 Box::new(b.eval(env)),
                 Box::new(t.eval(env)),
             ),
-            Expr::Ref(x) => Val::Ref(Box::new(x.eval(env))),
+            Expr::Ref(m, x) => Val::Ref(m, Box::new(x.eval(env))),
             Expr::Error => Val::Error,
             Expr::Spanned(_, x) => x.eval(env),
         }
@@ -431,7 +431,7 @@ impl Expr {
                 },
                 _ => (),
             },
-            Expr::Ref(x) => x.eval_quote_in_place(env, size, inline_metas),
+            Expr::Ref(_, x) => x.eval_quote_in_place(env, size, inline_metas),
             Expr::Elim(f, e) => {
                 f.eval_quote_in_place(env, size, inline_metas);
                 match &mut **e {
@@ -515,7 +515,7 @@ impl Val {
                     res
                 }
             }
-            Val::Ref(x) => Expr::Ref(Box::new(x.quote(size, inline_metas))),
+            Val::Ref(m, x) => Expr::Ref(m, Box::new(x.quote(size, inline_metas))),
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),
             Val::Pair(a, b, t) => Expr::Pair(
@@ -559,7 +559,7 @@ impl Val {
                 Lam(_) | Pi(_) => true,
             },
             Val::Lit(_) | Val::Pair(_, _, _) => unreachable!("not a type"),
-            Val::Ref(_) => true,
+            Val::Ref(m, _) => !m,
             Val::Error => true,
         }
     }
@@ -594,7 +594,7 @@ impl Val {
                     })
                 })
             }
-            Val::Ref(x) => x.check_scope(size),
+            Val::Ref(_, x) => x.check_scope(size),
             Val::Fun(clos) => clos.check_scope(size),
             Val::Lit(_) => Ok(()),
             Val::Pair(a, b, t) => {
@@ -675,7 +675,7 @@ impl Expr {
                         }
                     })
             }
-            Expr::Ref(x) => x.check_scope(allowed, inner_size, size),
+            Expr::Ref(_, x) => x.check_scope(allowed, inner_size, size),
             Expr::Fun(c) => c.check_scope(allowed, inner_size, size),
             Expr::Lit(_) => Ok(()),
             Expr::Pair(a, b, t) => {

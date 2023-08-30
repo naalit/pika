@@ -71,7 +71,7 @@
 				"match": "\\b(do|case|catch|of|if|then|else)\\b"
 			},  {
                 "name": "keyword.other.pika",
-                "match": "\\b(type|eff|with|struct|let|fun|where|impl|box|unbox)\\b"
+                "match": "\\b(type|eff|with|struct|let|fun|where|impl|box|unbox|mut)\\b"
             }]
 		},
 		"symbols": {

@@ -596,8 +596,13 @@ impl<'a> Parser<'a> {
                         self.pop();
                     }
                     Tok::BitAnd => {
-                        self.push(Tok::Reference);
+                        let cp = self.checkpoint();
                         self.advance();
+                        if self.maybe(Tok::MutKw) {
+                            self.push_at(cp, Tok::RefMut);
+                        } else {
+                            self.push_at(cp, Tok::Reference);
+                        }
                         self.expr(Prec::App);
                         self.pop();
                     }

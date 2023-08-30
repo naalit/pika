@@ -26,6 +26,7 @@ pub enum SyntaxKind {
     EffKw,
     BoxKw,
     UnboxKw,
+    MutKw,
 
     // Symbols the lexer recognizes as a "binary operator"
     Colon,     // :
@@ -97,6 +98,7 @@ pub enum SyntaxKind {
     ImpPars,
 
     Reference,
+    RefMut,
 
     StructInit,
     Var,

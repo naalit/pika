@@ -56,11 +56,13 @@ impl<T: std::fmt::Display> From<T> for Doc {
 }
 
 impl Doc {
-    // The first three colors from ariadne::ColorGenerator
+    // The first few colors from ariadne::ColorGenerator
     // This way we can access them anywhere more easily
     pub const COLOR1: ariadne::Color = ariadne::Color::Fixed(201);
     pub const COLOR2: ariadne::Color = ariadne::Color::Fixed(155);
     pub const COLOR3: ariadne::Color = ariadne::Color::Fixed(187);
+    pub const COLOR4: ariadne::Color = ariadne::Color::Fixed(218);
+    pub const COLOR5: ariadne::Color = ariadne::Color::Fixed(158);
 
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()

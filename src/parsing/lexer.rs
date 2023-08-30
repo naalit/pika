@@ -179,6 +179,7 @@ impl<'i> Lexer<'i> {
             "struct" => Tok::StructKw,
             "sig" => Tok::SigKw,
             "of" => Tok::OfKw,
+            "mut" => Tok::MutKw,
             _ => Tok::Name,
         };
         self.tok_in_place(tok)
@@ -514,6 +515,7 @@ impl<'i> fmt::Display for Tok {
             Tok::EffKw => "'eff'",
             Tok::BoxKw => "'box'",
             Tok::UnboxKw => "'unbox'",
+            Tok::MutKw => "'mut'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",

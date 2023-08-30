@@ -232,6 +232,7 @@ make_nodes! {
     Box = expr: Expr;
 
     Reference = expr: Expr;
+    RefMut = expr: Expr;
 
     GroupedExpr = expr: Expr;
 
@@ -253,7 +254,8 @@ make_nodes! {
         EffPat,
         Binder,
         StructInit,
-        Reference
+        Reference,
+        RefMut
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -659,6 +661,10 @@ impl Pretty for Expr {
                 .space()
                 .chain(x.b().pretty()),
             Expr::Reference(r) => Doc::start('&').chain(r.expr().pretty()),
+            Expr::RefMut(r) => Doc::start('&')
+                .add("mut", Doc::style_keyword())
+                .space()
+                .chain(r.expr().pretty()),
         };
         Doc::start('{').chain(p).add('}', ())
     }

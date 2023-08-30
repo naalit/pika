@@ -49,6 +49,7 @@ impl ast::Def {
                     x.exp_par().as_par(),
                     x.ret_ty().and_then(|x| x.expr()),
                     None,
+                    x.span(),
                     cxt,
                 );
                 let ty = ty
@@ -131,6 +132,7 @@ impl ast::Def {
                     x.exp_par().as_par(),
                     x.ret_ty().and_then(|x| x.expr()),
                     x.body(),
+                    x.span(),
                     cxt,
                 );
 
@@ -155,6 +157,7 @@ impl ast::Def {
                         kw: None,
                     })),
                     None,
+                    x.span(),
                     cxt,
                 );
 
@@ -225,6 +228,7 @@ impl ast::Def {
                             c.exp_par().as_par(),
                             c.ret_ty().and_then(|x| x.expr()),
                             None,
+                            c.span(),
                             cxt,
                         );
                         fn head(t: &Expr) -> &Expr {
@@ -262,7 +266,7 @@ impl ast::Def {
                                 par.name,
                                 par.ty.clone().eval(&mut cxt.env()),
                                 None,
-                                Vec::new(),
+                                None,
                             );
                         }
                         implicit.append(&mut check_params(
@@ -391,6 +395,7 @@ fn infer_fun(
     explicit: Option<SomePar>,
     ret_ty: Option<ast::Expr>,
     body: Option<ast::Body>,
+    span: RelSpan,
     cxt: &mut Cxt,
 ) -> (Expr, Expr) {
     // [a, b] [c, d] (e, f) => ...
@@ -424,6 +429,8 @@ fn infer_fun(
         )
     });
 
+    cxt.record_deps();
+    let bspan = body.as_ref().map_or(span, |x| x.span());
     let (body, bty) = match ret_ty {
         Some(bty) => {
             let span = bty.span();
@@ -446,6 +453,7 @@ fn infer_fun(
                 (Expr::Error, Val::Error)
             }),
     };
+    cxt.finish_deps(bspan); // TODO what do we do with this borrow
     let bty = bty.quote(cxt.size(), None);
     cxt.pop();
 
@@ -645,12 +653,7 @@ fn check_par(
         }
     };
     // Define each parameter so it can be used by the types of the rest
-    cxt.define_local(
-        par.name,
-        par.ty.clone().eval(&mut cxt.env()),
-        None,
-        Vec::new(),
-    );
+    cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None, None);
     par
 }
 
@@ -662,6 +665,7 @@ impl ast::Pair {
                 self.lhs().map(|par| SomePar { par, pat: false }),
                 self.rhs(),
                 None,
+                self.span(),
                 cxt,
             );
             match ty {
@@ -966,7 +970,7 @@ impl ast::Expr {
                             (par.name.0.inaccessible(cxt.db), par.name.1),
                             par.ty.clone().eval(&mut cxt.env()),
                             None,
-                            Vec::new(),
+                            None,
                         );
                         implicit.push(par.clone());
                     }
@@ -1075,12 +1079,7 @@ impl ast::Expr {
                     cxt.push();
                     for i in &mut params {
                         i.name.0 = i.name.0.inaccessible(cxt.db);
-                        cxt.define_local(
-                            i.name,
-                            i.ty.clone().eval(&mut cxt.env()),
-                            None,
-                            Vec::new(),
-                        );
+                        cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None, None);
                     }
 
                     let body = self.check(bty, cxt, reason);
@@ -1096,12 +1095,12 @@ impl ast::Expr {
                 }
 
                 // Autoref
-                (ast::Expr::Var(name), Val::Ref(ty)) => {
+                (ast::Expr::Var(name), Val::Ref(m, ty)) => {
                     let name = name.name(cxt.db);
                     if name.0 == cxt.db.name("_".to_string()) {
                         let meta = cxt.mcxt.new_meta(
                             cxt.locals(),
-                            MetaBounds::new(Val::Ref(ty)),
+                            MetaBounds::new(Val::Ref(m, ty)),
                             self.span(),
                         );
                         Ok(meta)
@@ -1112,33 +1111,39 @@ impl ast::Expr {
                                 let vty = entry.ty(cxt);
                                 let var = entry.var(cxt);
 
-                                if cxt.unify(vty, (*ty).clone(), reason).is_ok() {
-                                    match entry.try_borrow(cxt) {
-                                        Ok(_) => (),
-                                        Err(Some(err)) => cxt.error(
-                                            name.1,
-                                            TypeError::MoveError(
-                                                err,
-                                                name.0,
-                                                ty.clone().quote(cxt.size(), Some(&cxt.mcxt)),
-                                            ),
-                                        ),
-                                        Err(None) => {
-                                            return self.infer_check(Val::Ref(ty), cxt, reason)
+                                match cxt.unify(vty.clone(), Val::Ref(m, ty.clone()), reason) {
+                                    Ok(()) => {
+                                        return self.infer_check(Val::Ref(m, ty), cxt, reason)
+                                    }
+                                    Err(error) => {
+                                        if cxt.unify(vty, (*ty).clone(), reason).is_ok() {
+                                            match entry.try_borrow(m, cxt) {
+                                                Ok(_) => (),
+                                                Err(Some(err)) => cxt.error(name.1, err),
+                                                Err(None) => {
+                                                    return Err(error.into());
+                                                }
+                                            }
+                                        } else {
+                                            return Err(error.into());
                                         }
                                     }
-                                } else {
-                                    return self.infer_check(Val::Ref(ty), cxt, reason);
                                 }
 
                                 // This expression depends on everything the variable depends on, plus the variable itself
-                                cxt.add_deps(entry.deps(cxt).cloned().unwrap_or(Vec::new()));
-                                cxt.add_dep(self.span(), var.as_local().unwrap());
+                                cxt.add_dep(
+                                    entry.borrow(cxt).unwrap(),
+                                    Access {
+                                        name: name.0,
+                                        span: name.1,
+                                        kind: AccessKind::borrow(m),
+                                    },
+                                );
 
                                 // TODO does the backend need Expr::Ref or can it make do with the types?
                                 Ok(Expr::var(var.cvt(cxt.size())))
                             }
-                            _ => self.infer_check(Val::Ref(ty), cxt, reason),
+                            _ => self.infer_check(Val::Ref(m, ty), cxt, reason),
                         }
                     }
                 }
@@ -1232,32 +1237,34 @@ impl ast::Expr {
                             let mut entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
                             let ty = entry.ty(cxt);
 
-                            let err = if !ty.can_copy() {
-                                entry.try_move(cxt)
-                            } else if let Some(deps) = entry.deps(cxt) {
-                                cxt.check_deps(deps)
-                            } else {
-                                Ok(())
+                            let access = Access {
+                                name: name.0,
+                                span: name.1,
+                                kind: AccessKind::copy_move(ty.can_copy()),
                             };
-                            if let Err(err) = err {
-                                cxt.error(
-                                    name.1,
-                                    TypeError::MoveError(
-                                        err,
-                                        name.0,
-                                        ty.clone().quote(cxt.size(), Some(&cxt.mcxt)),
-                                    ),
-                                );
+                            if access.kind == AccessKind::Move {
+                                entry
+                                    .try_move(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)), cxt)?
+                            } else if let Some(borrow) = entry.borrow(cxt) {
+                                cxt.check_deps(borrow, access)?
                             }
                             // This expression depends on everything the variable depends on
-                            cxt.add_deps(entry.deps(cxt).cloned().unwrap_or(Vec::new()));
+                            if let Some(borrow) = entry.borrow(cxt) {
+                                cxt.add_dep(borrow, access);
+                            }
 
                             (Expr::var(entry.var(cxt).cvt(cxt.size())), ty)
                         }
                     }
                     ast::Expr::Lam(x) => {
-                        let (term, ty) =
-                            infer_fun(x.imp_par(), x.exp_par().as_par(), None, x.body(), cxt);
+                        let (term, ty) = infer_fun(
+                            x.imp_par(),
+                            x.exp_par().as_par(),
+                            None,
+                            x.body(),
+                            x.span(),
+                            cxt,
+                        );
                         (term, ty.eval(&mut cxt.env()))
                     }
                     ast::Expr::Pi(x) => {
@@ -1266,6 +1273,7 @@ impl ast::Expr {
                             x.exp_par().as_par(),
                             x.body().and_then(|x| x.expr()),
                             None,
+                            x.span(),
                             cxt,
                         );
                         (pi, Val::Type)
@@ -1276,7 +1284,15 @@ impl ast::Expr {
                             cxt,
                             &CheckReason::UsedAsType,
                         );
-                        (Expr::Ref(Box::new(x)), Val::Type)
+                        (Expr::Ref(false, Box::new(x)), Val::Type)
+                    }
+                    ast::Expr::RefMut(x) => {
+                        let x = x.expr().ok_or("Expected type of reference")?.check(
+                            Val::Type,
+                            cxt,
+                            &CheckReason::UsedAsType,
+                        );
+                        (Expr::Ref(true, Box::new(x)), Val::Type)
                     }
                     ast::Expr::App(x) => {
                         let (mut lhs, mut lhs_ty) = x
