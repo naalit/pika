@@ -291,7 +291,7 @@ impl<'a> Parser<'a> {
                 self.maybe(Tok::Newline);
                 if self.maybe(Tok::Colon) {
                     self.push(Tok::Ty);
-                    self.expr(());
+                    self.expr(Prec::Pat); // Not a pattern but we don't want to allow =
                     self.pop();
                 }
 
@@ -419,7 +419,7 @@ impl<'a> Parser<'a> {
                 self.advance();
 
                 self.push(Tok::Pat);
-                self.expr(());
+                self.expr(Prec::Pat);
                 self.pop();
 
                 // Allow declarations like
@@ -503,7 +503,7 @@ impl<'a> Parser<'a> {
             self.push(Tok::Pat);
 
             self.advance();
-            self.expr(());
+            self.expr(Prec::Pat);
             self.expect(Tok::SClose);
 
             self.pop();
@@ -603,6 +603,12 @@ impl<'a> Parser<'a> {
                         } else {
                             self.push_at(cp, Tok::Reference);
                         }
+                        self.expr(Prec::App);
+                        self.pop();
+                    }
+                    Tok::Times => {
+                        self.push(Tok::Deref);
+                        self.advance();
                         self.expr(Prec::App);
                         self.pop();
                     }
@@ -834,6 +840,12 @@ impl<'a> Parser<'a> {
                     {
                         self.arguments();
                     }
+                    self.pop();
+                }
+                Tok::Equals if Prec::Min >= min_prec => {
+                    self.push_at(lhs, Tok::Assign);
+                    self.advance();
+                    self.expr(());
                     self.pop();
                 }
                 // , is right associative
@@ -1086,8 +1098,6 @@ enum Prec {
     AddSub,
     /// *, /, %
     MulDiv,
-    /// **
-    Exp,
     /// &, |, ^^, >>, <<
     Bitwise,
     /// >, >=, <, <=, ==, !=
@@ -1098,6 +1108,8 @@ enum Prec {
     App,
     /// if (not a real binop)
     If,
+    /// The top-level precedence of patterns, which can't include = or if
+    Pat,
     /// ,
     Comma,
     /// :
@@ -1118,7 +1130,6 @@ impl Prec {
             Prec::Comp => Some(2),
             Prec::AddSub => Some(3),
             Prec::MulDiv => Some(4),
-            Prec::Exp => Some(5),
             _ => None,
         }
     }
@@ -1142,6 +1153,10 @@ impl PartialOrd for Prec {
             // And if has the lowest precedence
             (Prec::If, _) => return Some(Ordering::Less),
             (_, Prec::If) => return Some(Ordering::Greater),
+
+            // Then patterns
+            (Prec::Pat, _) => return Some(Ordering::Less),
+            (_, Prec::Pat) => return Some(Ordering::Greater),
 
             // Next is pipe
             (Prec::Pipe, _) => return Some(Ordering::Less),
@@ -1242,7 +1257,6 @@ impl Tok {
             Tok::AndKw | Tok::OrKw => Prec::Logic,
             Tok::Plus | Tok::Minus => Prec::AddSub,
             Tok::Times | Tok::Mod | Tok::Div => Prec::MulDiv,
-            Tok::Exp => Prec::Exp,
             Tok::Bar | Tok::Xor | Tok::LShift | Tok::RShift | Tok::BitAnd => Prec::Bitwise,
             Tok::Gt | Tok::GtE | Tok::Lt | Tok::LtE | Tok::Eq | Tok::NEq => Prec::Comp,
             Tok::LPipe | Tok::RPipe => Prec::Pipe,

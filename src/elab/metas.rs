@@ -10,12 +10,12 @@ impl std::fmt::Display for Meta {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SpecialBound {
     IntType { must_fit: i128 },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MetaBounds {
     ty: Val,
     special: Option<SpecialBound>,
@@ -85,7 +85,7 @@ impl MetaBounds {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum MetaEntry {
     Solved {
         /// A lambda term with no free variables
@@ -369,7 +369,7 @@ impl MetaCxt<'_> {
                     introduced_span,
                 } => Some((bounds, introduced_span)),
             })
-            .unwrap();
+            .unwrap_or_else(|| panic!("{:?}: {:?}", meta, self.metas.get(meta.0 as usize)));
         bounds.check(&solution, start_size, self)?;
 
         let mut rename = PartialRename {
@@ -499,6 +499,10 @@ impl Expr {
                 _ => (),
             },
             Expr::Ref(_, x) => x.check_solution(cxt, mode, s_from, s_to)?,
+            Expr::Assign(place, expr) => {
+                place.check_solution(cxt, mode, s_from, s_to)?;
+                expr.check_solution(cxt, mode, s_from, s_to)?;
+            }
             Expr::Elim(a, b) => {
                 a.check_solution(cxt, mode, s_from, s_to)?;
                 b.check_solution(cxt, mode, s_from, s_to)?;

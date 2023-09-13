@@ -69,11 +69,11 @@ impl Doc {
     }
 
     pub fn style_keyword() -> Style {
-        Color::Magenta.style().bold()
+        Color::Magenta.style()
     }
 
     pub fn style_literal() -> Style {
-        Color::Cyan.style().bold()
+        Color::Cyan.style()
     }
 
     /// Applies `style` to any string data directly in this Doc.

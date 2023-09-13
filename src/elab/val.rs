@@ -58,7 +58,7 @@ impl Neutral {
         } else {
             drop(guard);
             let (head, cache) = match self.head {
-                Head::Var(Var::Local(_, l)) => match env.get(l.idx(env.size)) {
+                Head::Var(Var::Local(n, l)) => match env.get_as_val(n, l.idx(env.size)) {
                     // Don't cache inlined locals since they're context-dependent
                     Some(v) => (v.clone(), false),
                     None => return Err(self),
@@ -115,7 +115,7 @@ impl VClos {
         } = self;
         for par in params {
             let ty = par.ty.eval(&mut env);
-            env.push(Some(arg(ty)));
+            env.push(Some(Ok(arg(ty))));
         }
         body.eval(&mut env)
     }
@@ -199,7 +199,7 @@ impl VClos {
                     name,
                     ty: ty.eval_quote(&mut env, size, inline_metas),
                 };
-                env.push(Some(Val::var(Var::Local(name, size.next_lvl()))));
+                env.push(Some(Err(size.next_lvl())));
                 size += 1;
                 par
             })
@@ -226,8 +226,8 @@ impl VClos {
             mut env,
             body,
         } = self;
-        for par in &params {
-            env.push(Some(Val::var(Var::Local(par.name, size.next_lvl()))));
+        for _ in params {
+            env.push(Some(Err(size.next_lvl())));
             size += 1;
         }
         body.eval(&mut env)
@@ -379,7 +379,7 @@ impl EClos {
         let state = env.state();
         for i in &mut self.params {
             i.ty.eval_quote_in_place(env, size, inline_metas);
-            env.push(Some(Val::var(Var::Local(i.name, size.next_lvl()))));
+            env.push(Some(Err(size.next_lvl())));
             size += 1;
         }
         self.body.eval_quote_in_place(env, size, inline_metas);
@@ -404,6 +404,7 @@ impl Expr {
                 Box::new(b.eval(env)),
                 Box::new(t.eval(env)),
             ),
+            Expr::Assign(_, _) => todo!("handle partial evaluation failing"),
             Expr::Ref(m, x) => Val::Ref(m, Box::new(x.eval(env))),
             Expr::Error => Val::Error,
             Expr::Spanned(_, x) => x.eval(env),
@@ -432,6 +433,10 @@ impl Expr {
                 _ => (),
             },
             Expr::Ref(_, x) => x.eval_quote_in_place(env, size, inline_metas),
+            Expr::Assign(place, expr) => {
+                place.eval_quote_in_place(env, size, inline_metas);
+                expr.eval_quote_in_place(env, size, inline_metas);
+            }
             Expr::Elim(f, e) => {
                 f.eval_quote_in_place(env, size, inline_metas);
                 match &mut **e {
@@ -479,7 +484,7 @@ impl Expr {
         self
     }
 
-    fn unspanned(&self) -> &Expr {
+    pub fn unspanned(&self) -> &Expr {
         match self {
             Expr::Spanned(_, x) => x.unspanned(),
             x => x,
@@ -676,6 +681,10 @@ impl Expr {
                     })
             }
             Expr::Ref(_, x) => x.check_scope(allowed, inner_size, size),
+            Expr::Assign(place, expr) => {
+                place.check_scope(allowed, inner_size, size)?;
+                expr.check_scope(allowed, inner_size, size)
+            }
             Expr::Fun(c) => c.check_scope(allowed, inner_size, size),
             Expr::Lit(_) => Ok(()),
             Expr::Pair(a, b, t) => {

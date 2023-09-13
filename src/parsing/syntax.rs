@@ -40,7 +40,6 @@ pub enum SyntaxKind {
     Bar,       // |
     Dot,       // .
     Comma,     // ,
-    Exp,       // **
     Mod,       // %
     Xor,       // ^^
     LShift,    // <<
@@ -99,6 +98,8 @@ pub enum SyntaxKind {
 
     Reference,
     RefMut,
+    Deref,
+    Assign,
 
     StructInit,
     Var,

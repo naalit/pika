@@ -536,7 +536,7 @@ impl VarEntry {
         Access { kind, name, span }
     }
 
-    pub fn try_move(&mut self, ty: Expr, cxt: &mut Cxt) -> Result<(), MoveError> {
+    pub fn try_move(&self, ty: Expr, cxt: &mut Cxt) -> Result<(), MoveError> {
         if let Some(borrow) = self.borrow(cxt) {
             cxt.check_deps(borrow, self.access(AccessKind::Move))?;
         }
@@ -593,8 +593,12 @@ impl VarEntry {
                 }
                 _ => unreachable!(),
             },
-
-            VarEntry::Other { .. } => Err(None),
+            // It's fine to borrow definitions immutably, they can't ever be mutated
+            VarEntry::Other {
+                var: VarDef::Def(_),
+                ..
+            } if !mutable => Ok(()),
+            _ => Err(None),
         }
     }
 }
@@ -711,7 +715,7 @@ impl Cxt<'_> {
     ) {
         let borrow = borrow.unwrap_or_else(|| Borrow::new(self));
         self.scope_mut().unwrap().define_local(name, ty, borrow);
-        self.env.push(value);
+        self.env.push(value.map(Ok));
     }
 
     pub fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val) {

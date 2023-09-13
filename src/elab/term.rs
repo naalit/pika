@@ -30,7 +30,6 @@ pub enum ArithOp {
     Sub,
     Mul,
     Div,
-    Exp,
     Mod,
     // Bitwise are included here since the types match
     Ior,
@@ -47,7 +46,6 @@ impl ArithOp {
             Tok::Minus => ArithOp::Sub,
             Tok::Times => ArithOp::Mul,
             Tok::Div => ArithOp::Div,
-            Tok::Exp => ArithOp::Exp,
             Tok::Mod => ArithOp::Mod,
             Tok::Bar => ArithOp::Ior,
             Tok::Xor => ArithOp::Xor,
@@ -65,7 +63,6 @@ impl std::fmt::Display for ArithOp {
             ArithOp::Sub => "-",
             ArithOp::Mul => "*",
             ArithOp::Div => "/",
-            ArithOp::Exp => "**",
             ArithOp::Mod => "%",
             ArithOp::Ior => "|",
             ArithOp::Xor => "^^",
@@ -298,6 +295,7 @@ pub enum Expr {
     Pair(Box<Expr>, Box<Expr>, Box<Expr>),
     /// (mutable, referent type)
     Ref(bool, Box<Expr>),
+    Assign(Box<Expr>, Box<Expr>),
     Spanned(RelSpan, Box<Expr>),
     Error,
 }
@@ -354,6 +352,7 @@ impl Expr {
     pub fn ty(&self, cxt: &mut Cxt) -> Val {
         match self {
             Expr::Type | Expr::Ref(_, _) => Val::Type,
+            Expr::Assign(_, _) => Val::var(Var::Builtin(Builtin::UnitType)),
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
@@ -458,6 +457,11 @@ impl Pretty for Expr {
                 .space()
                 .chain(x.pretty(db).nest(Prec::App))
                 .prec(Prec::App),
+            Expr::Assign(place, expr) => place
+                .pretty(db)
+                .add(" = ", ())
+                .chain(expr.pretty(db))
+                .prec(Prec::Term),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)

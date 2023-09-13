@@ -793,7 +793,7 @@ impl Expr {
                             class: Sigma, body, ..
                         }) => {
                             let mut env = cxt.env();
-                            env.push(Some(a.clone().eval(&mut cxt.env())));
+                            env.push(Some(Ok(a.clone().eval(&mut cxt.env()))));
                             body.eval_quote(&mut env, cxt.size(), None)
                         }
                         _ => Expr::Error,
@@ -895,6 +895,112 @@ pub(super) fn resolve_member(
             .add("' does not have members", ()),
     );
     (Expr::Error, Val::Error)
+}
+
+enum PlaceOrExpr {
+    Place(Place),
+    Expr(Expr, Val, Borrow, RelSpan),
+}
+enum Place {
+    Var(VarEntry),
+    Deref(Box<PlaceOrExpr>),
+}
+impl Place {
+    fn ty(&self, cxt: &Cxt) -> Result<Val, TypeError> {
+        match self {
+            Place::Var(v) => Ok(v.ty(cxt)),
+            Place::Deref(e) => {
+                let ty = match &**e {
+                    PlaceOrExpr::Place(t) => t.ty(cxt)?,
+                    PlaceOrExpr::Expr(_, ty, _, _) => ty.clone(),
+                };
+                if let Val::Ref(_, ty) = ty {
+                    Ok(*ty)
+                } else {
+                    Err(TypeError::Other(
+                        Doc::start("Expected reference after unary *, got ")
+                            .chain(ty.quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db)),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn to_expr(self, cxt: &Cxt) -> Expr {
+        match self {
+            Place::Var(v) => Expr::var(v.var(cxt).cvt(cxt.size())),
+            Place::Deref(e) => match *e {
+                PlaceOrExpr::Place(p) => p.to_expr(cxt), // TODO Expr::Deref (this will definitely be needed for backend)
+                PlaceOrExpr::Expr(e, _, _, _) => e,
+            },
+        }
+    }
+
+    /// Makes sure the access is valid, invalidating other borrows appropriately, and adds needed dependencies to the cxt
+    fn try_access(&self, kind: AccessKind, cxt: &mut Cxt) -> Result<(), TypeError> {
+        match self {
+            Place::Var(v) => {
+                let r = match kind {
+                    AccessKind::Mut | AccessKind::Imm => {
+                        let mutable = kind == AccessKind::Mut;
+                        v.try_borrow(mutable, cxt).map_err(|e| match e {
+                            Some(e) => TypeError::from(e),
+                            None => TypeError::Other(
+                                Doc::start("Could not borrow from ").debug(v.var(cxt)),
+                            ),
+                        })
+                    }
+                    AccessKind::Move => v
+                        .try_move(self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt)), cxt)
+                        .map_err(Into::into),
+                    AccessKind::Copy => Ok(()),
+                };
+                if let Some(borrow) = v.borrow(cxt) {
+                    cxt.add_dep(borrow, v.access(kind));
+                }
+                r
+            }
+            Place::Deref(_) if kind == AccessKind::Move => {
+                Err("Cannot move out of reference".into())
+            } // TODO type information (make this a MoveError variant)
+            Place::Deref(e) => {
+                let ty = match &**e {
+                    PlaceOrExpr::Place(p) => {
+                        p.try_access(kind, cxt)?;
+                        Cow::Owned(p.ty(cxt)?)
+                    }
+                    PlaceOrExpr::Expr(_, t, b, s) => {
+                        cxt.add_dep(
+                            *b,
+                            Access {
+                                kind,
+                                name: cxt.db.name("<expression>".into()),
+                                span: *s,
+                            },
+                        );
+                        Cow::Borrowed(t)
+                    }
+                };
+                match kind {
+                    AccessKind::Mut | AccessKind::Imm => {
+                        let mutable = kind == AccessKind::Mut;
+                        match &*ty {
+                            Val::Ref(m, _) => {
+                                if mutable && !m {
+                                    return Err(TypeError::Other(
+                                        "Cannot mutate through an immutable reference".into(),
+                                    ));
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => (),
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl ast::Expr {
@@ -1116,7 +1222,7 @@ impl ast::Expr {
                                         return self.infer_check(Val::Ref(m, ty), cxt, reason)
                                     }
                                     Err(error) => {
-                                        if cxt.unify(vty, (*ty).clone(), reason).is_ok() {
+                                        if cxt.unify(vty.clone(), (*ty).clone(), reason).is_ok() {
                                             match entry.try_borrow(m, cxt) {
                                                 Ok(_) => (),
                                                 Err(Some(err)) => cxt.error(name.1, err),
@@ -1124,6 +1230,17 @@ impl ast::Expr {
                                                     return Err(error.into());
                                                 }
                                             }
+                                        } else if !m
+                                            && cxt
+                                                .unify(
+                                                    vty.clone(),
+                                                    Val::Ref(true, ty.clone()),
+                                                    reason,
+                                                )
+                                                .is_ok()
+                                        {
+                                            // Degrade from mutable to immutable reference
+                                            // so we do nothing here, we're just immutably borrowing from the mutable reference
                                         } else {
                                             return Err(error.into());
                                         }
@@ -1169,6 +1286,33 @@ impl ast::Expr {
         };
         cxt.unify(ity, ty, reason)?;
         Ok(a)
+    }
+
+    fn elab_place(&self, cxt: &mut Cxt) -> Option<Place> {
+        match self {
+            ast::Expr::Var(n) => {
+                let entry = cxt.lookup(n.name(cxt.db))?;
+                Some(Place::Var(entry))
+            }
+            ast::Expr::Deref(e) => {
+                // Doesn't do type checking
+                match e.expr()?.elab_place(cxt) {
+                    Some(place) => Some(Place::Deref(Box::new(PlaceOrExpr::Place(place)))),
+                    None => {
+                        cxt.record_deps();
+                        let (e, ty) = e.expr()?.infer(cxt);
+                        let borrow = cxt.finish_deps(self.span())?;
+                        Some(Place::Deref(Box::new(PlaceOrExpr::Expr(
+                            e,
+                            ty,
+                            borrow,
+                            self.span(),
+                        ))))
+                    }
+                }
+            }
+            _ => None,
+        }
     }
 
     pub fn as_args(self) -> Vec<Result<ast::Expr, RelSpan>> {
@@ -1234,7 +1378,7 @@ impl ast::Expr {
                             );
                             (meta, mty)
                         } else {
-                            let mut entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
+                            let entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
                             let ty = entry.ty(cxt);
 
                             let access = Access {
@@ -1293,6 +1437,50 @@ impl ast::Expr {
                             &CheckReason::UsedAsType,
                         );
                         (Expr::Ref(true, Box::new(x)), Val::Type)
+                    }
+                    ast::Expr::Deref(_) => {
+                        let place = self.elab_place(cxt).ok_or("Expected reference after *")?;
+                        let xty = place.ty(cxt)?;
+                        // A bare deref must be a copy
+                        place.try_access(AccessKind::Copy, cxt)?;
+                        let x = place.to_expr(cxt);
+                        if !xty.can_copy() {
+                            match x.unspanned() {
+                                Expr::Head(Head::Var(Var::Local((n, _), _))) => {
+                                    return Err(MoveError::InvalidMove(
+                                        Doc::start("Cannot move out of reference"),
+                                        *n,
+                                        Box::new(xty.quote(cxt.size(), Some(&cxt.mcxt))),
+                                    )
+                                    .into())
+                                }
+                                _ => {
+                                    return Err(TypeError::Other(
+                                        Doc::start("Cannot move out of reference of type ").chain(
+                                            xty.quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db),
+                                        ),
+                                    ))
+                                }
+                            }
+                        }
+                        (x, xty)
+                    }
+                    ast::Expr::Assign(x) => {
+                        let place = x
+                            .lhs()
+                            .ok_or("Missing left-hand side of assignment")?
+                            .elab_place(cxt)
+                            .ok_or("Cannot assign to expression")?;
+                        let ty = place.ty(cxt)?;
+                        place.try_access(AccessKind::Mut, cxt)?;
+                        let expr = x
+                            .rhs()
+                            .ok_or("Missing right-hand side of assignment")?
+                            .check(ty, cxt, &CheckReason::MustMatch(x.lhs().unwrap().span()));
+                        (
+                            Expr::Assign(Box::new(place.to_expr(cxt)), Box::new(expr)),
+                            Val::var(Var::Builtin(Builtin::UnitType)),
+                        )
                     }
                     ast::Expr::App(x) => {
                         let (mut lhs, mut lhs_ty) = x
