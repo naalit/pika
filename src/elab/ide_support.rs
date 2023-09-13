@@ -67,7 +67,7 @@ impl Expr {
                 a.find_span(span, cxt)?;
                 b.find_span(span, cxt)?;
             }
-            Expr::Ref(_, x) => x.find_span(span, cxt)?,
+            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => x.find_span(span, cxt)?,
             Expr::Assign(place, expr) => {
                 place.find_span(span, cxt)?;
                 expr.find_span(span, cxt)?;

@@ -294,8 +294,10 @@ pub enum Expr {
     /// (consider `(I32, 3)`, which may be `(Type, I32)` or `(a: Type, a)`)
     Pair(Box<Expr>, Box<Expr>, Box<Expr>),
     /// (mutable, referent type)
-    Ref(bool, Box<Expr>),
+    RefType(bool, Box<Expr>),
     Assign(Box<Expr>, Box<Expr>),
+    Ref(bool, Box<Expr>),
+    Deref(Box<Expr>),
     Spanned(RelSpan, Box<Expr>),
     Error,
 }
@@ -307,7 +309,7 @@ impl PartialEq for Expr {
             (Self::Fun(l0), Self::Fun(r0)) => l0 == r0,
             (Self::Lit(l0), Self::Lit(r0)) => l0 == r0,
             (Self::Pair(l0, l1, l2), Self::Pair(r0, r1, r2)) => l0 == r0 && l1 == r1 && l2 == r2,
-            (Self::Ref(a, x), Self::Ref(b, y)) => a == b && x == y,
+            (Self::RefType(a, x), Self::RefType(b, y)) => a == b && x == y,
             // Ignore spans
             (Self::Spanned(_, l1), Self::Spanned(_, r1)) => l1 == r1,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
@@ -351,8 +353,13 @@ impl Expr {
 
     pub fn ty(&self, cxt: &mut Cxt) -> Val {
         match self {
-            Expr::Type | Expr::Ref(_, _) => Val::Type,
+            Expr::Type | Expr::RefType(_, _) => Val::Type,
             Expr::Assign(_, _) => Val::var(Var::Builtin(Builtin::UnitType)),
+            Expr::Ref(m, x) => Val::RefType(*m, Box::new(x.ty(cxt))),
+            Expr::Deref(x) => match x.ty(cxt) {
+                Val::RefType(_, t) => *t,
+                _ => unreachable!(),
+            },
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
@@ -449,10 +456,10 @@ impl Pretty for Expr {
                     Var::Cons(n, _) => n.pretty(db),
                 },
             },
-            Expr::Ref(false, x) => Doc::start('&')
+            Expr::RefType(false, x) => Doc::start('&')
                 .chain(x.pretty(db).nest(Prec::App))
                 .prec(Prec::App),
-            Expr::Ref(true, x) => Doc::start('&')
+            Expr::RefType(true, x) => Doc::start('&')
                 .add("mut", Doc::style_keyword())
                 .space()
                 .chain(x.pretty(db).nest(Prec::App))
@@ -462,6 +469,15 @@ impl Pretty for Expr {
                 .add(" = ", ())
                 .chain(expr.pretty(db))
                 .prec(Prec::Term),
+            Expr::Ref(m, x) => Doc::start("<ref ")
+                .add(m, ())
+                .add('>', ())
+                .space()
+                .chain(x.pretty(db).nest(Prec::App))
+                .prec(Prec::App),
+            Expr::Deref(x) => Doc::start('*')
+                .chain(x.pretty(db).nest(Prec::App))
+                .prec(Prec::App),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)

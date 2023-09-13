@@ -914,7 +914,7 @@ impl Place {
                     PlaceOrExpr::Place(t) => t.ty(cxt)?,
                     PlaceOrExpr::Expr(_, ty, _, _) => ty.clone(),
                 };
-                if let Val::Ref(_, ty) = ty {
+                if let Val::RefType(_, ty) = ty {
                     Ok(*ty)
                 } else {
                     Err(TypeError::Other(
@@ -929,10 +929,10 @@ impl Place {
     fn to_expr(self, cxt: &Cxt) -> Expr {
         match self {
             Place::Var(v) => Expr::var(v.var(cxt).cvt(cxt.size())),
-            Place::Deref(e) => match *e {
-                PlaceOrExpr::Place(p) => p.to_expr(cxt), // TODO Expr::Deref (this will definitely be needed for backend)
+            Place::Deref(e) => Expr::Deref(Box::new(match *e {
+                PlaceOrExpr::Place(p) => p.to_expr(cxt),
                 PlaceOrExpr::Expr(e, _, _, _) => e,
-            },
+            })),
         }
     }
 
@@ -985,7 +985,7 @@ impl Place {
                     AccessKind::Mut | AccessKind::Imm => {
                         let mutable = kind == AccessKind::Mut;
                         match &*ty {
-                            Val::Ref(m, _) => {
+                            Val::RefType(m, _) => {
                                 if mutable && !m {
                                     return Err(TypeError::Other(
                                         "Cannot mutate through an immutable reference".into(),
@@ -1201,70 +1201,44 @@ impl ast::Expr {
                 }
 
                 // Autoref
-                (ast::Expr::Var(name), Val::Ref(m, ty)) => {
-                    let name = name.name(cxt.db);
-                    if name.0 == cxt.db.name("_".to_string()) {
-                        let meta = cxt.mcxt.new_meta(
-                            cxt.locals(),
-                            MetaBounds::new(Val::Ref(m, ty)),
-                            self.span(),
-                        );
-                        Ok(meta)
-                    } else {
-                        let entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
-                        match entry {
-                            VarEntry::Local { name, .. } => {
-                                let vty = entry.ty(cxt);
-                                let var = entry.var(cxt);
+                (_, Val::RefType(m, ty)) => {
+                    let (x, xty) = match self.elab_place(cxt) {
+                        Some(p) => {
+                            let ty = p.ty(cxt)?;
+                            (Ok(p), ty)
+                        }
+                        None => {
+                            let (x, xty) = self.infer(cxt);
+                            (Err(x), xty)
+                        }
+                    };
 
-                                match cxt.unify(vty.clone(), Val::Ref(m, ty.clone()), reason) {
-                                    Ok(()) => {
-                                        return self.infer_check(Val::Ref(m, ty), cxt, reason)
-                                    }
-                                    Err(error) => {
-                                        if cxt.unify(vty.clone(), (*ty).clone(), reason).is_ok() {
-                                            match entry.try_borrow(m, cxt) {
-                                                Ok(_) => (),
-                                                Err(Some(err)) => cxt.error(name.1, err),
-                                                Err(None) => {
-                                                    return Err(error.into());
-                                                }
-                                            }
-                                        } else if !m
-                                            && cxt
-                                                .unify(
-                                                    vty.clone(),
-                                                    Val::Ref(true, ty.clone()),
-                                                    reason,
-                                                )
-                                                .is_ok()
-                                        {
-                                            // Degrade from mutable to immutable reference
-                                            // so we do nothing here, we're just immutably borrowing from the mutable reference
-                                        } else {
-                                            return Err(error.into());
-                                        }
-                                    }
-                                }
-
-                                // This expression depends on everything the variable depends on, plus the variable itself
-                                cxt.add_dep(
-                                    entry.borrow(cxt).unwrap(),
-                                    Access {
-                                        name: name.0,
-                                        span: name.1,
-                                        kind: AccessKind::borrow(m),
-                                    },
-                                );
-
-                                // TODO does the backend need Expr::Ref or can it make do with the types?
-                                Ok(Expr::var(var.cvt(cxt.size())))
+                    match cxt.unify(xty.clone(), Val::RefType(m, ty.clone()), reason) {
+                        Ok(()) => return self.infer_check(Val::RefType(m, ty), cxt, reason),
+                        Err(error) => {
+                            if cxt.unify(xty.clone(), (*ty).clone(), reason).is_ok() {
+                                // Autoref time
+                            } else if !m
+                                && cxt
+                                    .unify(xty.clone(), Val::RefType(true, ty.clone()), reason)
+                                    .is_ok()
+                            {
+                                // Degrade from mutable to immutable reference
+                                // so we do nothing here, we're just immutably borrowing from the mutable reference
+                            } else {
+                                return Err(error.into());
                             }
-                            _ => self.infer_check(Val::Ref(m, ty), cxt, reason),
                         }
                     }
-                }
 
+                    match x {
+                        Ok(place) => {
+                            place.try_access(AccessKind::borrow(m), cxt)?;
+                            Ok(Expr::Ref(m, Box::new(place.to_expr(cxt))))
+                        }
+                        Err(expr) => Ok(Expr::Ref(m, Box::new(expr))),
+                    }
+                }
                 (_, ty) => self.infer_check(ty, cxt, reason),
             }
         };
@@ -1428,7 +1402,7 @@ impl ast::Expr {
                             cxt,
                             &CheckReason::UsedAsType,
                         );
-                        (Expr::Ref(false, Box::new(x)), Val::Type)
+                        (Expr::RefType(false, Box::new(x)), Val::Type)
                     }
                     ast::Expr::RefMut(x) => {
                         let x = x.expr().ok_or("Expected type of reference")?.check(
@@ -1436,7 +1410,7 @@ impl ast::Expr {
                             cxt,
                             &CheckReason::UsedAsType,
                         );
-                        (Expr::Ref(true, Box::new(x)), Val::Type)
+                        (Expr::RefType(true, Box::new(x)), Val::Type)
                     }
                     ast::Expr::Deref(_) => {
                         let place = self.elab_place(cxt).ok_or("Expected reference after *")?;

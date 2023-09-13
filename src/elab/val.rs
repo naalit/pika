@@ -259,7 +259,9 @@ pub enum Val {
     // Do(Vec<Stmt>),
     Lit(Literal),
     Pair(Box<Val>, Box<Val>, Box<Val>),
+    RefType(bool, Box<Val>),
     Ref(bool, Box<Val>),
+    Deref(Box<Val>),
     Error,
 }
 impl IsTerm for Val {
@@ -405,7 +407,9 @@ impl Expr {
                 Box::new(t.eval(env)),
             ),
             Expr::Assign(_, _) => todo!("handle partial evaluation failing"),
+            Expr::RefType(m, x) => Val::RefType(m, Box::new(x.eval(env))),
             Expr::Ref(m, x) => Val::Ref(m, Box::new(x.eval(env))),
+            Expr::Deref(x) => Val::Deref(Box::new(x.eval(env))),
             Expr::Error => Val::Error,
             Expr::Spanned(_, x) => x.eval(env),
         }
@@ -432,7 +436,9 @@ impl Expr {
                 },
                 _ => (),
             },
-            Expr::Ref(_, x) => x.eval_quote_in_place(env, size, inline_metas),
+            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
+                x.eval_quote_in_place(env, size, inline_metas)
+            }
             Expr::Assign(place, expr) => {
                 place.eval_quote_in_place(env, size, inline_metas);
                 expr.eval_quote_in_place(env, size, inline_metas);
@@ -520,7 +526,9 @@ impl Val {
                     res
                 }
             }
+            Val::RefType(m, x) => Expr::RefType(m, Box::new(x.quote(size, inline_metas))),
             Val::Ref(m, x) => Expr::Ref(m, Box::new(x.quote(size, inline_metas))),
+            Val::Deref(x) => Expr::Deref(Box::new(x.quote(size, inline_metas))),
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),
             Val::Pair(a, b, t) => Expr::Pair(
@@ -563,8 +571,12 @@ impl Val {
                 // TODO separate function types for Fn, FnMut, FnOnce
                 Lam(_) | Pi(_) => true,
             },
-            Val::Lit(_) | Val::Pair(_, _, _) => unreachable!("not a type"),
-            Val::Ref(m, _) => !m,
+            // TODO technically deref can return a type
+            Val::Lit(_) | Val::Pair(_, _, _) | Val::Ref(_, _) | Val::Deref(_) => {
+                unreachable!("not a type")
+            }
+            Val::RefType(m, _) => !m,
+
             Val::Error => true,
         }
     }
@@ -599,7 +611,7 @@ impl Val {
                     })
                 })
             }
-            Val::Ref(_, x) => x.check_scope(size),
+            Val::RefType(_, x) | Val::Ref(_, x) | Val::Deref(x) => x.check_scope(size),
             Val::Fun(clos) => clos.check_scope(size),
             Val::Lit(_) => Ok(()),
             Val::Pair(a, b, t) => {
@@ -680,7 +692,9 @@ impl Expr {
                         }
                     })
             }
-            Expr::Ref(_, x) => x.check_scope(allowed, inner_size, size),
+            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
+                x.check_scope(allowed, inner_size, size)
+            }
             Expr::Assign(place, expr) => {
                 place.check_scope(allowed, inner_size, size)?;
                 expr.check_scope(allowed, inner_size, size)

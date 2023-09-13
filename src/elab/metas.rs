@@ -498,7 +498,9 @@ impl Expr {
                 // TODO unfold here instead of in solve()
                 _ => (),
             },
-            Expr::Ref(_, x) => x.check_solution(cxt, mode, s_from, s_to)?,
+            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
+                x.check_solution(cxt, mode, s_from, s_to)?
+            }
             Expr::Assign(place, expr) => {
                 place.check_solution(cxt, mode, s_from, s_to)?;
                 expr.check_solution(cxt, mode, s_from, s_to)?;

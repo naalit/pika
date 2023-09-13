@@ -373,7 +373,9 @@ impl UnifyCxt<'_, '_> {
                 self.unify(*a1, *b1, size, state)?;
                 self.unify(*a2, *b2, size, state)
             }
-            (Val::Ref(m1, a), Val::Ref(m2, b)) if m1 == m2 => self.unify(*a, *b, size, state),
+            (Val::RefType(m1, a), Val::RefType(m2, b)) if m1 == m2 => {
+                self.unify(*a, *b, size, state)
+            }
 
             // Now handle neutrals as directed by the unfolding state
             // If possible, try approximate conversion checking, unfolding if it fails (and if that's allowed)
