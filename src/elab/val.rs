@@ -556,13 +556,22 @@ impl Val {
         }
     }
 
-    pub fn can_copy(&self) -> bool {
+    pub fn can_copy(&self, cxt: &Cxt) -> bool {
+        self.can_copy_(cxt, true)
+    }
+
+    fn can_copy_(&self, cxt: &Cxt, inline: bool) -> bool {
         match self {
             Val::Type => true,
             Val::Neutral(n) => match n.head() {
                 // Currently all builtin types are copyable
                 Head::Var(Var::Builtin(_)) => true,
                 Head::Var(Var::Meta(_)) => true, // TODO add a Copy constraint to the meta somehow
+                _ if inline => {
+                    let mut s = self.clone();
+                    s.inline_head(&mut cxt.env(), &cxt.mcxt);
+                    s.can_copy_(cxt, false)
+                }
                 _ => false,
             },
             Val::Fun(clos) => match clos.class {

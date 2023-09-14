@@ -1358,7 +1358,7 @@ impl ast::Expr {
                             let access = Access {
                                 name: name.0,
                                 span: name.1,
-                                kind: AccessKind::copy_move(ty.can_copy()),
+                                kind: AccessKind::copy_move(ty.can_copy(cxt)),
                             };
                             if access.kind == AccessKind::Move {
                                 entry
@@ -1418,7 +1418,7 @@ impl ast::Expr {
                         // A bare deref must be a copy
                         place.try_access(AccessKind::Copy, cxt)?;
                         let x = place.to_expr(cxt);
-                        if !xty.can_copy() {
+                        if !xty.can_copy(cxt) {
                             match x.unspanned() {
                                 Expr::Head(Head::Var(Var::Local((n, _), _))) => {
                                     return Err(MoveError::InvalidMove(

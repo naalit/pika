@@ -406,7 +406,7 @@ impl MetaCxt<'_> {
         // Try to avoid inlining metas in the solution to keep it small
         let mut solution = solution.quote(inner_size_from, None);
         let solution2 = solution.clone();
-        let mode = SolutionCheckMode::Full(rename, inner_size_to);
+        let mode = SolutionCheckMode::Full(rename, inner_size_from);
         match solution.check_solution(self, &mode, inner_size_from, inner_size_to) {
             Ok(()) => (),
             Err(_) => {
