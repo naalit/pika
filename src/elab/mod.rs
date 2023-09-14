@@ -44,6 +44,9 @@ pub trait Elaborator: crate::parsing::Parser {
     fn def_name(&self, def: Def) -> Option<Name>;
 
     fn all_errors(&self, file: File) -> Vec<(Error, SplitId)>;
+
+    #[salsa::invoke(cxt::prelude_defs)]
+    fn prelude_defs(&self) -> std::sync::Arc<HashMap<Name, VarDef>>;
 }
 
 fn all_errors(db: &dyn Elaborator, file: File) -> Vec<(Error, SplitId)> {

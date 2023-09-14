@@ -86,7 +86,7 @@ macro_rules! _make_getter {
     };
 }
 /// Syntax examples:
-/// ```rust norun
+/// ```rust ignore
 /// make_nodes! {
 ///     // Simple nodes that correspond to one token and don't have arguments
 ///     Literal = ;

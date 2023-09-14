@@ -1,0 +1,63 @@
+type DoNotCopy of
+    New I32
+
+fun copy_ref (x: &DoNotCopy): (&DoNotCopy, &DoNotCopy) = (x, x)
+fun move_once (x: DoNotCopy): DoNotCopy = x
+fun reference (x: DoNotCopy): &DoNotCopy = x
+fun move_twice (x: DoNotCopy): (DoNotCopy, DoNotCopy) = (x, x)
+fun in_block (x: DoNotCopy): (DoNotCopy, DoNotCopy) = do
+    let y = x
+    (y, x)
+fun borrowed (x: DoNotCopy): (&DoNotCopy, DoNotCopy) = (x, x)
+fun borrowed2 (x: DoNotCopy): (DoNotCopy, &DoNotCopy) = (x, x)
+fun borrowed3 (x: DoNotCopy): () = do
+    let y: &DoNotCopy = x
+    let z: DoNotCopy = x
+    let w: &DoNotCopy = y
+
+fun borrow_move(x: &DoNotCopy, y: DoNotCopy): DoNotCopy = y
+fun same_variable(x: DoNotCopy): DoNotCopy = borrow_move(x, x)
+fun shadow(x: &DoNotCopy, y: DoNotCopy) = do
+    let z = y
+    borrow_move(x, z)
+
+type Ref a of
+    Ref (&a)
+
+fun borrow_move_s(x: Ref DoNotCopy, y: DoNotCopy): DoNotCopy = y
+fun borrow_move_s2(x: &Ref DoNotCopy, y: DoNotCopy): DoNotCopy = y
+fun same_variable_s(x: DoNotCopy): DoNotCopy = do
+    let r = Ref.Ref x
+    borrow_move_s(r, x)
+fun shadow_s(x: Ref DoNotCopy, y: DoNotCopy) = do
+    let r = Ref.Ref y
+    let z = y
+    borrow_move_s(x, z)
+fun same_variable_s2(x: DoNotCopy): DoNotCopy = do
+    let r = Ref.Ref x
+    borrow_move_s2(r, x)
+
+fun degrade(x: &mut DoNotCopy): &DoNotCopy = x
+fun upgrade(x: &DoNotCopy): &mut DoNotCopy = x
+fun make_mut(x: DoNotCopy): &mut DoNotCopy = x
+fun borrow_r(x: DoNotCopy): (&DoNotCopy, &DoNotCopy) = (x, x)
+fun borrow_m(x: DoNotCopy): (&mut DoNotCopy, &mut DoNotCopy) = (x, x)
+fun borrow_c(x: DoNotCopy): (&mut DoNotCopy, &DoNotCopy) = (x, x)
+fun borrow_d(x: DoNotCopy): (&DoNotCopy, &mut DoNotCopy) = (x, x)
+
+fun copy(x: I32): I32 = do
+    let y: I32 = x
+    let z: &mut I32 = x
+    y
+
+fun deref(x: &mut DoNotCopy): DoNotCopy = *x
+fun deref_copy(x: &mut I32): I32 = *x
+
+fun assign_imm(x: &I32): () = *x = 3
+fun assign_imm_chain1(x: &&mut I32): () = **x = 4
+fun assign_imm_chain2(x: &mut &I32): () = **x = 5
+fun assign_var(x: &mut I32, y: &mut I32): I32 = do
+    *x = 6
+    *y = *x
+    y = x
+    *y

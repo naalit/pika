@@ -1,7 +1,5 @@
 use std::{num::NonZeroU64, rc::Rc};
 
-use atomic_once_cell::AtomicOnceCell;
-
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -59,10 +57,8 @@ struct LocalScope {
     names: Vec<LocalVarDef>,
 }
 
-static PRELUDE_DEFS: AtomicOnceCell<HashMap<Name, VarDef>> = AtomicOnceCell::new();
-
-fn prelude_defs(db: &dyn Elaborator) -> HashMap<Name, VarDef> {
-    HashMap::from_iter(
+pub fn prelude_defs(db: &dyn Elaborator) -> std::sync::Arc<HashMap<Name, VarDef>> {
+    std::sync::Arc::new(HashMap::from_iter(
         [
             ("I8", Builtin::IntType(IntType::I8), Val::Type),
             ("I16", Builtin::IntType(IntType::I16), Val::Type),
@@ -80,14 +76,14 @@ fn prelude_defs(db: &dyn Elaborator) -> HashMap<Name, VarDef> {
                 VarDef::Var(Var::Builtin(*v), t.clone()),
             )
         }),
-    )
+    ))
 }
 
 impl Scope {
     fn lookup(&self, scope_idx: usize, name: SName, db: &dyn Elaborator) -> Option<VarEntry> {
         match self {
-            Scope::Prelude => PRELUDE_DEFS
-                .get_or_init(|| prelude_defs(db))
+            Scope::Prelude => db
+                .prelude_defs()
                 .get(&name.0)
                 .cloned()
                 .map(|x| VarEntry::new(x, name)),

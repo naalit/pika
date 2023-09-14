@@ -320,7 +320,7 @@ impl MetaCxt<'_> {
                 MetaEntry::Solved { .. } => true,
                 MetaEntry::Unsolved { .. } => false,
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     pub fn meta_ty(&self, meta: Meta) -> Option<Val> {

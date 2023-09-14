@@ -1,0 +1,39 @@
+type GADT t of
+    Two : Type -> GADT Type
+    One : GADT ()
+
+# Here Pika needs to figure out that GADT.One is impossible for GADT Type, so this is exhaustive
+fun f (x: GADT Type) = case x of
+    GADT.Two t => t
+
+# Here it needs to figure out that in one branch a is Unit, and in the other it's Type
+fun g [a] (x: GADT a) : a = case x of
+    GADT.One => ()
+    GADT.Two t => t
+
+# And finally, here it needs to figure out that the other argument has type Type in one branch
+fun h [a] (x: GADT a, y: a) : Type = case x of
+    GADT.Two t => (y -> t)
+    GADT.One => Type
+
+
+type MyGADT (_: Type) of
+    Pair : [a] (MyGADT a, MyGADT a) -> MyGADT a
+    Value : [a] a -> MyGADT a
+    IsUnit : MyGADT ()
+
+fun myFun [a] (x: MyGADT a) = case x of
+    MyGADT.Pair (MyGADT.IsUnit, MyGADT.Value ()) => "It's (IsUnit, ())!"
+    MyGADT.Pair (MyGADT.Value (), MyGADT.IsUnit) => "It's ((), IsUnit)!"
+    _ => "It's something else!"
+
+
+type T of
+  A
+  B
+  C
+
+fun f (x: (T, T)): I32 = case x of
+  T.A, _ => 12
+  _, T.A => 13
+  (T.B | T.C), (T.B | T.C) => 42
