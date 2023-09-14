@@ -179,6 +179,7 @@ impl<'i> Lexer<'i> {
             "struct" => Tok::StructKw,
             "sig" => Tok::SigKw,
             "of" => Tok::OfKw,
+            "mut" => Tok::MutKw,
             _ => Tok::Name,
         };
         self.tok_in_place(tok)
@@ -201,11 +202,7 @@ impl<'i> Lexer<'i> {
             '+' => Some(self.tok(Tok::Plus)),
             '*' => {
                 self.next();
-                if self.peek() == Some('*') {
-                    Some(self.tok(Tok::Exp))
-                } else {
-                    Some(self.tok_in_place(Tok::Times))
-                }
+                Some(self.tok_in_place(Tok::Times))
             }
             '/' => Some(self.tok(Tok::Div)),
             '%' => Some(self.tok(Tok::Mod)),
@@ -238,17 +235,7 @@ impl<'i> Lexer<'i> {
             }
             '&' => {
                 self.next();
-                if self.peek() == Some('&') {
-                    self.next();
-                    self.errors.push((
-                        LexError::Other("Invalid operator '&&': use 'and' for logical and".into()),
-                        self.span(),
-                    ));
-                    // They meant 'and', so have the rest of the compiler treat it as 'and'
-                    Some(self.tok_in_place(Tok::AndKw))
-                } else {
-                    Some(self.tok_in_place(Tok::BitAnd))
-                }
+                Some(self.tok_in_place(Tok::BitAnd))
             }
 
             '!' => {
@@ -514,6 +501,7 @@ impl<'i> fmt::Display for Tok {
             Tok::EffKw => "'eff'",
             Tok::BoxKw => "'box'",
             Tok::UnboxKw => "'unbox'",
+            Tok::MutKw => "'mut'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",
@@ -526,7 +514,6 @@ impl<'i> fmt::Display for Tok {
             Tok::Bar => "'|'",
             Tok::Dot => "'.'",
             Tok::Comma => "','",
-            Tok::Exp => "'**'",
             Tok::Xor => "'^^'",
             Tok::LShift => "'<<'",
             Tok::RShift => "'>>'",

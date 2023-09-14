@@ -44,6 +44,9 @@ pub trait Elaborator: crate::parsing::Parser {
     fn def_name(&self, def: Def) -> Option<Name>;
 
     fn all_errors(&self, file: File) -> Vec<(Error, SplitId)>;
+
+    #[salsa::invoke(cxt::prelude_defs)]
+    fn prelude_defs(&self) -> std::sync::Arc<HashMap<Name, VarDef>>;
 }
 
 fn all_errors(db: &dyn Elaborator, file: File) -> Vec<(Error, SplitId)> {
@@ -144,6 +147,7 @@ fn def_elab_n(db: &dyn Elaborator, def_id: Def, def_node: DefNode) -> DefElabRes
     let (def, cxt) = db.lookup_def_node(def_node);
     let mut cxt = Cxt::new(db, cxt);
     let result = def.elab(def_id, def_node, &mut cxt);
+    cxt.finish_deps(def.span());
     DefElabResult {
         result,
         errors: cxt.emit_errors(),
@@ -159,11 +163,22 @@ pub enum TypeError {
     Unify(unify::UnifyError),
     NotFunction(Expr, RelSpan),
     InvalidPattern(String, Expr),
+    MoveError(MoveError),
     Other(Doc),
 }
 impl<T: Into<Doc>> From<T> for TypeError {
     fn from(x: T) -> Self {
         TypeError::Other(x.into())
+    }
+}
+impl From<AccessError> for TypeError {
+    fn from(x: AccessError) -> Self {
+        TypeError::MoveError(x.into())
+    }
+}
+impl From<MoveError> for TypeError {
+    fn from(x: MoveError) -> Self {
+        TypeError::MoveError(x)
     }
 }
 impl TypeError {
@@ -194,6 +209,29 @@ impl TypeError {
                         .add("'", ()),
                     None,
                 )
+            }
+            TypeError::MoveError(err) => {
+                return match err {
+                    MoveError::InvalidMove(doc, name, ty) => Error {
+                        severity,
+                        message: doc.clone(),
+                        message_lsp: None,
+                        primary: Label {
+                            span,
+                            message: doc.clone(),
+                            color: Some(Doc::COLOR1),
+                        },
+                        secondary: vec![],
+                        note: Some(
+                            Doc::start("Move occurs because ")
+                                .chain(name.pretty(db))
+                                .add(" has type '", ())
+                                .chain(ty.pretty(db))
+                                .add("' which cannot be copied implicitly", ()),
+                        ),
+                    },
+                    MoveError::AccessError(e) => e.to_error(severity, db),
+                };
             }
         };
         Error {

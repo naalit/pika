@@ -86,7 +86,7 @@ macro_rules! _make_getter {
     };
 }
 /// Syntax examples:
-/// ```rust norun
+/// ```rust ignore
 /// make_nodes! {
 ///     // Simple nodes that correspond to one token and don't have arguments
 ///     Literal = ;
@@ -231,6 +231,11 @@ make_nodes! {
     // ??? TODO what do we include as the token argument
     Box = expr: Expr;
 
+    Reference = expr: Expr;
+    RefMut = expr: Expr;
+    Deref = expr: Expr;
+    Assign = lhs: Expr, rhs: (1 Expr);
+
     GroupedExpr = expr: Expr;
 
     enum Expr =
@@ -250,7 +255,11 @@ make_nodes! {
         // Patterns parse as expressions
         EffPat,
         Binder,
-        StructInit
+        StructInit,
+        Reference,
+        RefMut,
+        Deref,
+        Assign
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -655,6 +664,13 @@ impl Pretty for Expr {
                 .chain(x.a().pretty())
                 .space()
                 .chain(x.b().pretty()),
+            Expr::Reference(r) => Doc::start('&').chain(r.expr().pretty()),
+            Expr::RefMut(r) => Doc::start('&')
+                .add("mut", Doc::style_keyword())
+                .space()
+                .chain(r.expr().pretty()),
+            Expr::Deref(r) => Doc::start('*').chain(r.expr().pretty()),
+            Expr::Assign(x) => x.lhs().pretty().add(" = ", ()).chain(x.rhs().pretty()),
         };
         Doc::start('{').chain(p).add('}', ())
     }

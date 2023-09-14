@@ -10,12 +10,12 @@ impl std::fmt::Display for Meta {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SpecialBound {
     IntType { must_fit: i128 },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MetaBounds {
     ty: Val,
     special: Option<SpecialBound>,
@@ -85,7 +85,7 @@ impl MetaBounds {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum MetaEntry {
     Solved {
         /// A lambda term with no free variables
@@ -320,7 +320,7 @@ impl MetaCxt<'_> {
                 MetaEntry::Solved { .. } => true,
                 MetaEntry::Unsolved { .. } => false,
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     pub fn meta_ty(&self, meta: Meta) -> Option<Val> {
@@ -369,7 +369,7 @@ impl MetaCxt<'_> {
                     introduced_span,
                 } => Some((bounds, introduced_span)),
             })
-            .unwrap();
+            .unwrap_or_else(|| panic!("{:?}: {:?}", meta, self.metas.get(meta.0 as usize)));
         bounds.check(&solution, start_size, self)?;
 
         let mut rename = PartialRename {
@@ -406,7 +406,7 @@ impl MetaCxt<'_> {
         // Try to avoid inlining metas in the solution to keep it small
         let mut solution = solution.quote(inner_size_from, None);
         let solution2 = solution.clone();
-        let mode = SolutionCheckMode::Full(rename, inner_size_to);
+        let mode = SolutionCheckMode::Full(rename, inner_size_from);
         match solution.check_solution(self, &mode, inner_size_from, inner_size_to) {
             Ok(()) => (),
             Err(_) => {
@@ -498,6 +498,13 @@ impl Expr {
                 // TODO unfold here instead of in solve()
                 _ => (),
             },
+            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
+                x.check_solution(cxt, mode, s_from, s_to)?
+            }
+            Expr::Assign(place, expr) => {
+                place.check_solution(cxt, mode, s_from, s_to)?;
+                expr.check_solution(cxt, mode, s_from, s_to)?;
+            }
             Expr::Elim(a, b) => {
                 a.check_solution(cxt, mode, s_from, s_to)?;
                 b.check_solution(cxt, mode, s_from, s_to)?;

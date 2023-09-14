@@ -58,7 +58,7 @@ impl Neutral {
         } else {
             drop(guard);
             let (head, cache) = match self.head {
-                Head::Var(Var::Local(_, l)) => match env.get(l.idx(env.size)) {
+                Head::Var(Var::Local(n, l)) => match env.get_as_val(n, l.idx(env.size)) {
                     // Don't cache inlined locals since they're context-dependent
                     Some(v) => (v.clone(), false),
                     None => return Err(self),
@@ -115,7 +115,7 @@ impl VClos {
         } = self;
         for par in params {
             let ty = par.ty.eval(&mut env);
-            env.push(Some(arg(ty)));
+            env.push(Some(Ok(arg(ty))));
         }
         body.eval(&mut env)
     }
@@ -199,7 +199,7 @@ impl VClos {
                     name,
                     ty: ty.eval_quote(&mut env, size, inline_metas),
                 };
-                env.push(Some(Val::var(Var::Local(name, size.next_lvl()))));
+                env.push(Some(Err(size.next_lvl())));
                 size += 1;
                 par
             })
@@ -226,8 +226,8 @@ impl VClos {
             mut env,
             body,
         } = self;
-        for par in &params {
-            env.push(Some(Val::var(Var::Local(par.name, size.next_lvl()))));
+        for _ in params {
+            env.push(Some(Err(size.next_lvl())));
             size += 1;
         }
         body.eval(&mut env)
@@ -259,6 +259,9 @@ pub enum Val {
     // Do(Vec<Stmt>),
     Lit(Literal),
     Pair(Box<Val>, Box<Val>, Box<Val>),
+    RefType(bool, Box<Val>),
+    Ref(bool, Box<Val>),
+    Deref(Box<Val>),
     Error,
 }
 impl IsTerm for Val {
@@ -378,7 +381,7 @@ impl EClos {
         let state = env.state();
         for i in &mut self.params {
             i.ty.eval_quote_in_place(env, size, inline_metas);
-            env.push(Some(Val::var(Var::Local(i.name, size.next_lvl()))));
+            env.push(Some(Err(size.next_lvl())));
             size += 1;
         }
         self.body.eval_quote_in_place(env, size, inline_metas);
@@ -403,6 +406,10 @@ impl Expr {
                 Box::new(b.eval(env)),
                 Box::new(t.eval(env)),
             ),
+            Expr::Assign(_, _) => todo!("handle partial evaluation failing"),
+            Expr::RefType(m, x) => Val::RefType(m, Box::new(x.eval(env))),
+            Expr::Ref(m, x) => Val::Ref(m, Box::new(x.eval(env))),
+            Expr::Deref(x) => Val::Deref(Box::new(x.eval(env))),
             Expr::Error => Val::Error,
             Expr::Spanned(_, x) => x.eval(env),
         }
@@ -429,6 +436,13 @@ impl Expr {
                 },
                 _ => (),
             },
+            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
+                x.eval_quote_in_place(env, size, inline_metas)
+            }
+            Expr::Assign(place, expr) => {
+                place.eval_quote_in_place(env, size, inline_metas);
+                expr.eval_quote_in_place(env, size, inline_metas);
+            }
             Expr::Elim(f, e) => {
                 f.eval_quote_in_place(env, size, inline_metas);
                 match &mut **e {
@@ -476,7 +490,7 @@ impl Expr {
         self
     }
 
-    fn unspanned(&self) -> &Expr {
+    pub fn unspanned(&self) -> &Expr {
         match self {
             Expr::Spanned(_, x) => x.unspanned(),
             x => x,
@@ -512,6 +526,9 @@ impl Val {
                     res
                 }
             }
+            Val::RefType(m, x) => Expr::RefType(m, Box::new(x.quote(size, inline_metas))),
+            Val::Ref(m, x) => Expr::Ref(m, Box::new(x.quote(size, inline_metas))),
+            Val::Deref(x) => Expr::Deref(Box::new(x.quote(size, inline_metas))),
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),
             Val::Pair(a, b, t) => Expr::Pair(
@@ -536,6 +553,40 @@ impl Val {
                 }
             }
             _ => (),
+        }
+    }
+
+    pub fn can_copy(&self, cxt: &Cxt) -> bool {
+        self.can_copy_(cxt, true)
+    }
+
+    fn can_copy_(&self, cxt: &Cxt, inline: bool) -> bool {
+        match self {
+            Val::Type => true,
+            Val::Neutral(n) => match n.head() {
+                // Currently all builtin types are copyable
+                Head::Var(Var::Builtin(_)) => true,
+                Head::Var(Var::Meta(_)) => true, // TODO add a Copy constraint to the meta somehow
+                _ if inline => {
+                    let mut s = self.clone();
+                    s.inline_head(&mut cxt.env(), &cxt.mcxt);
+                    s.can_copy_(cxt, false)
+                }
+                _ => false,
+            },
+            Val::Fun(clos) => match clos.class {
+                // TODO check if all components can be copied; may require eval-ing
+                Sigma => false,
+                // TODO separate function types for Fn, FnMut, FnOnce
+                Lam(_) | Pi(_) => true,
+            },
+            // TODO technically deref can return a type
+            Val::Lit(_) | Val::Pair(_, _, _) | Val::Ref(_, _) | Val::Deref(_) => {
+                unreachable!("not a type")
+            }
+            Val::RefType(m, _) => !m,
+
+            Val::Error => true,
         }
     }
 
@@ -569,6 +620,7 @@ impl Val {
                     })
                 })
             }
+            Val::RefType(_, x) | Val::Ref(_, x) | Val::Deref(x) => x.check_scope(size),
             Val::Fun(clos) => clos.check_scope(size),
             Val::Lit(_) => Ok(()),
             Val::Pair(a, b, t) => {
@@ -648,6 +700,13 @@ impl Expr {
                             res.and_then(|()| ty.check_scope(allowed, inner_size, size))
                         }
                     })
+            }
+            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
+                x.check_scope(allowed, inner_size, size)
+            }
+            Expr::Assign(place, expr) => {
+                place.check_scope(allowed, inner_size, size)?;
+                expr.check_scope(allowed, inner_size, size)
             }
             Expr::Fun(c) => c.check_scope(allowed, inner_size, size),
             Expr::Lit(_) => Ok(()),

@@ -21,7 +21,7 @@ impl EClos {
             if i.name.1.superset(span) {
                 return Err(FindSpanResult::Name(i.name, Cow::Borrowed(&i.ty)));
             }
-            cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None);
+            cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None, None);
         }
         self.body.find_span(span, cxt)?;
         cxt.pop();
@@ -66,6 +66,11 @@ impl Expr {
             Expr::Pair(a, b, _) => {
                 a.find_span(span, cxt)?;
                 b.find_span(span, cxt)?;
+            }
+            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => x.find_span(span, cxt)?,
+            Expr::Assign(place, expr) => {
+                place.find_span(span, cxt)?;
+                expr.find_span(span, cxt)?;
             }
             Expr::Spanned(espan, x) => {
                 if espan.superset(span) {

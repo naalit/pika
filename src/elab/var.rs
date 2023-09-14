@@ -100,6 +100,13 @@ pub enum Var<L> {
     Cons(SName, Cons),
 }
 impl<T> Var<T> {
+    pub fn as_local(self) -> Option<T> {
+        match self {
+            Var::Local(_, l) => Some(l),
+            _ => None,
+        }
+    }
+
     pub fn with_sname(self, n: SName) -> Var<T> {
         match self {
             Var::Local(_, l) => Var::Local(n, l),
@@ -151,7 +158,8 @@ pub struct Env {
     /// Since locals are De Bruijn indices, we store a `VecDeque`, push to the front and index normally.
     /// When elaborating, we often want to evaluate something without any locals, or just add one or two at the front.
     /// To make that efficient, we leave off the tail of `None`s, and if an index goes past the length, it's `None`.
-    vals: VecDeque<Option<Val>>,
+    /// Also, we can use the environment for re-indexing locals - when we do this, we use the Err case
+    vals: VecDeque<Option<Result<Val, Lvl>>>,
     pub size: Size,
 }
 impl Env {
@@ -178,8 +186,16 @@ impl Env {
         self.size = size.min(self.size);
     }
 
-    pub fn get(&self, i: Idx) -> Option<&Val> {
+    pub fn get(&self, i: Idx) -> Option<&Result<Val, Lvl>> {
         self.vals.get(i.0 as usize).map(Option::as_ref).flatten()
+    }
+
+    pub fn get_as_val(&self, n: SName, i: Idx) -> Option<Val> {
+        self.vals
+            .get(i.0 as usize)
+            .cloned()
+            .flatten()
+            .map(|x| x.unwrap_or_else(|l| Val::var(Var::Local(n, l))))
     }
 
     /// If it's not present, returns a local variable value
@@ -188,10 +204,11 @@ impl Env {
             .get(i.0 as usize)
             .cloned()
             .flatten()
+            .map(|x| x.unwrap_or_else(|l| Val::var(Var::Local(n, l))))
             .unwrap_or_else(|| Val::var(Var::Local(n, i.lvl(self.size))))
     }
 
-    pub fn push(&mut self, v: Option<Val>) {
+    pub fn push(&mut self, v: Option<Result<Val, Lvl>>) {
         self.size = self.size.inc();
         if v.is_some() || !self.vals.is_empty() {
             self.vals.push_front(v);
@@ -208,13 +225,13 @@ impl Env {
         while self.vals.len() <= i.as_u32() as usize {
             self.vals.push_back(None);
         }
-        self.vals[i.as_u32() as usize] = Some(v);
+        self.vals[i.as_u32() as usize] = Some(Ok(v));
     }
 }
 impl Extend<Option<Val>> for Env {
     fn extend<T: IntoIterator<Item = Option<Val>>>(&mut self, iter: T) {
         for i in iter {
-            self.push(i);
+            self.push(i.map(Ok));
         }
     }
 }

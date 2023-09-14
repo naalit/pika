@@ -49,6 +49,7 @@ impl ast::Def {
                     x.exp_par().as_par(),
                     x.ret_ty().and_then(|x| x.expr()),
                     None,
+                    x.span(),
                     cxt,
                 );
                 let ty = ty
@@ -131,6 +132,7 @@ impl ast::Def {
                     x.exp_par().as_par(),
                     x.ret_ty().and_then(|x| x.expr()),
                     x.body(),
+                    x.span(),
                     cxt,
                 );
 
@@ -155,6 +157,7 @@ impl ast::Def {
                         kw: None,
                     })),
                     None,
+                    x.span(),
                     cxt,
                 );
 
@@ -225,6 +228,7 @@ impl ast::Def {
                             c.exp_par().as_par(),
                             c.ret_ty().and_then(|x| x.expr()),
                             None,
+                            c.span(),
                             cxt,
                         );
                         fn head(t: &Expr) -> &Expr {
@@ -258,7 +262,12 @@ impl ast::Def {
 
                         let mut implicit = ty_params.clone();
                         for par in &implicit {
-                            cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
+                            cxt.define_local(
+                                par.name,
+                                par.ty.clone().eval(&mut cxt.env()),
+                                None,
+                                None,
+                            );
                         }
                         implicit.append(&mut check_params(
                             c.imp_par()
@@ -386,6 +395,7 @@ fn infer_fun(
     explicit: Option<SomePar>,
     ret_ty: Option<ast::Expr>,
     body: Option<ast::Body>,
+    span: RelSpan,
     cxt: &mut Cxt,
 ) -> (Expr, Expr) {
     // [a, b] [c, d] (e, f) => ...
@@ -419,6 +429,8 @@ fn infer_fun(
         )
     });
 
+    cxt.record_deps();
+    let bspan = body.as_ref().map_or(span, |x| x.span());
     let (body, bty) = match ret_ty {
         Some(bty) => {
             let span = bty.span();
@@ -441,6 +453,7 @@ fn infer_fun(
                 (Expr::Error, Val::Error)
             }),
     };
+    cxt.finish_deps(bspan); // TODO what do we do with this borrow
     let bty = bty.quote(cxt.size(), None);
     cxt.pop();
 
@@ -640,7 +653,7 @@ fn check_par(
         }
     };
     // Define each parameter so it can be used by the types of the rest
-    cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None);
+    cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None, None);
     par
 }
 
@@ -652,6 +665,7 @@ impl ast::Pair {
                 self.lhs().map(|par| SomePar { par, pat: false }),
                 self.rhs(),
                 None,
+                self.span(),
                 cxt,
             );
             match ty {
@@ -779,7 +793,7 @@ impl Expr {
                             class: Sigma, body, ..
                         }) => {
                             let mut env = cxt.env();
-                            env.push(Some(a.clone().eval(&mut cxt.env())));
+                            env.push(Some(Ok(a.clone().eval(&mut cxt.env()))));
                             body.eval_quote(&mut env, cxt.size(), None)
                         }
                         _ => Expr::Error,
@@ -883,6 +897,112 @@ pub(super) fn resolve_member(
     (Expr::Error, Val::Error)
 }
 
+enum PlaceOrExpr {
+    Place(Place),
+    Expr(Expr, Val, Borrow, RelSpan),
+}
+enum Place {
+    Var(VarEntry),
+    Deref(Box<PlaceOrExpr>),
+}
+impl Place {
+    fn ty(&self, cxt: &Cxt) -> Result<Val, TypeError> {
+        match self {
+            Place::Var(v) => Ok(v.ty(cxt)),
+            Place::Deref(e) => {
+                let ty = match &**e {
+                    PlaceOrExpr::Place(t) => t.ty(cxt)?,
+                    PlaceOrExpr::Expr(_, ty, _, _) => ty.clone(),
+                };
+                if let Val::RefType(_, ty) = ty {
+                    Ok(*ty)
+                } else {
+                    Err(TypeError::Other(
+                        Doc::start("Expected reference after unary *, got ")
+                            .chain(ty.quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db)),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn to_expr(self, cxt: &Cxt) -> Expr {
+        match self {
+            Place::Var(v) => Expr::var(v.var(cxt).cvt(cxt.size())),
+            Place::Deref(e) => Expr::Deref(Box::new(match *e {
+                PlaceOrExpr::Place(p) => p.to_expr(cxt),
+                PlaceOrExpr::Expr(e, _, _, _) => e,
+            })),
+        }
+    }
+
+    /// Makes sure the access is valid, invalidating other borrows appropriately, and adds needed dependencies to the cxt
+    fn try_access(&self, kind: AccessKind, cxt: &mut Cxt) -> Result<(), TypeError> {
+        match self {
+            Place::Var(v) => {
+                let r = match kind {
+                    AccessKind::Mut | AccessKind::Imm => {
+                        let mutable = kind == AccessKind::Mut;
+                        v.try_borrow(mutable, cxt).map_err(|e| match e {
+                            Some(e) => TypeError::from(e),
+                            None => TypeError::Other(
+                                Doc::start("Could not borrow from ").debug(v.var(cxt)),
+                            ),
+                        })
+                    }
+                    AccessKind::Move => v
+                        .try_move(self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt)), cxt)
+                        .map_err(Into::into),
+                    AccessKind::Copy => Ok(()),
+                };
+                if let Some(borrow) = v.borrow(cxt) {
+                    cxt.add_dep(borrow, v.access(kind));
+                }
+                r
+            }
+            Place::Deref(_) if kind == AccessKind::Move => {
+                Err("Cannot move out of reference".into())
+            } // TODO type information (make this a MoveError variant)
+            Place::Deref(e) => {
+                let ty = match &**e {
+                    PlaceOrExpr::Place(p) => {
+                        p.try_access(kind, cxt)?;
+                        Cow::Owned(p.ty(cxt)?)
+                    }
+                    PlaceOrExpr::Expr(_, t, b, s) => {
+                        cxt.add_dep(
+                            *b,
+                            Access {
+                                kind,
+                                name: cxt.db.name("<expression>".into()),
+                                span: *s,
+                            },
+                        );
+                        Cow::Borrowed(t)
+                    }
+                };
+                match kind {
+                    AccessKind::Mut | AccessKind::Imm => {
+                        let mutable = kind == AccessKind::Mut;
+                        match &*ty {
+                            Val::RefType(m, _) => {
+                                if mutable && !m {
+                                    return Err(TypeError::Other(
+                                        "Cannot mutate through an immutable reference".into(),
+                                    ));
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => (),
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 impl ast::Expr {
     pub(super) fn check(&self, mut ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Expr {
         ty.inline_head(&mut cxt.env(), &cxt.mcxt);
@@ -955,6 +1075,7 @@ impl ast::Expr {
                         cxt.define_local(
                             (par.name.0.inaccessible(cxt.db), par.name.1),
                             par.ty.clone().eval(&mut cxt.env()),
+                            None,
                             None,
                         );
                         implicit.push(par.clone());
@@ -1064,7 +1185,7 @@ impl ast::Expr {
                     cxt.push();
                     for i in &mut params {
                         i.name.0 = i.name.0.inaccessible(cxt.db);
-                        cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None);
+                        cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None, None);
                     }
 
                     let body = self.check(bty, cxt, reason);
@@ -1079,15 +1200,46 @@ impl ast::Expr {
                     Ok(Expr::Fun(clos))
                 }
 
-                (_, ty) => {
-                    let (a, ity) = self.infer(cxt);
-                    let (a, ity) = match &ty {
-                        Val::Fun(clos) if clos.class == Pi(Impl) => (a, ity),
-                        _ => a.insert_metas(ity, None, self.span(), cxt),
+                // Autoref
+                (_, Val::RefType(m, ty)) => {
+                    let (x, xty) = match self.elab_place(cxt) {
+                        Some(p) => {
+                            let ty = p.ty(cxt)?;
+                            (Ok(p), ty)
+                        }
+                        None => {
+                            let (x, xty) = self.infer(cxt);
+                            (Err(x), xty)
+                        }
                     };
-                    cxt.unify(ity, ty, reason)?;
-                    Ok(a)
+
+                    match cxt.unify(xty.clone(), Val::RefType(m, ty.clone()), reason) {
+                        Ok(()) => return self.infer_check(Val::RefType(m, ty), cxt, reason),
+                        Err(error) => {
+                            if cxt.unify(xty.clone(), (*ty).clone(), reason).is_ok() {
+                                // Autoref time
+                            } else if !m
+                                && cxt
+                                    .unify(xty.clone(), Val::RefType(true, ty.clone()), reason)
+                                    .is_ok()
+                            {
+                                // Degrade from mutable to immutable reference
+                                // so we do nothing here, we're just immutably borrowing from the mutable reference
+                            } else {
+                                return Err(error.into());
+                            }
+                        }
+                    }
+
+                    match x {
+                        Ok(place) => {
+                            place.try_access(AccessKind::borrow(m), cxt)?;
+                            Ok(Expr::Ref(m, Box::new(place.to_expr(cxt))))
+                        }
+                        Err(expr) => Ok(Expr::Ref(m, Box::new(expr))),
+                    }
                 }
+                (_, ty) => self.infer_check(ty, cxt, reason),
             }
         };
         // TODO auto-applying implicits (probably? only allowing them on function calls is also an option to consider)
@@ -1097,6 +1249,43 @@ impl ast::Expr {
                 cxt.error(self.span(), e);
                 Expr::Error
             }
+        }
+    }
+
+    fn infer_check(&self, ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Result<Expr, TypeError> {
+        let (a, ity) = self.infer(cxt);
+        let (a, ity) = match &ty {
+            Val::Fun(clos) if clos.class == Pi(Impl) => (a, ity),
+            _ => a.insert_metas(ity, None, self.span(), cxt),
+        };
+        cxt.unify(ity, ty, reason)?;
+        Ok(a)
+    }
+
+    fn elab_place(&self, cxt: &mut Cxt) -> Option<Place> {
+        match self {
+            ast::Expr::Var(n) => {
+                let entry = cxt.lookup(n.name(cxt.db))?;
+                Some(Place::Var(entry))
+            }
+            ast::Expr::Deref(e) => {
+                // Doesn't do type checking
+                match e.expr()?.elab_place(cxt) {
+                    Some(place) => Some(Place::Deref(Box::new(PlaceOrExpr::Place(place)))),
+                    None => {
+                        cxt.record_deps();
+                        let (e, ty) = e.expr()?.infer(cxt);
+                        let borrow = cxt.finish_deps(self.span())?;
+                        Some(Place::Deref(Box::new(PlaceOrExpr::Expr(
+                            e,
+                            ty,
+                            borrow,
+                            self.span(),
+                        ))))
+                    }
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1163,13 +1352,37 @@ impl ast::Expr {
                             );
                             (meta, mty)
                         } else {
-                            let (v, t) = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
-                            (Expr::var(v.cvt(cxt.size())), t)
+                            let entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
+                            let ty = entry.ty(cxt);
+
+                            let access = Access {
+                                name: name.0,
+                                span: name.1,
+                                kind: AccessKind::copy_move(ty.can_copy(cxt)),
+                            };
+                            if access.kind == AccessKind::Move {
+                                entry
+                                    .try_move(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)), cxt)?
+                            } else if let Some(borrow) = entry.borrow(cxt) {
+                                cxt.check_deps(borrow, access)?
+                            }
+                            // This expression depends on everything the variable depends on
+                            if let Some(borrow) = entry.borrow(cxt) {
+                                cxt.add_dep(borrow, access);
+                            }
+
+                            (Expr::var(entry.var(cxt).cvt(cxt.size())), ty)
                         }
                     }
                     ast::Expr::Lam(x) => {
-                        let (term, ty) =
-                            infer_fun(x.imp_par(), x.exp_par().as_par(), None, x.body(), cxt);
+                        let (term, ty) = infer_fun(
+                            x.imp_par(),
+                            x.exp_par().as_par(),
+                            None,
+                            x.body(),
+                            x.span(),
+                            cxt,
+                        );
                         (term, ty.eval(&mut cxt.env()))
                     }
                     ast::Expr::Pi(x) => {
@@ -1178,9 +1391,70 @@ impl ast::Expr {
                             x.exp_par().as_par(),
                             x.body().and_then(|x| x.expr()),
                             None,
+                            x.span(),
                             cxt,
                         );
                         (pi, Val::Type)
+                    }
+                    ast::Expr::Reference(x) => {
+                        let x = x.expr().ok_or("Expected type of reference")?.check(
+                            Val::Type,
+                            cxt,
+                            &CheckReason::UsedAsType,
+                        );
+                        (Expr::RefType(false, Box::new(x)), Val::Type)
+                    }
+                    ast::Expr::RefMut(x) => {
+                        let x = x.expr().ok_or("Expected type of reference")?.check(
+                            Val::Type,
+                            cxt,
+                            &CheckReason::UsedAsType,
+                        );
+                        (Expr::RefType(true, Box::new(x)), Val::Type)
+                    }
+                    ast::Expr::Deref(_) => {
+                        let place = self.elab_place(cxt).ok_or("Expected reference after *")?;
+                        let xty = place.ty(cxt)?;
+                        // A bare deref must be a copy
+                        place.try_access(AccessKind::Copy, cxt)?;
+                        let x = place.to_expr(cxt);
+                        if !xty.can_copy(cxt) {
+                            match x.unspanned() {
+                                Expr::Head(Head::Var(Var::Local((n, _), _))) => {
+                                    return Err(MoveError::InvalidMove(
+                                        Doc::start("Cannot move out of reference"),
+                                        *n,
+                                        Box::new(xty.quote(cxt.size(), Some(&cxt.mcxt))),
+                                    )
+                                    .into())
+                                }
+                                _ => {
+                                    return Err(TypeError::Other(
+                                        Doc::start("Cannot move out of reference of type ").chain(
+                                            xty.quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db),
+                                        ),
+                                    ))
+                                }
+                            }
+                        }
+                        (x, xty)
+                    }
+                    ast::Expr::Assign(x) => {
+                        let place = x
+                            .lhs()
+                            .ok_or("Missing left-hand side of assignment")?
+                            .elab_place(cxt)
+                            .ok_or("Cannot assign to expression")?;
+                        let ty = place.ty(cxt)?;
+                        place.try_access(AccessKind::Mut, cxt)?;
+                        let expr = x
+                            .rhs()
+                            .ok_or("Missing right-hand side of assignment")?
+                            .check(ty, cxt, &CheckReason::MustMatch(x.lhs().unwrap().span()));
+                        (
+                            Expr::Assign(Box::new(place.to_expr(cxt)), Box::new(expr)),
+                            Val::var(Var::Builtin(Builtin::UnitType)),
+                        )
                     }
                     ast::Expr::App(x) => {
                         let (mut lhs, mut lhs_ty) = x

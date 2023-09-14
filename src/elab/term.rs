@@ -30,7 +30,6 @@ pub enum ArithOp {
     Sub,
     Mul,
     Div,
-    Exp,
     Mod,
     // Bitwise are included here since the types match
     Ior,
@@ -47,7 +46,6 @@ impl ArithOp {
             Tok::Minus => ArithOp::Sub,
             Tok::Times => ArithOp::Mul,
             Tok::Div => ArithOp::Div,
-            Tok::Exp => ArithOp::Exp,
             Tok::Mod => ArithOp::Mod,
             Tok::Bar => ArithOp::Ior,
             Tok::Xor => ArithOp::Xor,
@@ -65,7 +63,6 @@ impl std::fmt::Display for ArithOp {
             ArithOp::Sub => "-",
             ArithOp::Mul => "*",
             ArithOp::Div => "/",
-            ArithOp::Exp => "**",
             ArithOp::Mod => "%",
             ArithOp::Ior => "|",
             ArithOp::Xor => "^^",
@@ -296,6 +293,11 @@ pub enum Expr {
     /// The last Expr is the type, which can't be inferred from the values
     /// (consider `(I32, 3)`, which may be `(Type, I32)` or `(a: Type, a)`)
     Pair(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// (mutable, referent type)
+    RefType(bool, Box<Expr>),
+    Assign(Box<Expr>, Box<Expr>),
+    Ref(bool, Box<Expr>),
+    Deref(Box<Expr>),
     Spanned(RelSpan, Box<Expr>),
     Error,
 }
@@ -307,6 +309,7 @@ impl PartialEq for Expr {
             (Self::Fun(l0), Self::Fun(r0)) => l0 == r0,
             (Self::Lit(l0), Self::Lit(r0)) => l0 == r0,
             (Self::Pair(l0, l1, l2), Self::Pair(r0, r1, r2)) => l0 == r0 && l1 == r1 && l2 == r2,
+            (Self::RefType(a, x), Self::RefType(b, y)) => a == b && x == y,
             // Ignore spans
             (Self::Spanned(_, l1), Self::Spanned(_, r1)) => l1 == r1,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
@@ -350,7 +353,13 @@ impl Expr {
 
     pub fn ty(&self, cxt: &mut Cxt) -> Val {
         match self {
-            Expr::Type => Val::Type,
+            Expr::Type | Expr::RefType(_, _) => Val::Type,
+            Expr::Assign(_, _) => Val::var(Var::Builtin(Builtin::UnitType)),
+            Expr::Ref(m, x) => Val::RefType(*m, Box::new(x.ty(cxt))),
+            Expr::Deref(x) => match x.ty(cxt) {
+                Val::RefType(_, t) => *t,
+                _ => unreachable!(),
+            },
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
@@ -406,7 +415,7 @@ impl Expr {
                 Lam(icit) => {
                     cxt.push();
                     for Par { name, ty } in params {
-                        cxt.define_local(*name, ty.clone().eval(&mut cxt.env()), None);
+                        cxt.define_local(*name, ty.clone().eval(&mut cxt.env()), None, None);
                     }
                     let ty = Expr::Fun(EClos {
                         class: Pi(*icit),
@@ -447,6 +456,28 @@ impl Pretty for Expr {
                     Var::Cons(n, _) => n.pretty(db),
                 },
             },
+            Expr::RefType(false, x) => Doc::start('&')
+                .chain(x.pretty(db).nest(Prec::App))
+                .prec(Prec::App),
+            Expr::RefType(true, x) => Doc::start('&')
+                .add("mut", Doc::style_keyword())
+                .space()
+                .chain(x.pretty(db).nest(Prec::App))
+                .prec(Prec::App),
+            Expr::Assign(place, expr) => place
+                .pretty(db)
+                .add(" = ", ())
+                .chain(expr.pretty(db))
+                .prec(Prec::Term),
+            Expr::Ref(m, x) => Doc::start("<ref ")
+                .add(m, ())
+                .add('>', ())
+                .space()
+                .chain(x.pretty(db).nest(Prec::App))
+                .prec(Prec::App),
+            Expr::Deref(x) => Doc::start('*')
+                .chain(x.pretty(db).nest(Prec::App))
+                .prec(Prec::App),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)
