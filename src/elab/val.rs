@@ -500,6 +500,15 @@ impl Expr {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CopyClass {
+    Move,
+    Copy,
+    /// This means the type works like a mutable reference in that there can only be one active reference to it,
+    /// but we can copy it as long as we get rid of the copy before we use the original again
+    Mut,
+}
+
 impl Val {
     pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
         match self {
@@ -558,37 +567,38 @@ impl Val {
         }
     }
 
-    pub fn can_copy(&self, cxt: &Cxt) -> bool {
-        self.can_copy_(cxt, true)
+    pub fn copy_class(&self, cxt: &Cxt) -> CopyClass {
+        self.copy_class_(cxt, true)
     }
 
-    fn can_copy_(&self, cxt: &Cxt, inline: bool) -> bool {
+    fn copy_class_(&self, cxt: &Cxt, inline: bool) -> CopyClass {
         match self {
-            Val::Type => true,
+            Val::Type => CopyClass::Copy,
             Val::Neutral(n) => match n.head() {
                 // Currently all builtin types are copyable
-                Head::Var(Var::Builtin(_)) => true,
-                Head::Var(Var::Meta(_)) => true, // TODO add a Copy constraint to the meta somehow
+                Head::Var(Var::Builtin(_)) => CopyClass::Copy,
+                Head::Var(Var::Meta(_)) => CopyClass::Copy, // TODO add a Copy constraint to the meta somehow
                 _ if inline => {
                     let mut s = self.clone();
                     s.inline_head(&mut cxt.env(), &cxt.mcxt);
-                    s.can_copy_(cxt, false)
+                    s.copy_class_(cxt, false)
                 }
-                _ => false,
+                _ => CopyClass::Move,
             },
             Val::Fun(clos) => match clos.class {
                 // TODO check if all components can be copied; may require eval-ing
-                Sigma => false,
+                Sigma => CopyClass::Move,
                 // TODO separate function types for Fn, FnMut, FnOnce
-                Lam(_) | Pi(_) => true,
+                Lam(_) | Pi(_) => CopyClass::Copy,
             },
             // TODO technically deref can return a type
             Val::Lit(_) | Val::Pair(_, _, _) | Val::Ref(_, _) | Val::Deref(_) => {
                 unreachable!("not a type")
             }
-            Val::RefType(m, _) => !m,
+            Val::RefType(false, _) => CopyClass::Copy,
+            Val::RefType(true, _) => CopyClass::Mut,
 
-            Val::Error => true,
+            Val::Error => CopyClass::Copy,
         }
     }
 

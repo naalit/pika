@@ -969,7 +969,7 @@ impl Place {
                 let r = match kind {
                     AccessKind::Mut | AccessKind::Imm => {
                         let mutable = kind == AccessKind::Mut;
-                        v.try_borrow(mutable, cxt).map_err(Into::into)
+                        v.try_borrow(mutable, mutable, cxt).map_err(Into::into)
                     }
                     AccessKind::Move => v
                         .try_move(self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt)), cxt)
@@ -1390,11 +1390,13 @@ impl ast::Expr {
                             let access = Access {
                                 name: name.0,
                                 span: name.1,
-                                kind: AccessKind::copy_move(ty.can_copy(cxt)),
+                                kind: AccessKind::from(ty.copy_class(cxt)),
                             };
                             if access.kind == AccessKind::Move {
                                 entry
                                     .try_move(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)), cxt)?
+                            } else if access.kind == AccessKind::Mut {
+                                entry.try_borrow(true, false, cxt)?
                             } else if let Some(borrow) = entry.borrow(cxt) {
                                 cxt.check_deps(borrow, access)?
                             }
@@ -1450,7 +1452,7 @@ impl ast::Expr {
                         // A bare deref must be a copy
                         place.try_access(AccessKind::Copy, cxt)?;
                         let x = place.to_expr(cxt);
-                        if !xty.can_copy(cxt) {
+                        if xty.copy_class(cxt) != CopyClass::Copy {
                             match x.unspanned() {
                                 Expr::Head(Head::Var(Var::Local((n, _), _))) => {
                                     return Err(MoveError::InvalidMove(

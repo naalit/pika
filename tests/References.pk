@@ -57,7 +57,19 @@ fun deref_copy(x: &mut I32): I32 = *x
 # fun assign_imm_chain1(x: &&mut I32): () = **x = 4
 # fun assign_imm_chain2(x: &mut &I32): () = **x = 5
 fun assign_var(mut x: &mut I32, mut y: &mut I32): I32 = do
+    let a: I32 = 3
+    let mut b = 4
     *x = 6
     *y = *x
     y = x
     *y
+
+fun leaser(x: &mut I32): &mut I32 = x
+fun lease(x: &mut I32): &mut I32 = do
+    leaser(x)
+    x
+# fun lease_err(x: &mut I32): &mut I32 = do
+#     let y = leaser(x)
+#     leaser(x)
+#     y
+

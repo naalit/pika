@@ -182,6 +182,15 @@ impl AccessKind {
         }
     }
 }
+impl From<CopyClass> for AccessKind {
+    fn from(value: CopyClass) -> Self {
+        match value {
+            CopyClass::Move => AccessKind::Move,
+            CopyClass::Copy => AccessKind::Copy,
+            CopyClass::Mut => AccessKind::Mut,
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Borrow(NonZeroU64);
@@ -599,12 +608,17 @@ impl VarEntry {
         }
     }
 
-    pub fn try_borrow(&self, mutable: bool, cxt: &mut Cxt) -> Result<(), MoveError> {
+    pub fn try_borrow(
+        &self,
+        mutable: bool,
+        mutable_access: bool,
+        cxt: &mut Cxt,
+    ) -> Result<(), MoveError> {
         match self {
             VarEntry::Local { scope, var, .. } => match &cxt.scopes[*scope] {
                 Scope::Local(l) => {
                     let entry = &l.names[*var];
-                    if mutable && !entry.mutable {
+                    if mutable_access && !entry.mutable {
                         return Err(MoveError::InvalidBorrow(
                             Doc::start("Cannot mutate immutable variable ")
                                 .chain(entry.name.pretty(cxt.db)),
