@@ -100,6 +100,7 @@ pub enum SyntaxKind {
     RefMut,
     Deref,
     Assign,
+    MutVar,
 
     StructInit,
     Var,

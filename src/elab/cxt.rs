@@ -102,14 +102,24 @@ impl Scope {
 }
 
 impl LocalScope {
-    fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val, borrow: Borrow) {
+    fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val, borrow: Borrow, mutable: bool) {
         // TODO we probably want to keep the spans
-        self.names
-            .push(LocalVarDef::new(name.0, VarDef::Var(var, ty), borrow));
+        self.names.push(LocalVarDef::new(
+            name.0,
+            VarDef::Var(var, ty),
+            borrow,
+            mutable,
+        ));
     }
 
-    fn define_local(&mut self, name: SName, ty: Val, borrow: Borrow) {
-        self.define(name, Var::Local(name, self.size.next_lvl()), ty, borrow);
+    fn define_local(&mut self, name: SName, ty: Val, borrow: Borrow, mutable: bool) {
+        self.define(
+            name,
+            Var::Local(name, self.size.next_lvl()),
+            ty,
+            borrow,
+            mutable,
+        );
         self.size = self.size.inc();
     }
 
@@ -306,10 +316,16 @@ struct LocalVarDef {
     name: Name,
     var: VarDef,
     borrow: Borrow,
+    mutable: bool,
 }
 impl LocalVarDef {
-    fn new(name: Name, var: VarDef, borrow: Borrow) -> Self {
-        LocalVarDef { name, var, borrow }
+    fn new(name: Name, var: VarDef, borrow: Borrow, mutable: bool) -> Self {
+        LocalVarDef {
+            name,
+            var,
+            borrow,
+            mutable,
+        }
     }
 }
 
@@ -469,6 +485,7 @@ impl AccessError {
 pub enum MoveError {
     AccessError(AccessError),
     InvalidMove(Doc, Name, Box<Expr>),
+    InvalidBorrow(Doc, Name),
 }
 impl From<AccessError> for MoveError {
     fn from(value: AccessError) -> Self {
@@ -572,11 +589,18 @@ impl VarEntry {
         }
     }
 
-    pub fn try_borrow(&self, mutable: bool, cxt: &mut Cxt) -> Result<(), Option<AccessError>> {
+    pub fn try_borrow(&self, mutable: bool, cxt: &mut Cxt) -> Result<(), MoveError> {
         match self {
             VarEntry::Local { scope, var, .. } => match &cxt.scopes[*scope] {
                 Scope::Local(l) => {
                     let entry = &l.names[*var];
+                    if mutable && !entry.mutable {
+                        return Err(MoveError::InvalidBorrow(
+                            Doc::start("Cannot mutate immutable variable ")
+                                .chain(entry.name.pretty(cxt.db)),
+                            entry.name,
+                        ));
+                    }
                     let access = self.access(AccessKind::borrow(mutable));
                     cxt.check_deps(entry.borrow, access)?;
 
@@ -594,7 +618,10 @@ impl VarEntry {
                 var: VarDef::Def(_),
                 ..
             } if !mutable => Ok(()),
-            _ => Err(None),
+            VarEntry::Other { var, name } => Err(MoveError::InvalidBorrow(
+                Doc::start("Cannot move out of ").debug(var),
+                name.0,
+            )),
         }
     }
 }
@@ -708,9 +735,12 @@ impl Cxt<'_> {
         ty: Val,
         value: Option<Val>,
         borrow: Option<Borrow>,
+        mutable: bool,
     ) {
         let borrow = borrow.unwrap_or_else(|| Borrow::new(self));
-        self.scope_mut().unwrap().define_local(name, ty, borrow);
+        self.scope_mut()
+            .unwrap()
+            .define_local(name, ty, borrow, mutable);
         self.env.push(value.map(Ok));
     }
 
@@ -719,7 +749,9 @@ impl Cxt<'_> {
             panic!("Call define_local() for local variables!");
         }
         let borrow = Borrow::new(self);
-        self.scope_mut().unwrap().define(name, var, ty, borrow);
+        self.scope_mut()
+            .unwrap()
+            .define(name, var, ty, borrow, false);
     }
 
     pub fn def_cxt(&self) -> DefCxt {

@@ -612,6 +612,12 @@ impl<'a> Parser<'a> {
                         self.expr(Prec::App);
                         self.pop();
                     }
+                    Tok::MutKw => {
+                        self.push(Tok::MutVar);
+                        self.advance();
+                        self.var();
+                        self.pop();
+                    }
                     Tok::BoxKw | Tok::UnboxKw => {
                         self.push(Tok::Box);
                         self.advance();

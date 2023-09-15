@@ -18,7 +18,7 @@ mod input {
         ),
         Pair(Box<SPattern>, Box<SPattern>, Size),
         Or(Vec<SPattern>),
-        Var(SName),
+        Var(bool, SName),
         Typed(Box<SPattern>, Box<Val>),
         Any,
     }
@@ -62,7 +62,7 @@ mod input {
                     )
                 }
                 Pattern::Or(_) => Val::Error,
-                Pattern::Var(n) => {
+                Pattern::Var(_m, n) => {
                     *size += 1;
                     Val::var(Var::Local(*n, size.dec().next_lvl()))
                 }
@@ -121,9 +121,9 @@ mod input {
             let mut env = Vec::new();
             for (var, pat) in &self.end_ipats {
                 match pat {
-                    IPat::Var(n) => {
+                    IPat::Var(m, n) => {
                         let ty = cxt.var_tys[var.0].0.clone();
-                        env.push((*n, ty));
+                        env.push((*n, ty, *m));
                     }
                     _ => (),
                 }
@@ -215,11 +215,11 @@ mod input {
                     Pattern::Or(_) => {
                         unreachable!("or patterns should have been removed before remove_column()")
                     }
-                    Pattern::Var(v) => {
+                    Pattern::Var(m, v) => {
                         // The variable can't be used in the rest of the pattern
                         // and we don't want to define "real" variables that aren't used in other patterns
                         // so we push it to the end of the row
-                        row.end_ipats.push_back((var, IPat::Var(*v)));
+                        row.end_ipats.push_back((var, IPat::Var(*m, *v)));
                         row.columns.remove(i);
                         RemovedColumn::Nothing
                     }
@@ -239,8 +239,15 @@ mod input {
                 // TODO datatype constructors
                 ast::Expr::Var(v) => {
                     *size += 1;
-                    Pattern::Var(v.name(cxt.ecxt.db))
+                    Pattern::Var(false, v.name(cxt.ecxt.db))
                 }
+                ast::Expr::MutVar(v) => match v.var() {
+                    Some(v) => {
+                        *size += 1;
+                        Pattern::Var(true, v.name(cxt.ecxt.db))
+                    }
+                    None => Pattern::Any,
+                },
                 ast::Expr::App(x) => {
                     let (mut lhs, mut lhs_ty) = x
                         .lhs()
@@ -309,10 +316,13 @@ mod input {
                                                 *size += 1;
                                                 (
                                                     (
-                                                        Pattern::Var((
-                                                            cxt.ecxt.db.name("_".into()),
-                                                            RelSpan::empty(),
-                                                        )),
+                                                        Pattern::Var(
+                                                            false,
+                                                            (
+                                                                cxt.ecxt.db.name("_".into()),
+                                                                RelSpan::empty(),
+                                                            ),
+                                                        ),
                                                         RelSpan::empty(),
                                                     ),
                                                     (b.ty.clone().eval(&mut env)),
@@ -362,10 +372,13 @@ mod input {
                                         *size += 1;
                                         (
                                             (
-                                                Pattern::Var((
-                                                    cxt.ecxt.db.name("_".into()),
-                                                    RelSpan::empty(),
-                                                )),
+                                                Pattern::Var(
+                                                    false,
+                                                    (
+                                                        cxt.ecxt.db.name("_".into()),
+                                                        RelSpan::empty(),
+                                                    ),
+                                                ),
                                                 RelSpan::empty(),
                                             ),
                                             (b.ty.clone().eval(&mut Env::new(*size))),
@@ -531,7 +544,7 @@ mod input {
 
 // OUTPUT
 
-type PEnv = Vec<(SName, Val)>;
+type PEnv = Vec<(SName, Val, bool)>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct PVar(usize);
@@ -540,7 +553,7 @@ struct PVar(usize);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum IPat {
     Pair(PVar, PVar),
-    Var(SName),
+    Var(bool, SName),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -655,7 +668,7 @@ impl CaseElabCxt<'_, '_> {
                     let params = self.env_tys[&row.body]
                         .0
                         .iter()
-                        .map(|(n, ty)| Par {
+                        .map(|(n, ty, _)| Par {
                             name: *n,
                             ty: {
                                 let ty = ty.clone().quote(size, None);
@@ -805,7 +818,7 @@ impl CaseElabCxt<'_, '_> {
                     // we do this by adding a '_' var IPat to the pattern
                     row.end_ipats.push_back((
                         iargs[0],
-                        IPat::Var((self.ecxt.db.name("_".into()), RelSpan::empty())),
+                        IPat::Var(false, (self.ecxt.db.name("_".into()), RelSpan::empty())),
                     ));
                     row.columns.push_front(input::Column {
                         var: iargs[1],
@@ -949,7 +962,7 @@ mod coverage {
                         ),
                         None => (),
                     },
-                    IPat::Var(_) => size += 1,
+                    IPat::Var(_, _) => size += 1,
                 }
             }
             match &self.dec {
@@ -1097,12 +1110,12 @@ impl CaseOf<Expr> {
                 let va = pvar();
                 let vb = pvar();
                 vec.push((var, IPat::Pair(va, vb)));
-                vec.push((va, IPat::Var(*name)));
+                vec.push((va, IPat::Var(false, *name)));
                 (vec, vb)
             },
         );
         if let Some(Par { name, .. }) = body.params.last() {
-            ipats.push((vrest, IPat::Var(*name)));
+            ipats.push((vrest, IPat::Var(false, *name)));
         }
 
         CaseOf {
@@ -1151,12 +1164,12 @@ pub(super) fn elab_case(
                 let old_env = cxt.ecxt.env();
                 cxt.ecxt.push();
                 let mut params = Vec::new();
-                for (name, ty) in penv {
+                for (name, ty, m) in penv {
                     params.push(Par {
                         name: *name,
                         ty: ty.clone().quote(cxt.ecxt.size(), None),
                     });
-                    cxt.ecxt.define_local(*name, ty.clone(), None, s_borrow);
+                    cxt.ecxt.define_local(*name, ty.clone(), None, s_borrow, *m);
                 }
                 let mut env = env.clone();
                 while env.size < cxt.ecxt.size() {
@@ -1411,7 +1424,7 @@ impl DecNode<Val> {
                     // Leave a and b unset, the body we pick might not use them
                     _ => (),
                 },
-                IPat::Var(_) => params.push(env.get(var).copied().cloned()),
+                IPat::Var(_, _) => params.push(env.get(var).copied().cloned()),
             }
         }
         self.dec.try_eval(env, params)
@@ -1441,7 +1454,12 @@ impl IPat {
     pub(super) fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         match self {
             IPat::Pair(a, b) => Doc::start(a).add(',', ()).add(b, ()),
-            IPat::Var(v) => v.pretty(db),
+            IPat::Var(m, v) => if *m {
+                Doc::start("mut").style(Doc::style_keyword()).space()
+            } else {
+                Doc::none()
+            }
+            .chain(v.pretty(db)),
         }
     }
 }

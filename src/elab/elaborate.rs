@@ -4,9 +4,10 @@ impl ast::Expr {
     pub(super) fn as_let_def_pat(
         &self,
         db: &dyn Elaborator,
-    ) -> Option<(Option<SName>, Option<ast::Ty>)> {
+    ) -> Option<(Option<(bool, SName)>, Option<ast::Ty>)> {
         match self {
-            ast::Expr::Var(n) => Some((Some(n.name(db)), None)),
+            ast::Expr::MutVar(v) => Some((Some((true, v.var()?.name(db))), None)),
+            ast::Expr::Var(n) => Some((Some((false, n.name(db))), None)),
             ast::Expr::GroupedExpr(x) => x.expr().and_then(|x| x.as_let_def_pat(db)),
             ast::Expr::Binder(x) => {
                 let (name, ty) = x
@@ -76,7 +77,13 @@ impl ast::Def {
         match self {
             ast::Def::LetDef(x) => {
                 match x.pat()?.expr()?.as_let_def_pat(cxt.db) {
-                    Some((Some(name), None)) => {
+                    Some((Some((m, name)), None)) => {
+                        if m {
+                            cxt.error(
+                                x.pat()?.span(),
+                                "Only 'let' definitions in blocks can be mutable",
+                            );
+                        }
                         let (body, ty) = x.body()?.expr()?.infer(cxt);
                         // inline metas in the term
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
@@ -90,7 +97,13 @@ impl ast::Def {
                             children: Vec::new(),
                         })
                     }
-                    Some((Some(name), Some(pty))) => {
+                    Some((Some((m, name)), Some(pty))) => {
+                        if m {
+                            cxt.error(
+                                x.pat()?.span(),
+                                "Only 'let' definitions in blocks can be mutable",
+                            );
+                        }
                         // We already elaborated the type, so avoid doing that twice
                         let ty = cxt.db.def_type_n(def_id, def_node).result?;
                         let body = x.body()?.expr()?.check(
@@ -267,6 +280,7 @@ impl ast::Def {
                                 par.ty.clone().eval(&mut cxt.env()),
                                 None,
                                 None,
+                                false,
                             );
                         }
                         implicit.append(&mut check_params(
@@ -381,7 +395,8 @@ impl ast::Def {
                 .pat()
                 .and_then(|x| x.expr())
                 .and_then(|x| x.as_let_def_pat(db))
-                .and_then(|(n, _)| n),
+                .and_then(|(n, _)| n)
+                .map(|(_, n)| n),
             ast::Def::FunDef(x) => x.name().map(|x| x.name(db)),
             ast::Def::TypeDef(x) => x.name().map(|x| x.name(db)),
             ast::Def::TypeDefShort(x) => x.name().map(|x| x.name(db)),
@@ -551,12 +566,12 @@ fn check_params(
                 Ok(x) => x.span(),
                 Err(span) => *span,
             };
-            let name = x
+            let (_m, name) = x
                 .as_ref()
                 .ok()
                 .and_then(|x| x.as_simple_pat(cxt.db))
                 .and_then(|x| x.0)
-                .unwrap_or_else(|| (cxt.db.name("_".to_string()), span));
+                .unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), span)));
             cxt.error(
                 span,
                 Doc::start("Lambda contains extra parameter ")
@@ -575,7 +590,7 @@ fn check_par(
     expected_ty: Option<(Expr, &CheckReason)>,
     cxt: &mut Cxt,
 ) -> Par {
-    let par = match x {
+    let (m, par) = match x {
         Ok(ast::Expr::Binder(x)) => {
             let (name, ty) = x
                 .pat()
@@ -585,7 +600,8 @@ fn check_par(
                         .unwrap_or_else(|| todo!("move non-trivial pats to rhs"))
                 })
                 .unwrap_or((None, None));
-            let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), x.span()));
+            let (m, name) =
+                name.unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), x.span())));
             if ty.is_some() {
                 cxt.error(
                     x.pat().unwrap().span(),
@@ -609,13 +625,14 @@ fn check_par(
                 cxt.unify(ty, expected_ty, reason)
                     .unwrap_or_else(|e| cxt.error(x.span(), e));
             }
-            Par { name, ty }
+            (m, Par { name, ty })
         }
         Ok(x) if pat => {
             let (name, ty) = x
                 .as_simple_pat(cxt.db)
                 .unwrap_or_else(|| todo!("move non-trivial pats to rhs"));
-            let name = name.unwrap_or_else(|| (cxt.db.name("_".to_string()), x.span()));
+            let (m, name) =
+                name.unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), x.span())));
             let ty = match ty.map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType)) {
                 Some(ty) => {
                     if let Some((expected_ty, reason)) = expected_ty {
@@ -631,14 +648,17 @@ fn check_par(
                         .new_meta(cxt.locals(), MetaBounds::new(Val::Type), x.span())
                 }),
             };
-            Par { name, ty }
+            (m, Par { name, ty })
         }
         Ok(x) => {
             let ty = x.check(Val::Type, cxt, &CheckReason::UsedAsType);
-            Par {
-                name: (cxt.db.name("_".to_string()), x.span()),
-                ty,
-            }
+            (
+                false,
+                Par {
+                    name: (cxt.db.name("_".to_string()), x.span()),
+                    ty,
+                },
+            )
         }
         Err(span) => {
             if let Some((ty, reason)) = expected_ty {
@@ -646,14 +666,17 @@ fn check_par(
                 cxt.unify(Val::var(Var::Builtin(Builtin::UnitType)), ty, reason)
                     .unwrap_or_else(|e| cxt.error(span, e));
             }
-            Par {
-                name: (cxt.db.name("_".to_string()), span),
-                ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-            }
+            (
+                false,
+                Par {
+                    name: (cxt.db.name("_".to_string()), span),
+                    ty: Expr::var(Var::Builtin(Builtin::UnitType)),
+                },
+            )
         }
     };
     // Define each parameter so it can be used by the types of the rest
-    cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None, None);
+    cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None, None, m);
     par
 }
 
@@ -943,12 +966,7 @@ impl Place {
                 let r = match kind {
                     AccessKind::Mut | AccessKind::Imm => {
                         let mutable = kind == AccessKind::Mut;
-                        v.try_borrow(mutable, cxt).map_err(|e| match e {
-                            Some(e) => TypeError::from(e),
-                            None => TypeError::Other(
-                                Doc::start("Could not borrow from ").debug(v.var(cxt)),
-                            ),
-                        })
+                        v.try_borrow(mutable, cxt).map_err(Into::into)
                     }
                     AccessKind::Move => v
                         .try_move(self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt)), cxt)
@@ -1077,6 +1095,7 @@ impl ast::Expr {
                             par.ty.clone().eval(&mut cxt.env()),
                             None,
                             None,
+                            false,
                         );
                         implicit.push(par.clone());
                     }
@@ -1185,7 +1204,13 @@ impl ast::Expr {
                     cxt.push();
                     for i in &mut params {
                         i.name.0 = i.name.0.inaccessible(cxt.db);
-                        cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None, None);
+                        cxt.define_local(
+                            i.name,
+                            i.ty.clone().eval(&mut cxt.env()),
+                            None,
+                            None,
+                            false,
+                        );
                     }
 
                     let body = self.check(bty, cxt, reason);
@@ -1307,9 +1332,13 @@ impl ast::Expr {
         }
     }
 
-    fn as_simple_pat(&self, db: &dyn Elaborator) -> Option<(Option<SName>, Option<ast::Expr>)> {
+    fn as_simple_pat(
+        &self,
+        db: &dyn Elaborator,
+    ) -> Option<(Option<(bool, SName)>, Option<ast::Expr>)> {
         match self {
-            ast::Expr::Var(x) => Some((Some(x.name(db)), None)),
+            ast::Expr::MutVar(x) => Some((Some((true, x.var()?.name(db))), None)),
+            ast::Expr::Var(x) => Some((Some((false, x.name(db))), None)),
             ast::Expr::Binder(x) => {
                 let (name, old_ty) = x.pat()?.expr()?.as_simple_pat(db)?;
                 if old_ty.is_some() {
@@ -1325,7 +1354,7 @@ impl ast::Expr {
                 // For (), we return this expression as the type, since it's identical syntactically
                 .unwrap_or_else(|| {
                     Some((
-                        Some((db.name("_".to_string()), self.span())),
+                        Some((false, (db.name("_".to_string()), self.span()))),
                         Some(self.clone()),
                     ))
                 }),
@@ -1653,6 +1682,11 @@ impl ast::Expr {
                     ast::Expr::Binder(_) => {
                         return Err(TypeError::Other(Doc::start(
                             "Binder '_: _' not allowed in this context",
+                        )))
+                    }
+                    ast::Expr::MutVar(_) => {
+                        return Err(TypeError::Other(Doc::start(
+                            "'mut' not allowed in this context",
                         )))
                     }
                     ast::Expr::StructInit(_) => todo!(),

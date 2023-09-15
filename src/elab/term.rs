@@ -415,7 +415,7 @@ impl Expr {
                 Lam(icit) => {
                     cxt.push();
                     for Par { name, ty } in params {
-                        cxt.define_local(*name, ty.clone().eval(&mut cxt.env()), None, None);
+                        cxt.define_local(*name, ty.clone().eval(&mut cxt.env()), None, None, false);
                     }
                     let ty = Expr::Fun(EClos {
                         class: Pi(*icit),

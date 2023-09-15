@@ -235,6 +235,7 @@ make_nodes! {
     RefMut = expr: Expr;
     Deref = expr: Expr;
     Assign = lhs: Expr, rhs: (1 Expr);
+    MutVar = var: Var;
 
     GroupedExpr = expr: Expr;
 
@@ -259,7 +260,8 @@ make_nodes! {
         Reference,
         RefMut,
         Deref,
-        Assign
+        Assign,
+        MutVar
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -671,6 +673,10 @@ impl Pretty for Expr {
                 .chain(r.expr().pretty()),
             Expr::Deref(r) => Doc::start('*').chain(r.expr().pretty()),
             Expr::Assign(x) => x.lhs().pretty().add(" = ", ()).chain(x.rhs().pretty()),
+            Expr::MutVar(v) => Doc::start("mut")
+                .style(Doc::style_keyword())
+                .space()
+                .chain(v.var().pretty()),
         };
         Doc::start('{').chain(p).add('}', ())
     }

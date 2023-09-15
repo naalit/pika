@@ -230,6 +230,18 @@ impl TypeError {
                                 .add("' which cannot be copied implicitly", ()),
                         ),
                     },
+                    MoveError::InvalidBorrow(doc, _name) => Error {
+                        severity,
+                        message: doc.clone(),
+                        message_lsp: None,
+                        primary: Label {
+                            span,
+                            message: doc.clone(),
+                            color: Some(Doc::COLOR1),
+                        },
+                        secondary: vec![],
+                        note: None,
+                    },
                     MoveError::AccessError(e) => e.to_error(severity, db),
                 };
             }
