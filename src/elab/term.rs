@@ -346,6 +346,10 @@ impl Builtin {
             Builtin::CompOp(_) => Val::Error,
         }
     }
+
+    pub fn name(self, db: &(impl crate::parsing::Parser + ?Sized)) -> Name {
+        db.name(format!("{}", self))
+    }
 }
 impl Expr {
     pub fn var(var: Var<Idx>) -> Self {

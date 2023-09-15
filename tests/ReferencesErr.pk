@@ -74,3 +74,9 @@ fun lease_err(x: &mut I32): &mut I32 = do
     let y = leaser(x)
     leaser(x)
     y
+
+fun magic1(x: &mut DoNotCopy, y: &mut DoNotCopy): () = () # theoretically this could put (mutable) references in y into x
+fun magic2(x: &mut DoNotCopy, mut y: DoNotCopy): &mut DoNotCopy = do
+    magic1(x, y) # now y could be mutably borrowed
+    borrow_move(x, y) # so this should be illegal
+    x

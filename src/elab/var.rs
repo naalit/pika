@@ -1,5 +1,5 @@
-use super::{metas::Meta, val::Val, Cons};
-use crate::common::{Def, SName};
+use super::{metas::Meta, val::Val, Cons, Elaborator};
+use crate::common::*;
 use std::collections::VecDeque;
 
 // De Brujin indices and levels
@@ -113,6 +113,14 @@ impl<T> Var<T> {
             Var::Def(_, d) => Var::Def(n, d),
             Var::Cons(_, d) => Var::Cons(n, d),
             Var::Meta(_) | Var::Builtin(_) => self,
+        }
+    }
+
+    pub fn name(self, db: &dyn Elaborator) -> Option<Name> {
+        match self {
+            Var::Local(n, _) | Var::Def(n, _) | Var::Cons(n, _) => Some(n.0),
+            Var::Meta(_) => None,
+            Var::Builtin(b) => Some(b.name(db)),
         }
     }
 }

@@ -145,6 +145,7 @@ impl LocalScope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BorrowInvalid {
+    skip_borrow: Option<Borrow>,
     base_access: Access,
     chain_start: Option<Access>,
     chain_end: Option<Access>,
@@ -152,6 +153,7 @@ struct BorrowInvalid {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BorrowDef {
+    mutable_parents: Vec<(Borrow, Access)>,
     mutable_borrow: Option<(Borrow, Access)>,
     immutable_borrows: Vec<(Borrow, Access)>,
     /// These are borrows that don't borrow this one, but do depend on it by-value - so if this gets invalidated, they will too
@@ -197,6 +199,7 @@ pub struct Borrow(NonZeroU64);
 impl Borrow {
     fn new(cxt: &mut Cxt) -> Borrow {
         cxt.borrows.push(BorrowDef {
+            mutable_parents: Vec::new(),
             mutable_borrow: None,
             immutable_borrows: Vec::new(),
             invalid: None,
@@ -224,7 +227,16 @@ impl Borrow {
         cxt.borrows.get(idx as usize)
     }
 
+    pub fn mutable_dependencies(self, cxt: &Cxt) -> Vec<(Borrow, Access)> {
+        self.def(cxt)
+            .map(|d| d.mutable_parents.clone())
+            .unwrap_or_default()
+    }
+
     fn invalidate(self, mut invalid: BorrowInvalid, cxt: &mut Cxt) {
+        if invalid.skip_borrow == Some(self) {
+            return;
+        }
         if let Some(def) = self.def_mut(cxt) {
             if def.invalid.is_none()
                 || def
@@ -267,6 +279,7 @@ impl Borrow {
                 {
                     i.invalidate(
                         BorrowInvalid {
+                            skip_borrow: Some(self),
                             base_access: access,
                             chain_start: Some(a),
                             chain_end: None,
@@ -284,6 +297,7 @@ impl Borrow {
                 if let Some((i, a)) = def.mutable_borrow {
                     i.invalidate(
                         BorrowInvalid {
+                            skip_borrow: Some(self),
                             base_access: access,
                             chain_start: Some(a),
                             chain_end: None,
@@ -298,6 +312,7 @@ impl Borrow {
     fn invalidate_self(self, access: Access, move_type: Rc<Expr>, cxt: &mut Cxt) {
         self.invalidate(
             BorrowInvalid {
+                skip_borrow: None,
                 base_access: access,
                 chain_start: None,
                 chain_end: None,
@@ -308,10 +323,15 @@ impl Borrow {
     }
 
     /// Does not check validity or invalidate old borrows - do that before calling this
-    fn add_borrow(self, borrow: Borrow, access: Access, cxt: &mut Cxt) {
+    pub fn add_borrow(self, borrow: Borrow, access: Access, cxt: &mut Cxt) {
         if let Some(def) = self.def_mut(cxt) {
             match access.kind {
-                AccessKind::Mut => def.mutable_borrow = Some((borrow, access)),
+                AccessKind::Mut => {
+                    def.mutable_borrow = Some((borrow, access));
+                    if let Some(def) = borrow.def_mut(cxt) {
+                        def.mutable_parents.push((self, access));
+                    }
+                }
                 AccessKind::Imm => def.immutable_borrows.push((borrow, access)),
                 AccessKind::Move => def.move_or_copy.push((borrow, access)),
                 AccessKind::Copy => def.move_or_copy.push((borrow, access)),
@@ -351,9 +371,44 @@ pub enum VarEntry {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AccessPoint {
+    Expr,
+    Name(Name),
+    Function(Option<Name>),
+}
+impl From<Name> for AccessPoint {
+    fn from(value: Name) -> Self {
+        AccessPoint::Name(value)
+    }
+}
+impl AccessPoint {
+    fn pretty(
+        &self,
+        initial: bool,
+        col: ariadne::Color,
+        db: &(impl crate::elab::Elaborator + ?Sized),
+    ) -> Doc {
+        match self {
+            AccessPoint::Expr => {
+                Doc::start(if initial { "T" } else { "t" }).add("he result of this expression", ())
+            }
+            AccessPoint::Name(name) => {
+                Doc::start(if initial { "Variable " } else { "" }).chain(name.pretty(db).style(col))
+            }
+            AccessPoint::Function(func) => Doc::start(if initial { "T" } else { "t" })
+                .add("his call", ())
+                .chain(match func {
+                    Some(name) => Doc::start(" to ").chain(name.pretty(db).style(col)),
+                    None => Doc::none(),
+                }),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Access {
     pub kind: AccessKind,
-    pub name: Name,
+    pub point: AccessPoint,
     pub span: RelSpan,
 }
 #[derive(Clone, Debug)]
@@ -363,31 +418,33 @@ pub struct AccessError {
     dep_chain_end: Option<Access>,
     dep_access: Access,
     move_type: Option<Rc<Expr>>,
-    is_expression: bool,
 }
 impl AccessError {
     pub fn to_error(&self, severity: Severity, db: &dyn Elaborator) -> Error {
-        let name0 = self.dep_access.name.pretty(db);
-        let name1 = self.invalid_access.name.pretty(db);
-        let doc1 = if self.is_expression {
-            Doc::start("The result of this expression")
-        } else {
-            Doc::start("Variable ").chain(name1.style(Doc::COLOR1))
+        let name0 = |i, swap| {
+            self.dep_access
+                .point
+                .pretty(i, if swap { Doc::COLOR1 } else { Doc::COLOR2 }, db)
+        };
+        let name1 = |i, swap| {
+            self.invalid_access
+                .point
+                .pretty(i, if swap { Doc::COLOR2 } else { Doc::COLOR1 }, db)
         };
         let dep =
-            self.dep_access.name != self.invalid_access.name || self.dep_chain_start.is_some();
+            self.dep_access.point != self.invalid_access.point || self.dep_chain_start.is_some();
         let (message, dep_message, swap) = match self.dep_access.kind {
             AccessKind::Move => (
                 if dep {
-                    doc1.clone()
+                    name1(true, false)
                         .add(" borrows ", ())
-                        .chain(name0.clone().style(Doc::COLOR2))
+                        .chain(name0(false, false))
                         .add(" which has already been consumed", ())
                 } else {
-                    doc1.clone().add(" has already been consumed", ())
+                    name1(true, false).add(" has already been consumed", ())
                 },
                 Doc::start("Variable ")
-                    .chain(name0.clone().style(Doc::COLOR2))
+                    .chain(name0(false, false))
                     .add(" was consumed here", ()),
                 false,
             ),
@@ -398,17 +455,13 @@ impl AccessError {
                 }) =>
             {
                 (
-                    Doc::start("Variable ")
-                        .chain(name0.clone().style(Doc::COLOR1))
-                        .add(" cannot be accessed while mutably borrowed", ()),
+                    name0(true, true).add(" cannot be accessed while mutably borrowed", ()),
                     Doc::start("Mutable borrow later used here"),
                     true,
                 )
             }
             AccessKind::Mut => (
-                Doc::start("Variable ")
-                    .chain(name0.clone().style(Doc::COLOR1))
-                    .add(" cannot be accessed mutably while it is borrowed", ()),
+                name0(true, true).add(" cannot be accessed mutably while it is borrowed", ()),
                 Doc::start("Borrow later used here"),
                 true,
             ),
@@ -430,8 +483,7 @@ impl AccessError {
             secondary.push(Label {
                 span: access.span,
                 color: Some(Doc::COLOR3),
-                message: Doc::start("Variable ")
-                    .chain(name0.clone().style(Doc::COLOR3))
+                message: name0(true, swap) // TODO should this use COLOR3?
                     .add(" was", ())
                     .add(if mutable { " mutably" } else { "" }, ())
                     .add(" borrowed here", ()),
@@ -442,28 +494,30 @@ impl AccessError {
             secondary.push(Label {
                 span: access.span,
                 color: Some(Doc::COLOR4),
-                message: doc1
-                    .clone()
-                    .add(if mutable { " mutably" } else { "" }, ())
-                    .add(" borrows ", ())
-                    .chain(
-                        name0
-                            .clone()
-                            .style(if swap { Doc::COLOR1 } else { Doc::COLOR2 }),
-                    )
-                    .add(" through ", ())
-                    .chain(access.name.pretty(db).style(Doc::COLOR4)),
+                message: match access.point {
+                    AccessPoint::Function(_) => access
+                        .point
+                        .pretty(true, Doc::COLOR4, db)
+                        .add(" could mutate ", ())
+                        .chain(name1(false, swap))
+                        .add(" and insert", ())
+                        .add(if mutable { " mutably" } else { "" }, ())
+                        .add(" borrowed data from ", ())
+                        .chain(name0(false, swap)),
+                    _ => name1(true, swap)
+                        .add(if mutable { " mutably" } else { "" }, ())
+                        .add(" borrows ", ())
+                        .chain(name0(false, swap))
+                        .add(" through ", ())
+                        .chain(access.point.pretty(false, Doc::COLOR4, db)),
+                },
             });
         }
 
         let note = if self.dep_access.kind == AccessKind::Move {
             self.move_type.as_ref().map(|ty| {
                 Doc::start("Move occurs because ")
-                    .chain(
-                        name0
-                            .clone()
-                            .style(if dep { Doc::COLOR2 } else { Doc::COLOR1 }),
-                    )
+                    .chain(name0(false, swap))
                     .add(" has type '", ())
                     .chain(ty.pretty(db))
                     .add("' which cannot be copied implicitly", ())
@@ -565,7 +619,11 @@ impl VarEntry {
             VarEntry::Local { name, .. } => name,
             VarEntry::Other { name, .. } => name,
         };
-        Access { kind, name, span }
+        Access {
+            kind,
+            point: name.into(),
+            span,
+        }
     }
 
     pub fn try_move(&self, ty: Expr, cxt: &mut Cxt) -> Result<(), MoveError> {
@@ -581,7 +639,7 @@ impl VarEntry {
                     entry.borrow.invalidate_self(
                         Access {
                             kind: AccessKind::Move,
-                            name: name.0,
+                            point: name.0.into(),
                             span: name.1,
                         },
                         Rc::new(ty),
@@ -686,15 +744,12 @@ impl Cxt<'_> {
         // If an error occurs here, it's because of an invalid access within the expression
         let access = Access {
             kind: AccessKind::Imm,
-            name: self.db.name("this expression".into()),
+            point: AccessPoint::Expr,
             span,
         };
         self.check_deps(borrow, access)
             .map(|()| borrow)
-            .map_err(|mut e| {
-                e.is_expression = true;
-                self.error(RelSpan::empty(), e);
-            })
+            .map_err(|e| self.error(RelSpan::empty(), e))
             .ok()
     }
     pub fn add_dep(&mut self, dep: Borrow, access: Access) {
@@ -704,6 +759,7 @@ impl Cxt<'_> {
         match borrow.def(self) {
             Some(def) => {
                 if let Some(BorrowInvalid {
+                    skip_borrow: _,
                     base_access,
                     chain_start,
                     chain_end,
@@ -716,7 +772,6 @@ impl Cxt<'_> {
                         dep_chain_end: chain_end,
                         dep_access: base_access,
                         move_type,
-                        is_expression: false,
                     });
                 }
             }

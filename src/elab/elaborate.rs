@@ -995,7 +995,7 @@ impl Place {
                             *b,
                             Access {
                                 kind,
-                                name: cxt.db.name("<expression>".into()),
+                                point: AccessPoint::Expr,
                                 span: *s,
                             },
                         );
@@ -1388,7 +1388,7 @@ impl ast::Expr {
                             let ty = entry.ty(cxt);
 
                             let access = Access {
-                                name: name.0,
+                                point: name.0.into(),
                                 span: name.1,
                                 kind: AccessKind::from(ty.copy_class(cxt)),
                             };
@@ -1491,6 +1491,7 @@ impl ast::Expr {
                         )
                     }
                     ast::Expr::App(x) => {
+                        cxt.record_deps();
                         let (mut lhs, mut lhs_ty) = x
                             .lhs()
                             .ok_or("Missing left-hand side of application")?
@@ -1506,36 +1507,56 @@ impl ast::Expr {
                         lhs_span.end = x.imp().map(|x| x.span()).unwrap_or(lhs_span).end;
 
                         // Apply explicit arguments
-                        if let Some(exp) = x.exp() {
-                            match lhs_ty {
+                        let fun_name = match lhs.unspanned() {
+                            Expr::Head(Head::Var(v)) => v.name(cxt.db),
+                            _ => None,
+                        };
+                        let (expr, ty) = if let Some(exp) = x.exp() {
+                            let (exp, rty) = match lhs_ty {
                                 Val::Fun(clos) if matches!(clos.class, Pi(_)) => {
                                     let aty = clos.par_ty();
                                     let exp = exp.check(aty, cxt, &CheckReason::ArgOf(lhs_span));
                                     let vexp = exp.clone().eval(&mut cxt.env());
                                     let rty = clos.apply(vexp);
-                                    (
-                                        Expr::Elim(Box::new(lhs), Box::new(Elim::App(Expl, exp))),
-                                        rty,
-                                    )
+                                    (exp, rty)
                                 }
                                 Val::Error => {
                                     // Still try inferring the argument to catch errors
                                     let (exp, _) = exp.infer(cxt);
-                                    (
-                                        Expr::Elim(Box::new(lhs), Box::new(Elim::App(Expl, exp))),
-                                        Val::Error,
-                                    )
+                                    (exp, Val::Error)
                                 }
                                 lhs_ty => {
+                                    cxt.finish_deps(x.span());
                                     return Err(TypeError::NotFunction(
                                         lhs_ty.quote(cxt.size(), Some(&cxt.mcxt)),
                                         lhs_span,
-                                    ))
+                                    ));
                                 }
-                            }
+                            };
+                            (
+                                Expr::Elim(Box::new(lhs), Box::new(Elim::App(Expl, exp))),
+                                rty,
+                            )
                         } else {
                             (lhs, lhs_ty)
+                        };
+                        if let Some(arg_borrow) = cxt.finish_deps(x.span()) {
+                            let parents = arg_borrow.mutable_dependencies(cxt);
+                            for (parent, mut access) in parents {
+                                access.point = AccessPoint::Function(fun_name);
+                                access.span = lhs_span;
+                                arg_borrow.add_borrow(parent, access, cxt);
+                            }
+                            cxt.add_dep(
+                                arg_borrow,
+                                Access {
+                                    point: AccessPoint::Expr,
+                                    kind: AccessKind::Move,
+                                    span: x.span(),
+                                },
+                            );
                         }
+                        (expr, ty)
                     }
                     ast::Expr::Do(d) => {
                         let mut rty = None;
