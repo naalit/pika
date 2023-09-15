@@ -212,6 +212,7 @@ pub use self::Icit::*;
 pub struct Par {
     pub name: SName,
     pub ty: Expr,
+    pub mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,8 +415,14 @@ impl Expr {
                 // I don't *think* we need a return type annotation, but there might be edge cases where we do
                 Lam(icit) => {
                     cxt.push();
-                    for Par { name, ty } in params {
-                        cxt.define_local(*name, ty.clone().eval(&mut cxt.env()), None, None, false);
+                    for Par { name, ty, mutable } in params {
+                        cxt.define_local(
+                            *name,
+                            ty.clone().eval(&mut cxt.env()),
+                            None,
+                            None,
+                            *mutable,
+                        );
                     }
                     let ty = Expr::Fun(EClos {
                         class: Pi(*icit),

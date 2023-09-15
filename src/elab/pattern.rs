@@ -668,13 +668,14 @@ impl CaseElabCxt<'_, '_> {
                     let params = self.env_tys[&row.body]
                         .0
                         .iter()
-                        .map(|(n, ty, _)| Par {
+                        .map(|(n, ty, m)| Par {
                             name: *n,
                             ty: {
                                 let ty = ty.clone().quote(size, None);
                                 size += 1;
                                 ty
                             },
+                            mutable: *m,
                         })
                         .collect();
                     Dec::Guard(
@@ -1168,6 +1169,7 @@ pub(super) fn elab_case(
                     params.push(Par {
                         name: *name,
                         ty: ty.clone().quote(cxt.ecxt.size(), None),
+                        mutable: *m,
                     });
                     cxt.ecxt.define_local(*name, ty.clone(), None, s_borrow, *m);
                 }

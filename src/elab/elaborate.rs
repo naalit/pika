@@ -590,7 +590,7 @@ fn check_par(
     expected_ty: Option<(Expr, &CheckReason)>,
     cxt: &mut Cxt,
 ) -> Par {
-    let (m, par) = match x {
+    let par = match x {
         Ok(ast::Expr::Binder(x)) => {
             let (name, ty) = x
                 .pat()
@@ -600,7 +600,7 @@ fn check_par(
                         .unwrap_or_else(|| todo!("move non-trivial pats to rhs"))
                 })
                 .unwrap_or((None, None));
-            let (m, name) =
+            let (mutable, name) =
                 name.unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), x.span())));
             if ty.is_some() {
                 cxt.error(
@@ -625,13 +625,13 @@ fn check_par(
                 cxt.unify(ty, expected_ty, reason)
                     .unwrap_or_else(|e| cxt.error(x.span(), e));
             }
-            (m, Par { name, ty })
+            Par { name, ty, mutable }
         }
         Ok(x) if pat => {
             let (name, ty) = x
                 .as_simple_pat(cxt.db)
                 .unwrap_or_else(|| todo!("move non-trivial pats to rhs"));
-            let (m, name) =
+            let (mutable, name) =
                 name.unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), x.span())));
             let ty = match ty.map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType)) {
                 Some(ty) => {
@@ -648,17 +648,16 @@ fn check_par(
                         .new_meta(cxt.locals(), MetaBounds::new(Val::Type), x.span())
                 }),
             };
-            (m, Par { name, ty })
+            Par { name, ty, mutable }
         }
         Ok(x) => {
             let ty = x.check(Val::Type, cxt, &CheckReason::UsedAsType);
-            (
-                false,
-                Par {
-                    name: (cxt.db.name("_".to_string()), x.span()),
-                    ty,
-                },
-            )
+
+            Par {
+                name: (cxt.db.name("_".to_string()), x.span()),
+                ty,
+                mutable: false,
+            }
         }
         Err(span) => {
             if let Some((ty, reason)) = expected_ty {
@@ -666,17 +665,21 @@ fn check_par(
                 cxt.unify(Val::var(Var::Builtin(Builtin::UnitType)), ty, reason)
                     .unwrap_or_else(|e| cxt.error(span, e));
             }
-            (
-                false,
-                Par {
-                    name: (cxt.db.name("_".to_string()), span),
-                    ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-                },
-            )
+            Par {
+                name: (cxt.db.name("_".to_string()), span),
+                ty: Expr::var(Var::Builtin(Builtin::UnitType)),
+                mutable: false,
+            }
         }
     };
     // Define each parameter so it can be used by the types of the rest
-    cxt.define_local(par.name, par.ty.clone().eval(&mut cxt.env()), None, None, m);
+    cxt.define_local(
+        par.name,
+        par.ty.clone().eval(&mut cxt.env()),
+        None,
+        None,
+        par.mutable,
+    );
     par
 }
 
@@ -1627,6 +1630,7 @@ impl ast::Expr {
                                                             x.a().unwrap().span(),
                                                         ),
                                                         ty: ty.clone().quote(cxt.size(), None),
+                                                        mutable: false,
                                                     }],
                                                     body: Box::new(
                                                         ty.clone().quote(cxt.size().inc(), None),
@@ -1672,6 +1676,7 @@ impl ast::Expr {
                             params: vec![Par {
                                 name: (cxt.db.name("_".to_string()), x.lhs().unwrap().span()),
                                 ty: aty,
+                                mutable: false,
                             }],
                             body: Box::new(bty),
                         });

@@ -124,13 +124,14 @@ impl VClos {
         let mut env = self.env.clone();
         self.params
             .iter()
-            .rfold(None, |term, Par { name, ty }| {
+            .rfold(None, |term, Par { name, ty, mutable }| {
                 let term = match term {
                     Some(term) => Box::new(Expr::Fun(EClos {
                         class: Sigma,
                         params: vec![Par {
                             name: *name,
                             ty: ty.clone(),
+                            mutable: *mutable,
                         }],
                         body: term,
                     })),
@@ -194,10 +195,11 @@ impl VClos {
         } = self;
         let params: Vec<_> = params
             .into_iter()
-            .map(|Par { name, ty }| {
+            .map(|Par { name, ty, mutable }| {
                 let par = Par {
                     name,
                     ty: ty.eval_quote(&mut env, size, inline_metas),
+                    mutable,
                 };
                 env.push(Some(Err(size.next_lvl())));
                 size += 1;
@@ -236,7 +238,7 @@ impl VClos {
     pub fn synthesize_args(&self, size: Size) -> Val {
         let (arg, _size) = self.params.iter().rfold(
             (None, size + self.params.len()),
-            |(term, size), Par { name, ty: _ }| {
+            |(term, size), Par { name, .. }| {
                 let size = size.dec();
                 let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
                 let term = match term {

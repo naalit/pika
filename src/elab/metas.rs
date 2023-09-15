@@ -391,6 +391,7 @@ impl MetaCxt<'_> {
                                     name: (name, RelSpan::empty()),
                                     // TODO is this type ever used? can we actually find the type of this?
                                     ty: Expr::Error,
+                                    mutable: false,
                                 })
                                 .collect(),
                             icit,

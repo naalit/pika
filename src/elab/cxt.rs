@@ -541,6 +541,16 @@ impl VarEntry {
         }
     }
 
+    pub fn mutable(&self, cxt: &Cxt) -> bool {
+        match self {
+            VarEntry::Local { scope, var, .. } => match &cxt.scopes[*scope] {
+                Scope::Local(l) => l.names[*var].mutable,
+                _ => unreachable!(),
+            },
+            _ => false,
+        }
+    }
+
     pub fn access(&self, kind: AccessKind) -> Access {
         let &(name, span) = match self {
             VarEntry::Local { name, .. } => name,
@@ -818,6 +828,26 @@ impl Cxt<'_> {
                 _ => None,
             })
             .unwrap()
+    }
+
+    pub fn local_entry(&self, lvl: Lvl) -> VarEntry {
+        let (name, scope, idx) = self
+            .scopes
+            .iter()
+            .enumerate()
+            .find_map(|(i, x)| match x {
+                Scope::Local(x) => x.names.iter().enumerate().find_map(|(j, x)| match &x.var {
+                    VarDef::Var(Var::Local(n, l), _) if *l == lvl => Some((*n, i, j)),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap();
+        VarEntry::Local {
+            name,
+            scope,
+            var: idx,
+        }
     }
 
     pub fn local_ty(&self, lvl: Lvl) -> Val {

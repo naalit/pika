@@ -1,13 +1,13 @@
 use super::*;
 
 pub enum FindSpanResult<'a> {
-    Name(SName, Cow<'a, Expr>),
+    Name(bool, SName, Cow<'a, Expr>),
     Expr(Cow<'a, Expr>, RelSpan),
 }
 impl FindSpanResult<'_> {
     fn into_owned(self) -> FindSpanResult<'static> {
         match self {
-            FindSpanResult::Name(n, c) => FindSpanResult::Name(n, Cow::Owned(c.into_owned())),
+            FindSpanResult::Name(m, n, c) => FindSpanResult::Name(m, n, Cow::Owned(c.into_owned())),
             FindSpanResult::Expr(c, s) => FindSpanResult::Expr(Cow::Owned(c.into_owned()), s),
         }
     }
@@ -19,9 +19,19 @@ impl EClos {
         for i in &self.params {
             i.ty.find_span(span, cxt)?;
             if i.name.1.superset(span) {
-                return Err(FindSpanResult::Name(i.name, Cow::Borrowed(&i.ty)));
+                return Err(FindSpanResult::Name(
+                    i.mutable,
+                    i.name,
+                    Cow::Borrowed(&i.ty),
+                ));
             }
-            cxt.define_local(i.name, i.ty.clone().eval(&mut cxt.env()), None, None, false);
+            cxt.define_local(
+                i.name,
+                i.ty.clone().eval(&mut cxt.env()),
+                None,
+                None,
+                i.mutable,
+            );
         }
         self.body.find_span(span, cxt)?;
         cxt.pop();
@@ -33,10 +43,16 @@ impl Expr {
     pub fn find_span(&self, span: RelSpan, cxt: &mut Cxt) -> Result<(), FindSpanResult> {
         match self {
             Expr::Type => (),
-            &Expr::Head(Head::Var(Var::Local(n @ (_, s), _) | Var::Def(n @ (_, s), _))) => {
+            &Expr::Head(h @ Head::Var(Var::Local(n @ (_, s), _) | Var::Def(n @ (_, s), _))) => {
                 if s.superset(span) {
-                    eprintln!("here");
+                    let m = match h {
+                        Head::Var(Var::Local(_, l)) => {
+                            cxt.local_entry(l.lvl(cxt.size())).mutable(cxt)
+                        }
+                        _ => false,
+                    };
                     return Err(FindSpanResult::Name(
+                        m,
                         n,
                         Cow::Owned(self.ty(cxt).quote(cxt.size(), Some(&cxt.mcxt))),
                     ));
@@ -92,6 +108,7 @@ pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc
     if let Some(name) = def.result.as_ref().map(|x| x.name) {
         if name.1.contains(pos) {
             result = Some(FindSpanResult::Name(
+                false,
                 name,
                 Cow::Borrowed(&*def.result.as_ref().unwrap().ty),
             ))
@@ -108,6 +125,7 @@ pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc
                     let ty = ty.clone().quote(cxt.size(), None);
                     if span.contains(pos) {
                         res = Err(FindSpanResult::Name(
+                            false,
                             (split.name().unwrap(), *span),
                             Cow::Owned(ty),
                         ));
@@ -143,8 +161,13 @@ pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc
         }
     }
     match result? {
-        FindSpanResult::Name((name, span), ty) => Some((
-            name.pretty(db).add(':', ()).space().chain(ty.pretty(db)),
+        FindSpanResult::Name(m, (name, span), ty) => Some((
+            if m {
+                Doc::start("mut").style(Doc::style_keyword()).space()
+            } else {
+                Doc::none()
+            }
+            .chain(name.pretty(db).add(':', ()).space().chain(ty.pretty(db))),
             span,
         )),
         FindSpanResult::Expr(expr, span) => {
