@@ -1153,9 +1153,13 @@ pub(super) fn elab_case(
         .collect();
     let dec = cxt.compile_rows(rows, true, &cxt.ecxt.env());
     let mut rhs = Vec::new();
+    let borrow_checkpoint = cxt.ecxt.borrow_checkpoint();
+    let mut merges = Vec::new();
+    let mut deps = Vec::new();
     for (i, body) in cxt.bodies.iter().enumerate() {
         match cxt.env_tys.get(&Body(i)) {
             Some((penv, reachable, env)) => {
+                cxt.ecxt.record_deps();
                 if !reachable {
                     // If there's no body we have a bigger problem
                     if let Some(span) = body.as_ref().map(|x| x.span()) {
@@ -1210,8 +1214,27 @@ pub(super) fn elab_case(
                     params,
                     body: Box::new(body),
                 });
+                merges.push(cxt.ecxt.borrow_checkpoint());
+                cxt.ecxt.reset_borrows(borrow_checkpoint.clone());
+                deps.push(cxt.ecxt.finish_deps(s_span)); // TODO span
             }
             None => panic!("env_tys has no entry for body {}", i),
+        }
+    }
+    // We already reset the cxt borrows, so just merge them in
+    for i in merges {
+        cxt.ecxt.merge_borrows(i);
+    }
+    for i in deps {
+        if let Some(i) = i {
+            cxt.ecxt.add_dep(
+                i,
+                Access {
+                    kind: AccessKind::Move,
+                    point: AccessPoint::Expr,
+                    span: s_span, // TODO span
+                },
+            );
         }
     }
     let missing = dec.missing_patterns(svar, &cxt);

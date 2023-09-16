@@ -80,3 +80,31 @@ fun magic2(x: &mut DoNotCopy, mut y: DoNotCopy): &mut DoNotCopy = do
     magic1(x, y) # now y could be mutably borrowed
     borrow_move(x, y) # so this should be illegal
     x
+
+# Merging reference invalidations across case branches
+fun move(x: DoNotCopy): () = ()
+fun borrow(x: &DoNotCopy): () = ()
+fun good(a: I32, x: DoNotCopy): () = case a of
+    1 => move(x)
+    _ => move(x) # fine, the other move was in another branch
+fun bad(a: I32, x: DoNotCopy) = do
+    case a of
+        0 => ()
+        1 => move(x)
+        _ => ()
+    move(x) # not allowed, x may have been moved
+fun bad2(a: I32, x: DoNotCopy, y: DoNotCopy): &DoNotCopy = do
+    let q = case a of
+        0 => y
+        _ => x
+    move(x) # whether this moves x or y, it invalidates q either way
+    q
+type Cow[a] of
+    Own(a)
+    Borrow(&a)
+fun bad3(a: I32, x: DoNotCopy): Cow[DoNotCopy] = do
+    let q = case a of
+        0 => Cow.Own(x)
+        _ => Cow.Borrow(x)
+    borrow(x) # not allowed, x might be moved
+    q

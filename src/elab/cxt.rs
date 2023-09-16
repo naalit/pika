@@ -154,11 +154,33 @@ struct BorrowInvalid {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BorrowDef {
     mutable_parents: Vec<(Borrow, Access)>,
-    mutable_borrow: Option<(Borrow, Access)>,
+    /// Only one mutable borrow can be active at once, but there could still be multiple entries here if it gets mutably
+    /// borrowed separately in two different case branches
+    mutable_borrows: Vec<(Borrow, Access)>,
     immutable_borrows: Vec<(Borrow, Access)>,
     /// These are borrows that don't borrow this one, but do depend on it by-value - so if this gets invalidated, they will too
     move_or_copy: Vec<(Borrow, Access)>,
     invalid: Option<BorrowInvalid>,
+}
+impl BorrowDef {
+    fn merge_with(&mut self, mut other: BorrowDef) -> Option<BorrowInvalid> {
+        let was_valid = self.invalid.is_none();
+        let other_valid = other.invalid.is_none();
+        if was_valid {
+            self.invalid = other.invalid;
+        }
+        self.mutable_borrows.append(&mut other.mutable_borrows);
+        self.immutable_borrows.append(&mut other.immutable_borrows);
+        self.move_or_copy.append(&mut other.move_or_copy);
+        self.mutable_parents.append(&mut other.mutable_parents);
+        if was_valid || other_valid {
+            // It got invalidated in only one of the branches, invalidate it again now
+            self.invalid.clone()
+        } else {
+            // If it's invalid now, it already was in both branches so we don't care
+            None
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -200,7 +222,7 @@ impl Borrow {
     fn new(cxt: &mut Cxt) -> Borrow {
         cxt.borrows.push(BorrowDef {
             mutable_parents: Vec::new(),
-            mutable_borrow: None,
+            mutable_borrows: Vec::new(),
             immutable_borrows: Vec::new(),
             invalid: None,
             move_or_copy: Vec::new(),
@@ -252,8 +274,8 @@ impl Borrow {
                     .immutable_borrows
                     .iter()
                     .chain(&def.move_or_copy)
+                    .chain(&def.mutable_borrows)
                     .copied()
-                    .chain(def.mutable_borrow)
                     .collect::<Vec<_>>()
                 {
                     if start {
@@ -273,8 +295,8 @@ impl Borrow {
                 for (i, a) in def
                     .immutable_borrows
                     .iter()
+                    .chain(&def.mutable_borrows)
                     .copied()
-                    .chain(def.mutable_borrow)
                     .collect::<Vec<_>>()
                 {
                     i.invalidate(
@@ -294,7 +316,7 @@ impl Borrow {
     fn invalidate_mutable(self, access: Access, cxt: &mut Cxt) {
         if let Some(def) = self.def_mut(cxt) {
             if def.invalid.is_none() {
-                if let Some((i, a)) = def.mutable_borrow {
+                for (i, a) in def.mutable_borrows.clone() {
                     i.invalidate(
                         BorrowInvalid {
                             skip_borrow: Some(self),
@@ -327,7 +349,7 @@ impl Borrow {
         if let Some(def) = self.def_mut(cxt) {
             match access.kind {
                 AccessKind::Mut => {
-                    def.mutable_borrow = Some((borrow, access));
+                    def.mutable_borrows.push((borrow, access));
                     if let Some(def) = borrow.def_mut(cxt) {
                         def.mutable_parents.push((self, access));
                     }
@@ -708,6 +730,9 @@ impl VarEntry {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct BorrowCheckpoint(Vec<BorrowDef>);
+
 pub struct Cxt<'a> {
     pub db: &'a dyn Elaborator,
     scopes: Vec<Scope>,
@@ -733,6 +758,25 @@ impl Cxt<'_> {
         cxt.record_deps();
         cxt.env = Env::new(cxt.size());
         cxt
+    }
+
+    pub fn borrow_checkpoint(&self) -> BorrowCheckpoint {
+        BorrowCheckpoint(self.borrows.clone())
+    }
+    pub fn reset_borrows(&mut self, checkpoint: BorrowCheckpoint) -> BorrowCheckpoint {
+        let ret = self.borrow_checkpoint();
+        // Keep borrows created after checkpoint so that the Borrow indices line up
+        for (i, b) in checkpoint.0.into_iter().enumerate() {
+            self.borrows[i] = b;
+        }
+        ret
+    }
+    pub fn merge_borrows(&mut self, checkpoint: BorrowCheckpoint) {
+        for (i, b) in checkpoint.0.into_iter().enumerate() {
+            if let Some(invalid) = self.borrows[i].merge_with(b) {
+                Borrow((i as u64 + 1).try_into().unwrap()).invalidate(invalid, self);
+            }
+        }
     }
 
     pub fn record_deps(&mut self) {
