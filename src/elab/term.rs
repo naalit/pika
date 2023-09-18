@@ -10,15 +10,21 @@ pub enum FunClass {
     /// So their representation is the same (as is that for lambdas), and they're evaluated the same etc.
     /// TODO: we'll eventually annotate pis and probably lambdas with effects, but this will not happen for sigmas.
     Sigma,
-    Lam(Icit),
-    Pi(Icit),
+    Lam(Icit, CopyClass),
+    Pi(Icit, CopyClass),
 }
 impl FunClass {
     pub fn icit(self) -> Option<Icit> {
         match self {
             Sigma => None,
-            Lam(i) => Some(i),
-            Pi(i) => Some(i),
+            Lam(i, _) => Some(i),
+            Pi(i, _) => Some(i),
+        }
+    }
+    pub fn copy_class(self) -> CopyClass {
+        match self {
+            Sigma => CopyClass::Move,
+            Lam(_, c) | Pi(_, c) => c,
         }
     }
 }
@@ -402,7 +408,7 @@ impl Expr {
             },
             Expr::Elim(head, elim) => match &**elim {
                 Elim::App(_, x) => match head.ty(cxt) {
-                    Val::Fun(clos) if matches!(clos.class, Pi(_)) => {
+                    Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                         clos.apply(x.clone().eval(&mut cxt.env()))
                     }
                     _ => Val::Error,
@@ -415,9 +421,9 @@ impl Expr {
                 params,
                 body,
             }) => match class {
-                Sigma | Pi(_) => Val::Type,
+                Sigma | Pi(_, _) => Val::Type,
                 // I don't *think* we need a return type annotation, but there might be edge cases where we do
-                Lam(icit) => {
+                Lam(icit, c) => {
                     cxt.push();
                     for Par { name, ty, mutable } in params {
                         cxt.define_local(
@@ -429,7 +435,7 @@ impl Expr {
                         );
                     }
                     let ty = Expr::Fun(EClos {
-                        class: Pi(*icit),
+                        class: Pi(*icit, *c),
                         params: params.clone(),
                         body: Box::new(body.ty(cxt).quote(cxt.size(), None)),
                     });
@@ -529,7 +535,7 @@ impl Pretty for EClos {
             body,
         } = self;
         let d_params = match class {
-            Pi(Impl) | Lam(Impl) => Doc::start('[')
+            Pi(Impl, _) | Lam(Impl, _) => Doc::start('[')
                 .chain(Doc::intersperse(
                     params.iter().map(|x| {
                         x.name
@@ -541,7 +547,7 @@ impl Pretty for EClos {
                     Doc::start(',').space(),
                 ))
                 .add(']', ()),
-            Lam(Expl) => Doc::start('(')
+            Lam(Expl, _) => Doc::start('(')
                 .chain(Doc::intersperse(
                     params.iter().map(|x| {
                         x.name
@@ -553,12 +559,12 @@ impl Pretty for EClos {
                     Doc::start(',').space(),
                 ))
                 .add(')', ()),
-            Sigma | Pi(Expl) if params.len() == 1 => {
+            Sigma | Pi(Expl, _) if params.len() == 1 => {
                 assert_eq!(params.len(), 1);
                 let x = &params[0];
                 pretty_bind(x.name, x.ty.pretty(db).nest(Prec::App), db, *class != Sigma)
             }
-            Pi(Expl) => Doc::start('(')
+            Pi(Expl, _) => Doc::start('(')
                 .chain(Doc::intersperse(
                     params
                         .iter()
@@ -577,14 +583,19 @@ impl Pretty for EClos {
                     .chain(body.pretty(db).nest(Prec::Pair))
                     .prec(Prec::Pair)
             }
-            Lam(_) => d_params
+            Lam(_, _) => d_params
                 .space()
                 .add("=>", ())
                 .space()
                 .chain(body.pretty(db))
                 .prec(Prec::Term),
-            Pi(_) => d_params
+            Pi(_, c) => d_params
                 .space()
+                .chain(match c {
+                    CopyClass::Move => Doc::none(),
+                    CopyClass::Copy => Doc::start('&'),
+                    CopyClass::Mut => Doc::start('&').add("mut", Doc::style_keyword()).space(),
+                })
                 .add("->", ())
                 .space()
                 .chain(body.pretty(db).nest(Prec::Pi))

@@ -171,7 +171,7 @@ impl VClos {
                 return arg.app(
                     Elim::Case(
                         super::pattern::CaseOf::make_simple_args(EClos {
-                            class: Lam(Expl),
+                            class: Lam(Expl, CopyClass::Move),
                             params: self.params,
                             body: Box::new(body),
                         })
@@ -450,7 +450,7 @@ impl Expr {
                 match &mut **e {
                     // beta-reduce if possible
                     Elim::App(_, x) => match f.unspanned() {
-                        Expr::Fun(clos) if matches!(clos.class, Lam(_)) => {
+                        Expr::Fun(clos) if matches!(clos.class, Lam(_, _)) => {
                             // TODO avoid these clones
                             let x = x.clone().eval(env);
                             *self = clos.clone().eval(env).apply(x).quote(size, inline_metas);
@@ -500,13 +500,13 @@ impl Expr {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CopyClass {
-    Move,
     Copy,
     /// This means the type works like a mutable reference in that there can only be one active reference to it,
     /// but we can copy it as long as we get rid of the copy before we use the original again
     Mut,
+    Move,
 }
 
 impl Val {
@@ -588,8 +588,7 @@ impl Val {
             Val::Fun(clos) => match clos.class {
                 // TODO check if all components can be copied; may require eval-ing
                 Sigma => CopyClass::Move,
-                // TODO separate function types for Fn, FnMut, FnOnce
-                Lam(_) | Pi(_) => CopyClass::Copy,
+                Lam(_, c) | Pi(_, c) => c,
             },
             // TODO technically deref can return a type
             Val::Lit(_) | Val::Pair(_, _, _) | Val::Ref(_, _) | Val::Deref(_) => {

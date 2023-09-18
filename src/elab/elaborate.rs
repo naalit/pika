@@ -50,6 +50,7 @@ impl ast::Def {
                     x.exp_par().as_par(),
                     x.ret_ty().and_then(|x| x.expr()),
                     None,
+                    Some(CopyClass::Copy),
                     x.span(),
                     cxt,
                 );
@@ -145,6 +146,7 @@ impl ast::Def {
                     x.exp_par().as_par(),
                     x.ret_ty().and_then(|x| x.expr()),
                     x.body(),
+                    Some(CopyClass::Copy),
                     x.span(),
                     cxt,
                 );
@@ -170,6 +172,7 @@ impl ast::Def {
                         kw: None,
                     })),
                     None,
+                    Some(CopyClass::Copy),
                     x.span(),
                     cxt,
                 );
@@ -188,13 +191,13 @@ impl ast::Def {
 
                 let default_rty = Val::var(Var::Def(name, def_id));
                 let (ty_params, default_rty) = match &ty {
-                    Expr::Fun(clos) if matches!(clos.class, Pi(_)) => {
+                    Expr::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                         let arg = clos
                             .clone()
                             .eval(&mut cxt.env())
                             .synthesize_args(cxt.size());
                         match &*clos.body {
-                            Expr::Fun(clos2) if matches!(clos2.class, Pi(_)) => {
+                            Expr::Fun(clos2) if matches!(clos2.class, Pi(_, _)) => {
                                 let mut env = cxt.env();
                                 env.extend((0..clos.params.len()).map(|_| None));
                                 let arg2 = clos2
@@ -241,6 +244,7 @@ impl ast::Def {
                             c.exp_par().as_par(),
                             c.ret_ty().and_then(|x| x.expr()),
                             None,
+                            Some(CopyClass::Copy),
                             c.span(),
                             cxt,
                         );
@@ -251,14 +255,17 @@ impl ast::Def {
                             }
                         }
                         let rty = match &cty {
-                            Expr::Fun(clos) if matches!(clos.class, Pi(_)) => match &*clos.body {
-                                Expr::Fun(clos2)
-                                    if clos.class == Pi(Impl) && clos2.class == Pi(Expl) =>
-                                {
-                                    &clos2.body
+                            Expr::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
+                                match &*clos.body {
+                                    Expr::Fun(clos2)
+                                        if matches!(clos.class, Pi(Impl, _))
+                                            && matches!(clos2.class, Pi(Expl, _)) =>
+                                    {
+                                        &clos2.body
+                                    }
+                                    rty => rty,
                                 }
-                                rty => rty,
-                            },
+                            }
                             rty => rty,
                         };
                         match head(rty) {
@@ -312,14 +319,14 @@ impl ast::Def {
                         let mut ty = default_rty.clone().quote(cxt.size(), Some(&cxt.mcxt));
                         if !explicit.is_empty() {
                             ty = Expr::Fun(EClos {
-                                class: Pi(Expl),
+                                class: Pi(Expl, CopyClass::Copy),
                                 params: explicit,
                                 body: Box::new(ty),
                             });
                         }
                         if !implicit.is_empty() {
                             ty = Expr::Fun(EClos {
-                                class: Pi(Impl),
+                                class: Pi(Impl, CopyClass::Copy),
                                 params: implicit,
                                 body: Box::new(ty),
                             });
@@ -410,6 +417,7 @@ fn infer_fun(
     explicit: Option<SomePar>,
     ret_ty: Option<ast::Expr>,
     body: Option<ast::Body>,
+    copy_class: Option<CopyClass>,
     span: RelSpan,
     cxt: &mut Cxt,
 ) -> (Expr, Expr) {
@@ -417,7 +425,7 @@ fn infer_fun(
     // -->
     // [a, b, c, d] => ((e, f) => ...)
 
-    cxt.push();
+    cxt.push_capture();
     let implicit = check_params(
         implicit
             .into_iter()
@@ -470,21 +478,27 @@ fn infer_fun(
     };
     cxt.finish_deps(bspan); // TODO what do we do with this borrow
     let bty = bty.quote(cxt.size(), None);
-    cxt.pop();
+    let captures = cxt.pop();
+    let copy_class = copy_class.unwrap_or_else(|| {
+        captures.as_ref().map_or(CopyClass::Copy, |x| {
+            x.iter().fold(CopyClass::Copy, |x, (_, (y, _))| x.max(*y))
+        })
+    });
+    // TODO error if copy class doesn't match
 
     // We have to evaluate this outside of the scope
     let mut ty = if explicit.is_empty() {
         bty
     } else {
         Expr::Fun(EClos {
-            class: Pi(Expl),
+            class: Pi(Expl, copy_class),
             params: explicit.clone(),
             body: Box::new(bty),
         })
     };
     if !implicit.is_empty() {
         ty = Expr::Fun(EClos {
-            class: Pi(Impl),
+            class: Pi(Impl, copy_class),
             params: implicit.clone(),
             body: Box::new(ty),
         });
@@ -493,14 +507,14 @@ fn infer_fun(
         body
     } else {
         Expr::Fun(EClos {
-            class: Lam(Expl),
+            class: Lam(Expl, copy_class),
             params: explicit,
             body: Box::new(body),
         })
     };
     if !implicit.is_empty() {
         term = Expr::Fun(EClos {
-            class: Lam(Impl),
+            class: Lam(Impl, copy_class),
             params: implicit,
             body: Box::new(term),
         });
@@ -691,6 +705,7 @@ impl ast::Pair {
                 self.lhs().map(|par| SomePar { par, pat: false }),
                 self.rhs(),
                 None,
+                None, // TODO copy classes for sigma
                 self.span(),
                 cxt,
             );
@@ -770,7 +785,7 @@ impl Expr {
         cxt: &mut Cxt,
     ) -> (Expr, Val) {
         match ty {
-            Val::Fun(clos) if clos.class == Pi(Impl) => {
+            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
                 let mut args: VecDeque<_> = imp_args
                     .into_iter()
                     .flat_map(|x| x.args())
@@ -1062,14 +1077,16 @@ impl ast::Expr {
                         Box::new(Expr::Fun(ety)),
                     ))
                 }
-                (ast::Expr::Lam(x), Val::Fun(clos)) if matches!(clos.class, Pi(_)) => {
+                (ast::Expr::Lam(x), Val::Fun(clos)) if matches!(clos.class, Pi(_, _)) => {
                     // [a, b] [c, d] (e, f) => ...
                     // -->
                     // [a, b, c, d] => ((e, f) => ...)
+                    let ty = Val::Fun(clos.clone());
 
                     let mut clos = clos.move_env(&mut cxt.env());
+                    let copy_class = clos.class.copy_class();
 
-                    cxt.push();
+                    cxt.push_capture();
                     let mut implicit_tys: VecDeque<_> = match clos.class.icit() {
                         Some(Impl) => clos.params.iter().collect(),
                         _ => VecDeque::new(),
@@ -1108,7 +1125,7 @@ impl ast::Expr {
                         let mut body = clos.body.eval(&mut cxt.env());
                         body.inline_head(&mut cxt.env(), &cxt.mcxt);
                         match body {
-                            Val::Fun(c) if c.class == Pi(Expl) => {
+                            Val::Fun(c) if matches!(c.class, Pi(Expl, _)) => {
                                 clos = *c;
                                 if clos.env.size != cxt.size() {
                                     clos = clos.move_env(&mut cxt.env());
@@ -1120,7 +1137,7 @@ impl ast::Expr {
                                     return Err("Lambda contains explicit parameters which are not present in expected type".into());
                                 } else {
                                     clos = VClos {
-                                        class: Pi(Expl),
+                                        class: Pi(Expl, copy_class),
                                         params: Vec::new(),
                                         env: cxt.env(),
                                         body: body.quote(cxt.size(), None),
@@ -1129,6 +1146,9 @@ impl ast::Expr {
                             }
                         }
                     }
+
+                    let copy_class2 = clos.class.copy_class();
+                    cxt.push_capture();
 
                     let explicit = if let Some(e) = x.exp_par() {
                         check_params(
@@ -1159,20 +1179,42 @@ impl ast::Expr {
                         .and_then(|x| x.expr())
                         .ok_or("Missing body for lambda")?
                         .check(bty, cxt, reason);
-                    cxt.pop();
+                    let captures2 = cxt.pop();
+                    let captures = cxt.pop();
+                    let access = captures2
+                        .and_then(|x| {
+                            x.into_iter().find_map(
+                                |(_, (c, a))| if c > copy_class2 { Some(a) } else { None },
+                            )
+                        })
+                        .or_else(|| {
+                            captures.filter(|_| !implicit.is_empty()).and_then(|x| {
+                                x.into_iter().find_map(
+                                    |(_, (c, a))| if c > copy_class { Some(a) } else { None },
+                                )
+                            })
+                        });
+                    if let Some(access) = access {
+                        return Err(MoveError::FunAccess(
+                            access,
+                            ty.quote(cxt.size(), Some(&cxt.mcxt)),
+                            *reason,
+                        )
+                        .into());
+                    }
 
                     let mut term = if explicit.is_empty() {
                         body
                     } else {
                         Expr::Fun(EClos {
-                            class: Lam(Expl),
+                            class: Lam(Expl, copy_class2),
                             params: explicit,
                             body: Box::new(body),
                         })
                     };
                     if !implicit.is_empty() {
                         term = Expr::Fun(EClos {
-                            class: Lam(Impl),
+                            class: Lam(Impl, copy_class),
                             params: implicit,
                             body: Box::new(term),
                         });
@@ -1199,12 +1241,15 @@ impl ast::Expr {
                 // TODO this should probably be off by default, or at least more restricted
                 // But unfortunately it's kind of required for certain fancy dependent type things
                 // (like dependent composition)
-                (_, Val::Fun(clos)) if clos.class == Pi(Impl) => {
+                (_, Val::Fun(clos)) if matches!(clos.class, Pi(Impl, _)) => {
+                    let ty = Val::Fun(clos.clone());
+
                     let clos = clos.move_env(&mut cxt.env());
+                    let copy_class = clos.class.copy_class();
                     let mut params = clos.params.clone();
                     let bty = clos.open(cxt.size());
 
-                    cxt.push();
+                    cxt.push_capture();
                     for i in &mut params {
                         i.name.0 = i.name.0.inaccessible(cxt.db);
                         cxt.define_local(
@@ -1218,14 +1263,48 @@ impl ast::Expr {
 
                     let body = self.check(bty, cxt, reason);
 
+                    let captures = cxt.pop();
+                    let access = captures.and_then(|x| {
+                        x.into_iter()
+                            .find_map(|(_, (c, a))| if c > copy_class { Some(a) } else { None })
+                    });
+                    if let Some(access) = access {
+                        return Err(MoveError::FunAccess(
+                            access,
+                            ty.quote(cxt.size(), Some(&cxt.mcxt)),
+                            *reason,
+                        )
+                        .into());
+                    }
+
                     let clos = EClos {
-                        class: Lam(Impl),
+                        class: Lam(Impl, copy_class),
                         params,
                         body: Box::new(body),
                     };
 
-                    cxt.pop();
                     Ok(Expr::Fun(clos))
+                }
+
+                // Upgrade copy class of functions
+                (_, Val::Fun(clos)) if matches!(clos.class, Pi(_, _)) => {
+                    let (x, xty) = self.infer(cxt);
+                    let (x, mut xty) = match clos.class {
+                        Pi(Impl, _) => (x, xty),
+                        _ => x.insert_metas(xty, None, self.span(), cxt),
+                    };
+                    match &mut xty {
+                        Val::Fun(clos2)
+                            if matches!(clos2.class, Pi(_, _))
+                                && clos2.class.icit() == clos.class.icit()
+                                && clos.class.copy_class() > clos2.class.copy_class() =>
+                        {
+                            clos2.class = Pi(clos2.class.icit().unwrap(), clos.class.copy_class());
+                            cxt.unify(xty, Val::Fun(clos), reason)?
+                        }
+                        _ => cxt.unify(xty, Val::Fun(clos), reason)?,
+                    }
+                    Ok(x)
                 }
 
                 // Autoref
@@ -1283,7 +1362,7 @@ impl ast::Expr {
     fn infer_check(&self, ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Result<Expr, TypeError> {
         let (a, ity) = self.infer(cxt);
         let (a, ity) = match &ty {
-            Val::Fun(clos) if clos.class == Pi(Impl) => (a, ity),
+            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => (a, ity),
             _ => a.insert_metas(ity, None, self.span(), cxt),
         };
         cxt.unify(ity, ty, reason)?;
@@ -1365,6 +1444,26 @@ impl ast::Expr {
         }
     }
 
+    fn infer_access(
+        &self,
+        cxt: &mut Cxt,
+        inline_head: bool,
+        kind: impl FnOnce(&Val) -> AccessKind,
+    ) -> Result<(Expr, Val), TypeError> {
+        match self.elab_place(cxt) {
+            Some(place) => {
+                let ty = place.ty(cxt)?;
+                let mut ty2 = Cow::Borrowed(&ty);
+                if inline_head {
+                    ty2.to_mut().inline_head(&mut cxt.env(), &cxt.mcxt);
+                }
+                place.try_access(kind(&ty2), cxt)?;
+                Ok((place.to_expr(cxt), ty))
+            }
+            None => Ok(self.infer(cxt)),
+        }
+    }
+
     pub(super) fn infer(&self, cxt: &mut Cxt) -> (Expr, Val) {
         // TODO hopefully try {} blocks stabilize soon and this won't be necessary
         let mut result = || {
@@ -1414,17 +1513,30 @@ impl ast::Expr {
                             x.exp_par().as_par(),
                             None,
                             x.body(),
+                            None,
                             x.span(),
                             cxt,
                         );
                         (term, ty.eval(&mut cxt.env()))
                     }
                     ast::Expr::Pi(x) => {
+                        let copy_class = x
+                            .class()
+                            .filter(|x| x.refkw().is_some())
+                            .map(|x| {
+                                if x.mutkw().is_some() {
+                                    CopyClass::Mut
+                                } else {
+                                    CopyClass::Copy
+                                }
+                            })
+                            .unwrap_or(CopyClass::Move);
                         let (_, pi) = infer_fun(
                             x.imp_par(),
                             x.exp_par().as_par(),
                             x.body().and_then(|x| x.expr()),
                             None,
+                            Some(copy_class),
                             x.span(),
                             cxt,
                         );
@@ -1495,7 +1607,10 @@ impl ast::Expr {
                         let (mut lhs, mut lhs_ty) = x
                             .lhs()
                             .ok_or("Missing left-hand side of application")?
-                            .infer(cxt);
+                            .infer_access(cxt, true, |ty| match ty {
+                                Val::Fun(clos) => clos.class.copy_class().into(),
+                                _ => AccessKind::Move,
+                            })?;
                         lhs_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
                         let mut lhs_span = x.lhs().unwrap().span();
                         if let Some(member) = x.member() {
@@ -1513,7 +1628,7 @@ impl ast::Expr {
                         };
                         let (expr, ty) = if let Some(exp) = x.exp() {
                             let (exp, rty) = match lhs_ty {
-                                Val::Fun(clos) if matches!(clos.class, Pi(_)) => {
+                                Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                                     let aty = clos.par_ty();
                                     let exp = exp.check(aty, cxt, &CheckReason::ArgOf(lhs_span));
                                     let vexp = exp.clone().eval(&mut cxt.env());

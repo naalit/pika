@@ -82,6 +82,7 @@ fun lease(x: &mut I32): &mut I32 = do
 # Merging reference invalidations across case branches
 fun move(x: DoNotCopy): () = ()
 fun borrow(x: &DoNotCopy): () = ()
+fun mutate(x: &mut DoNotCopy): () = ()
 fun good(a: I32, x: DoNotCopy): () = case a of
     1 => move(x)
     _ => move(x) # fine, the other move was in another branch
@@ -106,3 +107,15 @@ type Cow[a] of
 #         _ => Cow.Borrow(x)
 #     borrow(x) # not allowed, x might be moved
 #     q
+
+fun h_own(f: () -> ()) = ()
+fun h_ref(f: () &-> ()) = ()
+fun h_mut(f: () &mut -> ()) = ()
+
+fun test(mut f: () &mut -> ()): () = do
+    f()
+    f()
+    h_own(() => f())
+    h_mut(() => f())
+    h_mut(f)
+    h_own(f)

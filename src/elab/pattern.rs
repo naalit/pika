@@ -270,7 +270,7 @@ mod input {
                     let start_size = *size;
                     let implicit = if let Some(args) = x.imp() {
                         match lhs_ty {
-                            Val::Fun(clos) if clos.class == Pi(Impl) => {
+                            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
                                 let args: Vec<_> = args
                                     .args()
                                     .into_iter()
@@ -364,7 +364,7 @@ mod input {
                         }
                     } else {
                         match lhs_ty {
-                            Val::Fun(clos) if clos.class == Pi(Impl) => {
+                            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
                                 let args: Vec<_> = clos
                                     .params
                                     .iter()
@@ -394,7 +394,7 @@ mod input {
                     };
                     let start_size = *size;
                     let explicit = match (x.exp(), lhs_ty) {
-                        (Some(args), Val::Fun(clos)) if clos.class == Pi(Expl) => {
+                        (Some(args), Val::Fun(clos)) if matches!(clos.class, Pi(Expl, _)) => {
                             let r = Some(Box::new((args.to_pattern(cxt, size), clos.par_ty())));
                             lhs_ty = clos.apply(
                                 r.as_ref()
@@ -680,7 +680,7 @@ impl CaseElabCxt<'_, '_> {
                         .collect();
                     Dec::Guard(
                         EClos {
-                            class: Lam(Expl),
+                            class: Lam(Expl, CopyClass::Move),
                             params,
                             body: Box::new(guard),
                         },
@@ -1000,17 +1000,17 @@ mod coverage {
                                     .filter_map(|(s, _, ty)| {
                                         let mut size = size;
                                         let (rty, has_args) = match ty {
-                                            Val::Fun(x) if matches!(x.class, Pi(_)) => {
+                                            Val::Fun(x) if matches!(x.class, Pi(_, _)) => {
                                                 let class = x.class;
                                                 let new_size = size + x.params.len();
                                                 let rty = x.open(size);
                                                 size = new_size;
                                                 match rty {
-                                                    Val::Fun(e) if e.class == Pi(Expl) => {
+                                                    Val::Fun(e) if matches!(class, Pi(Expl, _)) => {
                                                         size += e.params.len();
                                                         (e.open(new_size), true)
                                                     }
-                                                    rty => (rty, class == Pi(Expl)),
+                                                    rty => (rty, matches!(class, Pi(Expl, _))),
                                                 }
                                             }
                                             ty => (ty, false),
@@ -1210,7 +1210,7 @@ pub(super) fn elab_case(
                 cxt.ecxt.pop();
                 cxt.ecxt.set_env(old_env);
                 rhs.push(EClos {
-                    class: Lam(Expl),
+                    class: Lam(Expl, CopyClass::Move),
                     params,
                     body: Box::new(body),
                 });

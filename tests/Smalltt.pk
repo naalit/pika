@@ -10,7 +10,7 @@
 let typeInType : Type = Type
 
 # polymorphic identity, A has inferred type U
-let id : [A] -> A -> A = x => x
+let id : [A] &-> A -> A = x => x
 
 # We don't have any way to stop meta insertion right now
 # # by default metas are inserted for implicit arguments, but
@@ -18,17 +18,17 @@ let id : [A] -> A -> A = x => x
 # #  has a polymorphic type, {A} → A → A
 # id2 : {A} → A → A = id (id!)
 
-let id3 : [A] -> A -> A = x => id x
+let id3 : [A] &-> A -> A = x => id x
 
 # explicit id function can be used for type annotation
 # as in Idris
-let the : (A : _) -> A -> A = _ => x => x
+let the : (A : _) &-> A -> A = _ => x => x
 
 # This isn't in smalltt's demo, but it works there too
-let id4 : [A] -> A -> A = x => the _ x
+let id4 : [A] &-> A -> A = x => the _ x
 
 # top-level definition types can be omitted
-let constTy = [A, B] -> A -> B -> A
+let constTy = [A, B] &-> A -> B -> A
 
 let const : constTy = x => y => x
 
@@ -46,32 +46,32 @@ let const : constTy = x => y => x
 
 # Church bools
 # --------------------------------------------------------------------------------
-let Bool = (B : Type) -> B -> B -> B
+let Bool = (B : Type) &-> B -> B -> B
 let true  : Bool = _ => t => f => t
 let false : Bool = _ => t => f => f
 
 # 'and' is a reserved word in Pika
-let and2 : Bool -> Bool -> Bool =
+let and2 : Bool &-> Bool &-> Bool =
     b1 => b2 => b1 Bool true b2
 
 # Church natural numbers
 # --------------------------------------------------------------------------------
 let Nat : Type =
-    (n : Type) -> (n -> n) -> n -> n
+    (n : Type) &-> (n &-> n) &-> n &-> n
 
 let zero : Nat =
     n => s => z => z
 
-let suc : Nat -> Nat =
+let suc : Nat &-> Nat =
     a => n => s => z => s (a n s z)
 
 let n2 : Nat = n => s => z => s (s z)
 let n5 : Nat = n => s => z => s (s (s (s (s z))))
 
-let mul : Nat -> Nat -> Nat =
+let mul : Nat &-> Nat &-> Nat =
     a => b => n => s => z => a n (b n s) z
 
-let add : Nat -> Nat -> Nat =
+let add : Nat &-> Nat &-> Nat =
     a => b => n => s => z => a n s (b n s z)
 
 let n10    = mul n2    n5
@@ -92,24 +92,24 @@ let n200M  = mul n2    n100M
 
 # Church lists
 # --------------------------------------------------------------------------------
-let List  : Type -> Type = a => (l : Type) -> (a -> l -> l) -> l -> l
-let lnil  : [a] -> List a = l => c => n => n
-let lcons : [a] -> a -> List a -> List a = a => as => l => c => n => c a (as l c n)
+let List  : Type &-> Type = a => (l : Type) -> (a &-> l -> l) -> l -> l
+let lnil  : [a] &-> List a = l => c => n => n
+let lcons : [a] &-> a -> List a -> List a = a => as => l => c => n => c a (as l c n)
 
 let list1 = lcons true (lcons false (lcons false lnil))
 
-let map : [a, b] -> (a -> b) -> List a -> List b =
+let map : [a, b] &-> (a &-> b) &-> List a &-> List b =
     f => as => l => c => as l (a => c (f a))
 
 # Church vectors
 # --------------------------------------------------------------------------------
-let Vec : Type -> Nat -> Type =
-    a => n => (V : Nat -> Type) -> V zero -> ([n] -> a -> V n -> V (suc n)) -> V n
+let Vec : Type &-> Nat &-> Type =
+    a => n => (V : Nat &-> Type) -> V zero -> ([n] &-> a -> V n -> V (suc n)) -> V n
 
-let vnil : [a] -> Vec a zero =
+let vnil : [a] &-> Vec a zero =
     V => n => c => n
 
-let vcons : [a, n] -> a -> Vec a n -> Vec a (suc n) =
+let vcons : [a, n] &-> a -> Vec a n -> Vec a (suc n) =
     a => as => V => n => c => c a (as V n c)
 
 let vec1 = vcons true (vcons false (vcons true vnil))
@@ -118,62 +118,62 @@ let vec1 = vcons true (vcons false (vcons true vnil))
 # Leibniz (Church) propositional equality, useful for testing conversion.
 # Also note the implicit lambdas.
 # ----------------------------------------------------------------------------------
-let Eq : [A] -> A -> A -> Type =
-    [A] x => y => (P : A -> Type) -> P x -> P y
+let Eq : [A] &-> A &-> A -> Type =
+    [A] x => y => (P : A &-> Type) &-> P x &-> P y
 
 # TODO violates move semantics
-# let refl : [A][x : A] -> Eq x x =
+# let refl : [A][x : A] &-> Eq x x =
 #     P => px => px
 
 # # After a LOT of trying to figure out what I was doing wrong to make this not typecheck:
 # # It's (old) smalltt that was wrong for accepting it!
 # # New smalltt rejects it, because it requires solving a meta with a nonlinear spine!
-# let trans : [A][x: A, y: A, z : A] -> Eq x y -> Eq y z -> Eq x z =
+# let trans : [A][x: A, y: A, z : A] &-> Eq x y &-> Eq y z &-> Eq x z =
 #     p => q => q _ p
 
 # These are fine though
 
 # TODO these violate move semantics
-# let sym : [A][x: A, y : A] -> Eq x y -> Eq y x =
+# let sym : [A][x: A, y : A] &-> Eq x y &-> Eq y x =
 #     [_, x, y] p => p (y => Eq y x) refl
 
-# let ap : [A, B](f : A -> B) -> [x, y : A] -> Eq x y -> Eq (f x) (f y) =
+# let ap : [A, B](f : A &-> B) &-> [x, y : A] &-> Eq x y &-> Eq (f x) (f y) =
 #     f => [x, y] p => p (y => Eq (f x) (f y)) refl
 
 # Pairs, Top, Bot
 # --------------------------------------------------------------------------------
-let Pair : Type -> Type -> Type =
+let Pair : Type &-> Type &-> Type =
     A => B => (Pair : Type) -> (pair : A -> B -> Pair) -> Pair
 
-let pair : [A, B] -> A -> B -> Pair A B =
+let pair : [A, B] &-> A -> B -> Pair A B =
     a => b => Pair => pair => pair a b
 
-let proj1 : [A, B] -> Pair A B -> A =
+let proj1 : [A, B] &-> Pair A B &-> A =
     p => p _ (x => y => x)
 
-let proj2 : [A, B] -> Pair A B -> B =
+let proj2 : [A, B] &-> Pair A B &-> B =
     p => p _ (x => y => y)
 
 let Top : Type =
-    (Top : Type) -> (tt : Top) -> Top
+    (Top : Type) &-> (tt : Top) &-> Top
 
 let tt : Top =
     Top => tt => tt
 
 let Bot : Type =
-    (Bot : Type) -> Bot
+    (Bot : Type) &-> Bot
 
 # Dependent function composition (higher-order unification example)
 # --------------------------------------------------------------------------------
 
-let comp : [A] [B : A -> Type] [C : [a] -> B a -> Type] -> (f : [a](b : B a) -> C b) -> (g : (a : A) -> B a) -> (x : A) -> C (g x) =
+let comp : [A] [B : A &-> Type] [C : [a] &-> B a &-> Type] &-> (f : [a](b : B a) &-> C b) &-> (g : (a : A) &-> B a) &-> (x : A) &-> C (g x) =
     f => g => a => f (g a)
 
-let compTest1 : Nat -> Nat =
+let compTest1 : Nat &-> Nat =
     comp suc suc
 
 # TODO violates move semantics
-# let compTest2 : [m, A] -> A -> Vec A m -> Vec A (suc (suc m)) =
+# let compTest2 : [m, A] &-> A &-> Vec A m &-> Vec A (suc (suc m)) =
 #     a => comp (vcons a) (vcons a)
 
 
@@ -181,56 +181,56 @@ let compTest1 : Nat -> Nat =
 # --------------------------------------------------------------------------------
 
 let Ty : Type =
-    (Ty  : Type) -> (l: Ty) -> (fn : Ty -> Ty -> Ty) -> Ty
+    (Ty  : Type) &-> (l: Ty) &-> (fn : Ty &-> Ty &-> Ty) -> Ty
 
 let l : Ty = _ => l => _ => l
 
 # TODO violates move semantics
-# let fn : Ty -> Ty -> Ty =
+# let fn : Ty &-> Ty &-> Ty =
 #     A => B => Ty => l => fn => fn (A Ty l fn) (B Ty l fn)
 
-let Con : Type = (Con : Type) -> (nil  : Con) -> (cons : Con -> Ty -> Con) -> Con
+let Con : Type = (Con : Type) &-> (nil  : Con) &-> (cons : Con &-> Ty &-> Con) -> Con
 
 let nil : Con =
     Con => nil => cons => nil
 
-let cons : Con -> Ty -> Con =
+let cons : Con &-> Ty &-> Con =
     P => A => Con => nil => cons => cons (P Con nil cons) A
 
-let Var : Con -> Ty -> Type =
-    P => A => (Var : Con -> Ty -> Type) -> (vz  : [P, A] -> Var (cons P A) A) -> (vs : [P, B, A] -> Var P A -> Var (cons P B) A) -> Var P A
+let Var : Con &-> Ty &-> Type =
+    P => A => (Var : Con &-> Ty &-> Type) &-> (vz  : [P, A] &-> Var (cons P A) A) &-> (vs : [P, B, A] &-> Var P A &-> Var (cons P B) A) &-> Var P A
 
-let vz : [P, A] -> Var (cons P A) A =
+let vz : [P, A] &-> Var (cons P A) A =
     Var => vz => vs => vz
 
-let vs : [P, B, A] -> Var P A -> Var (cons P B) A =
+let vs : [P, B, A] &-> Var P A &-> Var (cons P B) A =
     x => Var => vz => vs => vs (x Var vz vs)
 
-# let Tm : Con -> Ty -> Type =
-#     P => A => (Tm  : Con -> Ty -> Type) -> (var : [P, A] -> Var P A -> Tm P A) -> (lam : [P, A, B] -> Tm (cons P A) B -> Tm P (fn A B)) -> (app : [P, A, B] -> Tm P (fn A B) -> Tm P A -> Tm P B) -> Tm P A
+# let Tm : Con &-> Ty &-> Type =
+#     P => A => (Tm  : Con &-> Ty &-> Type) &-> (var : [P, A] &-> Var P A &-> Tm P A) &-> (lam : [P, A, B] &-> Tm (cons P A) B &-> Tm P (fn A B)) &-> (app : [P, A, B] &-> Tm P (fn A B) &-> Tm P A &-> Tm P B) &-> Tm P A
 
-# let var : [P, A] -> Var P A -> Tm P A =
+# let var : [P, A] &-> Var P A &-> Tm P A =
 #     x => Tm => var => lam => app => var x
 
-# let lam : [P, A, B] -> Tm (cons P A) B -> Tm P (fn A B) =
+# let lam : [P, A, B] &-> Tm (cons P A) B &-> Tm P (fn A B) =
 #     t => Tm => var => lam => app => lam (t Tm var lam app)
 
-# let app : [P, A, B] -> Tm P (fn A B) -> Tm P A -> Tm P B =
+# let app : [P, A, B] &-> Tm P (fn A B) &-> Tm P A &-> Tm P B =
 #     t => u => Tm => var => lam => app => app (t Tm var lam app) (u Tm var lam app)
 
 # Well-typed interpreter for Church-coded STLC
 # --------------------------------------------------------------------------------
 
-let EvalTy : Ty -> Type =
-    A => A _ Bot (A => B => A -> B)
+let EvalTy : Ty &-> Type =
+    A => A _ Bot (A => B => A &-> B)
 
-let EvalCon : Con -> Type =
+let EvalCon : Con &-> Type =
     P => P _ Top (D => A => Pair D (EvalTy A))
 
-let EvalVar : [P, A] -> Var P A -> EvalCon P -> EvalTy A =
-    x => x (P => A => EvalCon P -> EvalTy A) (env => proj2 env)
+let EvalVar : [P, A] &-> Var P A &-> EvalCon P &-> EvalTy A =
+    x => x (P => A => EvalCon P &-> EvalTy A) (env => proj2 env)
             (rec => env => rec (proj1 env))
 
-# let EvalTm : [P, A] -> Tm P A -> EvalCon P -> EvalTy A =
-#     t => t (P => A => EvalCon P -> EvalTy A) EvalVar (t => env => a => t (pair env a))
+# let EvalTm : [P, A] &-> Tm P A &-> EvalCon P &-> EvalTy A =
+#     t => t (P => A => EvalCon P &-> EvalTy A) EvalVar (t => env => a => t (pair env a))
 #             (t => u => env => t env (u env))

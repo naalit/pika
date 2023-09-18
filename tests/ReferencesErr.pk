@@ -84,6 +84,7 @@ fun magic2(x: &mut DoNotCopy, mut y: DoNotCopy): &mut DoNotCopy = do
 # Merging reference invalidations across case branches
 fun move(x: DoNotCopy): () = ()
 fun borrow(x: &DoNotCopy): () = ()
+fun mutate(x: &mut DoNotCopy): () = ()
 fun good(a: I32, x: DoNotCopy): () = case a of
     1 => move(x)
     _ => move(x) # fine, the other move was in another branch
@@ -108,3 +109,15 @@ fun bad3(a: I32, x: DoNotCopy): Cow[DoNotCopy] = do
         _ => Cow.Borrow(x)
     borrow(x) # not allowed, x might be moved
     q
+
+fun h_own(f: () -> ()) = ()
+fun h_ref(f: () &-> ()) = ()
+fun h_mut(f: () &mut -> ()) = ()
+
+fun problems1(x: DoNotCopy): () = do
+    let f = () => move(x)
+    f()
+    f()
+fun problems2(mut x: DoNotCopy): () = h_mut(() => move(x))
+fun problems3(mut x: DoNotCopy): () = h_ref(() => mutate(x))
+fun problems4(f: () &mut -> ()): () = h_ref(f)

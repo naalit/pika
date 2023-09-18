@@ -805,6 +805,29 @@ impl<'a> Parser<'a> {
 
                                 self.pop();
                             }
+                            Tok::BitAnd => {
+                                self.push_at(cp, Tok::Pi);
+
+                                if let Some(par_cp) = par_cp {
+                                    self.push_at(par_cp, Tok::TermPar);
+                                    self.pop();
+                                }
+
+                                self.push(Tok::FunClass);
+                                self.advance();
+                                self.maybe(Tok::MutKw);
+                                self.pop();
+
+                                self.expect(Tok::Arrow);
+
+                                self.push(Tok::Body);
+                                self.expr(Prec::Arrow);
+                                self.pop();
+
+                                self.maybe_with();
+
+                                self.pop();
+                            }
                             _ => {
                                 self.expected("-> or =>", "after implicit parameters");
                                 self.advance();
@@ -971,6 +994,36 @@ impl<'a> Parser<'a> {
                     self.maybe_with();
 
                     self.pop();
+                }
+                // () &mut -> ()
+                // we should avoid parsing the & as a binop even if we can't parse it as a pi right now
+                Tok::BitAnd
+                    if self.peek(1) == Tok::Arrow
+                        || (self.peek(1) == Tok::MutKw && self.peek(2) == Tok::Arrow) =>
+                {
+                    if Prec::Arrow < min_prec {
+                        break;
+                    } else {
+                        self.push_at(lhs, Tok::Pi);
+
+                        self.push_at(lhs, Tok::TermPar);
+                        self.pop();
+
+                        self.push(Tok::FunClass);
+                        self.advance();
+                        self.maybe(Tok::MutKw);
+                        self.pop();
+
+                        self.expect(Tok::Arrow);
+
+                        self.push(Tok::Body);
+                        self.expr(Prec::Arrow);
+                        self.pop();
+
+                        self.maybe_with();
+
+                        self.pop();
+                    }
                 }
                 op if op.binop_prec().is_some() => {
                     let prec = op.binop_prec().unwrap();

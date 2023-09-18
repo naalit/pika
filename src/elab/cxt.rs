@@ -54,7 +54,9 @@ enum Scope {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LocalScope {
     size: Size,
+    start_size: Size,
     names: Vec<LocalVarDef>,
+    captures: Option<Vec<(Lvl, (CopyClass, Access))>>,
 }
 
 pub fn prelude_defs(db: &dyn Elaborator) -> std::sync::Arc<HashMap<Name, VarDef>> {
@@ -135,10 +137,12 @@ impl LocalScope {
             })
     }
 
-    fn new(size: Size) -> Self {
+    fn new(size: Size, capture: bool) -> Self {
         LocalScope {
             size,
+            start_size: size,
             names: Vec::new(),
+            captures: capture.then(|| Vec::new()),
         }
     }
 }
@@ -392,7 +396,7 @@ pub enum VarEntry {
     },
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AccessPoint {
     Expr,
     Name(Name),
@@ -427,7 +431,7 @@ impl AccessPoint {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Access {
     pub kind: AccessKind,
     pub point: AccessPoint,
@@ -571,6 +575,7 @@ pub enum MoveError {
     AccessError(AccessError),
     InvalidMove(Doc, Name, Box<Expr>),
     InvalidBorrow(Doc, Name),
+    FunAccess(Access, Expr, CheckReason),
 }
 impl From<AccessError> for MoveError {
     fn from(value: AccessError) -> Self {
@@ -653,20 +658,15 @@ impl VarEntry {
             cxt.check_deps(borrow, self.access(AccessKind::Move))?;
         }
         match self {
-            VarEntry::Local {
-                name, scope, var, ..
-            } => match &mut cxt.scopes[*scope] {
+            VarEntry::Local { scope, var, .. } => match &mut cxt.scopes[*scope] {
                 Scope::Local(l) => {
                     let entry = &mut l.names[*var];
-                    entry.borrow.invalidate_self(
-                        Access {
-                            kind: AccessKind::Move,
-                            point: name.0.into(),
-                            span: name.1,
-                        },
-                        Rc::new(ty),
-                        cxt,
-                    );
+                    let lvl = entry.var.as_var().unwrap().as_local();
+                    let access = self.access(AccessKind::Move);
+                    entry.borrow.invalidate_self(access, Rc::new(ty), cxt);
+                    if let Some(lvl) = lvl {
+                        cxt.record_access(lvl, access);
+                    }
                     Ok(())
                 }
                 _ => unreachable!(),
@@ -708,10 +708,14 @@ impl VarEntry {
                     let access = self.access(AccessKind::borrow(mutable));
                     cxt.check_deps(entry.borrow, access)?;
 
+                    let lvl = entry.var.as_var().unwrap().as_local();
                     if mutable {
                         entry.borrow.invalidate_children(access, cxt);
                     } else {
                         entry.borrow.invalidate_mutable(access, cxt);
+                    }
+                    if let Some(lvl) = lvl {
+                        cxt.record_access(lvl, access);
                     }
                     Ok(())
                 }
@@ -909,17 +913,60 @@ impl Cxt<'_> {
         })
     }
 
+    fn record_access(&mut self, lvl: Lvl, access: Access) {
+        let class = match access.kind {
+            AccessKind::Move => CopyClass::Move,
+            AccessKind::Mut => CopyClass::Mut,
+            AccessKind::Imm | AccessKind::Copy => CopyClass::Copy,
+        };
+        for i in self.scopes.iter_mut().rev() {
+            match i {
+                Scope::Local(l) => {
+                    if !lvl.in_scope(l.start_size) {
+                        break;
+                    } else if let Some(captures) = &mut l.captures {
+                        let mut found = false;
+                        for (l, x) in captures.iter_mut() {
+                            if *l == lvl {
+                                match x {
+                                    (c, _) if *c >= class => (),
+                                    _ => *x = (class, access),
+                                }
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            captures.push((lvl, (class, access)));
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
     pub fn push(&mut self) {
-        self.scopes.push(Scope::Local(LocalScope::new(self.size())));
+        self.scopes
+            .push(Scope::Local(LocalScope::new(self.size(), false)));
+    }
+
+    pub fn push_capture(&mut self) {
+        self.scopes
+            .push(Scope::Local(LocalScope::new(self.size(), true)));
     }
 
     pub fn push_def_scope(&mut self, def: Def) {
         self.scopes.push(Scope::Namespace(Namespace::Def(def)));
     }
 
-    pub fn pop(&mut self) {
-        self.scopes.pop();
+    pub fn pop(&mut self) -> Option<Vec<(Lvl, (CopyClass, Access))>> {
+        let scope = self.scopes.pop();
         self.env.reset_to_size(self.size());
+        scope.and_then(|x| match x {
+            Scope::Local(l) => l.captures,
+            _ => None,
+        })
     }
 
     pub fn lookup(&self, name: SName) -> Option<VarEntry> {
@@ -928,19 +975,6 @@ impl Cxt<'_> {
             .enumerate()
             .rev()
             .find_map(|(i, x)| x.lookup(i, name, self.db))
-    }
-
-    fn local_def(&self, lvl: Lvl) -> &LocalVarDef {
-        self.scopes
-            .iter()
-            .find_map(|x| match x {
-                Scope::Local(x) => x.names.iter().find_map(|x| match &x.var {
-                    VarDef::Var(Var::Local(_, l), _) if *l == lvl => Some(x),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .unwrap()
     }
 
     pub fn local_entry(&self, lvl: Lvl) -> VarEntry {

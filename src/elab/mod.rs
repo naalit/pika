@@ -242,6 +242,47 @@ impl TypeError {
                         secondary: vec![],
                         note: None,
                     },
+                    MoveError::FunAccess(access, ety, reason) => {
+                        let (secondary2, note) = self::unify::UnifyError::pretty_reason(*reason);
+                        let ty_doc = match ety.unspanned() {
+                            Expr::Fun(clos) => match clos.class.copy_class() {
+                                CopyClass::Copy => Doc::start("'&->' function"),
+                                CopyClass::Mut => Doc::start("'&")
+                                    .add("mut", Doc::style_keyword())
+                                    .add(" ->' function", ()),
+                                CopyClass::Move => Doc::start("'->' function"),
+                            },
+                            _ => Doc::start("function"),
+                        };
+                        let kind_doc = match access.kind {
+                            AccessKind::Mut => "Mutating",
+                            AccessKind::Imm => "Borrowing",
+                            AccessKind::Move => "Moving",
+                            AccessKind::Copy => "Copying",
+                        };
+                        let mut secondary = vec![Label {
+                            span,
+                            message: Doc::start("This function is expected to have type '")
+                                .chain(ety.pretty(db))
+                                .add("'", ()),
+                            color: Some(Doc::COLOR2),
+                        }];
+                        secondary.extend(secondary2);
+                        Error {
+                            severity,
+                            message_lsp: None,
+                            message: Doc::start(kind_doc)
+                                .add(" captured variables is not allowed in ", ())
+                                .chain(ty_doc),
+                            primary: Label {
+                                span: access.span,
+                                message: Doc::start(kind_doc).add(" this captured variable", ()),
+                                color: Some(Doc::COLOR1),
+                            },
+                            secondary,
+                            note,
+                        }
+                    }
                     MoveError::AccessError(e) => e.to_error(severity, db),
                 };
             }

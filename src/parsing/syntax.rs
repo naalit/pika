@@ -101,6 +101,7 @@ pub enum SyntaxKind {
     Deref,
     Assign,
     MutVar,
+    FunClass,
 
     StructInit,
     Var,

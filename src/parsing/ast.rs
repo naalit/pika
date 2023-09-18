@@ -205,7 +205,8 @@ make_nodes! {
 
     WithClause = effs: [Expr];
     Lam = imp_par: ImpPars, exp_par: PatPar, body: Body;
-    Pi = imp_par: ImpPars, exp_par: TermPar, body: Body, with: WithClause;
+    Pi = imp_par: ImpPars, exp_par: TermPar, class: FunClass, body: Body, with: WithClause;
+    FunClass = refkw: (!BitAnd), mutkw: (!MutKw);
 
     StructInit = lhs: Expr, fields: StructFields;
 
@@ -553,6 +554,13 @@ impl Pretty for Expr {
                 .chain(l.imp_par().pretty())
                 .chain(l.exp_par().pretty())
                 .space()
+                .chain(match l.class() {
+                    None => Doc::none(),
+                    Some(x) => Doc::start(if x.refkw().is_some() { "&" } else { "" }).add(
+                        if x.mutkw().is_some() { "mut " } else { "" },
+                        Doc::style_keyword(),
+                    ),
+                })
                 .add("->", ())
                 .space()
                 .chain(l.body().pretty()),

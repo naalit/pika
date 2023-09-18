@@ -68,7 +68,7 @@ struct UnifyCxt<'a, 'b> {
     env: &'a mut Env,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum CheckReason {
     UsedAsType,
     Condition,
@@ -87,47 +87,49 @@ pub enum UnifyErrorKind {
     MetaSolve(MetaSolveError, RelSpan),
 }
 impl UnifyError {
+    pub fn pretty_reason(reason: CheckReason) -> (Option<Label>, Option<Doc>) {
+        match reason {
+            CheckReason::UsedAsType => (
+                None,
+                Some(Doc::start("Expected because it was used as a type")),
+            ),
+            CheckReason::Condition => (
+                None,
+                Some(Doc::start(
+                    "Expected because it was used as a condition in an if expression",
+                )),
+            ),
+            CheckReason::GivenType(span) => (
+                Some(Label {
+                    span,
+                    message: Doc::start("The type is given here"),
+                    color: Some(Doc::COLOR3),
+                }),
+                None,
+            ),
+            CheckReason::ArgOf(span) => (
+                Some(Label {
+                    span,
+                    message: Doc::start("Must have this type to pass as argument to this function"),
+                    color: Some(Doc::COLOR3),
+                }),
+                None,
+            ),
+            CheckReason::MustMatch(span) => (
+                Some(Label {
+                    span,
+                    message: Doc::start("Must have the same type as this"),
+                    color: Some(Doc::COLOR3),
+                }),
+                None,
+            ),
+        }
+    }
+
     pub fn to_error(&self, span: RelSpan, db: &dyn Elaborator) -> Error {
         match &self.kind {
             UnifyErrorKind::Conversion => {
-                let (secondary, note) = match self.reason.clone() {
-                    CheckReason::UsedAsType => (
-                        None,
-                        Some(Doc::start("Expected because it was used as a type")),
-                    ),
-                    CheckReason::Condition => (
-                        None,
-                        Some(Doc::start(
-                            "Expected because it was used as a condition in an if expression",
-                        )),
-                    ),
-                    CheckReason::GivenType(span) => (
-                        Some(Label {
-                            span,
-                            message: Doc::start("The type is given here"),
-                            color: Some(Doc::COLOR3),
-                        }),
-                        None,
-                    ),
-                    CheckReason::ArgOf(span) => (
-                        Some(Label {
-                            span,
-                            message: Doc::start(
-                                "Must have this type to pass as argument to this function",
-                            ),
-                            color: Some(Doc::COLOR3),
-                        }),
-                        None,
-                    ),
-                    CheckReason::MustMatch(span) => (
-                        Some(Label {
-                            span,
-                            message: Doc::start("Must have the same type as this"),
-                            color: Some(Doc::COLOR3),
-                        }),
-                        None,
-                    ),
-                };
+                let (secondary, note) = Self::pretty_reason(self.reason);
                 Error {
                     severity: Severity::Error,
                     message: Doc::start("Could not match types: expected '")
@@ -483,7 +485,7 @@ impl UnifyCxt<'_, '_> {
             }
 
             // Eta-expand if there's a lambda on one side
-            (Val::Fun(clos), x) | (x, Val::Fun(clos)) if matches!(clos.class, Lam(_)) => {
+            (Val::Fun(clos), x) | (x, Val::Fun(clos)) if matches!(clos.class, Lam(_, _)) => {
                 let new_size = size + clos.params.len();
                 let elim = Elim::App(clos.class.icit().unwrap(), clos.synthesize_args(size));
                 let a = clos.open(size);

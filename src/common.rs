@@ -231,7 +231,8 @@ impl Error {
         r.add_labels(
             self.secondary
                 .into_iter()
-                .map(|x| x.ariadne(split_span, cache.db)),
+                .enumerate()
+                .map(|(i, x)| x.ariadne(split_span, cache.db).with_order(i as i32)),
         );
         if let Some(note) = self.note {
             r.set_note(note.to_string(true));

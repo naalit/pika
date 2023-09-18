@@ -423,7 +423,7 @@ impl MetaCxt<'_> {
 
         for (params, icit) in params.into_iter().rev() {
             solution = Expr::Fun(EClos {
-                class: Lam(icit),
+                class: Lam(icit, CopyClass::Copy),
                 params,
                 body: Box::new(solution),
             })
