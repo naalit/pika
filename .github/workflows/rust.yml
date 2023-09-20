@@ -24,6 +24,7 @@ jobs:
       uses: actions-rs/tarpaulin@v0.1.0
       with:
         out-type: Lcov
+        version: '0.27.0'
 
     - name: Upload code coverage
       uses: coverallsapp/github-action@v2
