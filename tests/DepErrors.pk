@@ -1,5 +1,5 @@
 type Data of
-    New I32
+    New(I32)
 
 fun borrow(x: &Data): () = ()
 fun move(x: Data): () = ()

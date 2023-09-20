@@ -834,7 +834,7 @@ impl Cxt<'_> {
         &mut self,
         inferred: Val,
         expected: Val,
-        reason: &CheckReason,
+        reason: CheckReason,
     ) -> Result<(), super::unify::UnifyError> {
         self.mcxt
             .unify(inferred, expected, self.size(), self.env(), reason)

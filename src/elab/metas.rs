@@ -101,6 +101,7 @@ pub enum MetaEntry {
 pub enum MetaSolveError {
     Occurs(Meta),
     Scope(Name),
+    ScopeMeta(Meta),
     SpineNonVariable(Expr),
     SpineNonApp(Elim<Expr>),
     SpineDuplicate(Name),
@@ -113,6 +114,10 @@ impl MetaSolveError {
             MetaSolveError::Occurs(m) => Doc::start("Solved meta ")
                 .add(m, Doc::COLOR1)
                 .add(" occurs in solution", ()),
+            MetaSolveError::ScopeMeta(m) => Doc::start("Meta ").add(m, Doc::COLOR1).add(
+                ", which is outside of the scope of the meta, occurs in solution",
+                (),
+            ),
             MetaSolveError::Scope(n) => Doc::start("Variable ")
                 .add(db.lookup_name(*n), Doc::COLOR1)
                 .add(
@@ -477,12 +482,12 @@ impl Expr {
                 Head::Var(Var::Meta(m)) if *m == mode.occurs_meta() => {
                     return Err(MetaSolveError::Occurs(*m))
                 }
-                Head::Var(Var::Meta(m)) => match &cxt.metas[m.0 as usize] {
-                    MetaEntry::Solved {
+                Head::Var(Var::Meta(m)) => match &cxt.metas.get(m.0 as usize) {
+                    Some(MetaEntry::Solved {
                         solution,
                         occurs_cache,
                         ..
-                    } => {
+                    }) => {
                         if *occurs_cache.read().unwrap() != Some(mode.occurs_meta()) {
                             // TODO is the only option to avoid cloning here to make a separate check_solution() function for occurs-only?
                             solution.clone().check_solution(
@@ -494,7 +499,9 @@ impl Expr {
                             *occurs_cache.write().unwrap() = Some(mode.occurs_meta());
                         }
                     }
-                    MetaEntry::Unsolved { .. } => (),
+                    Some(MetaEntry::Unsolved { .. }) => (),
+                    // TODO this case probably shouldn't happen, not sure why it sometimes triggers right now
+                    None => return Err(MetaSolveError::ScopeMeta(*m)),
                 },
                 // TODO unfold here instead of in solve()
                 _ => (),

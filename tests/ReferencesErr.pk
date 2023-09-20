@@ -1,5 +1,5 @@
 type DoNotCopy of
-    New I32
+    New(I32)
 
 fun copy_ref (x: &DoNotCopy): (&DoNotCopy, &DoNotCopy) = (x, x)
 fun move_once (x: DoNotCopy): DoNotCopy = x
@@ -21,20 +21,20 @@ fun shadow(x: &DoNotCopy, y: DoNotCopy) = do
     let z = y
     borrow_move(x, z)
 
-type Ref a of
-    Ref (&a)
+type Ref[a] of
+    Ref(&a)
 
-fun borrow_move_s(x: Ref DoNotCopy, y: DoNotCopy): DoNotCopy = y
-fun borrow_move_s2(x: &Ref DoNotCopy, y: DoNotCopy): DoNotCopy = y
+fun borrow_move_s(x: Ref[DoNotCopy], y: DoNotCopy): DoNotCopy = y
+fun borrow_move_s2(x: &Ref[DoNotCopy], y: DoNotCopy): DoNotCopy = y
 fun same_variable_s(x: DoNotCopy): DoNotCopy = do
-    let r = Ref.Ref x
+    let r = Ref.Ref(x)
     borrow_move_s(r, x)
-fun shadow_s(x: Ref DoNotCopy, y: DoNotCopy) = do
-    let r = Ref.Ref y
+fun shadow_s(x: Ref[DoNotCopy], y: DoNotCopy) = do
+    let r = Ref.Ref(y)
     let z = y
     borrow_move_s(x, z)
 fun same_variable_s2(x: DoNotCopy): DoNotCopy = do
-    let r = Ref.Ref x
+    let r = Ref.Ref(x)
     borrow_move_s2(r, x)
 
 fun degrade(x: &mut DoNotCopy): &DoNotCopy = x

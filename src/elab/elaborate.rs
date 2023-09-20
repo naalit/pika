@@ -30,7 +30,7 @@ impl ast::Def {
             ast::Def::LetDef(l) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
                 Some((_, Some(ty))) => Some(
                     ty.expr()?
-                        .check(Val::Type, cxt, &CheckReason::UsedAsType)
+                        .check(Val::Type, cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut cxt.env()),
                 ),
@@ -110,7 +110,7 @@ impl ast::Def {
                         let body = x.body()?.expr()?.check(
                             ty.clone(),
                             cxt,
-                            &CheckReason::GivenType(pty.span()),
+                            CheckReason::GivenType(pty.span()),
                         );
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
                         Some(Definition {
@@ -303,7 +303,7 @@ impl ast::Def {
                                 .collect(),
                             true,
                             ParamTys::Inferred,
-                            &CheckReason::UsedAsType,
+                            CheckReason::UsedAsType,
                             cxt,
                         ));
                         let explicit = c.exp_par().as_par().map_or(Vec::new(), |x| {
@@ -311,7 +311,7 @@ impl ast::Def {
                                 x.par.as_args(),
                                 x.pat,
                                 ParamTys::Inferred,
-                                &CheckReason::UsedAsType,
+                                CheckReason::UsedAsType,
                                 cxt,
                             )
                         });
@@ -439,7 +439,7 @@ fn infer_fun(
             .collect(),
         true,
         ParamTys::Inferred,
-        &CheckReason::UsedAsType,
+        CheckReason::UsedAsType,
         cxt,
     );
     let explicit = explicit.map_or(Vec::new(), |x| {
@@ -447,7 +447,7 @@ fn infer_fun(
             x.par.as_args(),
             x.pat,
             ParamTys::Inferred,
-            &CheckReason::UsedAsType,
+            CheckReason::UsedAsType,
             cxt,
         )
     });
@@ -457,11 +457,11 @@ fn infer_fun(
     let (body, bty) = match ret_ty {
         Some(bty) => {
             let span = bty.span();
-            let bty = bty.check(Val::Type, cxt, &CheckReason::UsedAsType);
+            let bty = bty.check(Val::Type, cxt, CheckReason::UsedAsType);
             let bty = bty.eval(&mut cxt.env());
             let body = body
                 .and_then(|x| x.expr())
-                .map(|x| x.check(bty.clone(), cxt, &CheckReason::GivenType(span)))
+                .map(|x| x.check(bty.clone(), cxt, CheckReason::GivenType(span)))
                 .unwrap_or_else(|| {
                     // cxt.error(span, "Missing function body");
                     Expr::Error
@@ -556,7 +556,7 @@ fn check_params(
     pars: Vec<Result<ast::Expr, RelSpan>>,
     pat: bool,
     tys: ParamTys,
-    reason: &CheckReason,
+    reason: CheckReason,
     cxt: &mut Cxt,
 ) -> Vec<Par> {
     let err_missing = tys.err_missing();
@@ -601,7 +601,7 @@ fn check_params(
 fn check_par(
     x: Result<ast::Expr, RelSpan>,
     pat: bool,
-    expected_ty: Option<(Expr, &CheckReason)>,
+    expected_ty: Option<(Expr, CheckReason)>,
     cxt: &mut Cxt,
 ) -> Par {
     let par = match x {
@@ -625,7 +625,7 @@ fn check_par(
             let ty = x
                 .ty()
                 .and_then(|x| x.expr())
-                .map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType))
+                .map(|x| x.check(Val::Type, cxt, CheckReason::UsedAsType))
                 .unwrap_or_else(|| {
                     cxt.error(
                         x.span(),
@@ -642,12 +642,15 @@ fn check_par(
             Par { name, ty, mutable }
         }
         Ok(x) if pat => {
-            let (name, ty) = x
-                .as_simple_pat(cxt.db)
-                .unwrap_or_else(|| todo!("move non-trivial pats to rhs"));
+            let (name, ty) = x.as_simple_pat(cxt.db).unwrap_or_else(|| {
+                todo!(
+                    "move non-trivial pats to rhs ({})",
+                    ast::Pretty::pretty(&x).to_string(false)
+                )
+            });
             let (mutable, name) =
                 name.unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), x.span())));
-            let ty = match ty.map(|x| x.check(Val::Type, cxt, &CheckReason::UsedAsType)) {
+            let ty = match ty.map(|x| x.check(Val::Type, cxt, CheckReason::UsedAsType)) {
                 Some(ty) => {
                     if let Some((expected_ty, reason)) = expected_ty {
                         let ty = ty.clone().eval(&mut cxt.env());
@@ -665,7 +668,7 @@ fn check_par(
             Par { name, ty, mutable }
         }
         Ok(x) => {
-            let ty = x.check(Val::Type, cxt, &CheckReason::UsedAsType);
+            let ty = x.check(Val::Type, cxt, CheckReason::UsedAsType);
 
             Par {
                 name: (cxt.db.name("_".to_string()), x.span()),
@@ -796,7 +799,7 @@ impl Expr {
                 let rty = clos.elab_with(|aty| match args.pop_front() {
                     Some(arg) => match arg {
                         Ok(arg) => {
-                            let arg = arg.check(aty, cxt, &CheckReason::ArgOf(span));
+                            let arg = arg.check(aty, cxt, CheckReason::ArgOf(span));
                             targs.push(arg.clone());
                             arg.eval(&mut cxt.env())
                         }
@@ -804,9 +807,10 @@ impl Expr {
                             if let Err(e) = cxt.unify(
                                 Val::var(Var::Builtin(Builtin::UnitType)),
                                 aty,
-                                &CheckReason::ArgOf(span),
+                                CheckReason::ArgOf(span),
                             ) {
                                 cxt.error(span, e);
+                                targs.push(Expr::Error);
                                 Val::Error
                             } else {
                                 targs.push(Expr::var(Var::Builtin(Builtin::Unit)));
@@ -1040,7 +1044,7 @@ impl Place {
 }
 
 impl ast::Expr {
-    pub(super) fn check(&self, mut ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Expr {
+    pub(super) fn check(&self, mut ty: Val, cxt: &mut Cxt, reason: CheckReason) -> Expr {
         ty.inline_head(&mut cxt.env(), &cxt.mcxt);
         let result = || {
             match (self, ty) {
@@ -1172,7 +1176,6 @@ impl ast::Expr {
                         Vec::new()
                     };
 
-                    assert_eq!(cxt.size(), clos.env.size + clos.params.len());
                     let bty = clos.body.eval(&mut cxt.env());
                     let body = x
                         .body()
@@ -1198,7 +1201,7 @@ impl ast::Expr {
                         return Err(MoveError::FunAccess(
                             access,
                             ty.quote(cxt.size(), Some(&cxt.mcxt)),
-                            *reason,
+                            reason,
                         )
                         .into());
                     }
@@ -1272,7 +1275,7 @@ impl ast::Expr {
                         return Err(MoveError::FunAccess(
                             access,
                             ty.quote(cxt.size(), Some(&cxt.mcxt)),
-                            *reason,
+                            reason,
                         )
                         .into());
                     }
@@ -1359,7 +1362,7 @@ impl ast::Expr {
         }
     }
 
-    fn infer_check(&self, ty: Val, cxt: &mut Cxt, reason: &CheckReason) -> Result<Expr, TypeError> {
+    fn infer_check(&self, ty: Val, cxt: &mut Cxt, reason: CheckReason) -> Result<Expr, TypeError> {
         let (a, ity) = self.infer(cxt);
         let (a, ity) = match &ty {
             Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => (a, ity),
@@ -1401,7 +1404,7 @@ impl ast::Expr {
             ast::Expr::GroupedExpr(ref x) => x
                 .expr()
                 .map(|x| x.as_args())
-                .unwrap_or_else(|| vec![Err(x.span())]),
+                .unwrap_or_else(|| vec![Ok(self)]),
             ast::Expr::Pair(x) => {
                 let mut v = x
                     .rhs()
@@ -1546,7 +1549,7 @@ impl ast::Expr {
                         let x = x.expr().ok_or("Expected type of reference")?.check(
                             Val::Type,
                             cxt,
-                            &CheckReason::UsedAsType,
+                            CheckReason::UsedAsType,
                         );
                         (Expr::RefType(false, Box::new(x)), Val::Type)
                     }
@@ -1554,7 +1557,7 @@ impl ast::Expr {
                         let x = x.expr().ok_or("Expected type of reference")?.check(
                             Val::Type,
                             cxt,
-                            &CheckReason::UsedAsType,
+                            CheckReason::UsedAsType,
                         );
                         (Expr::RefType(true, Box::new(x)), Val::Type)
                     }
@@ -1596,7 +1599,7 @@ impl ast::Expr {
                         let expr = x
                             .rhs()
                             .ok_or("Missing right-hand side of assignment")?
-                            .check(ty, cxt, &CheckReason::MustMatch(x.lhs().unwrap().span()));
+                            .check(ty, cxt, CheckReason::MustMatch(x.lhs().unwrap().span()));
                         (
                             Expr::Assign(Box::new(place.to_expr(cxt)), Box::new(expr)),
                             Val::var(Var::Builtin(Builtin::UnitType)),
@@ -1626,11 +1629,31 @@ impl ast::Expr {
                             Expr::Head(Head::Var(v)) => v.name(cxt.db),
                             _ => None,
                         };
-                        let (expr, ty) = if let Some(exp) = x.exp() {
+                        let (expr, ty) = if let Some(mut exp) = x.exp() {
+                            if let Some(block) = x.do_expr() {
+                                // Reassociate to put the do block on the right side
+                                exp = exp.as_args().into_iter().rev().fold(
+                                    block.expr().ok_or("expected expression in do block")?,
+                                    |acc, x| {
+                                        let x = x.unwrap_or_else(|s| {
+                                            ast::Expr::GroupedExpr(ast::GroupedExpr::Val {
+                                                span: s,
+                                                expr: None,
+                                            })
+                                        });
+                                        let span = RelSpan::new(x.span().start, acc.span().end);
+                                        ast::Expr::Pair(ast::Pair::Val {
+                                            span,
+                                            lhs: Some(Box::new(x)),
+                                            rhs: Some(Box::new(acc)),
+                                        })
+                                    },
+                                );
+                            }
                             let (exp, rty) = match lhs_ty {
                                 Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                                     let aty = clos.par_ty();
-                                    let exp = exp.check(aty, cxt, &CheckReason::ArgOf(lhs_span));
+                                    let exp = exp.check(aty, cxt, CheckReason::ArgOf(lhs_span));
                                     let vexp = exp.clone().eval(&mut cxt.env());
                                     let rty = clos.apply(vexp);
                                     (exp, rty)
@@ -1739,7 +1762,7 @@ impl ast::Expr {
                                     .check(
                                         ty.clone(),
                                         cxt,
-                                        &CheckReason::MustMatch(x.a().unwrap().span()),
+                                        CheckReason::MustMatch(x.a().unwrap().span()),
                                     );
                                 let (builtin, ret_ty) = ArithOp::from_tok(tok)
                                     .map(|x| (Builtin::ArithOp(x), ty.clone()))

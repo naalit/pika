@@ -138,7 +138,7 @@ mod input {
             row: &mut Row,
             var: PVar,
             ty: &Val,
-            reason: &CheckReason,
+            reason: CheckReason,
             target_cons: &mut Option<PCons>,
             env: &Env,
         ) -> RemovedColumn {
@@ -302,9 +302,7 @@ mod input {
                                                     .unify(
                                                         Val::var(Var::Builtin(Builtin::UnitType)),
                                                         b.ty.clone().eval(&mut env),
-                                                        &CheckReason::ArgOf(
-                                                            x.lhs().unwrap().span(),
-                                                        ),
+                                                        CheckReason::ArgOf(x.lhs().unwrap().span()),
                                                     )
                                                     .unwrap_or_else(|e| cxt.ecxt.error(span, e));
                                                 (
@@ -506,7 +504,7 @@ mod input {
                     match x
                         .ty()
                         .and_then(|x| x.expr())
-                        .map(|x| x.check(Val::Type, cxt.ecxt, &CheckReason::UsedAsType))
+                        .map(|x| x.check(Val::Type, cxt.ecxt, CheckReason::UsedAsType))
                     {
                         Some(ty) => {
                             Pattern::Typed(Box::new(pat), Box::new(ty.eval(&mut cxt.ecxt.env())))
@@ -662,7 +660,7 @@ impl CaseElabCxt<'_, '_> {
                     let guard = guard.check(
                         Val::var(Var::Builtin(Builtin::BoolType)),
                         &mut self.ecxt,
-                        &CheckReason::Condition,
+                        CheckReason::Condition,
                     );
                     let mut size = self.ecxt.size();
                     let params = self.env_tys[&row.body]
@@ -748,7 +746,7 @@ impl CaseElabCxt<'_, '_> {
         let mut start_ipats = Vec::new();
 
         for mut row in rows.iter().cloned() {
-            match self.remove_column(&mut row, switch_var, &sty, &sreason, &mut yes_cons, env) {
+            match self.remove_column(&mut row, switch_var, &sty, sreason, &mut yes_cons, env) {
                 input::RemovedColumn::Yes(_cons, iargs2, eargs2, env) => {
                     if iargs.is_empty() && eargs.is_none() && yes_env.is_none() {
                         iargs.extend(
@@ -1024,7 +1022,7 @@ mod coverage {
                                                 vty.clone(),
                                                 size,
                                                 &mut Env::new(size),
-                                                vreason,
+                                                *vreason,
                                             )
                                             .is_err()
                                         {
@@ -1185,7 +1183,7 @@ pub(super) fn elab_case(
                 let body = match rty {
                     Some((rty, reason)) => body
                         .as_ref()
-                        .map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, reason)),
+                        .map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, *reason)),
                     None => match body {
                         Some(body) => {
                             let (expr, ty) = body.infer(cxt.ecxt);
@@ -1305,7 +1303,7 @@ fn elab_block(
                 if let Err(e) = ecxt.unify(
                     Val::var(Var::Builtin(Builtin::UnitType)),
                     rty.clone(),
-                    reason,
+                    *reason,
                 ) {
                     ecxt.error(span, e);
                 }
@@ -1334,7 +1332,7 @@ fn elab_block(
 
     match &block[0] {
         ast::Stmt::Expr(e) if block.len() == 1 => match rty {
-            Some((rty, reason)) => e.check(rty.clone(), ecxt, reason),
+            Some((rty, reason)) => e.check(rty.clone(), ecxt, *reason),
             None => {
                 let (expr, ty) = e.infer(ecxt);
                 *rty = Some((ty, CheckReason::MustMatch(e.span())));
@@ -1368,7 +1366,7 @@ fn elab_block(
                         .ty()
                         .and_then(|x| x.expr())
                         .map(|x| (x.span(), x))
-                        .map(|(s, x)| (x.check(Val::Type, ecxt, &CheckReason::UsedAsType), s))
+                        .map(|(s, x)| (x.check(Val::Type, ecxt, CheckReason::UsedAsType), s))
                         .map(|(x, s)| (x.eval(&mut ecxt.env()), s)),
                     _ => None,
                 };
@@ -1376,7 +1374,7 @@ fn elab_block(
                 let (body, ty, reason) = match ty {
                     Some((ty, span)) => match d.body().and_then(|x| x.expr()) {
                         Some(body) => {
-                            let body = body.check(ty.clone(), ecxt, &CheckReason::GivenType(span));
+                            let body = body.check(ty.clone(), ecxt, CheckReason::GivenType(span));
                             (body, ty, CheckReason::GivenType(span))
                         }
                         None => (Expr::Error, ty, CheckReason::GivenType(span)),

@@ -171,7 +171,7 @@ pub enum Severity {
     Warning,
 }
 impl Severity {
-    fn ariadne(self) -> ariadne::ReportKind {
+    fn ariadne(self) -> ariadne::ReportKind<'static> {
         match self {
             Severity::Error => ariadne::ReportKind::Error,
             Severity::Warning => ariadne::ReportKind::Warning,

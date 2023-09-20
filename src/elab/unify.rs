@@ -203,7 +203,7 @@ impl MetaCxt<'_> {
         b: Val,
         size: Size,
         mut env: Env,
-        reason: &CheckReason,
+        reason: CheckReason,
     ) -> Result<(), UnifyError> {
         UnifyCxt {
             meta_cxt: self,
@@ -216,7 +216,7 @@ impl MetaCxt<'_> {
             kind,
             inferred: a.quote(size, Some(self)),
             expected: b.quote(size, Some(self)),
-            reason: reason.clone(),
+            reason: reason,
         })
     }
 
@@ -228,7 +228,7 @@ impl MetaCxt<'_> {
         b: Val,
         size: Size,
         env: &mut Env,
-        reason: &CheckReason,
+        reason: CheckReason,
     ) -> Result<(), UnifyError> {
         UnifyCxt {
             meta_cxt: self,

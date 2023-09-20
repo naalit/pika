@@ -285,7 +285,7 @@ impl<'a> Parser<'a> {
 
                 self.var();
 
-                self.params(true);
+                self.params(true, true);
 
                 // Allow newline before the colon, for long parameter lists
                 self.maybe(Tok::Newline);
@@ -325,7 +325,7 @@ impl<'a> Parser<'a> {
                 self.var();
 
                 if !matches!(self.cur(), Tok::Equals | Tok::OfKw | Tok::StructKw) {
-                    self.params(true);
+                    self.params(true, true);
                 }
 
                 if self.maybe(Tok::Equals) {
@@ -377,7 +377,7 @@ impl<'a> Parser<'a> {
                             }
 
                             if self.cur() != Tok::Colon {
-                                self.params(false);
+                                self.params(false, true);
                             }
 
                             if self.maybe(Tok::Colon) {
@@ -468,6 +468,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.pop();
             }
+            Tok::DoKw => self.expr(Prec::App),
             tok => {
                 self.expected("expression", None);
                 if tok.starts_atom() {
@@ -492,7 +493,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Returns the checkpoint for explicit parameters, so they can be set as PatPar or TermPar as needed
-    fn params_inner(&mut self) -> Option<Checkpoint> {
+    fn params_inner(&mut self, require_parens: bool) -> Option<Checkpoint> {
         // First implicit params
         let cp = self.checkpoint();
         let mut had_imp = false;
@@ -503,7 +504,9 @@ impl<'a> Parser<'a> {
             self.push(Tok::Pat);
 
             self.advance();
-            self.expr(Prec::Pat);
+            if self.cur() != Tok::SClose {
+                self.expr(Prec::Pat);
+            }
             self.expect(Tok::SClose);
 
             self.pop();
@@ -514,10 +517,17 @@ impl<'a> Parser<'a> {
             self.push_at(cp, Tok::ImpPars);
             self.pop();
         }
-        if self.cur().starts_atom() || self.cur() == Tok::Indent {
+        if self.cur() == Tok::POpen
+            || self.cur() == Tok::Indent
+            || (!require_parens && self.cur().starts_atom())
+        {
             // Explicit parameters
             let cp = self.checkpoint();
-            self.expr(Prec::App);
+            if require_parens {
+                self.atom()
+            } else {
+                self.expr(ExprParams::no_arrow())
+            };
             Some(cp)
         } else {
             if !had_imp {
@@ -528,8 +538,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn params(&mut self, pat: bool) {
-        if let Some(cp) = self.params_inner() {
+    fn params(&mut self, pat: bool, require_parens: bool) {
+        if let Some(cp) = self.params_inner(require_parens) {
             if pat {
                 self.push_at(cp, Tok::PatPar);
                 self.push_at(cp, Tok::Pat);
@@ -563,13 +573,17 @@ impl<'a> Parser<'a> {
         }
 
         // Then explicit
-        if self.cur().starts_atom() {
-            if indent {
-                self.expr(Prec::Indented);
-                self.expect(Tok::Dedent);
-            } else {
+        if self.cur() == Tok::POpen {
+            self.atom();
+            if self.cur() == Tok::DoKw {
+                self.push(Tok::AppDo);
+
                 self.atom();
+
+                self.pop();
             }
+        } else if self.cur() == Tok::DoKw {
+            self.atom();
         } else if !had_imp {
             self.expected("arguments", None);
         }
@@ -582,6 +596,7 @@ impl<'a> Parser<'a> {
             min_prec,
             lhs,
             allow_lambda,
+            allow_arrow,
         } = params.into();
         let lhs = match lhs {
             None => {
@@ -626,6 +641,7 @@ impl<'a> Parser<'a> {
                             min_prec,
                             lhs: None,
                             allow_lambda,
+                            allow_arrow,
                         });
 
                         self.pop();
@@ -649,8 +665,25 @@ impl<'a> Parser<'a> {
                         self.pop();
                     }
                     Tok::DoKw => {
-                        self.push(Tok::Do);
-                        self.advance();
+                        let mut lambda = false;
+                        // For now at least, anything on the same line as a do counts as do-lambda syntax
+                        if self.peek(1) != Tok::Indent {
+                            lambda = true;
+
+                            self.push(Tok::Lam);
+
+                            self.advance();
+
+                            self.params(true, false);
+
+                            self.expect(Tok::WideArrow);
+
+                            self.push(Tok::Body);
+                            self.push(Tok::Do);
+                        } else {
+                            self.push(Tok::Do);
+                            self.advance();
+                        }
 
                         self.expect(Tok::Indent);
                         loop {
@@ -680,6 +713,10 @@ impl<'a> Parser<'a> {
                         }
 
                         self.pop();
+                        if lambda {
+                            self.pop();
+                            self.pop();
+                        }
                     }
                     Tok::CaseKw => {
                         self.push(Tok::Case);
@@ -767,7 +804,7 @@ impl<'a> Parser<'a> {
                     }
                     // If it starts with [, it must be a lambda or pi
                     Tok::SOpen => {
-                        let par_cp = self.params_inner();
+                        let par_cp = self.params_inner(false);
                         match self.cur() {
                             Tok::WideArrow => {
                                 self.push_at(cp, Tok::Lam);
@@ -844,17 +881,12 @@ impl<'a> Parser<'a> {
         let mut assoc = None;
         loop {
             match self.cur() {
-                Tok::SOpen | Tok::POpen => {
+                Tok::SOpen | Tok::POpen | Tok::DoKw => {
                     self.push_at(lhs, Tok::App);
                     self.arguments();
                     self.pop();
                 }
 
-                x if x.starts_atom() => {
-                    self.push_at(lhs, Tok::App);
-                    self.arguments();
-                    self.pop();
-                }
                 Tok::Dot => {
                     self.push_at(lhs, Tok::App);
                     self.advance();
@@ -863,10 +895,7 @@ impl<'a> Parser<'a> {
                     self.var();
                     self.pop();
 
-                    if self.cur().starts_atom()
-                        || (self.cur() == Tok::Indent && min_prec <= Prec::Min)
-                        || self.cur() == Tok::SOpen
-                    {
+                    if self.cur() == Tok::SOpen || self.cur() == Tok::POpen {
                         self.arguments();
                     }
                     self.pop();
@@ -933,7 +962,7 @@ impl<'a> Parser<'a> {
                 // So implement operator chaining
                 // If we're not at the outermost expression, though, pass control back there
                 Tok::Indent if min_prec <= Prec::Min => {
-                    if self.peek(1).starts_atom() || self.peek(1) == Tok::SOpen {
+                    if self.peek(1) == Tok::POpen || self.peek(1) == Tok::SOpen {
                         self.push_at(lhs, Tok::App);
                         self.arguments();
                         self.pop();
@@ -979,7 +1008,7 @@ impl<'a> Parser<'a> {
 
                     self.pop();
                 }
-                Tok::Arrow if Prec::Arrow >= min_prec => {
+                Tok::Arrow if allow_arrow && Prec::Arrow >= min_prec => {
                     self.push_at(lhs, Tok::Pi);
 
                     self.push_at(lhs, Tok::TermPar);
@@ -1001,7 +1030,7 @@ impl<'a> Parser<'a> {
                     if self.peek(1) == Tok::Arrow
                         || (self.peek(1) == Tok::MutKw && self.peek(2) == Tok::Arrow) =>
                 {
-                    if Prec::Arrow < min_prec {
+                    if !allow_arrow || Prec::Arrow < min_prec {
                         break;
                     } else {
                         self.push_at(lhs, Tok::Pi);
@@ -1068,6 +1097,7 @@ struct ExprParams {
     min_prec: Prec,
     lhs: Option<Checkpoint>,
     allow_lambda: bool,
+    allow_arrow: bool,
 }
 impl ExprParams {
     fn new() -> Self {
@@ -1079,6 +1109,13 @@ impl ExprParams {
             ..Self::new()
         }
     }
+    fn no_arrow() -> Self {
+        ExprParams {
+            allow_lambda: false,
+            allow_arrow: false,
+            ..Self::new()
+        }
+    }
 }
 impl From<()> for ExprParams {
     fn from(_: ()) -> Self {
@@ -1086,6 +1123,7 @@ impl From<()> for ExprParams {
             min_prec: Prec::Min,
             lhs: None,
             allow_lambda: true,
+            allow_arrow: true,
         }
     }
 }
@@ -1095,6 +1133,7 @@ impl From<Prec> for ExprParams {
             min_prec,
             lhs: None,
             allow_lambda: true,
+            allow_arrow: true,
         }
     }
 }
@@ -1104,6 +1143,7 @@ impl From<(Prec, Option<Checkpoint>)> for ExprParams {
             min_prec,
             lhs,
             allow_lambda: true,
+            allow_arrow: true,
         }
     }
 }

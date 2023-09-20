@@ -44,10 +44,9 @@
             "name": "entity.name.class.pika"
         },
 		"function-call": {
-			"_comment": "This is an awful regex involving all four of {positive,negative}{lookahead,lookbehind} but it *mostly* works. Semantic tokens will be better of course",
-			"match": "(?<=(case|catch|if|then|else|let|fun|box|unbox|[^a-zA-Z_0-9)\\s]|^)\\s*)\\b([a-z_][a-zA-Z_0-9]*)\\b\\s*(?!of|then)(?=[\\(\\[a-zA-Z_0-9]|<\\|)",
+			"match": "\\b([a-z_][a-zA-Z_0-9]*)\\b\\s*(?=\\(|do\\s*)",
 			"captures": {
-				"2": {
+				"1": {
 					"name": "entity.name.function.pika"
 				}
 			}

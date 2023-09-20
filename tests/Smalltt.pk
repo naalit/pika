@@ -2,6 +2,8 @@
 # Also for benchmarking, but that doesn't exist yet
 # Note that it uses lambdas instead of `fun` since that's what smalltt does
 # Also, Pika doesn't allow unicode lambdas and arrows, and I removed the unicode names too
+# And especially now that Pika requires parentheses on calls this is incredibly un-idiomatic Pika,
+# because I just translated it verbatim including currying and everything
 
 # Basics
 # --------------------------------------------------------------------------------
@@ -18,14 +20,14 @@ let id : [A] &-> A -> A = x => x
 # #  has a polymorphic type, {A} → A → A
 # id2 : {A} → A → A = id (id!)
 
-let id3 : [A] &-> A -> A = x => id x
+let id3 : [A] &-> A -> A = x => id(x)
 
 # explicit id function can be used for type annotation
 # as in Idris
 let the : (A : _) &-> A -> A = _ => x => x
 
 # This isn't in smalltt's demo, but it works there too
-let id4 : [A] &-> A -> A = x => the _ x
+let id4 : [A] &-> A -> A = x => the(_)(x)
 
 # top-level definition types can be omitted
 let constTy = [A, B] &-> A -> B -> A
@@ -52,7 +54,7 @@ let false : Bool = _ => t => f => f
 
 # 'and' is a reserved word in Pika
 let and2 : Bool &-> Bool &-> Bool =
-    b1 => b2 => b1 Bool true b2
+    b1 => b2 => b1(Bool)(true)(b2)
 
 # Church natural numbers
 # --------------------------------------------------------------------------------
@@ -63,63 +65,63 @@ let zero : Nat =
     n => s => z => z
 
 let suc : Nat &-> Nat =
-    a => n => s => z => s (a n s z)
+    a => n => s => z => s(a(n)(s)(z))
 
-let n2 : Nat = n => s => z => s (s z)
-let n5 : Nat = n => s => z => s (s (s (s (s z))))
+let n2 : Nat = n => s => z => s(s(z))
+let n5 : Nat = n => s => z => s(s(s(s(s(z)))))
 
 let mul : Nat &-> Nat &-> Nat =
-    a => b => n => s => z => a n (b n s) z
+    a => b => n => s => z => a(n)(b(n)(s))(z)
 
 let add : Nat &-> Nat &-> Nat =
-    a => b => n => s => z => a n s (b n s z)
+    a => b => n => s => z => a (n) (s) (b (n) (s) (z))
 
-let n10    = mul n2    n5
-let n10b   = mul n5    n2
-let n100   = mul n10   n10
-let n100b  = mul n10b  n10b
-let n10k   = mul n100  n100
-let n10kb  = mul n100b n100b
-let n100k  = mul n10k  n10
-let n100kb = mul n10kb n10b
-let n1M    = mul n10k  n100
-let n1MB   = mul n10kb n100b
-let n10M   = mul n1M   n10
-let n10MB  = mul n1MB  n10b
-let n100M  = mul n10M  n10
-let n200M  = mul n2    n100M
+let n10    = mul (n2)    (n5)
+let n10b   = mul (n5)    (n2)
+let n100   = mul (n10)   (n10)
+let n100b  = mul (n10b)  (n10b)
+let n10k   = mul (n100)  (n100)
+let n10kb  = mul (n100b) (n100b)
+let n100k  = mul (n10k)  (n10)
+let n100kb = mul (n10kb) (n10b)
+let n1M    = mul (n10k)  (n100)
+let n1MB   = mul (n10kb) (n100b)
+let n10M   = mul (n1M)   (n10)
+let n10MB  = mul (n1MB)  (n10b)
+let n100M  = mul (n10M)  (n10)
+let n200M  = mul (n2)    (n100M)
 
 
 # Church lists
 # --------------------------------------------------------------------------------
 let List  : Type &-> Type = a => (l : Type) -> (a &-> l -> l) -> l -> l
-let lnil  : [a] &-> List a = l => c => n => n
-let lcons : [a] &-> a -> List a -> List a = a => as => l => c => n => c a (as l c n)
+let lnil  : [a] &-> List(a) = l => c => n => n
+let lcons : [a] &-> a -> List(a) -> List(a) = a => as => l => c => n => c (a) (as (l) (c) (n))
 
-let list1 = lcons true (lcons false (lcons false lnil))
+let list1 = lcons (true) (lcons (false) (lcons (false) (lnil)))
 
-let map : [a, b] &-> (a &-> b) &-> List a &-> List b =
-    f => as => l => c => as l (a => c (f a))
+let map : [a, b] &-> (a &-> b) &-> List (a) &-> List (b) =
+    f => as => l => c => as (l) (a => c (f (a)))
 
 # Church vectors
 # --------------------------------------------------------------------------------
 let Vec : Type &-> Nat &-> Type =
-    a => n => (V : Nat &-> Type) -> V zero -> ([n] &-> a -> V n -> V (suc n)) -> V n
+    a => n => (V : Nat &-> Type) -> V (zero) -> ([n] &-> a -> V (n) -> V (suc (n))) -> V (n)
 
-let vnil : [a] &-> Vec a zero =
+let vnil : [a] &-> Vec (a) (zero) =
     V => n => c => n
 
-let vcons : [a, n] &-> a -> Vec a n -> Vec a (suc n) =
-    a => as => V => n => c => c a (as V n c)
+let vcons : [a, n] &-> a -> Vec (a) (n) -> Vec (a) (suc (n)) =
+    a => as => V => n => c => c (a) (as (V) (n) (c))
 
-let vec1 = vcons true (vcons false (vcons true vnil))
+let vec1 = vcons (true) (vcons (false) (vcons (true) (vnil)))
 
 
 # Leibniz (Church) propositional equality, useful for testing conversion.
 # Also note the implicit lambdas.
 # ----------------------------------------------------------------------------------
 let Eq : [A] &-> A &-> A -> Type =
-    [A] x => y => (P : A &-> Type) &-> P x &-> P y
+    [A] x => y => (P : A &-> Type) &-> P (x) &-> P (y)
 
 # TODO violates move semantics
 # let refl : [A][x : A] &-> Eq x x =
@@ -145,14 +147,14 @@ let Eq : [A] &-> A &-> A -> Type =
 let Pair : Type &-> Type &-> Type =
     A => B => (Pair : Type) -> (pair : A -> B -> Pair) -> Pair
 
-let pair : [A, B] &-> A -> B -> Pair A B =
-    a => b => Pair => pair => pair a b
+let pair : [A, B] &-> A -> B -> Pair (A) (B) =
+    a => b => Pair => pair => pair (a) (b)
 
-let proj1 : [A, B] &-> Pair A B &-> A =
-    p => p _ (x => y => x)
+let proj1 : [A, B] &-> Pair (A) (B) &-> A =
+    p => p (_) (x => y => x)
 
-let proj2 : [A, B] &-> Pair A B &-> B =
-    p => p _ (x => y => y)
+let proj2 : [A, B] &-> Pair (A) (B) &-> B =
+    p => p (_) (x => y => y)
 
 let Top : Type =
     (Top : Type) &-> (tt : Top) &-> Top
@@ -166,11 +168,11 @@ let Bot : Type =
 # Dependent function composition (higher-order unification example)
 # --------------------------------------------------------------------------------
 
-let comp : [A] [B : A &-> Type] [C : [a] &-> B a &-> Type] &-> (f : [a](b : B a) &-> C b) &-> (g : (a : A) &-> B a) &-> (x : A) &-> C (g x) =
-    f => g => a => f (g a)
+let comp : [A] [B : A &-> Type] [C : [a] &-> B (a) &-> Type] &-> (f : [a](b : B (a)) &-> C (b)) &-> (g : (a : A) &-> B (a)) &-> (x : A) &-> C (g (x)) =
+    f => g => a => f (g (a))
 
 let compTest1 : Nat &-> Nat =
-    comp suc suc
+    comp (suc) (suc)
 
 # TODO violates move semantics
 # let compTest2 : [m, A] &-> A &-> Vec A m &-> Vec A (suc (suc m)) =
@@ -195,16 +197,16 @@ let nil : Con =
     Con => nil => cons => nil
 
 let cons : Con &-> Ty &-> Con =
-    P => A => Con => nil => cons => cons (P Con nil cons) A
+    P => A => Con => nil => cons => cons (P (Con) (nil) (cons)) (A)
 
 let Var : Con &-> Ty &-> Type =
-    P => A => (Var : Con &-> Ty &-> Type) &-> (vz  : [P, A] &-> Var (cons P A) A) &-> (vs : [P, B, A] &-> Var P A &-> Var (cons P B) A) &-> Var P A
+    P => A => (Var : Con &-> Ty &-> Type) &-> (vz  : [P, A] &-> Var (cons (P) (A)) (A)) &-> (vs : [P, B, A] &-> Var (P) (A) &-> Var (cons (P) (B)) (A)) &-> Var (P) (A)
 
-let vz : [P, A] &-> Var (cons P A) A =
+let vz : [P, A] &-> Var (cons (P) (A)) (A) =
     Var => vz => vs => vz
 
-let vs : [P, B, A] &-> Var P A &-> Var (cons P B) A =
-    x => Var => vz => vs => vs (x Var vz vs)
+let vs : [P, B, A] &-> Var (P) (A) &-> Var (cons (P) (B)) (A) =
+    x => Var => vz => vs => vs (x (Var) (vz) (vs))
 
 # let Tm : Con &-> Ty &-> Type =
 #     P => A => (Tm  : Con &-> Ty &-> Type) &-> (var : [P, A] &-> Var P A &-> Tm P A) &-> (lam : [P, A, B] &-> Tm (cons P A) B &-> Tm P (fn A B)) &-> (app : [P, A, B] &-> Tm P (fn A B) &-> Tm P A &-> Tm P B) &-> Tm P A
@@ -222,14 +224,14 @@ let vs : [P, B, A] &-> Var P A &-> Var (cons P B) A =
 # --------------------------------------------------------------------------------
 
 let EvalTy : Ty &-> Type =
-    A => A _ Bot (A => B => A &-> B)
+    A => A (_) (Bot) (A => B => A &-> B)
 
 let EvalCon : Con &-> Type =
-    P => P _ Top (D => A => Pair D (EvalTy A))
+    P => P (_) (Top) (D => A => Pair (D) (EvalTy (A)))
 
-let EvalVar : [P, A] &-> Var P A &-> EvalCon P &-> EvalTy A =
-    x => x (P => A => EvalCon P &-> EvalTy A) (env => proj2 env)
-            (rec => env => rec (proj1 env))
+let EvalVar : [P, A] &-> Var (P) (A) &-> EvalCon (P) &-> EvalTy (A) =
+    x => x (P => A => EvalCon (P) &-> EvalTy (A)) (env => proj2 (env))
+            (rec => env => rec (proj1 (env)))
 
 # let EvalTm : [P, A] &-> Tm P A &-> EvalCon P &-> EvalTy A =
 #     t => t (P => A => EvalCon P &-> EvalTy A) EvalVar (t => env => a => t (pair env a))

@@ -211,9 +211,10 @@ make_nodes! {
     StructInit = lhs: Expr, fields: StructFields;
 
     Member = var: Var;
-    App = lhs: Expr, member: Member, imp: ImpArgs, exp: (1 Expr);
+    App = lhs: Expr, member: Member, imp: ImpArgs, exp: (1 Expr), do_expr: AppDo;
 
     Do = block: [Stmt];
+    AppDo = expr: Expr;
 
     CaseKw = ;
     CatchKw = ;
@@ -578,22 +579,27 @@ impl Pretty for Expr {
                     Doc::none().hardline(),
                 ))
                 .indent(),
-            Expr::App(x) => {
-                if let Some(member) = x.member() {
-                    let doc = x.lhs().pretty().add('.', ()).chain(member.var().pretty());
-                    if x.imp().is_some() || x.exp().is_some() {
-                        doc.space().chain(x.imp().pretty()).chain(x.exp().pretty())
-                    } else {
-                        doc
-                    }
+            Expr::App(x) => if let Some(member) = x.member() {
+                let doc = x.lhs().pretty().add('.', ()).chain(member.var().pretty());
+                if x.imp().is_some() || x.exp().is_some() {
+                    doc.space().chain(x.imp().pretty()).chain(x.exp().pretty())
                 } else {
-                    x.lhs()
-                        .pretty()
-                        .space()
-                        .chain(x.imp().pretty())
-                        .chain(x.exp().pretty())
+                    doc
                 }
+            } else {
+                x.lhs()
+                    .pretty()
+                    .space()
+                    .chain(x.imp().pretty())
+                    .chain(x.exp().pretty())
             }
+            .chain(match x.do_expr() {
+                Some(x) => Doc::start(" do")
+                    .style(Doc::style_keyword())
+                    .space()
+                    .chain(x.expr().pretty()),
+                None => Doc::none(),
+            }),
             Expr::Pair(x) => x
                 .lhs()
                 .pretty()

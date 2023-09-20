@@ -102,6 +102,7 @@ pub enum SyntaxKind {
     Assign,
     MutVar,
     FunClass,
+    AppDo,
 
     StructInit,
     Var,
