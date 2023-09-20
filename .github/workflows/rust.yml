@@ -23,7 +23,7 @@ jobs:
     - name: Run tests and generate coverage
       uses: actions-rs/tarpaulin@v0.1.0
       with:
-        out-type: Lcov
+        args: '--out Lcov'
         version: '0.27.0'
 
     - name: Upload code coverage
