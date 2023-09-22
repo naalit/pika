@@ -1,3 +1,5 @@
+use crate::pretty::Prec;
+
 use super::*;
 
 pub enum FindSpanResult<'a> {
@@ -64,7 +66,16 @@ impl Expr {
                     x.find_span(span, cxt)?;
                     a.find_span(span, cxt)?;
                 }
-                Elim::Member(_) => todo!(),
+                Elim::Member(_, _, n @ (_, s)) => {
+                    if s.superset(span) {
+                        return Err(FindSpanResult::Name(
+                            false,
+                            *n,
+                            Cow::Owned(self.ty(cxt).quote(cxt.size(), Some(&cxt.mcxt))),
+                        ));
+                    }
+                }
+                Elim::Deref => a.find_span(span, cxt)?,
                 Elim::Case(case, _) => {
                     a.find_span(span, cxt)?;
                     let mut r = Ok(());
@@ -78,12 +89,17 @@ impl Expr {
             },
             Expr::Fun(clos) => clos.find_span(span, cxt)?,
             Expr::Lit(_) => (),
-            // The type isn't a child of the pair in the source language
+            // The type isn't a child of the pair/struct in the source language
             Expr::Pair(a, b, _) => {
                 a.find_span(span, cxt)?;
                 b.find_span(span, cxt)?;
             }
-            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => x.find_span(span, cxt)?,
+            Expr::Struct(_, fields, _) => {
+                for i in fields {
+                    i.find_span(span, cxt)?;
+                }
+            }
+            Expr::RefType(_, x) | Expr::Ref(_, x) => x.find_span(span, cxt)?,
             Expr::Assign(place, expr) => {
                 place.find_span(span, cxt)?;
                 expr.find_span(span, cxt)?;
@@ -119,6 +135,23 @@ pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc
     if result.is_none() {
         let res = match &def.result.as_ref()?.body {
             DefBody::Let(body) => body.find_span(RelSpan::new(pos, pos), &mut cxt),
+            DefBody::Struct(fields) => {
+                let mut res = Ok(());
+                for (name, ty) in fields {
+                    if name.1.contains(pos) {
+                        res = Err(FindSpanResult::Name(false, *name, Cow::Borrowed(ty)));
+                        break;
+                    }
+                    let e = ty
+                        .find_span(RelSpan::new(pos, pos), &mut cxt)
+                        .map_err(|e| e.into_owned());
+                    if e.is_err() {
+                        res = e;
+                        break;
+                    }
+                }
+                res
+            }
             DefBody::Type(ctors) => {
                 let mut res = Ok(());
                 for (split, span, ty) in ctors {
@@ -126,7 +159,7 @@ pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc
                     if span.contains(pos) {
                         res = Err(FindSpanResult::Name(
                             false,
-                            (split.name().unwrap(), *span),
+                            (split.name().unwrap_or(def.result.as_ref()?.name.0), *span),
                             Cow::Owned(ty),
                         ));
                         break;
@@ -162,12 +195,78 @@ pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc
     }
     match result? {
         FindSpanResult::Name(m, (name, span), ty) => Some((
-            if m {
-                Doc::start("mut").style(Doc::style_keyword()).space()
-            } else {
-                Doc::none()
-            }
-            .chain(name.pretty(db).add(':', ()).space().chain(ty.pretty(db))),
+            match ty.unspanned() {
+                Expr::Fun(clos) if matches!(clos.class, Pi(_, _)) && !m => Doc::start("fun")
+                    .style(Doc::style_keyword())
+                    .space()
+                    .chain(name.pretty(db))
+                    .chain({
+                        let mut clos2 = Ok(clos);
+                        let imp = match clos.class {
+                            Pi(Impl, _) => {
+                                let params = clos.params.clone();
+                                clos2 = match &*clos.body {
+                                    Expr::Fun(clos) if matches!(clos.class, Pi(Expl, _)) => {
+                                        Ok(clos)
+                                    }
+                                    rty => Err(rty.clone()),
+                                };
+                                Doc::start('[')
+                                    .chain(Doc::intersperse(
+                                        params.iter().map(|x| {
+                                            x.name
+                                                .pretty(db)
+                                                .add(':', ())
+                                                .space()
+                                                .chain(x.ty.pretty(db).nest(Prec::App))
+                                        }),
+                                        Doc::start(',').space(),
+                                    ))
+                                    .add(']', ())
+                            }
+                            _ => Doc::none(),
+                        };
+                        match clos2 {
+                            Ok(clos) => {
+                                let params = clos.params.clone();
+                                imp.add('(', ())
+                                    .chain(
+                                        // Treat unit specially
+                                        if params.len() == 1
+                                            && matches!(
+                                                params.first().map(|x| x.ty.unspanned()),
+                                                Some(Expr::Head(Head::Var(Var::Builtin(
+                                                    Builtin::UnitType
+                                                ))))
+                                            )
+                                        {
+                                            Doc::none()
+                                        } else {
+                                            Doc::intersperse(
+                                                params.iter().map(|x| {
+                                                    x.name
+                                                        .pretty(db)
+                                                        .add(':', ())
+                                                        .space()
+                                                        .chain(x.ty.pretty(db).nest(Prec::App))
+                                                }),
+                                                Doc::start(',').space(),
+                                            )
+                                        },
+                                    )
+                                    .add("): ", ())
+                                    .chain(clos.body.pretty(db))
+                            }
+                            Err(exp) => imp.add(": ", ()).chain(exp.pretty(db)),
+                        }
+                    }),
+                ty => if m {
+                    Doc::start("mut").style(Doc::style_keyword()).space()
+                } else {
+                    Doc::none()
+                }
+                .chain(name.pretty(db).add(':', ()).space().chain(ty.pretty(db))),
+            },
             span,
         )),
         FindSpanResult::Expr(expr, span) => {

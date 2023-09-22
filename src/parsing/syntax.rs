@@ -128,7 +128,7 @@ pub enum SyntaxKind {
     LetDef,
     FunDef,
     TypeDef,
-    TypeDefShort,
+    TypeDefCtors,
     TypeDefStruct,
     ConsDef,
     BlockDef,

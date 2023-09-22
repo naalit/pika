@@ -319,42 +319,33 @@ impl<'a> Parser<'a> {
                 self.pop();
             }
             Tok::TypeKw | Tok::EffKw => {
-                let cp = self.checkpoint();
+                self.push(Tok::TypeDef);
                 self.advance();
 
                 self.var();
 
-                if !matches!(self.cur(), Tok::Equals | Tok::OfKw | Tok::StructKw) {
-                    self.params(true, true);
+                if !matches!(
+                    self.cur(),
+                    Tok::Equals | Tok::OfKw | Tok::StructKw | Tok::Newline
+                ) {
+                    self.params(false, true);
                 }
 
-                if self.maybe(Tok::Equals) {
-                    // Short form: type MyInt = i32
-                    // [where ...]
-                    self.push_at(cp, Tok::TypeDefShort);
-
-                    self.push(Tok::Ty);
-                    self.expr(());
-                    self.pop();
-                } else if self.maybe(Tok::StructKw) {
+                if self.maybe(Tok::StructKw) {
                     // Struct form type definition
                     // type Config struct
                     //   let maxIters : I32
                     // [where ...]
-                    self.push_at(cp, Tok::TypeDefStruct);
+                    self.push(Tok::TypeDefStruct);
 
-                    if self.expect(Tok::Indent) {
-                        // Fields
-                        self.push(Tok::StructFields);
-                        self.defs();
-                        self.pop();
+                    // Fields
+                    self.push(Tok::StructFields);
+                    self.block();
+                    self.pop();
 
-                        self.expect_and_reset(Tok::Dedent);
-                    } else {
-                        self.reset(Tok::Newline, false);
-                    }
-                } else {
-                    self.push_at(cp, Tok::TypeDef);
+                    self.pop();
+                } else if self.cur() != Tok::Newline {
+                    self.push(Tok::TypeDefCtors);
 
                     // If they left off the 'of', attempt to recover the 'where' block if possible
                     // since there will be lots of code in there which we want to check
@@ -397,6 +388,8 @@ impl<'a> Parser<'a> {
                     } else {
                         self.reset(Tok::Newline, false);
                     }
+
+                    self.pop();
                 }
 
                 self.reset(Tok::Newline, false);
@@ -589,6 +582,32 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn block(&mut self) {
+        self.expect(Tok::Indent);
+        loop {
+            self.stmt();
+            match self.cur() {
+                Tok::Newline => self.advance(),
+                Tok::Dedent => {
+                    self.advance();
+                    break;
+                }
+                _ => {
+                    self.expected("newline or dedent", "after end of statement");
+                    while !matches!(self.cur(), Tok::Newline | Tok::Dedent | Tok::Eof) {
+                        self.advance();
+                    }
+                    if self.cur() == Tok::Newline {
+                        self.advance();
+                    } else {
+                        self.advance();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// Parses an expression where all operators have at least the given precedence
     /// If `lhs` is `Some`, will only parse the operator and right hand side and add it to the provides lhs
     fn expr(&mut self, params: impl Into<ExprParams>) {
@@ -685,32 +704,7 @@ impl<'a> Parser<'a> {
                             self.advance();
                         }
 
-                        self.expect(Tok::Indent);
-                        loop {
-                            self.stmt();
-                            match self.cur() {
-                                Tok::Newline => self.advance(),
-                                Tok::Dedent => {
-                                    self.advance();
-                                    break;
-                                }
-                                _ => {
-                                    self.expected("newline or dedent", "after end of statement");
-                                    while !matches!(
-                                        self.cur(),
-                                        Tok::Newline | Tok::Dedent | Tok::Eof
-                                    ) {
-                                        self.advance();
-                                    }
-                                    if self.cur() == Tok::Newline {
-                                        self.advance();
-                                    } else {
-                                        self.advance();
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                        self.block();
 
                         self.pop();
                         if lambda {
@@ -947,14 +941,10 @@ impl<'a> Parser<'a> {
                     self.push_at(lhs, Tok::StructInit);
 
                     self.advance();
-                    if self.maybe(Tok::Indent) {
-                        self.push(Tok::StructFields);
-                        self.defs();
-                        self.pop();
-                        self.expect_and_reset(Tok::Dedent);
-                    } else {
-                        self.reset(Tok::Newline, false);
-                    }
+
+                    self.push(Tok::StructFields);
+                    self.block();
+                    self.pop();
 
                     self.pop();
                 }

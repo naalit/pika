@@ -44,7 +44,7 @@
             "name": "entity.name.class.pika"
         },
 		"function-call": {
-			"match": "\\b([a-z_][a-zA-Z_0-9]*)\\b\\s*(?=\\(|do\\s*)",
+			"match": "\\b([a-z_][a-zA-Z_0-9]*)\\b\\s*(?=\\(|\\[|do\\s*)",
 			"captures": {
 				"1": {
 					"name": "entity.name.function.pika"

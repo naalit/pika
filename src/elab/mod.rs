@@ -284,6 +284,18 @@ impl TypeError {
                         }
                     }
                     MoveError::AccessError(e) => e.to_error(severity, db),
+                    MoveError::InvalidAccess(doc, access) => Error {
+                        severity,
+                        message_lsp: None,
+                        message: doc.clone(),
+                        primary: Label {
+                            span: access.span,
+                            message: doc.clone(),
+                            color: Some(Doc::COLOR1),
+                        },
+                        secondary: Vec::new(),
+                        note: None,
+                    },
                 };
             }
         };

@@ -131,7 +131,7 @@ impl std::fmt::Display for Builtin {
             Builtin::IntType(i) => write!(f, "{:?}", i),
             Builtin::Unit => write!(f, "()"),
             Builtin::UnitType => write!(f, "()"),
-            Builtin::StringType => write!(f, "String"),
+            Builtin::StringType => write!(f, "Str"),
             Builtin::BoolType => write!(f, "Bool"),
             Builtin::ArithOp(op) => write!(f, "{}", op),
             Builtin::CompOp(op) => write!(f, "{}", op),
@@ -245,6 +245,7 @@ pub struct Definition {
 pub enum DefBody {
     Let(Box<Expr>),
     Type(Vec<(SplitId, RelSpan, Val)>),
+    Struct(Vec<(SName, Expr)>),
 }
 
 pub trait IsTerm {
@@ -279,8 +280,8 @@ pub enum Head<L> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Elim<T: IsTerm> {
     App(Icit, T),
-    // TODO probably use MemberId or something with a specific member of a specific type
-    Member(SName),
+    Member(Def, u64, SName),
+    Deref,
     Case(super::pattern::CaseOf<T>, T),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -304,8 +305,9 @@ pub enum Expr {
     RefType(bool, Box<Expr>),
     Assign(Box<Expr>, Box<Expr>),
     Ref(bool, Box<Expr>),
-    Deref(Box<Expr>),
     Spanned(RelSpan, Box<Expr>),
+    /// (def, fields, type)
+    Struct(Def, Vec<Expr>, Box<Expr>),
     Error,
 }
 impl PartialEq for Expr {
@@ -367,10 +369,6 @@ impl Expr {
             Expr::Type | Expr::RefType(_, _) => Val::Type,
             Expr::Assign(_, _) => Val::var(Var::Builtin(Builtin::UnitType)),
             Expr::Ref(m, x) => Val::RefType(*m, Box::new(x.ty(cxt))),
-            Expr::Deref(x) => match x.ty(cxt) {
-                Val::RefType(_, t) => *t,
-                _ => unreachable!(),
-            },
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
@@ -396,11 +394,11 @@ impl Expr {
                             .def_elab(d)
                             .and_then(|x| x.result)
                             .and_then(|x| match x.body {
-                                DefBody::Let(_) => None,
                                 DefBody::Type(v) => v
                                     .into_iter()
                                     .find(|(s, _, _)| *s == split)
                                     .map(|(_, _, ty)| ty),
+                                _ => None,
                             })
                             .unwrap_or(Val::Error)
                     }
@@ -413,7 +411,14 @@ impl Expr {
                     }
                     _ => Val::Error,
                 },
-                Elim::Member(_) => todo!(),
+                Elim::Member(def, idx, _) => {
+                    let lhs = (**head).clone().eval(&mut cxt.env());
+                    super::elaborate::member_type(&lhs, *def, *idx, cxt)
+                }
+                Elim::Deref => match head.ty(cxt) {
+                    Val::RefType(_, t) => *t,
+                    _ => unreachable!(),
+                },
                 Elim::Case(_, ty) => ty.clone().eval(&mut cxt.env()),
             },
             Expr::Fun(EClos {
@@ -452,7 +457,7 @@ impl Expr {
                 Literal::F32(_) => todo!(),
                 Literal::String(_) => Val::var(Var::Builtin(Builtin::StringType)),
             },
-            Expr::Pair(_, _, ty) => ty.clone().eval(&mut cxt.env()),
+            Expr::Pair(_, _, ty) | Expr::Struct(_, _, ty) => ty.clone().eval(&mut cxt.env()),
             Expr::Spanned(_, x) => x.ty(cxt),
             Expr::Error => Val::Error,
         }
@@ -492,9 +497,6 @@ impl Pretty for Expr {
                 .space()
                 .chain(x.pretty(db).nest(Prec::App))
                 .prec(Prec::App),
-            Expr::Deref(x) => Doc::start('*')
-                .chain(x.pretty(db).nest(Prec::App))
-                .prec(Prec::App),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)
@@ -508,10 +510,13 @@ impl Pretty for Expr {
                         Expl => Doc::none().space().chain(b.pretty(db).nest(Prec::Atom)),
                     })
                     .prec(Prec::App),
-                Elim::Member(m) => a
+                Elim::Member(_, _, m) => a
                     .pretty(db)
                     .add('.', ())
                     .chain(m.pretty(db))
+                    .prec(Prec::App),
+                Elim::Deref => Doc::start('*')
+                    .chain(a.pretty(db).nest(Prec::App))
                     .prec(Prec::App),
                 Elim::Case(c, _) => c.pretty(a.pretty(db), db).prec(Prec::Term),
             },
@@ -523,6 +528,26 @@ impl Pretty for Expr {
                 .space()
                 .chain(b.pretty(db).nest(Prec::Pair))
                 .prec(Prec::Pair),
+            Expr::Struct(def, fields, _) => {
+                let edef = db.def_elab(*def).unwrap().result.unwrap();
+                let fnames = match edef.body {
+                    DefBody::Struct(f) => f,
+                    _ => unreachable!(),
+                };
+                edef.name
+                    .pretty(db)
+                    .space()
+                    .add("struct", Doc::style_keyword())
+                    .hardline()
+                    .chain(Doc::intersperse(
+                        fields.iter().zip(fnames).map(|(val, (name, _))| {
+                            name.pretty(db).add(':', ()).space().chain(val.pretty(db))
+                        }),
+                        Doc::none().hardline(),
+                    ))
+                    .indent()
+                    .prec(Prec::Term)
+            }
             Expr::Error => Doc::none().add("%error", Doc::style_literal()),
         }
     }

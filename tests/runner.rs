@@ -62,3 +62,8 @@ fn ref_errors() {
 fn gadts() {
     test(&["GADTs.pk"]).succeeds();
 }
+
+#[test]
+fn structs() {
+    test(&["Structs.pk"]).succeeds();
+}

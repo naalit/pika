@@ -1,0 +1,53 @@
+# first this syntax
+type Range(U32, U32)
+type Spanned[a](a, Range)
+
+let s = Spanned("hi", Range(12, 13))
+
+# then struct syntax
+type Data struct
+    let span: Range
+    let length: U64
+    let message: Str
+where
+    fun to_str(self: &Data): Str = self.message
+    fun len(&self): U64 = self.length
+    fun process(&mut self) = do
+        self.length = self.length + 2
+        self.message = "Done processing"
+
+# and sigma, now with the shorter field syntax instead of definition syntax
+type Any struct
+    ty: Type
+    val: ty
+where
+    fun new[a](val: a): Any = Any struct
+        ty: a
+        val
+
+    fun get(&self): &self.ty = self.val
+
+# verifying structs and methods with implicit parameters
+type MyStruct[a, b, c] struct
+    one: a
+    two: b
+    three: c
+where
+    fun get_one(self): a = self.one
+    fun get_two(self): b = self.two
+
+fun main() = do
+    let mut data = Data struct
+        span: Range(0, 240)
+        length: 12
+        message: "Needs processing"
+    data.process()
+    let s = data.to_str()
+    let n = data.length + data.len()
+    let any = Any.new(data)
+    let q = any.val # : any.ty
+    let p = MyStruct struct
+        one: "hi"
+        two: q
+        three: s
+    let m = p.get_two() # : any.ty

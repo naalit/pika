@@ -261,9 +261,9 @@ pub enum Val {
     // Do(Vec<Stmt>),
     Lit(Literal),
     Pair(Box<Val>, Box<Val>, Box<Val>),
+    Struct(Def, Vec<Val>, Box<Val>),
     RefType(bool, Box<Val>),
     Ref(bool, Box<Val>),
-    Deref(Box<Val>),
     Error,
 }
 impl IsTerm for Val {
@@ -312,22 +312,39 @@ impl Val {
                 }
                 Val::Neutral(ref mut neutral) => {
                     neutral.app(Elim::App(icit, arg));
-                    return self;
+                    self
                 }
-                Val::Error => return Val::Error,
+                Val::Error => Val::Error,
                 _ => unreachable!("Cannot resolve application to non-Lam"),
             },
-            Elim::Member(_) => todo!(),
+            Elim::Member(def, idx, name) => match self {
+                // TODO Val::Struct
+                Val::Neutral(ref mut neutral) => {
+                    neutral.app(Elim::Member(def, idx, name));
+                    self
+                }
+                Val::Error => Val::Error,
+                _ => unreachable!("Cannot resolve member of non-struct {:?}", self),
+            },
             Elim::Case(ref case, _) => match case.try_eval(&self) {
-                Some(v) => return v,
+                Some(v) => v,
                 None => match self {
                     Val::Neutral(ref mut neutral) => {
                         neutral.app(x);
-                        return self;
+                        self
                     }
-                    Val::Error => return Val::Error,
+                    Val::Error => Val::Error,
                     x => todo!("couldn't eval case of {:?}", x),
                 },
+            },
+            Elim::Deref => match self {
+                Val::Ref(_, v) => *v,
+                Val::Neutral(ref mut neutral) => {
+                    neutral.app(Elim::Deref);
+                    self
+                }
+                Val::Error => Val::Error,
+                _ => unreachable!("Cannot dereference non-reference {:?}", self),
             },
         }
     }
@@ -341,8 +358,9 @@ impl Elim<Expr> {
     pub fn eval(self, env: &mut Env) -> Elim<Val> {
         match self {
             Elim::App(icit, arg) => Elim::App(icit, arg.eval(env)),
-            Elim::Member(_) => todo!(),
+            Elim::Member(def, idx, name) => Elim::Member(def, idx, name),
             Elim::Case(case, ty) => Elim::Case(case.map(|x| x.eval(env)), ty.eval(env)),
+            Elim::Deref => Elim::Deref,
         }
     }
 }
@@ -350,11 +368,12 @@ impl Elim<Val> {
     pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Elim<Expr> {
         match self {
             Elim::App(icit, arg) => Elim::App(icit, arg.quote(size, inline_metas)),
-            Elim::Member(_) => todo!(),
+            Elim::Member(def, idx, name) => Elim::Member(def, idx, name),
             Elim::Case(case, ty) => Elim::Case(
                 case.map(|x| x.quote(size, inline_metas)),
                 ty.quote(size, inline_metas),
             ),
+            Elim::Deref => Elim::Deref,
         }
     }
 }
@@ -408,10 +427,14 @@ impl Expr {
                 Box::new(b.eval(env)),
                 Box::new(t.eval(env)),
             ),
+            Expr::Struct(def, fields, ty) => Val::Struct(
+                def,
+                fields.into_iter().map(|x| x.eval(env)).collect(),
+                Box::new(ty.eval(env)),
+            ),
             Expr::Assign(_, _) => todo!("handle partial evaluation failing"),
             Expr::RefType(m, x) => Val::RefType(m, Box::new(x.eval(env))),
             Expr::Ref(m, x) => Val::Ref(m, Box::new(x.eval(env))),
-            Expr::Deref(x) => Val::Deref(Box::new(x.eval(env))),
             Expr::Error => Val::Error,
             Expr::Spanned(_, x) => x.eval(env),
         }
@@ -438,9 +461,7 @@ impl Expr {
                 },
                 _ => (),
             },
-            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
-                x.eval_quote_in_place(env, size, inline_metas)
-            }
+            Expr::RefType(_, x) | Expr::Ref(_, x) => x.eval_quote_in_place(env, size, inline_metas),
             Expr::Assign(place, expr) => {
                 place.eval_quote_in_place(env, size, inline_metas);
                 expr.eval_quote_in_place(env, size, inline_metas);
@@ -457,7 +478,7 @@ impl Expr {
                         }
                         _ => x.eval_quote_in_place(env, size, inline_metas),
                     },
-                    Elim::Member(_) => todo!(),
+                    Elim::Member(_, _, _) | Elim::Deref => (),
                     Elim::Case(case, ty) => {
                         case.visit_mut(|x| x.eval_quote_in_place(env, size, inline_metas));
                         ty.eval_quote_in_place(env, size, inline_metas);
@@ -480,6 +501,12 @@ impl Expr {
                 a.eval_quote_in_place(env, size, inline_metas);
                 b.eval_quote_in_place(env, size, inline_metas);
                 t.eval_quote_in_place(env, size, inline_metas);
+            }
+            Expr::Struct(_, fields, ty) => {
+                for i in fields {
+                    i.eval_quote_in_place(env, size, inline_metas);
+                }
+                ty.eval_quote_in_place(env, size, inline_metas);
             }
             Expr::Error => (),
             Expr::Spanned(_, x) => x.eval_quote_in_place(env, size, inline_metas),
@@ -539,13 +566,20 @@ impl Val {
             }
             Val::RefType(m, x) => Expr::RefType(m, Box::new(x.quote(size, inline_metas))),
             Val::Ref(m, x) => Expr::Ref(m, Box::new(x.quote(size, inline_metas))),
-            Val::Deref(x) => Expr::Deref(Box::new(x.quote(size, inline_metas))),
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),
             Val::Pair(a, b, t) => Expr::Pair(
                 Box::new(a.quote(size, inline_metas)),
                 Box::new(b.quote(size, inline_metas)),
                 Box::new(t.quote(size, inline_metas)),
+            ),
+            Val::Struct(def, fields, ty) => Expr::Struct(
+                def,
+                fields
+                    .into_iter()
+                    .map(|x| x.quote(size, inline_metas))
+                    .collect(),
+                Box::new(ty.quote(size, inline_metas)),
             ),
             Val::Error => Expr::Error,
         }
@@ -590,13 +624,11 @@ impl Val {
                 Sigma => CopyClass::Move,
                 Lam(_, c) | Pi(_, c) => c,
             },
-            // TODO technically deref can return a type
-            Val::Lit(_) | Val::Pair(_, _, _) | Val::Ref(_, _) | Val::Deref(_) => {
+            Val::Lit(_) | Val::Pair(_, _, _) | Val::Ref(_, _) | Val::Struct { .. } => {
                 unreachable!("not a type")
             }
             Val::RefType(false, _) => CopyClass::Copy,
             Val::RefType(true, _) => CopyClass::Mut,
-
             Val::Error => CopyClass::Copy,
         }
     }
@@ -618,7 +650,7 @@ impl Val {
                 n.spine().iter().fold(Ok(()), |acc, x| {
                     acc.and_then(|()| match x {
                         Elim::App(_, x) => x.check_scope(size),
-                        Elim::Member(_) => todo!(),
+                        Elim::Member(_, _, _) | Elim::Deref => Ok(()),
                         Elim::Case(case, ty) => {
                             let mut res = Ok(());
                             case.visit(|x| {
@@ -631,13 +663,19 @@ impl Val {
                     })
                 })
             }
-            Val::RefType(_, x) | Val::Ref(_, x) | Val::Deref(x) => x.check_scope(size),
+            Val::RefType(_, x) | Val::Ref(_, x) => x.check_scope(size),
             Val::Fun(clos) => clos.check_scope(size),
             Val::Lit(_) => Ok(()),
             Val::Pair(a, b, t) => {
                 a.check_scope(size)?;
                 b.check_scope(size)?;
                 t.check_scope(size)
+            }
+            Val::Struct(_, fields, ty) => {
+                for i in fields {
+                    i.check_scope(size)?;
+                }
+                ty.check_scope(size)
             }
             Val::Error => Ok(()),
         }
@@ -700,7 +738,7 @@ impl Expr {
                 a.check_scope(allowed, inner_size, size)
                     .and_then(|()| match &**e {
                         Elim::App(_, x) => x.check_scope(allowed, inner_size, size),
-                        Elim::Member(_) => todo!(),
+                        Elim::Member(_, _, _) | Elim::Deref => Ok(()),
                         Elim::Case(case, ty) => {
                             let mut res = Ok(());
                             case.visit(|x| {
@@ -712,9 +750,7 @@ impl Expr {
                         }
                     })
             }
-            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
-                x.check_scope(allowed, inner_size, size)
-            }
+            Expr::RefType(_, x) | Expr::Ref(_, x) => x.check_scope(allowed, inner_size, size),
             Expr::Assign(place, expr) => {
                 place.check_scope(allowed, inner_size, size)?;
                 expr.check_scope(allowed, inner_size, size)
@@ -725,6 +761,12 @@ impl Expr {
                 a.check_scope(allowed, inner_size, size)?;
                 b.check_scope(allowed, inner_size, size)?;
                 t.check_scope(allowed, inner_size, size)
+            }
+            Expr::Struct(_, fields, ty) => {
+                for i in fields {
+                    i.check_scope(allowed, inner_size, size)?;
+                }
+                ty.check_scope(allowed, inner_size, size)
             }
             Expr::Spanned(_, x) => x.check_scope(allowed, inner_size, size),
             Expr::Error => Ok(()),

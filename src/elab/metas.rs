@@ -134,8 +134,9 @@ impl MetaSolveError {
                     match e {
                         Elim::App(Impl, _) => "implicit application",
                         Elim::App(_, _) => unreachable!(),
-                        Elim::Member(_) => "member access",
+                        Elim::Member(_, _, _) => "member access",
                         Elim::Case(_, _) => "case-of",
+                        Elim::Deref => "dereference",
                     },
                     (),
                 ),
@@ -455,7 +456,8 @@ impl Elim<Expr> {
             Elim::App(_, x) => {
                 x.check_solution(cxt, mode, s_from, s_to)?;
             }
-            Elim::Member(_) => todo!(),
+            Elim::Member(_, _, _) => (),
+            Elim::Deref => (),
             Elim::Case(_, _) => todo!(),
         }
         Ok(())
@@ -506,9 +508,7 @@ impl Expr {
                 // TODO unfold here instead of in solve()
                 _ => (),
             },
-            Expr::RefType(_, x) | Expr::Ref(_, x) | Expr::Deref(x) => {
-                x.check_solution(cxt, mode, s_from, s_to)?
-            }
+            Expr::RefType(_, x) | Expr::Ref(_, x) => x.check_solution(cxt, mode, s_from, s_to)?,
             Expr::Assign(place, expr) => {
                 place.check_solution(cxt, mode, s_from, s_to)?;
                 expr.check_solution(cxt, mode, s_from, s_to)?;
@@ -521,6 +521,12 @@ impl Expr {
                 a.check_solution(cxt, mode, s_from, s_to)?;
                 b.check_solution(cxt, mode, s_from, s_to)?;
                 t.check_solution(cxt, mode, s_from, s_to)?;
+            }
+            Expr::Struct(_, fields, ty) => {
+                for i in fields {
+                    i.check_solution(cxt, mode, s_from, s_to)?;
+                }
+                ty.check_solution(cxt, mode, s_from, s_to)?;
             }
             Expr::Fun(EClos {
                 class: _,

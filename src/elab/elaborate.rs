@@ -24,6 +24,115 @@ impl ast::Expr {
     }
 }
 
+impl ast::Stmt {
+    pub(super) fn elab_dec(&self, cxt: &mut Cxt) -> Option<(SName, Val)> {
+        match self {
+            ast::Stmt::Def(ast::Def::LetDef(l)) if l.body().is_some() => {
+                cxt.error(l.span(), "Only declarations are allowed in this context");
+                None
+            }
+            ast::Stmt::Def(ast::Def::FunDef(f)) if f.body().is_some() => {
+                cxt.error(f.span(), "Only declarations are allowed in this context");
+                None
+            }
+            ast::Stmt::Def(ast::Def::LetDef(l)) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
+                Some((Some((_, name)), Some(ty))) => Some((
+                    name,
+                    ty.expr()?
+                        .check(Val::Type, cxt, CheckReason::UsedAsType)
+                        .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                        .eval(&mut cxt.env()),
+                )),
+                _ => {
+                    cxt.error(l.span(), "Could not determine type of 'let' declaration");
+                    None
+                }
+            },
+            ast::Stmt::Expr(e @ ast::Expr::Binder(_)) => match e.as_let_def_pat(cxt.db) {
+                Some((Some((_, name)), Some(ty))) => Some((
+                    name,
+                    ty.expr()?
+                        .check(Val::Type, cxt, CheckReason::UsedAsType)
+                        .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                        .eval(&mut cxt.env()),
+                )),
+                _ => {
+                    cxt.error(e.span(), "Could not determine type of field declaration");
+                    None
+                }
+            },
+            ast::Stmt::Def(ast::Def::FunDef(x)) => {
+                let (_, ty) = infer_fun(
+                    x.imp_par(),
+                    x.exp_par().as_par(),
+                    x.ret_ty().and_then(|x| x.expr()),
+                    None,
+                    Some(CopyClass::Copy),
+                    x.span(),
+                    cxt,
+                );
+                let ty = ty
+                    .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                    .eval(&mut cxt.env());
+
+                Some((x.name()?.name(cxt.db), ty))
+            }
+            ast::Stmt::Def(ast::Def::TypeDef(_)) => {
+                cxt.error(
+                    self.span(),
+                    "Type definitions are not allowed in this context",
+                );
+                None
+            }
+            _ => {
+                cxt.error(self.span(), "Expressions are not allowed in this context");
+                None
+            }
+        }
+    }
+
+    pub(super) fn elab_field(
+        &self,
+        cxt: &mut Cxt,
+    ) -> Option<(SName, Result<(Expr, Val), ast::Expr>)> {
+        match self {
+            ast::Stmt::Def(ast::Def::LetDef(l)) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
+                Some((Some((_, name)), _)) => Some((name, Err(l.body()?.expr()?))),
+                _ => None,
+            },
+            ast::Stmt::Def(ast::Def::FunDef(x)) => {
+                let (expr, ty) = infer_fun(
+                    x.imp_par(),
+                    x.exp_par().as_par(),
+                    x.ret_ty().and_then(|x| x.expr()),
+                    x.body(),
+                    Some(CopyClass::Copy),
+                    x.span(),
+                    cxt,
+                );
+                let ty = ty
+                    .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                    .eval(&mut cxt.env());
+
+                Some((x.name()?.name(cxt.db), Ok((expr, ty))))
+            }
+            ast::Stmt::Def(ast::Def::TypeDef(_)) => {
+                cxt.error(
+                    self.span(),
+                    "Type definitions are not allowed in this context",
+                );
+                None
+            }
+            ast::Stmt::Expr(e @ ast::Expr::Var(x)) => Some((x.name(cxt.db), Err(e.clone()))),
+            ast::Stmt::Expr(ast::Expr::Binder(x)) => Some((
+                x.pat()?.expr()?.as_let_def_pat(cxt.db)?.0?.1,
+                Err(x.ty()?.expr()?),
+            )),
+            _ => None,
+        }
+    }
+}
+
 impl ast::Def {
     pub(super) fn elab_type(&self, def_id: Def, def_node: DefNode, cxt: &mut Cxt) -> Option<Val> {
         match self {
@@ -45,10 +154,18 @@ impl ast::Def {
                 }
             },
             ast::Def::FunDef(x) => {
+                // Return () by default
+                let rty = x
+                    .ret_ty()
+                    .and_then(|x| x.expr())
+                    .unwrap_or(ast::Expr::GroupedExpr(ast::GroupedExpr::Val {
+                        span: x.name().map_or(self.span(), |x| x.span()),
+                        expr: None,
+                    }));
                 let (_, ty) = infer_fun(
                     x.imp_par(),
                     x.exp_par().as_par(),
-                    x.ret_ty().and_then(|x| x.expr()),
+                    Some(rty),
                     None,
                     Some(CopyClass::Copy),
                     x.span(),
@@ -69,8 +186,6 @@ impl ast::Def {
                         .eval(&mut cxt.env()),
                 )
             }
-            ast::Def::TypeDefShort(_) => todo!(),
-            ast::Def::TypeDefStruct(_) => todo!(),
         }
     }
 
@@ -141,10 +256,19 @@ impl ast::Def {
                     cxt.error(self.span(), "Function declarations aren't allowed in this context, a function body is required");
                 }
 
+                // Return () by default
+                let rty = x
+                    .ret_ty()
+                    .and_then(|x| x.expr())
+                    .unwrap_or(ast::Expr::GroupedExpr(ast::GroupedExpr::Val {
+                        span: x.name().map_or(self.span(), |x| x.span()),
+                        expr: None,
+                    }));
+
                 let (term, ty) = infer_fun(
                     x.imp_par(),
                     x.exp_par().as_par(),
-                    x.ret_ty().and_then(|x| x.expr()),
+                    Some(rty),
                     x.body(),
                     Some(CopyClass::Copy),
                     x.span(),
@@ -166,7 +290,7 @@ impl ast::Def {
                 cxt.push();
                 let (_, ty) = infer_fun(
                     x.imp_par(),
-                    x.exp_par().as_par(),
+                    None,
                     Some(ast::Expr::Type(ast::Type::Val {
                         span: x.name().map_or_else(|| x.span(), |n| n.span()),
                         kw: None,
@@ -224,127 +348,245 @@ impl ast::Def {
                     _ => (Vec::new(), default_rty),
                 };
 
-                let mut ctors = Vec::new();
-                let mut n_unnamed = 0;
-                for c in x.cons() {
-                    let split = match c.name().map(|x| x.name(cxt.db)) {
-                        Some((n, _)) => SplitId::Named(n),
-                        None => {
-                            n_unnamed += 1;
-                            SplitId::Idx(n_unnamed)
-                        }
-                    };
-                    let span = c.name().map_or(RelSpan::empty(), |x| x.span());
-                    // If a return type is not given, the type arguments are added as implicit parameters
-                    // and all of them are applied to the type constructor for the return type.
-                    // If the return type is given, nothing is implied and the types and parameters are as given.
-                    let cty = if c.ret_ty().is_some() {
-                        let (_, cty) = infer_fun(
-                            c.imp_par(),
-                            c.exp_par().as_par(),
-                            c.ret_ty().and_then(|x| x.expr()),
-                            None,
-                            Some(CopyClass::Copy),
-                            c.span(),
-                            cxt,
+                let body = match x.body() {
+                    Some(_) if x.exp_par().is_some() => {
+                        cxt.error(
+                            x.exp_par().map_or(x.span(), |x| x.span()),
+                            "Type definitions can only have implicit parameters",
                         );
-                        fn head(t: &Expr) -> &Expr {
-                            match t {
-                                Expr::Elim(a, e) if matches!(&**e, Elim::App(_, _)) => head(a),
-                                t => t,
+                        DefBody::Let(Box::new(Expr::Error))
+                    }
+                    // Tuple struct
+                    None => {
+                        // We manufacture a constructor with SplitId::Idx(0)
+                        let cty = {
+                            cxt.push();
+
+                            let implicit = ty_params.clone();
+                            for par in &implicit {
+                                cxt.define_local(
+                                    par.name,
+                                    par.ty.clone().eval(&mut cxt.env()),
+                                    None,
+                                    None,
+                                    false,
+                                );
                             }
-                        }
-                        let rty = match &cty {
-                            Expr::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
-                                match &*clos.body {
-                                    Expr::Fun(clos2)
-                                        if matches!(clos.class, Pi(Impl, _))
-                                            && matches!(clos2.class, Pi(Expl, _)) =>
-                                    {
-                                        &clos2.body
+                            let explicit = x.exp_par().as_par().map_or(Vec::new(), |x| {
+                                check_params(
+                                    x.par.as_args(),
+                                    x.pat,
+                                    ParamTys::Inferred,
+                                    CheckReason::UsedAsType,
+                                    None,
+                                    cxt,
+                                )
+                            });
+
+                            let mut ty = default_rty.clone().quote(cxt.size(), Some(&cxt.mcxt));
+                            if !explicit.is_empty() {
+                                ty = Expr::Fun(EClos {
+                                    class: Pi(Expl, CopyClass::Copy),
+                                    params: explicit,
+                                    body: Box::new(ty),
+                                });
+                            }
+                            if !implicit.is_empty() {
+                                ty = Expr::Fun(EClos {
+                                    class: Pi(Impl, CopyClass::Copy),
+                                    params: implicit,
+                                    body: Box::new(ty),
+                                });
+                            }
+
+                            cxt.pop();
+
+                            ty
+                        };
+                        let split = SplitId::Idx(0);
+                        DefBody::Type(vec![(
+                            split,
+                            x.span(),
+                            cty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                                .eval(&mut cxt.env()),
+                        )])
+                    }
+                    // (G)ADT
+                    Some(ast::TypeDefBody::TypeDefCtors(cons)) => {
+                        let mut ctors = Vec::new();
+                        let mut n_unnamed = 0;
+                        for c in cons.cons() {
+                            let split = match c.name().map(|x| x.name(cxt.db)) {
+                                Some((n, _)) => SplitId::Named(n),
+                                None => {
+                                    n_unnamed += 1;
+                                    SplitId::Idx(n_unnamed)
+                                }
+                            };
+                            let span = c.name().map_or(RelSpan::empty(), |x| x.span());
+                            // If a return type is not given, the type arguments are added as implicit parameters
+                            // and all of them are applied to the type constructor for the return type.
+                            // If the return type is given, nothing is implied and the types and parameters are as given.
+                            let cty = if c.ret_ty().is_some() {
+                                let (_, cty) = infer_fun(
+                                    c.imp_par(),
+                                    c.exp_par().as_par(),
+                                    c.ret_ty().and_then(|x| x.expr()),
+                                    None,
+                                    Some(CopyClass::Copy),
+                                    c.span(),
+                                    cxt,
+                                );
+                                fn head(t: &Expr) -> &Expr {
+                                    match t {
+                                        Expr::Elim(a, e) if matches!(&**e, Elim::App(_, _)) => {
+                                            head(a)
+                                        }
+                                        t => t,
+                                    }
+                                }
+                                let rty = match &cty {
+                                    Expr::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
+                                        match &*clos.body {
+                                            Expr::Fun(clos2)
+                                                if matches!(clos.class, Pi(Impl, _))
+                                                    && matches!(clos2.class, Pi(Expl, _)) =>
+                                            {
+                                                &clos2.body
+                                            }
+                                            rty => rty,
+                                        }
                                     }
                                     rty => rty,
-                                }
-                            }
-                            rty => rty,
-                        };
-                        match head(rty) {
-                            Expr::Head(Head::Var(Var::Def(_, def))) if *def == def_id => (),
-                            Expr::Error => (),
-                            _ => cxt.error(
-                                c.ret_ty().unwrap().span(),
-                                Doc::start("Datatype constructor must return a value of its parent type, not").space().chain(rty.pretty(cxt.db))
-                            ),
-                        }
-                        cty
-                    } else {
-                        cxt.push();
-
-                        let mut implicit = ty_params.clone();
-                        for par in &implicit {
-                            cxt.define_local(
-                                par.name,
-                                par.ty.clone().eval(&mut cxt.env()),
-                                None,
-                                None,
-                                false,
-                            );
-                        }
-                        implicit.append(&mut check_params(
-                            c.imp_par()
-                                .into_iter()
-                                .flat_map(|x| x.pars())
-                                .flat_map(|x| {
-                                    match x.par().and_then(|x| x.pat()).and_then(|x| x.expr()) {
-                                        Some(x) => x.as_args(),
-                                        None => vec![Err(x.span())],
+                                };
+                                match head(rty) {
+                                        Expr::Head(Head::Var(Var::Def(_, def))) if *def == def_id => (),
+                                        Expr::Error => (),
+                                        _ => cxt.error(
+                                            c.ret_ty().unwrap().span(),
+                                            Doc::start("Datatype constructor must return a value of its parent type, not").space().chain(rty.pretty(cxt.db))
+                                        ),
                                     }
+                                cty
+                            } else {
+                                cxt.push();
+
+                                let mut implicit = ty_params.clone();
+                                for par in &implicit {
+                                    cxt.define_local(
+                                        par.name,
+                                        par.ty.clone().eval(&mut cxt.env()),
+                                        None,
+                                        None,
+                                        false,
+                                    );
+                                }
+                                implicit.append(&mut check_params(
+                                    c.imp_par()
+                                        .into_iter()
+                                        .flat_map(|x| x.pars())
+                                        .flat_map(|x| {
+                                            match x
+                                                .par()
+                                                .and_then(|x| x.pat())
+                                                .and_then(|x| x.expr())
+                                            {
+                                                Some(x) => x.as_args(),
+                                                None => vec![Err(x.span())],
+                                            }
+                                        })
+                                        .collect(),
+                                    true,
+                                    ParamTys::Inferred,
+                                    CheckReason::UsedAsType,
+                                    None,
+                                    cxt,
+                                ));
+                                let explicit = c.exp_par().as_par().map_or(Vec::new(), |x| {
+                                    check_params(
+                                        x.par.as_args(),
+                                        x.pat,
+                                        ParamTys::Inferred,
+                                        CheckReason::UsedAsType,
+                                        None,
+                                        cxt,
+                                    )
+                                });
+
+                                let mut ty = default_rty.clone().quote(cxt.size(), Some(&cxt.mcxt));
+                                if !explicit.is_empty() {
+                                    ty = Expr::Fun(EClos {
+                                        class: Pi(Expl, CopyClass::Copy),
+                                        params: explicit,
+                                        body: Box::new(ty),
+                                    });
+                                }
+                                if !implicit.is_empty() {
+                                    ty = Expr::Fun(EClos {
+                                        class: Pi(Impl, CopyClass::Copy),
+                                        params: implicit,
+                                        body: Box::new(ty),
+                                    });
+                                }
+
+                                cxt.pop();
+
+                                ty
+                            };
+                            if let Some(name) = c.name().map(|x| x.name(cxt.db)) {
+                                cxt.define(
+                                    name,
+                                    Var::Cons(name, cxt.db.cons_id(def_id, split)),
+                                    cty.clone().eval(&mut cxt.env()),
+                                );
+                            }
+                            ctors.push((split, span, cty));
+                        }
+                        DefBody::Type(
+                            ctors
+                                .into_iter()
+                                .map(|(s, span, ty)| {
+                                    (
+                                        s,
+                                        span,
+                                        ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                                            .eval(&mut cxt.env()),
+                                    )
                                 })
                                 .collect(),
-                            true,
-                            ParamTys::Inferred,
-                            CheckReason::UsedAsType,
-                            cxt,
-                        ));
-                        let explicit = c.exp_par().as_par().map_or(Vec::new(), |x| {
-                            check_params(
-                                x.par.as_args(),
-                                x.pat,
-                                ParamTys::Inferred,
-                                CheckReason::UsedAsType,
-                                cxt,
-                            )
-                        });
-
-                        let mut ty = default_rty.clone().quote(cxt.size(), Some(&cxt.mcxt));
-                        if !explicit.is_empty() {
-                            ty = Expr::Fun(EClos {
-                                class: Pi(Expl, CopyClass::Copy),
-                                params: explicit,
-                                body: Box::new(ty),
-                            });
-                        }
-                        if !implicit.is_empty() {
-                            ty = Expr::Fun(EClos {
-                                class: Pi(Impl, CopyClass::Copy),
-                                params: implicit,
-                                body: Box::new(ty),
-                            });
-                        }
-
-                        cxt.pop();
-
-                        ty
-                    };
-                    if let Some(name) = c.name().map(|x| x.name(cxt.db)) {
-                        cxt.define(
-                            name,
-                            Var::Cons(name, cxt.db.cons_id(def_id, split)),
-                            cty.clone().eval(&mut cxt.env()),
-                        );
+                        )
                     }
-                    ctors.push((split, span, cty));
-                }
+                    // Struct
+                    Some(ast::TypeDefBody::TypeDefStruct(s)) => {
+                        let mut fields = Vec::new();
+                        cxt.push();
+                        for i in ty_params {
+                            cxt.define_local(i.name, i.ty.eval(&mut cxt.env()), None, None, false);
+                        }
+                        cxt.push();
+                        for i in s.fields().into_iter().flat_map(|x| x.fields()) {
+                            if let Some((name, ty)) = i.elab_dec(cxt) {
+                                cxt.define_local(name, ty.clone(), None, None, false);
+                                fields.push((name, ty));
+                            }
+                        }
+                        cxt.pop();
+                        // Make sure to inline any relevant metas
+                        let mut size = cxt.size();
+                        let body = DefBody::Struct(
+                            fields
+                                .into_iter()
+                                .map(|(name, ty)| {
+                                    let r = (name, ty.quote(size, Some(&cxt.mcxt)));
+                                    size += 1;
+                                    r
+                                })
+                                .collect(),
+                        );
+                        cxt.pop();
+                        body
+                    }
+                };
 
                 cxt.push_def_scope(def_id);
                 let mut i = 0;
@@ -373,24 +615,10 @@ impl ast::Def {
                     // Inline metas in all types involved after elaborating the constructors
                     // since metas caused by inferred types of type arguments can be solved in ctors
                     ty: Box::new(ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))),
-                    body: DefBody::Type(
-                        ctors
-                            .into_iter()
-                            .map(|(s, span, ty)| {
-                                (
-                                    s,
-                                    span,
-                                    ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
-                                        .eval(&mut cxt.env()),
-                                )
-                            })
-                            .collect(),
-                    ),
+                    body,
                     children,
                 })
             }
-            ast::Def::TypeDefShort(_) => todo!(),
-            ast::Def::TypeDefStruct(_) => todo!(),
         }
     }
 }
@@ -406,8 +634,6 @@ impl ast::Def {
                 .map(|(_, n)| n),
             ast::Def::FunDef(x) => x.name().map(|x| x.name(db)),
             ast::Def::TypeDef(x) => x.name().map(|x| x.name(db)),
-            ast::Def::TypeDefShort(x) => x.name().map(|x| x.name(db)),
-            ast::Def::TypeDefStruct(x) => x.name().map(|x| x.name(db)),
         }
     }
 }
@@ -426,7 +652,7 @@ fn infer_fun(
     // [a, b, c, d] => ((e, f) => ...)
 
     cxt.push_capture();
-    let implicit = check_params(
+    let mut implicit = check_params(
         implicit
             .into_iter()
             .flat_map(|x| x.pars())
@@ -440,17 +666,22 @@ fn infer_fun(
         true,
         ParamTys::Inferred,
         CheckReason::UsedAsType,
+        None,
         cxt,
     );
+    let mut extra_pars = Vec::new();
     let explicit = explicit.map_or(Vec::new(), |x| {
         check_params(
             x.par.as_args(),
             x.pat,
             ParamTys::Inferred,
             CheckReason::UsedAsType,
+            Some(&mut extra_pars),
             cxt,
         )
     });
+    extra_pars.append(&mut implicit);
+    let implicit = extra_pars;
 
     cxt.record_deps();
     let bspan = body.as_ref().map_or(span, |x| x.span());
@@ -557,9 +788,11 @@ fn check_params(
     pat: bool,
     tys: ParamTys,
     reason: CheckReason,
+    mut extra_pars: Option<&mut Vec<Par>>,
     cxt: &mut Cxt,
 ) -> Vec<Par> {
     let err_missing = tys.err_missing();
+    let mut first = true;
     tys.zip_with(
         pars.into_iter()
             .flat_map(|x| match x {
@@ -593,18 +826,106 @@ fn check_params(
                     .add(" which is not present in expected type", ()),
             );
         }
-        check_par(x, pat, ty.map(|x| (x, reason)), cxt)
+        check_par(
+            x,
+            pat,
+            ty.map(|x| (x, reason)),
+            if first {
+                first = false;
+                // Rust should make this easier
+                extra_pars.as_mut().map(|x| &mut **x)
+            } else {
+                None
+            },
+            cxt,
+        )
     })
     .collect()
+}
+
+impl ast::Expr {
+    fn is_self_pat(&self, incl_ref: bool, cxt: &Cxt) -> bool {
+        match self {
+            ast::Expr::Reference(x) if incl_ref => {
+                x.expr().map_or(false, |x| x.is_self_pat(false, cxt))
+            }
+            ast::Expr::RefMut(x) if incl_ref => {
+                x.expr().map_or(false, |x| x.is_self_pat(false, cxt))
+            }
+            ast::Expr::MutVar(x) if incl_ref => x
+                .var()
+                .map_or(false, |x| x.name(cxt.db).0 == cxt.db.name("self".into())),
+            ast::Expr::Var(x) => x.name(cxt.db).0 == cxt.db.name("self".into()),
+            _ => false,
+        }
+    }
+
+    fn as_self_pat(&self, ty: Expr) -> (bool, Expr) {
+        match self {
+            ast::Expr::Reference(_) => (false, Expr::RefType(false, Box::new(ty))),
+            ast::Expr::RefMut(_) => (true, Expr::RefType(true, Box::new(ty))),
+            ast::Expr::Var(_) => (false, ty),
+            ast::Expr::MutVar(_) => (true, ty),
+            _ => unreachable!(),
+        }
+    }
 }
 
 fn check_par(
     x: Result<ast::Expr, RelSpan>,
     pat: bool,
     expected_ty: Option<(Expr, CheckReason)>,
+    extra_pars: Option<&mut Vec<Par>>,
     cxt: &mut Cxt,
 ) -> Par {
     let par = match x {
+        Ok(x) if x.is_self_pat(true, cxt) => {
+            let (m, ty) = match cxt.resolve_self() {
+                Some(def) if extra_pars.is_some() => {
+                    let edef = cxt.db.def_elab(def).unwrap().result.unwrap();
+                    let rty = Expr::var(Var::Def(edef.name, def));
+                    let (mut ty_params, rty) = match &*edef.ty {
+                        Expr::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
+                            let mut env = cxt.env();
+                            let size = cxt.size();
+                            for i in &clos.params {
+                                cxt.define_local(
+                                    i.name,
+                                    i.ty.clone().eval(&mut cxt.env()),
+                                    None,
+                                    None,
+                                    false,
+                                );
+                            }
+                            let arg = clos
+                                .clone()
+                                .eval(&mut env)
+                                .synthesize_args(size)
+                                .quote(cxt.size(), None);
+                            (
+                                clos.params.clone(),
+                                Expr::Elim(
+                                    Box::new(rty),
+                                    Box::new(Elim::App(clos.class.icit().unwrap(), arg)),
+                                ),
+                            )
+                        }
+                        _ => (Vec::new(), rty),
+                    };
+                    extra_pars.unwrap().append(&mut ty_params);
+                    x.as_self_pat(rty)
+                }
+                _ => {
+                    cxt.error(x.span(), "`self` cannot be used in this context");
+                    (false, Expr::Error)
+                }
+            };
+            Par {
+                name: (cxt.db.name("self".into()), x.span()),
+                mutable: m,
+                ty,
+            }
+        }
         Ok(ast::Expr::Binder(x)) => {
             let (name, ty) = x
                 .pat()
@@ -860,53 +1181,164 @@ impl Expr {
     }
 }
 
-pub(super) fn resolve_member(
-    lhs: Expr,
-    mut lhs_ty: Val,
+pub(super) fn member_type(lhs: &Val, def: Def, idx: u64, cxt: &mut Cxt) -> Val {
+    if let Some(DefBody::Struct(fields)) =
+        cxt.db.def_elab(def).and_then(|x| x.result).map(|x| x.body)
+    {
+        let mut env = cxt.env();
+        let lhs_ty = lhs.clone().quote(cxt.size(), Some(&cxt.mcxt)).ty(cxt);
+        match cxt.db.def_type(def).and_then(|x| x.result).unwrap() {
+            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => match lhs_ty {
+                Val::Neutral(n) => {
+                    assert!(matches!(n.head(), Head::Var(Var::Def(_, d)) if d == def));
+                    for i in n.spine() {
+                        match i {
+                            Elim::App(Impl, x) => {
+                                for (val, _) in x
+                                    .clone()
+                                    .zip_pair(&clos.params)
+                                    .expect("TODO switch to using case or something")
+                                {
+                                    env.push(Some(Ok(val)));
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            },
+            _ => (),
+        }
+        for (i, (fname, fty)) in fields.iter().enumerate() {
+            if i as u64 == idx {
+                return fty.clone().eval(&mut env);
+            }
+            let val = lhs
+                .clone()
+                .app(Elim::Member(def, i as u64, *fname), &mut env);
+            env.push(Some(Ok(val)));
+        }
+        Val::Error
+    } else {
+        Val::Error
+    }
+}
+
+pub(super) fn resolve_member(lhs: PlaceOrExpr, member: ast::Member, cxt: &mut Cxt) -> PlaceOrExpr {
+    match resolve_member_method(lhs, member, cxt) {
+        Ok(x) => x,
+        Err((l, _)) => {
+            cxt.error(l.span(), "Method call not allowed here");
+            PlaceOrExpr::Expr(Expr::Error, Val::Error, None, l.span())
+        }
+    }
+}
+
+pub(super) fn resolve_member_method(
+    lhs: PlaceOrExpr,
     member: ast::Member,
     cxt: &mut Cxt,
-) -> (Expr, Val) {
+) -> Result<PlaceOrExpr, (PlaceOrExpr, Def)> {
+    let span = RelSpan::new(lhs.span().start, member.span().end);
+    let mut lhs_ty = lhs.ty(cxt);
     if let Some(name) = member.var().map(|x| x.name(cxt.db)) {
         lhs_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
         match &lhs_ty {
             Val::Error => (),
-            // TODO struct members
-            // TODO methods
+            Val::RefType(_, _) => {
+                return resolve_member_method(
+                    PlaceOrExpr::Place(Place::Deref(Box::new(lhs))),
+                    member,
+                    cxt,
+                )
+            }
+            Val::Neutral(n) => match n.head() {
+                Head::Var(Var::Def(_, def)) => {
+                    let edef = cxt.db.def_elab(def);
+                    // Struct fields
+                    match edef
+                        .as_ref()
+                        .and_then(|x| x.result.as_ref())
+                        .map(|x| &x.body)
+                    {
+                        Some(DefBody::Struct(fields)) => {
+                            if let Some((idx, (_, _))) = fields
+                                .iter()
+                                .enumerate()
+                                .find(|(_, ((n, _), _))| *n == name.0)
+                            {
+                                return Ok(PlaceOrExpr::Place(Place::Member(
+                                    Box::new(lhs),
+                                    def,
+                                    idx as u64,
+                                    name,
+                                )));
+                            }
+                        }
+                        _ => (),
+                    }
+                    // Methods in `where` block
+                    if let Some((split, _)) =
+                        edef.as_ref().and_then(|x| x.result.as_ref()).and_then(|x| {
+                            x.children
+                                .iter()
+                                .find(|(s, _)| *s == SplitId::Named(name.0))
+                        })
+                    {
+                        let def = cxt.db.def(DefLoc::Child(def, *split));
+                        // TODO check if it actually has a `self` parameter
+                        return Err((lhs, def));
+                    }
+                }
+                _ => (),
+            },
             _ => {
+                let lhs = lhs.finish(AccessKind::from(lhs_ty.copy_class(cxt)), cxt);
                 let mut lhs_val = lhs.clone().eval(&mut cxt.env());
                 lhs_val.inline_head(&mut cxt.env(), &cxt.mcxt);
                 match lhs_val {
                     Val::Neutral(n) => match n.head() {
                         Head::Var(Var::Def(def_name, def)) => {
                             let edef = cxt.db.def_elab(def);
-                            match edef
-                                .as_ref()
-                                .and_then(|x| x.result.as_ref())
-                                .map(|x| &x.body)
-                            {
-                                Some(DefBody::Type(ctors)) => {
-                                    if let Some((split, _, ty)) =
-                                        ctors.iter().find(|(s, _, _)| *s == SplitId::Named(name.0))
-                                    {
-                                        return (
-                                            Expr::var(Var::Cons(name, cxt.db.cons_id(def, *split))),
-                                            ty.clone(),
-                                        );
-                                    } else if let Some((split, _)) = edef
-                                        .unwrap()
-                                        .result
-                                        .unwrap()
+                            match edef.as_ref().and_then(|x| x.result.as_ref()) {
+                                Some(edef) => {
+                                    match &edef.body {
+                                        DefBody::Type(ctors) => {
+                                            if let Some((split, _, ty)) = ctors
+                                                .iter()
+                                                .find(|(s, _, _)| *s == SplitId::Named(name.0))
+                                            {
+                                                return Ok(PlaceOrExpr::Expr(
+                                                    Expr::var(Var::Cons(
+                                                        name,
+                                                        cxt.db.cons_id(def, *split),
+                                                    )),
+                                                    ty.clone(),
+                                                    None,
+                                                    span,
+                                                ));
+                                            }
+                                        }
+                                        _ => (),
+                                    }
+                                    if let Some((split, _)) = edef
                                         .children
-                                        .into_iter()
+                                        .iter()
                                         .find(|(s, _)| *s == SplitId::Named(name.0))
                                     {
-                                        let def = cxt.db.def(DefLoc::Child(def, split));
+                                        let def = cxt.db.def(DefLoc::Child(def, *split));
                                         let ty = cxt
                                             .db
                                             .def_type(def)
                                             .and_then(|x| x.result)
                                             .unwrap_or(Val::Error);
-                                        return (Expr::var(Var::Def(name, def)), ty);
+                                        return Ok(PlaceOrExpr::Expr(
+                                            Expr::var(Var::Def(name, def)),
+                                            ty,
+                                            None,
+                                            span,
+                                        ));
                                     } else {
                                         cxt.error(
                                             member.span(),
@@ -915,7 +1347,12 @@ pub(super) fn resolve_member(
                                                 .add(" has no member ", ())
                                                 .add(cxt.db.lookup_name(name.0), Doc::COLOR1),
                                         );
-                                        return (Expr::Error, Val::Error);
+                                        return Ok(PlaceOrExpr::Expr(
+                                            Expr::Error,
+                                            Val::Error,
+                                            None,
+                                            span,
+                                        ));
                                     }
                                 }
                                 _ => (),
@@ -939,19 +1376,68 @@ pub(super) fn resolve_member(
             )
             .add("' does not have members", ()),
     );
-    (Expr::Error, Val::Error)
+    Ok(PlaceOrExpr::Expr(Expr::Error, Val::Error, None, span))
 }
 
-enum PlaceOrExpr {
+#[derive(Debug, Clone)]
+pub enum PlaceOrExpr {
     Place(Place),
-    Expr(Expr, Val, Borrow, RelSpan),
+    Expr(Expr, Val, Option<Borrow>, RelSpan),
 }
-enum Place {
+impl PlaceOrExpr {
+    pub fn finish(self, kind: AccessKind, cxt: &mut Cxt) -> Expr {
+        match self {
+            PlaceOrExpr::Place(place) => {
+                place
+                    .try_access(kind, cxt)
+                    .unwrap_or_else(|e| cxt.error(place.span(), e));
+                place.to_expr(cxt)
+            }
+            PlaceOrExpr::Expr(e, _, _, _) => e,
+        }
+    }
+
+    fn to_expr(self, cxt: &Cxt) -> Expr {
+        match self {
+            PlaceOrExpr::Place(place) => place.to_expr(cxt),
+            PlaceOrExpr::Expr(e, _, _, _) => e,
+        }
+    }
+
+    pub fn ty(&self, cxt: &mut Cxt) -> Val {
+        match self {
+            PlaceOrExpr::Place(place) => place.ty(cxt).unwrap_or_else(|e| {
+                cxt.error(place.span(), e);
+                Val::Error
+            }),
+            PlaceOrExpr::Expr(_, ty, _, _) => ty.clone(),
+        }
+    }
+
+    fn span(&self) -> RelSpan {
+        match self {
+            PlaceOrExpr::Place(place) => place.span(),
+            PlaceOrExpr::Expr(_, _, _, s) => *s,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Place {
     Var(VarEntry),
     Deref(Box<PlaceOrExpr>),
+    Member(Box<PlaceOrExpr>, Def, u64, SName),
 }
 impl Place {
-    fn ty(&self, cxt: &Cxt) -> Result<Val, TypeError> {
+    fn span(&self) -> RelSpan {
+        match self {
+            Place::Var(entry) => entry.access(AccessKind::Copy).span,
+            Place::Deref(b) => b.span(),
+            Place::Member(b, _, _, n) => RelSpan::new(b.span().start, n.1.end),
+        }
+    }
+
+    fn ty(&self, cxt: &mut Cxt) -> Result<Val, TypeError> {
         match self {
             Place::Var(v) => Ok(v.ty(cxt)),
             Place::Deref(e) => {
@@ -968,16 +1454,21 @@ impl Place {
                     ))
                 }
             }
+            Place::Member(e, def, idx, _) => {
+                let lhs = e.clone().to_expr(cxt).eval(&mut cxt.env());
+                Ok(member_type(&lhs, *def, *idx, cxt))
+            }
         }
     }
 
     fn to_expr(self, cxt: &Cxt) -> Expr {
         match self {
             Place::Var(v) => Expr::var(v.var(cxt).cvt(cxt.size())),
-            Place::Deref(e) => Expr::Deref(Box::new(match *e {
-                PlaceOrExpr::Place(p) => p.to_expr(cxt),
-                PlaceOrExpr::Expr(e, _, _, _) => e,
-            })),
+            Place::Deref(e) => Expr::Elim(Box::new(e.to_expr(cxt)), Box::new(Elim::Deref)),
+            Place::Member(e, def, idx, name) => Expr::Elim(
+                Box::new(e.to_expr(cxt)),
+                Box::new(Elim::Member(def, idx, name)),
+            ),
         }
     }
 
@@ -1000,6 +1491,27 @@ impl Place {
                 }
                 r
             }
+            Place::Member(e, _, _, _) => {
+                // Just forward on the access
+                match &**e {
+                    PlaceOrExpr::Place(p) => {
+                        p.try_access(kind, cxt)?;
+                    }
+                    PlaceOrExpr::Expr(_, _, b, s) => {
+                        if let Some(b) = b {
+                            cxt.add_dep(
+                                *b,
+                                Access {
+                                    kind,
+                                    point: AccessPoint::Expr,
+                                    span: *s,
+                                },
+                            );
+                        }
+                    }
+                };
+                Ok(())
+            }
             Place::Deref(_) if kind == AccessKind::Move => {
                 Err("Cannot move out of reference".into())
             } // TODO type information (make this a MoveError variant)
@@ -1010,14 +1522,16 @@ impl Place {
                         Cow::Owned(p.ty(cxt)?)
                     }
                     PlaceOrExpr::Expr(_, t, b, s) => {
-                        cxt.add_dep(
-                            *b,
-                            Access {
-                                kind,
-                                point: AccessPoint::Expr,
-                                span: *s,
-                            },
-                        );
+                        if let Some(b) = b {
+                            cxt.add_dep(
+                                *b,
+                                Access {
+                                    kind,
+                                    point: AccessPoint::Expr,
+                                    span: *s,
+                                },
+                            );
+                        }
                         Cow::Borrowed(t)
                     }
                 };
@@ -1109,6 +1623,7 @@ impl ast::Expr {
                         true,
                         ParamTys::Impl(&mut implicit_tys),
                         reason,
+                        None,
                         cxt,
                     );
                     // Add any implicit parameters in the type but not the lambda to the lambda
@@ -1160,6 +1675,7 @@ impl ast::Expr {
                             true,
                             ParamTys::Expl(clos.par_ty().quote(cxt.size(), None)),
                             reason,
+                            None,
                             cxt,
                         )
                     } else {
@@ -1385,17 +1901,37 @@ impl ast::Expr {
                     None => {
                         cxt.record_deps();
                         let (e, ty) = e.expr()?.infer(cxt);
-                        let borrow = cxt.finish_deps(self.span())?;
+                        let borrow = cxt.finish_deps(self.span());
                         Some(Place::Deref(Box::new(PlaceOrExpr::Expr(
                             e,
                             ty,
-                            borrow,
+                            Some(borrow),
                             self.span(),
                         ))))
                     }
                 }
             }
+            ast::Expr::App(x) if x.imp() == None && x.exp() == None && x.do_expr() == None => {
+                let lhs = x.lhs()?.elab_unborrowed(cxt);
+                let x = resolve_member(lhs, x.member()?, cxt);
+                match x {
+                    PlaceOrExpr::Place(place) => Some(place),
+                    PlaceOrExpr::Expr(_, _, _, _) => None, // TODO this work gets duplicated
+                }
+            }
             _ => None,
+        }
+    }
+
+    pub fn elab_unborrowed(&self, cxt: &mut Cxt) -> PlaceOrExpr {
+        match self.elab_place(cxt) {
+            Some(place) => PlaceOrExpr::Place(place),
+            None => {
+                cxt.record_deps();
+                let (e, ty) = self.infer(cxt);
+                let borrow = cxt.finish_deps(self.span());
+                PlaceOrExpr::Expr(e, ty, Some(borrow), self.span())
+            }
         }
     }
 
@@ -1444,26 +1980,6 @@ impl ast::Expr {
                     ))
                 }),
             _ => None,
-        }
-    }
-
-    fn infer_access(
-        &self,
-        cxt: &mut Cxt,
-        inline_head: bool,
-        kind: impl FnOnce(&Val) -> AccessKind,
-    ) -> Result<(Expr, Val), TypeError> {
-        match self.elab_place(cxt) {
-            Some(place) => {
-                let ty = place.ty(cxt)?;
-                let mut ty2 = Cow::Borrowed(&ty);
-                if inline_head {
-                    ty2.to_mut().inline_head(&mut cxt.env(), &cxt.mcxt);
-                }
-                place.try_access(kind(&ty2), cxt)?;
-                Ok((place.to_expr(cxt), ty))
-            }
-            None => Ok(self.infer(cxt)),
         }
     }
 
@@ -1607,17 +2123,56 @@ impl ast::Expr {
                     }
                     ast::Expr::App(x) => {
                         cxt.record_deps();
-                        let (mut lhs, mut lhs_ty) = x
+                        let mut lhs = x
                             .lhs()
                             .ok_or("Missing left-hand side of application")?
-                            .infer_access(cxt, true, |ty| match ty {
-                                Val::Fun(clos) => clos.class.copy_class().into(),
-                                _ => AccessKind::Move,
-                            })?;
-                        lhs_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
-                        let mut lhs_span = x.lhs().unwrap().span();
+                            .elab_unborrowed(cxt);
+                        let mut self_param = None;
+                        let self_span = lhs.span();
                         if let Some(member) = x.member() {
-                            (lhs, lhs_ty) = resolve_member(lhs, lhs_ty, member, cxt);
+                            lhs = match resolve_member_method(lhs.into(), member.clone(), cxt) {
+                                Ok(lhs) => lhs,
+                                Err((lhs, mdef)) => {
+                                    let ty = cxt.db.def_type(mdef).unwrap().result.unwrap();
+                                    self_param = Some(lhs);
+                                    PlaceOrExpr::Expr(
+                                        Expr::var(Var::Def(
+                                            member.var().unwrap().name(cxt.db),
+                                            mdef,
+                                        )),
+                                        ty,
+                                        None,
+                                        member.span(),
+                                    )
+                                }
+                            }
+                        }
+                        let mut lhs_ty = lhs.ty(cxt);
+                        lhs_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
+                        let mut lhs_span = lhs.span();
+                        let mut lhs = lhs.finish(lhs_ty.copy_class(cxt).into(), cxt);
+
+                        if x.exp().is_some() && self_param.is_none() {
+                            if let &Expr::Head(Head::Var(Var::Def(_, def))) = &lhs {
+                                let edef = cxt.db.def_elab(def);
+                                match edef
+                                    .as_ref()
+                                    .and_then(|x| x.result.as_ref())
+                                    .map(|x| (x.name, &x.body))
+                                {
+                                    Some((name, DefBody::Type(ctors))) if ctors.len() == 1 => {
+                                        let (split, _, ty) = ctors.first().unwrap();
+                                        if *split == SplitId::Idx(0) {
+                                            lhs = Expr::var(Var::Cons(
+                                                name,
+                                                cxt.db.cons_id(def, *split),
+                                            ));
+                                            lhs_ty = ty.clone();
+                                        }
+                                    }
+                                    _ => (),
+                                }
+                            }
                         }
 
                         // First handle implicit arguments, then curry and apply explicits
@@ -1653,7 +2208,78 @@ impl ast::Expr {
                             let (exp, rty) = match lhs_ty {
                                 Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                                     let aty = clos.par_ty();
-                                    let exp = exp.check(aty, cxt, CheckReason::ArgOf(lhs_span));
+                                    let (self_arg, ety) = if let Some(mut self_param) = self_param {
+                                        let (sty, eclos) = match aty {
+                                            Val::Fun(clos) if clos.class == Sigma => {
+                                                (clos.par_ty(), Some(clos))
+                                            }
+                                            aty => (aty, None),
+                                        };
+                                        // Insert proper ref and derefs
+                                        loop {
+                                            match (&sty, self_param.ty(cxt)) {
+                                                (Val::RefType(_, _), Val::RefType(_, _)) => break,
+                                                (Val::RefType(m, _), _) => {
+                                                    let ty = self_param.ty(cxt);
+                                                    cxt.record_deps();
+                                                    let e = self_param
+                                                        .finish(sty.copy_class(cxt).into(), cxt);
+                                                    let b = cxt.finish_deps(self_span);
+                                                    self_param = PlaceOrExpr::Expr(
+                                                        Expr::Ref(*m, Box::new(e)),
+                                                        Val::RefType(*m, Box::new(ty)),
+                                                        Some(b),
+                                                        self_span,
+                                                    );
+                                                    break;
+                                                }
+                                                (_, Val::RefType(_, _)) => {
+                                                    self_param = PlaceOrExpr::Place(Place::Deref(
+                                                        Box::new(self_param),
+                                                    ));
+                                                    continue;
+                                                }
+                                                _ => break,
+                                            }
+                                        }
+                                        let pty = self_param.ty(cxt);
+                                        let kind = sty.copy_class(cxt).into();
+                                        cxt.unify(pty, sty, CheckReason::ArgOf(lhs_span))?;
+                                        let self_arg = self_param.finish(kind, cxt);
+                                        (
+                                            Some(self_arg.clone()),
+                                            eclos.map(|x| x.apply(self_arg.eval(&mut cxt.env()))),
+                                        )
+                                    } else {
+                                        (None, Some(aty))
+                                    };
+                                    let exp = match (ety, exp) {
+                                        (None, ast::Expr::GroupedExpr(x)) if x.expr().is_none() => {
+                                            self_arg.expect("pretty sure this case is impossible")
+                                        }
+                                        (None, x) => {
+                                            cxt.error(
+                                                x.span(),
+                                                "Unexpected extra arguments to method call",
+                                            );
+                                            Expr::Error
+                                        }
+                                        (Some(ety), exp) => {
+                                            let exp =
+                                                exp.check(ety, cxt, CheckReason::ArgOf(lhs_span));
+                                            match self_arg {
+                                                Some(arg) => Expr::Pair(
+                                                    Box::new(arg),
+                                                    Box::new(exp),
+                                                    Box::new(
+                                                        clos.par_ty()
+                                                            .quote(cxt.size(), Some(&cxt.mcxt)),
+                                                    ),
+                                                ),
+                                                None => exp,
+                                            }
+                                        }
+                                    };
                                     let vexp = exp.clone().eval(&mut cxt.env());
                                     let rty = clos.apply(vexp);
                                     (exp, rty)
@@ -1676,24 +2302,32 @@ impl ast::Expr {
                                 rty,
                             )
                         } else {
+                            if self_param.is_some() {
+                                cxt.error(
+                                    lhs_span,
+                                    Doc::start("'").chain(lhs.pretty(cxt.db)).add(
+                                        "' is a method, not a field; use parentheses () to call it",
+                                        (),
+                                    ),
+                                );
+                            }
                             (lhs, lhs_ty)
                         };
-                        if let Some(arg_borrow) = cxt.finish_deps(x.span()) {
-                            let parents = arg_borrow.mutable_dependencies(cxt);
-                            for (parent, mut access) in parents {
-                                access.point = AccessPoint::Function(fun_name);
-                                access.span = lhs_span;
-                                arg_borrow.add_borrow(parent, access, cxt);
-                            }
-                            cxt.add_dep(
-                                arg_borrow,
-                                Access {
-                                    point: AccessPoint::Expr,
-                                    kind: AccessKind::Move,
-                                    span: x.span(),
-                                },
-                            );
+                        let arg_borrow = cxt.finish_deps(x.span());
+                        let parents = arg_borrow.mutable_dependencies(cxt);
+                        for (parent, mut access) in parents {
+                            access.point = AccessPoint::Function(fun_name);
+                            access.span = lhs_span;
+                            arg_borrow.add_borrow(parent, access, cxt);
                         }
+                        cxt.add_dep(
+                            arg_borrow,
+                            Access {
+                                point: AccessPoint::Expr,
+                                kind: AccessKind::Move,
+                                span: x.span(),
+                            },
+                        );
                         (expr, ty)
                     }
                     ast::Expr::Do(d) => {
@@ -1844,7 +2478,11 @@ impl ast::Expr {
                         let vty = ty.clone().eval(&mut cxt.env());
                         (Expr::Pair(Box::new(a), Box::new(b), Box::new(ty)), vty)
                     }
-                    ast::Expr::EffPat(_) => todo!(),
+                    ast::Expr::EffPat(_) => {
+                        return Err(TypeError::Other(Doc::start(
+                            "'eff' not allowed in this context",
+                        )))
+                    }
                     ast::Expr::Binder(_) => {
                         return Err(TypeError::Other(Doc::start(
                             "Binder '_: _' not allowed in this context",
@@ -1855,7 +2493,130 @@ impl ast::Expr {
                             "'mut' not allowed in this context",
                         )))
                     }
-                    ast::Expr::StructInit(_) => todo!(),
+                    ast::Expr::StructInit(x) => {
+                        let lhs = x
+                            .lhs()
+                            .ok_or("missing struct name")?
+                            .check(Val::Type, cxt, CheckReason::UsedAsType)
+                            .eval(&mut cxt.env());
+                        match &lhs {
+                            Val::Neutral(n) => match n.head() {
+                                Head::Var(Var::Def(def_name, def)) => {
+                                    if let Some(Definition {
+                                        body: DefBody::Struct(fields),
+                                        ..
+                                    }) = cxt.db.def_elab(def).and_then(|x| x.result)
+                                    {
+                                        let body = x.fields().ok_or("missing struct fields")?;
+                                        let mut named = Vec::new();
+                                        let mut vals: Vec<(usize, Val)> = Vec::new();
+                                        let env = {
+                                            let mut env = cxt.env();
+                                            match cxt
+                                                .db
+                                                .def_type(def)
+                                                .and_then(|x| x.result)
+                                                .unwrap()
+                                            {
+                                                Val::Fun(clos)
+                                                    if matches!(clos.class, Pi(Impl, _)) =>
+                                                {
+                                                    assert!(
+                                                        matches!(n.head(), Head::Var(Var::Def(_, d)) if d == def)
+                                                    );
+                                                    for i in n.spine() {
+                                                        match i {
+                                                                    Elim::App(Impl, x) => {
+                                                                        for (val, _) in x
+                                                                            .clone()
+                                                                            .zip_pair(&clos.params)
+                                                                            .expect("TODO switch to using case or something")
+                                                                        {
+                                                                            env.push(Some(Ok(val)));
+                                                                        }
+                                                                    }
+                                                                    _ => unreachable!(),
+                                                                }
+                                                    }
+                                                }
+                                                _ => (),
+                                            }
+                                            env
+                                        };
+                                        for stmt in body.fields() {
+                                            let (name, val) = stmt.elab_field(cxt).ok_or("Expression in struct literal must define a name and give it a value")?;
+                                            let (idx, (fname, ety)) = fields
+                                                .iter()
+                                                .enumerate()
+                                                .find(|(_, (n, _))| n.0 == name.0)
+                                                .ok_or(
+                                                    Doc::start("Struct ")
+                                                        .chain(def_name.pretty(cxt.db))
+                                                        .add(" has no member '", ())
+                                                        .chain(name.pretty(cxt.db))
+                                                        .add("'", ()),
+                                                )?;
+                                            let mut env = {
+                                                let mut env = env.clone();
+
+                                                for i in 0..idx {
+                                                    env.push(
+                                                        vals.iter()
+                                                            .find(|(n, _)| *n == i)
+                                                            .map(|(_, x)| Ok(x.clone())),
+                                                    );
+                                                }
+                                                env
+                                            };
+                                            let ety = ety.clone().eval(&mut env);
+                                            let val = match val {
+                                                Ok((expr, ty)) => {
+                                                    cxt.unify(
+                                                        ty,
+                                                        ety,
+                                                        CheckReason::GivenType(fname.1),
+                                                    )?;
+                                                    expr
+                                                }
+                                                Err(expr) => expr.check(
+                                                    ety,
+                                                    cxt,
+                                                    CheckReason::GivenType(fname.1),
+                                                ),
+                                            };
+                                            vals.push((idx, val.clone().eval(&mut cxt.env())));
+                                            named.push((name, val));
+                                        }
+                                        let ret = fields.iter().map(|(name, _)| {
+                                        let mut found = None;
+                                        for (n, e) in &named {
+                                            if n.0 == name.0 {
+                                                if found.is_none() {
+                                                    found = Some(e.clone());
+                                                } else {
+                                                    cxt.error(n.1, Doc::start("Struct literal contains duplicate name '").chain(n.pretty(cxt.db)).add("'", ()));
+                                                }
+                                            }
+                                        }
+                                        found.unwrap_or_else(|| {
+                                            cxt.error(def_name.1, Doc::start("Struct literal missing field '").chain(name.pretty(cxt.db)).add("'", ()));
+                                            Expr::Error
+                                        })
+                                    }).collect();
+                                        let ety = lhs.clone().quote(cxt.size(), Some(&cxt.mcxt));
+                                        return Ok((Expr::Struct(def, ret, Box::new(ety)), lhs));
+                                    }
+                                }
+                                _ => (),
+                            },
+                            _ => (),
+                        }
+                        cxt.error(
+                            x.lhs().unwrap().span(),
+                            "Expected struct type before 'struct'",
+                        );
+                        (Expr::Error, Val::Error)
+                    }
                 }
             })
         };

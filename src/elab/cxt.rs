@@ -70,6 +70,7 @@ pub fn prelude_defs(db: &dyn Elaborator) -> std::sync::Arc<HashMap<Name, VarDef>
             ("U16", Builtin::IntType(IntType::U16), Val::Type),
             ("U32", Builtin::IntType(IntType::U32), Val::Type),
             ("U64", Builtin::IntType(IntType::U64), Val::Type),
+            ("Str", Builtin::StringType, Val::Type),
         ]
         .iter()
         .map(|(k, v, t)| {
@@ -104,7 +105,14 @@ impl Scope {
 }
 
 impl LocalScope {
-    fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val, borrow: Borrow, mutable: bool) {
+    fn define(
+        &mut self,
+        name: SName,
+        var: Var<Lvl>,
+        ty: Val,
+        borrow: Option<Borrow>,
+        mutable: bool,
+    ) {
         // TODO we probably want to keep the spans
         self.names.push(LocalVarDef::new(
             name.0,
@@ -119,7 +127,7 @@ impl LocalScope {
             name,
             Var::Local(name, self.size.next_lvl()),
             ty,
-            borrow,
+            Some(borrow),
             mutable,
         );
         self.size = self.size.inc();
@@ -155,28 +163,28 @@ struct BorrowInvalid {
     chain_end: Option<Access>,
     move_type: Option<Rc<Expr>>,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct BorrowDef {
-    mutable_parents: Vec<(Borrow, Access)>,
+    mutable_parents: HashMap<Borrow, Access>,
     /// Only one mutable borrow can be active at once, but there could still be multiple entries here if it gets mutably
     /// borrowed separately in two different case branches
-    mutable_borrows: Vec<(Borrow, Access)>,
-    immutable_borrows: Vec<(Borrow, Access)>,
+    mutable_borrows: HashMap<Borrow, Access>,
+    immutable_borrows: HashMap<Borrow, Access>,
     /// These are borrows that don't borrow this one, but do depend on it by-value - so if this gets invalidated, they will too
-    move_or_copy: Vec<(Borrow, Access)>,
+    move_or_copy: HashMap<Borrow, Access>,
     invalid: Option<BorrowInvalid>,
 }
 impl BorrowDef {
-    fn merge_with(&mut self, mut other: BorrowDef) -> Option<BorrowInvalid> {
+    fn merge_with(&mut self, other: BorrowDef) -> Option<BorrowInvalid> {
         let was_valid = self.invalid.is_none();
         let other_valid = other.invalid.is_none();
         if was_valid {
             self.invalid = other.invalid;
         }
-        self.mutable_borrows.append(&mut other.mutable_borrows);
-        self.immutable_borrows.append(&mut other.immutable_borrows);
-        self.move_or_copy.append(&mut other.move_or_copy);
-        self.mutable_parents.append(&mut other.mutable_parents);
+        self.mutable_borrows.extend(other.mutable_borrows);
+        self.immutable_borrows.extend(other.immutable_borrows);
+        self.move_or_copy.extend(other.move_or_copy);
+        self.mutable_parents.extend(other.mutable_parents);
         if was_valid || other_valid {
             // It got invalidated in only one of the branches, invalidate it again now
             self.invalid.clone()
@@ -224,13 +232,7 @@ impl From<CopyClass> for AccessKind {
 pub struct Borrow(NonZeroU64);
 impl Borrow {
     fn new(cxt: &mut Cxt) -> Borrow {
-        cxt.borrows.push(BorrowDef {
-            mutable_parents: Vec::new(),
-            mutable_borrows: Vec::new(),
-            immutable_borrows: Vec::new(),
-            invalid: None,
-            move_or_copy: Vec::new(),
-        });
+        cxt.borrows.push(BorrowDef::default());
         Borrow(
             (cxt.borrows_start + cxt.borrows.len() as u64)
                 .try_into()
@@ -255,7 +257,7 @@ impl Borrow {
 
     pub fn mutable_dependencies(self, cxt: &Cxt) -> Vec<(Borrow, Access)> {
         self.def(cxt)
-            .map(|d| d.mutable_parents.clone())
+            .map(|d| d.mutable_parents.iter().map(|(&x, &y)| (x, y)).collect())
             .unwrap_or_default()
     }
 
@@ -267,8 +269,8 @@ impl Borrow {
             if def.invalid.is_none()
                 || def
                     .move_or_copy
-                    .last()
-                    .map_or(false, |x| x.1.kind == AccessKind::Move)
+                    .iter()
+                    .any(|x| x.1.kind == AccessKind::Move)
             {
                 let start = invalid.chain_start.is_none();
                 if def.invalid.is_none() {
@@ -279,7 +281,7 @@ impl Borrow {
                     .iter()
                     .chain(&def.move_or_copy)
                     .chain(&def.mutable_borrows)
-                    .copied()
+                    .map(|(&x, &y)| (x, y))
                     .collect::<Vec<_>>()
                 {
                     if start {
@@ -300,7 +302,7 @@ impl Borrow {
                     .immutable_borrows
                     .iter()
                     .chain(&def.mutable_borrows)
-                    .copied()
+                    .map(|(&x, &y)| (x, y))
                     .collect::<Vec<_>>()
                 {
                     i.invalidate(
@@ -353,14 +355,20 @@ impl Borrow {
         if let Some(def) = self.def_mut(cxt) {
             match access.kind {
                 AccessKind::Mut => {
-                    def.mutable_borrows.push((borrow, access));
+                    def.mutable_borrows.insert(borrow, access);
                     if let Some(def) = borrow.def_mut(cxt) {
-                        def.mutable_parents.push((self, access));
+                        def.mutable_parents.insert(self, access);
                     }
                 }
-                AccessKind::Imm => def.immutable_borrows.push((borrow, access)),
-                AccessKind::Move => def.move_or_copy.push((borrow, access)),
-                AccessKind::Copy => def.move_or_copy.push((borrow, access)),
+                AccessKind::Imm => {
+                    def.immutable_borrows.insert(borrow, access);
+                }
+                AccessKind::Move => {
+                    def.move_or_copy.insert(borrow, access);
+                }
+                AccessKind::Copy => {
+                    def.move_or_copy.insert(borrow, access);
+                }
             }
         }
     }
@@ -370,11 +378,11 @@ impl Borrow {
 struct LocalVarDef {
     name: Name,
     var: VarDef,
-    borrow: Borrow,
+    borrow: Option<Borrow>,
     mutable: bool,
 }
 impl LocalVarDef {
-    fn new(name: Name, var: VarDef, borrow: Borrow, mutable: bool) -> Self {
+    fn new(name: Name, var: VarDef, borrow: Option<Borrow>, mutable: bool) -> Self {
         LocalVarDef {
             name,
             var,
@@ -384,6 +392,7 @@ impl LocalVarDef {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum VarEntry {
     Local {
         name: SName,
@@ -504,7 +513,6 @@ impl AccessError {
             color: Some(Doc::COLOR2),
         }];
         if let Some(access) = self.dep_chain_start {
-            assert!(matches!(access.kind, AccessKind::Imm | AccessKind::Mut));
             let mutable = access.kind == AccessKind::Mut;
             secondary.push(Label {
                 span: access.span,
@@ -576,6 +584,7 @@ pub enum MoveError {
     InvalidMove(Doc, Name, Box<Expr>),
     InvalidBorrow(Doc, Name),
     FunAccess(Access, Expr, CheckReason),
+    InvalidAccess(Doc, Access),
 }
 impl From<AccessError> for MoveError {
     fn from(value: AccessError) -> Self {
@@ -624,7 +633,7 @@ impl VarEntry {
     pub fn borrow(&self, cxt: &Cxt) -> Option<Borrow> {
         match self {
             VarEntry::Local { scope, var, .. } => match &cxt.scopes[*scope] {
-                Scope::Local(l) => Some(l.names[*var].borrow),
+                Scope::Local(l) => l.names[*var].borrow,
                 _ => unreachable!(),
             },
             _ => None,
@@ -663,7 +672,10 @@ impl VarEntry {
                     let entry = &mut l.names[*var];
                     let lvl = entry.var.as_var().unwrap().as_local();
                     let access = self.access(AccessKind::Move);
-                    entry.borrow.invalidate_self(access, Rc::new(ty), cxt);
+                    entry
+                        .borrow
+                        .unwrap()
+                        .invalidate_self(access, Rc::new(ty), cxt);
                     if let Some(lvl) = lvl {
                         cxt.record_access(lvl, access);
                     }
@@ -706,13 +718,14 @@ impl VarEntry {
                         ));
                     }
                     let access = self.access(AccessKind::borrow(mutable));
-                    cxt.check_deps(entry.borrow, access)?;
+                    let borrow = entry.borrow.unwrap();
+                    cxt.check_deps(borrow, access)?;
 
                     let lvl = entry.var.as_var().unwrap().as_local();
                     if mutable {
-                        entry.borrow.invalidate_children(access, cxt);
+                        borrow.invalidate_children(access, cxt);
                     } else {
-                        entry.borrow.invalidate_mutable(access, cxt);
+                        borrow.invalidate_mutable(access, cxt);
                     }
                     if let Some(lvl) = lvl {
                         cxt.record_access(lvl, access);
@@ -787,7 +800,7 @@ impl Cxt<'_> {
         let borrow = Borrow::new(self);
         self.expr_borrow.push(borrow)
     }
-    pub fn finish_deps(&mut self, span: RelSpan) -> Option<Borrow> {
+    pub fn finish_deps(&mut self, span: RelSpan) -> Borrow {
         let borrow = self.expr_borrow.pop().unwrap();
         // If an error occurs here, it's because of an invalid access within the expression
         let access = Access {
@@ -797,13 +810,15 @@ impl Cxt<'_> {
         };
         self.check_deps(borrow, access)
             .map(|()| borrow)
-            .map_err(|e| self.error(RelSpan::empty(), e))
-            .ok()
+            .unwrap_or_else(|e| {
+                self.error(RelSpan::empty(), e);
+                borrow
+            })
     }
     pub fn add_dep(&mut self, dep: Borrow, access: Access) {
         dep.add_borrow(*self.expr_borrow.last().unwrap(), access, self)
     }
-    pub fn check_deps(&self, borrow: Borrow, access: Access) -> Result<(), AccessError> {
+    pub fn check_deps(&self, borrow: Borrow, access: Access) -> Result<(), MoveError> {
         match borrow.def(self) {
             Some(def) => {
                 if let Some(BorrowInvalid {
@@ -820,11 +835,15 @@ impl Cxt<'_> {
                         dep_chain_end: chain_end,
                         dep_access: base_access,
                         move_type,
-                    });
+                    }
+                    .into());
                 }
             }
             None => {
-                panic!();
+                return Err(MoveError::InvalidAccess(
+                    Doc::start("Cannot access outside local in definition"),
+                    access,
+                ))
             }
         }
         Ok(())
@@ -875,10 +894,7 @@ impl Cxt<'_> {
         if matches!(var, Var::Local(_, _)) {
             panic!("Call define_local() for local variables!");
         }
-        let borrow = Borrow::new(self);
-        self.scope_mut()
-            .unwrap()
-            .define(name, var, ty, borrow, false);
+        self.scope_mut().unwrap().define(name, var, ty, None, false);
     }
 
     pub fn def_cxt(&self) -> DefCxt {
@@ -897,6 +913,13 @@ impl Cxt<'_> {
 
     pub fn size(&self) -> Size {
         self.scope().map_or(Size::zero(), |x| x.size)
+    }
+
+    pub fn resolve_self(&self) -> Option<Def> {
+        self.scopes.iter().rev().find_map(|x| match x {
+            Scope::Namespace(Namespace::Def(def)) => Some(*def),
+            _ => None,
+        })
     }
 
     fn scope(&self) -> Option<&LocalScope> {

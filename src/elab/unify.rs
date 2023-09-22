@@ -340,7 +340,8 @@ impl UnifyCxt<'_, '_> {
                 (Elim::App(i1, a), Elim::App(i2, b)) if i1 == i2 => {
                     self.unify(a.clone(), b.clone(), size, state)?;
                 }
-                (Elim::Member(_), Elim::Member(_)) => todo!(),
+                (Elim::Member(d1, i1, _), Elim::Member(d2, i2, _)) if d1 == d2 && i1 == i2 => (),
+                (Elim::Deref, Elim::Deref) => (),
                 (Elim::Case(_, _), Elim::Case(_, _)) => todo!(),
 
                 _ => return Ok(false),

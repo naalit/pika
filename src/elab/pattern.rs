@@ -249,13 +249,20 @@ mod input {
                     None => Pattern::Any,
                 },
                 ast::Expr::App(x) => {
-                    let (mut lhs, mut lhs_ty) = x
+                    let (lhs, mut lhs_ty) = x
                         .lhs()
-                        .map(|x| x.infer(cxt.ecxt))
+                        .map(|x| x.elab_unborrowed(cxt.ecxt))
+                        .map(|mut lhs| {
+                            if let Some(member) = x.member() {
+                                lhs = resolve_member(lhs, member, cxt.ecxt);
+                            }
+                            let ty = lhs.ty(cxt.ecxt);
+                            (
+                                lhs.finish(AccessKind::from(ty.copy_class(cxt.ecxt)), cxt.ecxt),
+                                ty,
+                            )
+                        })
                         .unwrap_or((Expr::Error, Val::Error));
-                    if let Some(member) = x.member() {
-                        (lhs, lhs_ty) = resolve_member(lhs, lhs_ty, member, cxt.ecxt);
-                    }
                     let cons = match lhs {
                         Expr::Head(Head::Var(Var::Cons(_, cons))) => cons,
                         Expr::Error => return (Pattern::Any, self.span()),
@@ -1224,16 +1231,14 @@ pub(super) fn elab_case(
         cxt.ecxt.merge_borrows(i);
     }
     for i in deps {
-        if let Some(i) = i {
-            cxt.ecxt.add_dep(
-                i,
-                Access {
-                    kind: AccessKind::Move,
-                    point: AccessPoint::Expr,
-                    span: s_span, // TODO span
-                },
-            );
-        }
+        cxt.ecxt.add_dep(
+            i,
+            Access {
+                kind: AccessKind::Move,
+                point: AccessPoint::Expr,
+                span: s_span, // TODO span
+            },
+        );
     }
     let missing = dec.missing_patterns(svar, &cxt);
     if !missing.is_empty() {
@@ -1271,7 +1276,7 @@ impl ast::Case {
             sty,
             self.scrutinee().map_or_else(|| self.span(), |s| s.span()),
             CheckReason::MustMatch(self.scrutinee().map(|x| x.span()).unwrap_or(self.span())),
-            borrow,
+            Some(borrow),
             self.branches().into_iter().map(|x| x.as_row()),
             rty,
             ecxt,
@@ -1397,7 +1402,7 @@ fn elab_block(
                     ty,
                     d.pat().map_or_else(|| d.span(), |s| s.span()),
                     reason,
-                    borrow,
+                    Some(borrow),
                     std::iter::once((d.pat().and_then(|x| x.expr()), d.span(), rest)),
                     rty,
                     ecxt,

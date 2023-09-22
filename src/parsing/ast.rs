@@ -277,13 +277,14 @@ make_nodes! {
     LetDef = pat: Pat, body: Body;
     FunDef = name: Var, imp_par: ImpPars, exp_par: PatPar, ret_ty: Ty, with: WithClause, body: Body;
     ConsDef = name: Var, imp_par: ImpPars, exp_par: TermPar, ret_ty: Ty;
-    TypeDef = name: Var, imp_par: ImpPars, exp_par: PatPar, cons: [ConsDef], block: BlockDef;
-    TypeDefShort = name: Var, imp_par: ImpPars, exp_par: PatPar, inner: Ty, block: BlockDef;
-    TypeDefStruct = name: Var, imp_par: ImpPars, exp_par: PatPar, fields: StructFields, block: BlockDef;
-    StructFields = defs: [Def];
+    TypeDef = name: Var, imp_par: ImpPars, exp_par: TermPar, body: TypeDefBody, block: BlockDef;
+    enum TypeDefBody = TypeDefStruct, TypeDefCtors;
+    TypeDefCtors = cons: [ConsDef];
+    TypeDefStruct = fields: StructFields;
+    StructFields = fields: [Stmt];
     BlockDef = defs: [Def];
 
-    enum Def = LetDef, FunDef, TypeDef, TypeDefShort, TypeDefStruct;
+    enum Def = LetDef, FunDef, TypeDef;
 
     enum Stmt = Expr, Def;
 
@@ -434,63 +435,38 @@ impl Pretty for Def {
                 .add('=', ())
                 .space()
                 .chain(x.body().pretty()),
-            Def::TypeDefShort(x) => Doc::none()
-                .add("type", Doc::style_keyword())
-                .space()
-                .chain(x.name().pretty())
-                .space()
-                .chain(x.imp_par().pretty())
-                .chain(x.exp_par().pretty())
-                .space()
-                .add("=", ())
-                .space()
-                .chain(x.inner().pretty())
-                .chain(if let Some(block) = x.block() {
-                    Doc::none().hardline().chain(
-                        Doc::none()
-                            .add("where", Doc::style_keyword())
-                            .hardline()
-                            .chain(Doc::intersperse(
-                                block.defs().into_iter().map(|x| x.pretty()),
-                                Doc::none().hardline(),
-                            ))
-                            .indent(),
-                    )
-                } else {
-                    Doc::none()
-                }),
-            Def::TypeDefStruct(x) => Doc::none()
-                .add("type", Doc::style_keyword())
-                .space()
-                .chain(x.name().pretty())
-                .space()
-                .chain(x.imp_par().pretty())
-                .chain(x.exp_par().pretty())
-                .space()
-                .add("struct", Doc::style_keyword())
-                .hardline()
-                .chain(Doc::intersperse(
-                    x.fields()
-                        .into_iter()
-                        .flat_map(|x| x.defs())
-                        .map(|x| x.pretty()),
-                    Doc::none().hardline(),
-                ))
-                .indent()
-                .chain(if let Some(block) = x.block() {
-                    Doc::none().hardline().chain(
-                        Doc::none()
-                            .add("where", Doc::style_keyword())
-                            .hardline()
-                            .chain(Doc::intersperse(
-                                block.defs().into_iter().map(|x| x.pretty()),
-                                Doc::none().hardline(),
-                            ))
-                            .indent(),
-                    )
-                } else {
-                    Doc::none()
-                }),
+            // Def::TypeDefStruct(x) => Doc::none()
+            //     .add("type", Doc::style_keyword())
+            //     .space()
+            //     .chain(x.name().pretty())
+            //     .space()
+            //     .chain(x.imp_par().pretty())
+            //     .chain(x.exp_par().pretty())
+            //     .space()
+            //     .add("struct", Doc::style_keyword())
+            //     .hardline()
+            //     .chain(Doc::intersperse(
+            //         x.fields()
+            //             .into_iter()
+            //             .flat_map(|x| x.defs())
+            //             .map(|x| x.pretty()),
+            //         Doc::none().hardline(),
+            //     ))
+            //     .indent()
+            //     .chain(if let Some(block) = x.block() {
+            //         Doc::none().hardline().chain(
+            //             Doc::none()
+            //                 .add("where", Doc::style_keyword())
+            //                 .hardline()
+            //                 .chain(Doc::intersperse(
+            //                     block.defs().into_iter().map(|x| x.pretty()),
+            //                     Doc::none().hardline(),
+            //                 ))
+            //                 .indent(),
+            //         )
+            //     } else {
+            //         Doc::none()
+            //     }),
             Def::TypeDef(x) => Doc::none()
                 .add("type", Doc::style_keyword())
                 .space()
@@ -499,13 +475,28 @@ impl Pretty for Def {
                 .chain(x.imp_par().pretty())
                 .chain(x.exp_par().pretty())
                 .space()
-                .add("of", Doc::style_keyword())
-                .hardline()
-                .chain(Doc::intersperse(
-                    x.cons().into_iter().map(|x| x.pretty()),
-                    Doc::none().hardline(),
-                ))
-                .indent()
+                .chain(match x.body() {
+                    None => Doc::none(),
+                    Some(TypeDefBody::TypeDefStruct(x)) => Doc::none()
+                        .add("struct", Doc::style_keyword())
+                        .hardline()
+                        .chain(Doc::intersperse(
+                            x.fields()
+                                .into_iter()
+                                .flat_map(|x| x.fields())
+                                .map(|x| x.pretty()),
+                            Doc::none().hardline(),
+                        ))
+                        .indent(),
+                    Some(TypeDefBody::TypeDefCtors(x)) => Doc::none()
+                        .add("of", Doc::style_keyword())
+                        .hardline()
+                        .chain(Doc::intersperse(
+                            x.cons().into_iter().map(|x| x.pretty()),
+                            Doc::none().hardline(),
+                        ))
+                        .indent(),
+                })
                 .chain(if let Some(block) = x.block() {
                     Doc::none().hardline().chain(
                         Doc::none()
@@ -574,7 +565,7 @@ impl Pretty for Expr {
                 .chain(Doc::intersperse(
                     x.fields()
                         .into_iter()
-                        .flat_map(|x| x.defs())
+                        .flat_map(|x| x.fields())
                         .map(|x| x.pretty()),
                     Doc::none().hardline(),
                 ))

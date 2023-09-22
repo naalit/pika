@@ -17,7 +17,7 @@ fun borrowed3 (x: DoNotCopy): () = do
 
 fun borrow_move(x: &DoNotCopy, y: DoNotCopy): DoNotCopy = y
 fun same_variable(x: DoNotCopy): DoNotCopy = borrow_move(x, x)
-fun shadow(x: &DoNotCopy, y: DoNotCopy) = do
+fun shadow(x: &DoNotCopy, y: DoNotCopy): DoNotCopy = do
     let z = y
     borrow_move(x, z)
 
@@ -29,7 +29,7 @@ fun borrow_move_s2(x: &Ref[DoNotCopy], y: DoNotCopy): DoNotCopy = y
 fun same_variable_s(x: DoNotCopy): DoNotCopy = do
     let r = Ref.Ref(x)
     borrow_move_s(r, x)
-fun shadow_s(x: Ref[DoNotCopy], y: DoNotCopy) = do
+fun shadow_s(x: Ref[DoNotCopy], y: DoNotCopy): DoNotCopy = do
     let r = Ref.Ref(y)
     let z = y
     borrow_move_s(x, z)

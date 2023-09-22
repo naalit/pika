@@ -148,7 +148,7 @@ pub fn driver(config: Config) {
                                 .emit_stderr();
                         }
                     }
-                    None => todo!(),
+                    _ => todo!(),
                 }
             }
         }
