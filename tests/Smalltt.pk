@@ -172,7 +172,7 @@ let comp : [A] [B : A &-> Type] [C : [a] &-> B (a) &-> Type] &-> (f : [a](b : B 
     f => g => a => f (g (a))
 
 let compTest1 : Nat &-> Nat =
-    comp (suc) (suc)
+    comp ([_] => suc) (suc)
 
 # TODO violates move semantics
 # let compTest2 : [m, A] &-> A &-> Vec A m &-> Vec A (suc (suc m)) =

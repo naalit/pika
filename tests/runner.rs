@@ -67,3 +67,8 @@ fn gadts() {
 fn structs() {
     test(&["Structs.pk"]).succeeds();
 }
+
+#[test]
+fn traits() {
+    test(&["Traits.pk"]).succeeds();
+}

@@ -134,23 +134,28 @@ impl ast::Stmt {
 }
 
 impl ast::Def {
-    pub(super) fn elab_type(&self, def_id: Def, def_node: DefNode, cxt: &mut Cxt) -> Option<Val> {
+    pub(super) fn elab_type(
+        &self,
+        def_id: Def,
+        def_node: DefNode,
+        cxt: &mut Cxt,
+    ) -> Option<DefType> {
         match self {
             ast::Def::LetDef(l) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
-                Some((_, Some(ty))) => Some(
+                Some((_, Some(ty))) => Some(DefType::new(
                     ty.expr()?
                         .check(Val::Type, cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut cxt.env()),
-                ),
+                )),
                 _ => {
                     // Infer the type from the value if possible
                     // TODO would it make sense to call def_elab() instead?
                     let ty = cxt.db.def_elab_n(def_id, def_node).result?.ty;
-                    Some(
+                    Some(DefType::new(
                         ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                             .eval(&mut cxt.env()),
-                    )
+                    ))
                 }
             },
             ast::Def::FunDef(x) => {
@@ -175,16 +180,20 @@ impl ast::Def {
                     .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                     .eval(&mut cxt.env());
 
-                Some(ty)
+                Some(DefType::new(ty))
             }
-            ast::Def::TypeDef(_) => {
+            ast::Def::TypeDef(_) | ast::Def::ImplDef(_) => {
                 // We usually can't know types of type arguments from just the signature
                 // so in general we need to elaborate the constructor types as well
-                let ty = cxt.db.def_elab_n(def_id, def_node).result?.ty;
-                Some(
-                    ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                let def = cxt.db.def_elab_n(def_id, def_node).result?;
+                Some(DefType {
+                    ty: def
+                        .ty
+                        .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut cxt.env()),
-                )
+                    is_trait: def.is_trait,
+                    is_impl: def.is_impl,
+                })
             }
         }
     }
@@ -205,6 +214,8 @@ impl ast::Def {
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
                         Some(Definition {
                             name,
+                            is_trait: false,
+                            is_impl: false,
                             ty: Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
                             body: DefBody::Let(Box::new(Expr::Spanned(
                                 x.body().unwrap().span(),
@@ -221,7 +232,7 @@ impl ast::Def {
                             );
                         }
                         // We already elaborated the type, so avoid doing that twice
-                        let ty = cxt.db.def_type_n(def_id, def_node).result?;
+                        let ty = cxt.db.def_type_n(def_id, def_node).result?.ty;
                         let body = x.body()?.expr()?.check(
                             ty.clone(),
                             cxt,
@@ -230,6 +241,8 @@ impl ast::Def {
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
                         Some(Definition {
                             name,
+                            is_trait: false,
+                            is_impl: false,
                             ty: Box::new(Expr::Spanned(
                                 pty.span(),
                                 Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
@@ -277,6 +290,8 @@ impl ast::Def {
 
                 Some(Definition {
                     name: x.name()?.name(cxt.db),
+                    is_trait: false,
+                    is_impl: false,
                     ty: Box::new(ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))),
                     body: DefBody::Let(Box::new(term.eval_quote(
                         &mut cxt.env(),
@@ -286,10 +301,105 @@ impl ast::Def {
                     children: Vec::new(),
                 })
             }
-            ast::Def::TypeDef(x) => {
+            ast::Def::ImplDef(x) => {
+                let name = self
+                    .name(cxt.db)
+                    .unwrap_or((cxt.db.name("_".into()), x.span()));
+
                 cxt.push();
+                let pars = check_params(
+                    x.pars()
+                        .into_iter()
+                        .flat_map(|x| x.pars())
+                        .flat_map(
+                            |x| match x.par().and_then(|x| x.pat()).and_then(|x| x.expr()) {
+                                Some(x) => x.as_args(),
+                                None => vec![Err(x.span())],
+                            },
+                        )
+                        .collect(),
+                    true,
+                    ParamTys::Inferred(Impl),
+                    CheckReason::UsedAsType,
+                    None,
+                    cxt,
+                );
+
+                let (body, ty) = x.body()?.expr()?.infer(cxt);
+                match &ty {
+                    Val::Neutral(n) if matches!(n.head(), Head::Var(Var::Def(_, d)) if cxt.db.def_type(d).and_then(|x| x.result).map_or(false, |x| x.is_trait)) => {
+                        ()
+                    }
+                    _ => cxt.error(
+                        x.span(),
+                        Doc::start("`impl` used with non-trait '")
+                            .chain(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db))
+                            .add("'", ()),
+                    ),
+                }
+                // inline metas in the term
+                let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
+                let ty = ty.quote(cxt.size(), Some(&cxt.mcxt));
+                cxt.pop();
+
+                let body = if pars.is_empty() {
+                    body
+                } else {
+                    Expr::Fun(EClos {
+                        class: Lam(Impl, CopyClass::Copy),
+                        params: pars.clone(),
+                        body: Box::new(body),
+                    })
+                };
+                let ty = if pars.is_empty() {
+                    ty
+                } else {
+                    Expr::Fun(EClos {
+                        class: Pi(Impl, CopyClass::Copy),
+                        params: pars,
+                        body: Box::new(ty),
+                    })
+                };
+
+                Some(Definition {
+                    name,
+                    is_trait: false,
+                    is_impl: true,
+                    ty: Box::new(ty),
+                    body: DefBody::Let(Box::new(Expr::Spanned(
+                        x.body().unwrap().span(),
+                        Box::new(body),
+                    ))),
+                    children: Vec::new(),
+                })
+            }
+            ast::Def::TypeDef(x) => {
+                let is_trait = x
+                    .syntax()
+                    .unwrap()
+                    .children_with_tokens()
+                    .any(|x| x.kind() == crate::parsing::SyntaxKind::TraitKw);
+                let span = x.name().map_or(x.span(), |x| x.span());
+
+                cxt.push();
+                let has_self = x
+                    .imp_par()
+                    .and_then(|x| x.pars().first().cloned())
+                    .and_then(|x| x.par())
+                    .and_then(|x| x.pat())
+                    .and_then(|x| x.expr())
+                    .and_then(|x| x.as_let_def_pat(cxt.db))
+                    .and_then(|x| x.0)
+                    .map_or(false, |(_, (n, _))| n == cxt.db.name("Self".into()));
                 let (_, ty) = infer_fun(
-                    x.imp_par(),
+                    ImpPars {
+                        imp_pars: x.imp_par(),
+                        extra: if is_trait && !has_self {
+                            vec![Par::new((cxt.db.name("Self".into()), span), Expr::Type)]
+                        } else {
+                            Vec::new()
+                        },
+                    },
                     None,
                     Some(ast::Expr::Type(ast::Type::Val {
                         span: x.name().map_or_else(|| x.span(), |n| n.span()),
@@ -376,7 +486,7 @@ impl ast::Def {
                                 check_params(
                                     x.par.as_args(),
                                     x.pat,
-                                    ParamTys::Inferred,
+                                    ParamTys::Inferred(Expl),
                                     CheckReason::UsedAsType,
                                     None,
                                     cxt,
@@ -497,7 +607,7 @@ impl ast::Def {
                                         })
                                         .collect(),
                                     true,
-                                    ParamTys::Inferred,
+                                    ParamTys::Inferred(Impl),
                                     CheckReason::UsedAsType,
                                     None,
                                     cxt,
@@ -506,7 +616,7 @@ impl ast::Def {
                                     check_params(
                                         x.par.as_args(),
                                         x.pat,
-                                        ParamTys::Inferred,
+                                        ParamTys::Inferred(Expl),
                                         CheckReason::UsedAsType,
                                         None,
                                         cxt,
@@ -559,7 +669,11 @@ impl ast::Def {
                     // Struct
                     Some(ast::TypeDefBody::TypeDefStruct(s)) => {
                         let mut fields = Vec::new();
-                        cxt.push();
+                        if is_trait {
+                            cxt.push_trait_scope();
+                        } else {
+                            cxt.push();
+                        }
                         for i in ty_params {
                             cxt.define_local(i.name, i.ty.eval(&mut cxt.env()), None, None, false);
                         }
@@ -612,6 +726,8 @@ impl ast::Def {
                 cxt.pop();
                 Some(Definition {
                     name: x.name()?.name(cxt.db),
+                    is_trait,
+                    is_impl: false,
                     // Inline metas in all types involved after elaborating the constructors
                     // since metas caused by inferred types of type arguments can be solved in ctors
                     ty: Box::new(ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))),
@@ -634,12 +750,26 @@ impl ast::Def {
                 .map(|(_, n)| n),
             ast::Def::FunDef(x) => x.name().map(|x| x.name(db)),
             ast::Def::TypeDef(x) => x.name().map(|x| x.name(db)),
+            ast::Def::ImplDef(x) => x.name().map(|x| x.name(db)),
+        }
+    }
+}
+
+struct ImpPars {
+    imp_pars: Option<ast::ImpPars>,
+    extra: Vec<Par>,
+}
+impl From<Option<ast::ImpPars>> for ImpPars {
+    fn from(value: Option<ast::ImpPars>) -> Self {
+        ImpPars {
+            imp_pars: value,
+            extra: Vec::new(),
         }
     }
 }
 
 fn infer_fun(
-    implicit: Option<ast::ImpPars>,
+    implicit: impl Into<ImpPars>,
     explicit: Option<SomePar>,
     ret_ty: Option<ast::Expr>,
     body: Option<ast::Body>,
@@ -652,8 +782,21 @@ fn infer_fun(
     // [a, b, c, d] => ((e, f) => ...)
 
     cxt.push_capture();
+    let ImpPars {
+        imp_pars,
+        extra: mut extra_pars,
+    } = implicit.into();
+    for i in &extra_pars {
+        cxt.define_local(
+            i.name,
+            i.ty.clone().eval(&mut cxt.env()),
+            None,
+            None,
+            i.mutable,
+        );
+    }
     let mut implicit = check_params(
-        implicit
+        imp_pars
             .into_iter()
             .flat_map(|x| x.pars())
             .flat_map(
@@ -664,17 +807,16 @@ fn infer_fun(
             )
             .collect(),
         true,
-        ParamTys::Inferred,
+        ParamTys::Inferred(Impl),
         CheckReason::UsedAsType,
         None,
         cxt,
     );
-    let mut extra_pars = Vec::new();
     let explicit = explicit.map_or(Vec::new(), |x| {
         check_params(
             x.par.as_args(),
             x.pat,
-            ParamTys::Inferred,
+            ParamTys::Inferred(Expl),
             CheckReason::UsedAsType,
             Some(&mut extra_pars),
             cxt,
@@ -793,6 +935,7 @@ fn check_params(
 ) -> Vec<Par> {
     let err_missing = tys.err_missing();
     let mut first = true;
+    let allow_impl = tys.allow_impl();
     tys.zip_with(
         pars.into_iter()
             .flat_map(|x| match x {
@@ -837,6 +980,7 @@ fn check_params(
             } else {
                 None
             },
+            allow_impl,
             cxt,
         )
     })
@@ -876,18 +1020,17 @@ fn check_par(
     pat: bool,
     expected_ty: Option<(Expr, CheckReason)>,
     extra_pars: Option<&mut Vec<Par>>,
+    allow_impl: bool,
     cxt: &mut Cxt,
 ) -> Par {
     let par = match x {
         Ok(x) if x.is_self_pat(true, cxt) => {
-            let (m, ty) = match cxt.resolve_self() {
-                Some(def) if extra_pars.is_some() => {
-                    let edef = cxt.db.def_elab(def).unwrap().result.unwrap();
-                    let rty = Expr::var(Var::Def(edef.name, def));
-                    let (mut ty_params, rty) = match &*edef.ty {
-                        Expr::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
-                            let mut env = cxt.env();
-                            let size = cxt.size();
+            let (m, ty) = match cxt.resolve_self(x.span()) {
+                Some(rty) if extra_pars.is_some() => {
+                    let ty = rty.ty(cxt);
+                    let (mut ty_params, rty) = match ty {
+                        Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
+                            let before_size = cxt.size();
                             for i in &clos.params {
                                 cxt.define_local(
                                     i.name,
@@ -899,8 +1042,7 @@ fn check_par(
                             }
                             let arg = clos
                                 .clone()
-                                .eval(&mut env)
-                                .synthesize_args(size)
+                                .synthesize_args(before_size)
                                 .quote(cxt.size(), None);
                             (
                                 clos.params.clone(),
@@ -924,6 +1066,35 @@ fn check_par(
                 name: (cxt.db.name("self".into()), x.span()),
                 mutable: m,
                 ty,
+                is_impl: false,
+            }
+        }
+        Ok(ast::Expr::ImplPat(x)) => {
+            if !allow_impl {
+                cxt.error(x.span(), "`impl` is only allowed in implicit arguments");
+            }
+            let ty = x
+                .expr()
+                .map(|x| x.check(Val::Type, cxt, CheckReason::UsedAsType))
+                .unwrap_or(Expr::Error);
+
+            match ty.clone().eval(&mut cxt.env()) {
+                Val::Neutral(n) if matches!(n.head(), Head::Var(Var::Def(_, d)) if cxt.db.def_type(d).and_then(|x| x.result).map_or(false, |x| x.is_trait)) => {
+                    ()
+                }
+                ty => cxt.error(
+                    x.span(),
+                    Doc::start("`impl` used with non-trait '")
+                        .chain(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db))
+                        .add("'", ()),
+                ),
+            }
+
+            Par {
+                name: (cxt.db.name("_".to_string()), x.span()),
+                ty,
+                mutable: false,
+                is_impl: true,
             }
         }
         Ok(ast::Expr::Binder(x)) => {
@@ -960,7 +1131,12 @@ fn check_par(
                 cxt.unify(ty, expected_ty, reason)
                     .unwrap_or_else(|e| cxt.error(x.span(), e));
             }
-            Par { name, ty, mutable }
+            Par {
+                name,
+                ty,
+                mutable,
+                is_impl: false,
+            }
         }
         Ok(x) if pat => {
             let (name, ty) = x.as_simple_pat(cxt.db).unwrap_or_else(|| {
@@ -981,21 +1157,21 @@ fn check_par(
                     }
                     ty
                 }
-                None => expected_ty.map(|(x, _)| x).unwrap_or_else(|| {
-                    cxt.mcxt
-                        .new_meta(cxt.locals(), MetaBounds::new(Val::Type), x.span())
-                }),
+                None => expected_ty
+                    .map(|(x, _)| x)
+                    .unwrap_or_else(|| cxt.new_meta(MetaBounds::new(Val::Type), x.span())),
             };
-            Par { name, ty, mutable }
+            Par {
+                name,
+                ty,
+                mutable,
+                is_impl: false,
+            }
         }
         Ok(x) => {
             let ty = x.check(Val::Type, cxt, CheckReason::UsedAsType);
 
-            Par {
-                name: (cxt.db.name("_".to_string()), x.span()),
-                ty,
-                mutable: false,
-            }
+            Par::new((cxt.db.name("_".to_string()), x.span()), ty)
         }
         Err(span) => {
             if let Some((ty, reason)) = expected_ty {
@@ -1003,11 +1179,10 @@ fn check_par(
                 cxt.unify(Val::var(Var::Builtin(Builtin::UnitType)), ty, reason)
                     .unwrap_or_else(|e| cxt.error(span, e));
             }
-            Par {
-                name: (cxt.db.name("_".to_string()), span),
-                ty: Expr::var(Var::Builtin(Builtin::UnitType)),
-                mutable: false,
-            }
+            Par::new(
+                (cxt.db.name("_".to_string()), span),
+                Expr::var(Var::Builtin(Builtin::UnitType)),
+            )
         }
     };
     // Define each parameter so it can be used by the types of the rest
@@ -1053,16 +1228,20 @@ impl ast::Pair {
 enum ParamTys<'a, 'b> {
     Impl(&'a mut VecDeque<&'b Par>),
     Expl(Expr),
-    Inferred,
+    Inferred(Icit),
 }
 impl ParamTys<'_, '_> {
     fn err_missing(&self) -> bool {
-        !matches!(self, ParamTys::Inferred)
+        !matches!(self, ParamTys::Inferred(_))
+    }
+
+    fn allow_impl(&self) -> bool {
+        matches!(self, ParamTys::Impl(_) | ParamTys::Inferred(Impl))
     }
 
     fn zip_with<T>(self, it: impl ExactSizeIterator<Item = T>) -> Vec<(Option<Expr>, Vec<T>)> {
         match self {
-            ParamTys::Inferred => it.map(|x| (None, vec![x])).collect(),
+            ParamTys::Inferred(_) => it.map(|x| (None, vec![x])).collect(),
             ParamTys::Impl(v) => it
                 .map(|x| (v.pop_front().map(|par| par.ty.clone()), vec![x]))
                 .collect(),
@@ -1101,7 +1280,7 @@ impl ParamTys<'_, '_> {
 
 impl Expr {
     /// If `term` of type `ty` takes implicit parameters, insert metas to apply them.
-    fn insert_metas(
+    pub(super) fn insert_metas(
         self,
         ty: Val,
         imp_args: Option<ast::ImpArgs>,
@@ -1117,7 +1296,7 @@ impl Expr {
                     .collect();
                 let mut targs: Vec<Expr> = Vec::new();
                 let par_ty = clos.par_ty();
-                let rty = clos.elab_with(|aty| match args.pop_front() {
+                let rty = clos.elab_with(|aty, is_impl| match args.pop_front() {
                     Some(arg) => match arg {
                         Ok(arg) => {
                             let arg = arg.check(aty, cxt, CheckReason::ArgOf(span));
@@ -1141,7 +1320,7 @@ impl Expr {
                     },
                     None => {
                         // Apply a new metavariable
-                        let e = cxt.mcxt.new_meta(cxt.locals(), MetaBounds::new(aty), span);
+                        let e = cxt.new_meta(MetaBounds::new(aty).with_impl(is_impl), span);
                         targs.push(e.clone());
                         e.eval(&mut cxt.env())
                     }
@@ -1176,6 +1355,15 @@ impl Expr {
                     rty,
                 )
             }
+            _ if imp_args.is_some() => {
+                cxt.error(
+                    span,
+                    Doc::start("Value of type '")
+                        .chain(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db))
+                        .add("' does not take implicit parameters", ()),
+                );
+                (self, ty)
+            }
             _ => (self, ty),
         }
     }
@@ -1187,7 +1375,7 @@ pub(super) fn member_type(lhs: &Val, def: Def, idx: u64, cxt: &mut Cxt) -> Val {
     {
         let mut env = cxt.env();
         let lhs_ty = lhs.clone().quote(cxt.size(), Some(&cxt.mcxt)).ty(cxt);
-        match cxt.db.def_type(def).and_then(|x| x.result).unwrap() {
+        match cxt.db.def_type(def).and_then(|x| x.result).unwrap().ty {
             Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => match lhs_ty {
                 Val::Neutral(n) => {
                     assert!(matches!(n.head(), Head::Var(Var::Def(_, d)) if d == def));
@@ -1206,6 +1394,7 @@ pub(super) fn member_type(lhs: &Val, def: Def, idx: u64, cxt: &mut Cxt) -> Val {
                         }
                     }
                 }
+                Val::Error => return Val::Error,
                 _ => unreachable!(),
             },
             _ => (),
@@ -1235,13 +1424,16 @@ pub(super) fn resolve_member(lhs: PlaceOrExpr, member: ast::Member, cxt: &mut Cx
     }
 }
 
+// For a method, returns Err(self, method)
 pub(super) fn resolve_member_method(
     lhs: PlaceOrExpr,
     member: ast::Member,
     cxt: &mut Cxt,
-) -> Result<PlaceOrExpr, (PlaceOrExpr, Def)> {
+) -> Result<PlaceOrExpr, (PlaceOrExpr, Expr)> {
     let span = RelSpan::new(lhs.span().start, member.span().end);
     let mut lhs_ty = lhs.ty(cxt);
+    let mut error = None;
+
     if let Some(name) = member.var().map(|x| x.name(cxt.db)) {
         lhs_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
         match &lhs_ty {
@@ -1288,16 +1480,18 @@ pub(super) fn resolve_member_method(
                     {
                         let def = cxt.db.def(DefLoc::Child(def, *split));
                         // TODO check if it actually has a `self` parameter
-                        return Err((lhs, def));
+                        return Err((lhs, Expr::var(Var::Def(name, def))));
                     }
                 }
                 _ => (),
             },
             _ => {
-                let lhs = lhs.finish(AccessKind::from(lhs_ty.copy_class(cxt)), cxt);
+                let lhs = lhs
+                    .clone()
+                    .finish(AccessKind::from(lhs_ty.copy_class(cxt)), cxt);
                 let mut lhs_val = lhs.clone().eval(&mut cxt.env());
                 lhs_val.inline_head(&mut cxt.env(), &cxt.mcxt);
-                match lhs_val {
+                match &lhs_val {
                     Val::Neutral(n) => match n.head() {
                         Head::Var(Var::Def(def_name, def)) => {
                             let edef = cxt.db.def_elab(def);
@@ -1320,6 +1514,30 @@ pub(super) fn resolve_member_method(
                                                 ));
                                             }
                                         }
+                                        DefBody::Struct(fields) if edef.is_trait => {
+                                            if let Some((idx, (_, _))) = fields
+                                                .iter()
+                                                .enumerate()
+                                                .find(|(_, ((n, _), _))| *n == name.0)
+                                            {
+                                                let (lhs, _) =
+                                                    lhs.insert_metas(lhs_ty, None, span, cxt);
+                                                let lhs_val = lhs.eval(&mut cxt.env());
+                                                let meta = cxt.new_meta(
+                                                    MetaBounds::new(lhs_val.clone())
+                                                        .with_impl(true),
+                                                    span,
+                                                );
+                                                return Ok(PlaceOrExpr::Place(Place::Member(
+                                                    Box::new(PlaceOrExpr::Expr(
+                                                        meta, lhs_val, None, span,
+                                                    )),
+                                                    def,
+                                                    idx as u64,
+                                                    name,
+                                                )));
+                                            }
+                                        }
                                         _ => (),
                                     }
                                     if let Some((split, _)) = edef
@@ -1332,7 +1550,7 @@ pub(super) fn resolve_member_method(
                                             .db
                                             .def_type(def)
                                             .and_then(|x| x.result)
-                                            .unwrap_or(Val::Error);
+                                            .map_or(Val::Error, |x| x.ty);
                                         return Ok(PlaceOrExpr::Expr(
                                             Expr::var(Var::Def(name, def)),
                                             ty,
@@ -1340,19 +1558,12 @@ pub(super) fn resolve_member_method(
                                             span,
                                         ));
                                     } else {
-                                        cxt.error(
-                                            member.span(),
+                                        error = Some(
                                             Doc::start("Type ")
                                                 .add(cxt.db.lookup_name(def_name.0), Doc::COLOR2)
                                                 .add(" has no member ", ())
                                                 .add(cxt.db.lookup_name(name.0), Doc::COLOR1),
                                         );
-                                        return Ok(PlaceOrExpr::Expr(
-                                            Expr::Error,
-                                            Val::Error,
-                                            None,
-                                            span,
-                                        ));
                                     }
                                 }
                                 _ => (),
@@ -1364,17 +1575,66 @@ pub(super) fn resolve_member_method(
                 }
             }
         }
+
+        // Look for trait methods in scope
+        let mut trait_results = Vec::new();
+        for trait_def in cxt.all_traits() {
+            let edef = cxt.db.def_elab(trait_def).unwrap().result.unwrap();
+
+            match &edef.body {
+                DefBody::Struct(fields) => {
+                    if let Some((idx, (_, _))) = fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, ((n, _), _))| *n == name.0)
+                    {
+                        trait_results.push((edef.name, (trait_def, idx)));
+                    }
+                }
+                _ => (),
+            }
+        }
+        match trait_results.len() {
+            0 => (),
+            1 => {
+                let (tname, (def, idx)) = trait_results.pop().unwrap();
+                let tr = Expr::var(Var::Def(tname, def));
+                let tr_ty = tr.ty(cxt);
+                let (tr, _) = tr.insert_metas(tr_ty, None, span, cxt);
+                let tr = tr.eval(&mut cxt.env());
+                let meta = cxt.new_meta(MetaBounds::new(tr.clone()).with_impl(true), span);
+                let method = Expr::Elim(
+                    Box::new(meta),
+                    Box::new(Elim::Member(def, idx as u64, name)),
+                );
+                return Err((lhs, method));
+            }
+            _ => {
+                error = Some(
+                    Doc::start("Ambiguous trait method call '")
+                        .chain(name.pretty(cxt.db))
+                        .add("()': candidate traits include '", ())
+                        .chain(trait_results[0].0.pretty(cxt.db))
+                        .add("' and '", ())
+                        .chain(trait_results[1].0.pretty(cxt.db))
+                        .add("'", ()),
+                );
+            }
+        }
     }
+
     cxt.error(
         member.span(),
-        Doc::start("Value of type '")
-            .chain(
-                lhs_ty
-                    .clone()
-                    .quote(cxt.size(), Some(&cxt.mcxt))
-                    .pretty(cxt.db),
-            )
-            .add("' does not have members", ()),
+        error.unwrap_or_else(|| {
+            Doc::start("Value of type '")
+                .chain(
+                    lhs_ty
+                        .clone()
+                        .quote(cxt.size(), Some(&cxt.mcxt))
+                        .pretty(cxt.db),
+                )
+                .add("' does not have members", ())
+        }),
     );
     Ok(PlaceOrExpr::Expr(Expr::Error, Val::Error, None, span))
 }
@@ -1669,30 +1929,30 @@ impl ast::Expr {
                     let copy_class2 = clos.class.copy_class();
                     cxt.push_capture();
 
-                    let explicit = if let Some(e) = x.exp_par() {
-                        check_params(
-                            vec![e.pat().and_then(|e| e.expr()).ok_or_else(|| x.span())],
-                            true,
-                            ParamTys::Expl(clos.par_ty().quote(cxt.size(), None)),
-                            reason,
-                            None,
-                            cxt,
+                    let (explicit, bty) = if let Some(e) = x.exp_par() {
+                        (
+                            check_params(
+                                vec![e.pat().and_then(|e| e.expr()).ok_or_else(|| x.span())],
+                                true,
+                                ParamTys::Expl(clos.par_ty().quote(cxt.size(), None)),
+                                reason,
+                                None,
+                                cxt,
+                            ),
+                            clos.body.eval(&mut cxt.env()),
                         )
                     } else {
-                        if !clos.params.is_empty() {
-                            return Err(Doc::start("Expected explicit parameters of type '")
-                                .chain(
-                                    clos.par_ty()
-                                        .quote(cxt.size(), Some(&cxt.mcxt))
-                                        .pretty(cxt.db),
-                                )
-                                .add("'", ())
-                                .into());
-                        }
-                        Vec::new()
+                        (
+                            Vec::new(),
+                            match clos.params.len() {
+                                0 => clos.body.eval(&mut cxt.env()),
+                                // Try to curry the explicit parameters onto the body
+                                _ => Val::Fun(Box::new(clos)),
+                            },
+                        )
                     };
 
-                    let bty = clos.body.eval(&mut cxt.env());
+                    // let bty = clos.body.eval(&mut cxt.env());
                     let body = x
                         .body()
                         .and_then(|x| x.expr())
@@ -1754,55 +2014,6 @@ impl ast::Expr {
                     let mut rty = Some((ty, reason.clone()));
                     let expr = d.elaborate(&mut rty, cxt);
                     Ok(expr)
-                }
-
-                // Insert implicit lambdas when checking against an implicit function type
-                // TODO this should probably be off by default, or at least more restricted
-                // But unfortunately it's kind of required for certain fancy dependent type things
-                // (like dependent composition)
-                (_, Val::Fun(clos)) if matches!(clos.class, Pi(Impl, _)) => {
-                    let ty = Val::Fun(clos.clone());
-
-                    let clos = clos.move_env(&mut cxt.env());
-                    let copy_class = clos.class.copy_class();
-                    let mut params = clos.params.clone();
-                    let bty = clos.open(cxt.size());
-
-                    cxt.push_capture();
-                    for i in &mut params {
-                        i.name.0 = i.name.0.inaccessible(cxt.db);
-                        cxt.define_local(
-                            i.name,
-                            i.ty.clone().eval(&mut cxt.env()),
-                            None,
-                            None,
-                            false,
-                        );
-                    }
-
-                    let body = self.check(bty, cxt, reason);
-
-                    let captures = cxt.pop();
-                    let access = captures.and_then(|x| {
-                        x.into_iter()
-                            .find_map(|(_, (c, a))| if c > copy_class { Some(a) } else { None })
-                    });
-                    if let Some(access) = access {
-                        return Err(MoveError::FunAccess(
-                            access,
-                            ty.quote(cxt.size(), Some(&cxt.mcxt)),
-                            reason,
-                        )
-                        .into());
-                    }
-
-                    let clos = EClos {
-                        class: Lam(Impl, copy_class),
-                        params,
-                        body: Box::new(body),
-                    };
-
-                    Ok(Expr::Fun(clos))
                 }
 
                 // Upgrade copy class of functions
@@ -1992,14 +2203,9 @@ impl ast::Expr {
                         let name = name.name(cxt.db);
                         if name.0 == cxt.db.name("_".to_string()) {
                             let mty = cxt
-                                .mcxt
-                                .new_meta(cxt.locals(), MetaBounds::new(Val::Type), self.span())
+                                .new_meta(MetaBounds::new(Val::Type), self.span())
                                 .eval(&mut cxt.env());
-                            let meta = cxt.mcxt.new_meta(
-                                cxt.locals(),
-                                MetaBounds::new(mty.clone()),
-                                self.span(),
-                            );
+                            let meta = cxt.new_meta(MetaBounds::new(mty.clone()), self.span());
                             (meta, mty)
                         } else {
                             let entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
@@ -2132,23 +2338,14 @@ impl ast::Expr {
                         if let Some(member) = x.member() {
                             lhs = match resolve_member_method(lhs.into(), member.clone(), cxt) {
                                 Ok(lhs) => lhs,
-                                Err((lhs, mdef)) => {
-                                    let ty = cxt.db.def_type(mdef).unwrap().result.unwrap();
+                                Err((lhs, method)) => {
+                                    let ty = method.ty(cxt);
                                     self_param = Some(lhs);
-                                    PlaceOrExpr::Expr(
-                                        Expr::var(Var::Def(
-                                            member.var().unwrap().name(cxt.db),
-                                            mdef,
-                                        )),
-                                        ty,
-                                        None,
-                                        member.span(),
-                                    )
+                                    PlaceOrExpr::Expr(method, ty, None, member.span())
                                 }
                             }
                         }
-                        let mut lhs_ty = lhs.ty(cxt);
-                        lhs_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
+                        let mut lhs_ty = lhs.ty(cxt).inlined(cxt);
                         let mut lhs_span = lhs.span();
                         let mut lhs = lhs.finish(lhs_ty.copy_class(cxt).into(), cxt);
 
@@ -2419,14 +2616,13 @@ impl ast::Expr {
                                                 Box::new(b),
                                                 Box::new(Expr::Fun(EClos {
                                                     class: Sigma,
-                                                    params: vec![Par {
-                                                        name: (
+                                                    params: vec![Par::new(
+                                                        (
                                                             cxt.db.name("_".into()),
                                                             x.a().unwrap().span(),
                                                         ),
-                                                        ty: ty.clone().quote(cxt.size(), None),
-                                                        mutable: false,
-                                                    }],
+                                                        ty.clone().quote(cxt.size(), None),
+                                                    )],
                                                     body: Box::new(
                                                         ty.clone().quote(cxt.size().inc(), None),
                                                     ),
@@ -2468,11 +2664,10 @@ impl ast::Expr {
                         let bty = bty.quote(cxt.size().inc(), None);
                         let ty = Expr::Fun(EClos {
                             class: Sigma,
-                            params: vec![Par {
-                                name: (cxt.db.name("_".to_string()), x.lhs().unwrap().span()),
-                                ty: aty,
-                                mutable: false,
-                            }],
+                            params: vec![Par::new(
+                                (cxt.db.name("_".to_string()), x.lhs().unwrap().span()),
+                                aty,
+                            )],
                             body: Box::new(bty),
                         });
                         let vty = ty.clone().eval(&mut cxt.env());
@@ -2493,6 +2688,11 @@ impl ast::Expr {
                             "'mut' not allowed in this context",
                         )))
                     }
+                    ast::Expr::ImplPat(_) => {
+                        return Err(TypeError::Other(Doc::start(
+                            "'impl' not allowed in this context",
+                        )))
+                    }
                     ast::Expr::StructInit(x) => {
                         let lhs = x
                             .lhs()
@@ -2504,9 +2704,32 @@ impl ast::Expr {
                                 Head::Var(Var::Def(def_name, def)) => {
                                     if let Some(Definition {
                                         body: DefBody::Struct(fields),
+                                        is_trait,
+                                        ty,
                                         ..
                                     }) = cxt.db.def_elab(def).and_then(|x| x.result)
                                     {
+                                        if is_trait {
+                                            let self_arg = match n.spine().first() {
+                                                Some(Elim::App(Impl, x)) => match ty.unspanned() {
+                                                    Expr::Fun(clos)
+                                                        if matches!(clos.class, Pi(Impl, _)) =>
+                                                    {
+                                                        x.clone()
+                                                            .zip_pair(&clos.params)
+                                                            .unwrap()
+                                                            .into_iter()
+                                                            .next()
+                                                            .unwrap()
+                                                            .0
+                                                    }
+                                                    x => unreachable!("{:?}", x),
+                                                },
+                                                x => unreachable!("{:?}", x),
+                                            };
+                                            cxt.push_trait_impl_scope(self_arg);
+                                        }
+
                                         let body = x.fields().ok_or("missing struct fields")?;
                                         let mut named = Vec::new();
                                         let mut vals: Vec<(usize, Val)> = Vec::new();
@@ -2517,6 +2740,7 @@ impl ast::Expr {
                                                 .def_type(def)
                                                 .and_then(|x| x.result)
                                                 .unwrap()
+                                                .ty
                                             {
                                                 Val::Fun(clos)
                                                     if matches!(clos.class, Pi(Impl, _)) =>
@@ -2587,22 +2811,27 @@ impl ast::Expr {
                                             vals.push((idx, val.clone().eval(&mut cxt.env())));
                                             named.push((name, val));
                                         }
+
+                                        if is_trait {
+                                            cxt.pop();
+                                        }
+
                                         let ret = fields.iter().map(|(name, _)| {
-                                        let mut found = None;
-                                        for (n, e) in &named {
-                                            if n.0 == name.0 {
-                                                if found.is_none() {
-                                                    found = Some(e.clone());
-                                                } else {
-                                                    cxt.error(n.1, Doc::start("Struct literal contains duplicate name '").chain(n.pretty(cxt.db)).add("'", ()));
+                                            let mut found = None;
+                                            for (n, e) in &named {
+                                                if n.0 == name.0 {
+                                                    if found.is_none() {
+                                                        found = Some(e.clone());
+                                                    } else {
+                                                        cxt.error(n.1, Doc::start("Struct literal contains duplicate name '").chain(n.pretty(cxt.db)).add("'", ()));
+                                                    }
                                                 }
                                             }
-                                        }
-                                        found.unwrap_or_else(|| {
-                                            cxt.error(def_name.1, Doc::start("Struct literal missing field '").chain(name.pretty(cxt.db)).add("'", ()));
-                                            Expr::Error
-                                        })
-                                    }).collect();
+                                            found.unwrap_or_else(|| {
+                                                cxt.error(def_name.1, Doc::start("Struct literal missing field '").chain(name.pretty(cxt.db)).add("'", ()));
+                                                Expr::Error
+                                            })
+                                        }).collect();
                                         let ety = lhs.clone().quote(cxt.size(), Some(&cxt.mcxt));
                                         return Ok((Expr::Struct(def, ret, Box::new(ety)), lhs));
                                     }

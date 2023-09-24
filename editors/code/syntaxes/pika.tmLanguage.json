@@ -67,10 +67,10 @@
 		"keywords": {
 			"patterns": [{
 				"name": "keyword.control.pika",
-				"match": "\\b(do|case|catch|of|if|then|else)\\b"
+				"match": "\\b(case|catch|of|if|then|else)\\b"
 			},  {
                 "name": "keyword.other.pika",
-                "match": "\\b(type|eff|with|struct|let|fun|where|impl|box|unbox|mut)\\b"
+                "match": "\\b(type|eff|with|struct|let|fun|where|impl|box|unbox|mut|do|self|trait)\\b"
             }]
 		},
 		"symbols": {

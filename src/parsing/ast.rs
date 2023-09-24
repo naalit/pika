@@ -238,6 +238,7 @@ make_nodes! {
     Deref = expr: Expr;
     Assign = lhs: Expr, rhs: (1 Expr);
     MutVar = var: Var;
+    ImplPat = expr: Expr;
 
     GroupedExpr = expr: Expr;
 
@@ -263,7 +264,8 @@ make_nodes! {
         RefMut,
         Deref,
         Assign,
-        MutVar
+        MutVar,
+        ImplPat
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -278,13 +280,14 @@ make_nodes! {
     FunDef = name: Var, imp_par: ImpPars, exp_par: PatPar, ret_ty: Ty, with: WithClause, body: Body;
     ConsDef = name: Var, imp_par: ImpPars, exp_par: TermPar, ret_ty: Ty;
     TypeDef = name: Var, imp_par: ImpPars, exp_par: TermPar, body: TypeDefBody, block: BlockDef;
+    ImplDef = pars: ImpPars, name: Var, body: Body;
     enum TypeDefBody = TypeDefStruct, TypeDefCtors;
     TypeDefCtors = cons: [ConsDef];
     TypeDefStruct = fields: StructFields;
     StructFields = fields: [Stmt];
     BlockDef = defs: [Def];
 
-    enum Def = LetDef, FunDef, TypeDef;
+    enum Def = LetDef, FunDef, TypeDef, ImplDef;
 
     enum Stmt = Expr, Def;
 
@@ -435,38 +438,6 @@ impl Pretty for Def {
                 .add('=', ())
                 .space()
                 .chain(x.body().pretty()),
-            // Def::TypeDefStruct(x) => Doc::none()
-            //     .add("type", Doc::style_keyword())
-            //     .space()
-            //     .chain(x.name().pretty())
-            //     .space()
-            //     .chain(x.imp_par().pretty())
-            //     .chain(x.exp_par().pretty())
-            //     .space()
-            //     .add("struct", Doc::style_keyword())
-            //     .hardline()
-            //     .chain(Doc::intersperse(
-            //         x.fields()
-            //             .into_iter()
-            //             .flat_map(|x| x.defs())
-            //             .map(|x| x.pretty()),
-            //         Doc::none().hardline(),
-            //     ))
-            //     .indent()
-            //     .chain(if let Some(block) = x.block() {
-            //         Doc::none().hardline().chain(
-            //             Doc::none()
-            //                 .add("where", Doc::style_keyword())
-            //                 .hardline()
-            //                 .chain(Doc::intersperse(
-            //                     block.defs().into_iter().map(|x| x.pretty()),
-            //                     Doc::none().hardline(),
-            //                 ))
-            //                 .indent(),
-            //         )
-            //     } else {
-            //         Doc::none()
-            //     }),
             Def::TypeDef(x) => Doc::none()
                 .add("type", Doc::style_keyword())
                 .space()
@@ -511,6 +482,13 @@ impl Pretty for Def {
                 } else {
                     Doc::none()
                 }),
+            Def::ImplDef(x) => Doc::none()
+                .add("impl", Doc::style_keyword())
+                .chain(x.pars().pretty())
+                .space()
+                .chain(x.name().pretty())
+                .add(": ", ())
+                .chain(x.body().pretty()),
         }
     }
 }
@@ -671,6 +649,9 @@ impl Pretty for Expr {
                 .chain(x.a().pretty())
                 .space()
                 .chain(x.b().pretty()),
+            Expr::ImplPat(r) => Doc::start("impl ")
+                .style(Doc::style_keyword())
+                .chain(r.expr().pretty()),
             Expr::Reference(r) => Doc::start('&').chain(r.expr().pretty()),
             Expr::RefMut(r) => Doc::start('&')
                 .add("mut", Doc::style_keyword())

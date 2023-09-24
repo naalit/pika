@@ -350,8 +350,24 @@ pub struct DefElabResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefType {
+    ty: Val,
+    is_trait: bool,
+    is_impl: bool,
+}
+impl DefType {
+    pub fn new(ty: Val) -> Self {
+        DefType {
+            ty,
+            is_trait: false,
+            is_impl: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefTypeResult {
-    result: Option<Val>,
+    result: Option<DefType>,
     errors: Vec<Error>,
 }
 

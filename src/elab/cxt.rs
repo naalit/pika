@@ -42,11 +42,32 @@ impl Namespace {
             Namespace::Def(def) => DefLoc::Child(def, split),
         }
     }
+
+    fn all_defs(self, db: &(impl Elaborator + ?Sized)) -> Vec<Def> {
+        match self {
+            Namespace::Global(file) => db
+                .all_split_ids(file)
+                .into_iter()
+                .map(|split| db.def(DefLoc::Root(file, split)))
+                .collect(),
+            Namespace::Def(def) => db
+                .def_elab(def)
+                .and_then(|x| x.result)
+                .map(|x| {
+                    x.children
+                        .into_iter()
+                        .map(|x| db.def(DefLoc::Child(def, x.0)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Scope {
     Prelude,
+    Trait(Val),
     Namespace(Namespace),
     Local(LocalScope),
 }
@@ -90,6 +111,7 @@ impl Scope {
                 .get(&name.0)
                 .cloned()
                 .map(|x| VarEntry::new(x, name)),
+            Scope::Trait(_) => None,
             Scope::Namespace(n) => {
                 let split = SplitId::Named(name.0);
                 let def = db.def(n.def_loc(split));
@@ -626,7 +648,7 @@ impl VarEntry {
                 .db
                 .def_type(*d)
                 .and_then(|x| x.result)
-                .unwrap_or(Val::Error),
+                .map_or(Val::Error, |x| x.ty),
         }
     }
 
@@ -904,10 +926,16 @@ impl Cxt<'_> {
         }
     }
 
-    pub fn emit_errors(&self) -> Vec<Error> {
+    pub fn new_meta(&mut self, bounds: MetaBounds, span: RelSpan) -> Expr {
+        self.mcxt.new_meta(self.locals(), self.size(), bounds, span)
+    }
+
+    pub fn emit_errors(&mut self) -> Vec<Error> {
+        let errors = self.mcxt.error_unsolved();
         self.errors
             .iter()
             .map(|(severity, x, span)| x.to_error(*severity, *span, self.db))
+            .chain(errors)
             .collect()
     }
 
@@ -915,9 +943,13 @@ impl Cxt<'_> {
         self.scope().map_or(Size::zero(), |x| x.size)
     }
 
-    pub fn resolve_self(&self) -> Option<Def> {
+    pub fn resolve_self(&self, span: RelSpan) -> Option<Expr> {
         self.scopes.iter().rev().find_map(|x| match x {
-            Scope::Namespace(Namespace::Def(def)) => Some(*def),
+            Scope::Namespace(Namespace::Def(def)) => Some(Expr::var(Var::Def(
+                (self.db.name("Self".into()), span),
+                *def,
+            ))),
+            Scope::Trait(val) => Some(val.clone().quote(self.size(), None)),
             _ => None,
         })
     }
@@ -983,7 +1015,32 @@ impl Cxt<'_> {
         self.scopes.push(Scope::Namespace(Namespace::Def(def)));
     }
 
+    pub fn push_trait_scope(&mut self) {
+        self.scopes.push(Scope::Trait(Val::var(Var::Local(
+            (self.db.name("Self".into()), RelSpan::empty()),
+            Size::zero().next_lvl(),
+        ))));
+    }
+
+    pub fn push_trait_impl_scope(&mut self, self_arg: Val) {
+        self.scopes.push(Scope::Trait(self_arg));
+    }
+
     pub fn pop(&mut self) -> Option<Vec<(Lvl, (CopyClass, Access))>> {
+        let new_size = self
+            .scopes
+            .iter()
+            .rev()
+            .skip(1)
+            .find_map(|x| match x {
+                Scope::Local(l) => Some(l.size),
+                _ => None,
+            })
+            .unwrap_or(self.size());
+        if matches!(self.scopes.last(), Some(Scope::Local(_))) {
+            self.resolve_impls(new_size);
+        }
+
         let scope = self.scopes.pop();
         self.env.reset_to_size(self.size());
         scope.and_then(|x| match x {
@@ -992,12 +1049,194 @@ impl Cxt<'_> {
         })
     }
 
+    fn resolve_impls(&mut self, new_size: Size) {
+        let metas = self.mcxt.needed_impls(new_size);
+        if !metas.is_empty() {
+            let locals: Vec<_> = self
+                .locals()
+                .into_iter()
+                .map(|(n, l)| (n, l, self.local_ty(l)))
+                .collect();
+            for (meta, msize, mspan) in metas {
+                let mty = self.mcxt.meta_ty(meta).unwrap();
+                let trait_def = match &mty {
+                    Val::Neutral(neutral) => match neutral.head() {
+                        Head::Var(Var::Def(_, trait_def)) => trait_def,
+                        _ => unreachable!(),
+                    },
+                    _ => unreachable!(),
+                };
+
+                // Start by searching locals
+                let mut solutions = Vec::new();
+                for (n, l, lty) in locals.iter().take(msize.as_u32() as usize) {
+                    // on this insert_metas and the next one, we need to save a checkpoint of the mcxt
+                    // bc if unification fails we could get random metas lying around that will go unsolved
+                    let cp = self.mcxt.checkpoint();
+                    let (lval, lty) = Expr::var(Var::Local((*n, mspan), l.idx(self.size())))
+                        .insert_metas(lty.clone(), None, mspan, self);
+                    match &lty {
+                        Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
+                            match self.mcxt.unify(
+                                lty.clone(),
+                                mty.clone(),
+                                msize,
+                                self.env(),
+                                CheckReason::MustMatch(mspan),
+                            ) {
+                                Ok(()) => {
+                                    solutions.push(lval.eval(&mut self.env()));
+                                }
+                                Err(_) => self.mcxt.reset_to(cp),
+                            }
+                        }
+                        _ => self.mcxt.reset_to(cp),
+                    }
+                }
+
+                // Now search impls in scope
+                if solutions.is_empty() {
+                    let impls: Vec<_> = self
+                        .scopes
+                        .iter()
+                        .rev()
+                        .flat_map(|x| match x {
+                            Scope::Local(l) => l
+                                .names
+                                .iter()
+                                .filter_map(|x| match x.var {
+                                    VarDef::Var(_, _) => None,
+                                    VarDef::Def(d) => Some(d),
+                                })
+                                .collect(),
+                            Scope::Namespace(n) => n.all_defs(self.db),
+                            _ => vec![],
+                        })
+                        .filter(|x| {
+                            self.db
+                                .def_type(*x)
+                                .and_then(|x| x.result)
+                                .map_or(false, |x| x.is_impl)
+                        })
+                        .collect();
+                    for idef in impls {
+                        let cp = self.mcxt.checkpoint();
+                        let ity = self.db.def_type(idef).unwrap().result.unwrap().ty;
+                        let (ival, ity) =
+                            Expr::var(Var::Def((self.db.name("_".into()), mspan), idef))
+                                .insert_metas(ity, None, mspan, self);
+                        match &ity {
+                            Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
+                                match self.mcxt.unify(
+                                    ity.clone(),
+                                    mty.clone(),
+                                    msize,
+                                    self.env(),
+                                    CheckReason::MustMatch(mspan),
+                                ) {
+                                    Ok(()) => {
+                                        solutions.push(ival.eval(&mut self.env()));
+                                    }
+                                    Err(_) => self.mcxt.reset_to(cp),
+                                }
+                            }
+                            _ => self.mcxt.reset_to(cp),
+                        }
+                    }
+                }
+
+                match solutions.len() {
+                    0 => {
+                        self.error(
+                            mspan,
+                            TypeError::Other(
+                                Doc::start("Could not find impl for '")
+                                    .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
+                                    .add("' in this scope", ()),
+                            ),
+                        );
+                        self.mcxt.mark_meta_error(meta);
+                    }
+                    1 => {
+                        let spine = locals
+                            .iter()
+                            // We might have defined more locals since the meta intro, so make sure we have the right spine length
+                            .take(msize.as_u32() as usize)
+                            .fold(None, |rest, &(n, l, _)| {
+                                let x = Expr::var(Var::Local((n, RelSpan::empty()), l.idx(msize)));
+                                match rest {
+                                    // TODO do we ever need these types?
+                                    Some(rest) => Some(Expr::Pair(
+                                        Box::new(x),
+                                        Box::new(rest),
+                                        Box::new(Expr::Error),
+                                    )),
+                                    None => Some(x),
+                                }
+                            })
+                            .unwrap()
+                            .eval(&mut Env::new(msize));
+                        if let Err(e) = self.mcxt.solve(
+                            msize,
+                            meta,
+                            vec![Elim::App(Expl, spine)],
+                            solutions.pop().unwrap(),
+                            true,
+                        ) {
+                            self.error(
+                                mspan,
+                                Doc::start("Error resolving impl for '")
+                                    .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
+                                    .add(": ", ())
+                                    .chain(e.pretty(self.db)),
+                            );
+                        }
+                    }
+                    _ => {
+                        // TODO incorporate spans of candidates
+                        self.error(
+                            mspan,
+                            Doc::start("Multiple ambiguous impls for '")
+                                .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
+                                .add("'", ()),
+                        );
+                        self.mcxt.mark_meta_error(meta);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn lookup(&self, name: SName) -> Option<VarEntry> {
         self.scopes
             .iter()
             .enumerate()
             .rev()
             .find_map(|(i, x)| x.lookup(i, name, self.db))
+    }
+
+    pub fn all_traits(&self) -> impl Iterator<Item = Def> + '_ {
+        self.scopes
+            .iter()
+            .rev()
+            .flat_map(|x| match x {
+                Scope::Local(l) => l
+                    .names
+                    .iter()
+                    .filter_map(|x| match x.var {
+                        VarDef::Var(_, _) => None,
+                        VarDef::Def(d) => Some(d),
+                    })
+                    .collect(),
+                Scope::Namespace(n) => n.all_defs(self.db),
+                _ => vec![],
+            })
+            .filter(|x| {
+                self.db
+                    .def_type(*x)
+                    .and_then(|x| x.result)
+                    .map_or(false, |x| x.is_trait)
+            })
     }
 
     pub fn local_entry(&self, lvl: Lvl) -> VarEntry {

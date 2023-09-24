@@ -219,6 +219,17 @@ pub struct Par {
     pub name: SName,
     pub ty: Expr,
     pub mutable: bool,
+    pub is_impl: bool,
+}
+impl Par {
+    pub fn new(name: SName, ty: Expr) -> Self {
+        Par {
+            name,
+            ty,
+            mutable: false,
+            is_impl: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +247,8 @@ pub struct ConsDef {
 /// Local let statements are ordered, can contain arbitrary patterns, and create local variables rather than definitions.
 pub struct Definition {
     pub name: SName,
+    pub is_trait: bool,
+    pub is_impl: bool,
     pub ty: Box<Expr>,
     pub body: DefBody,
     pub children: Vec<(SplitId, DefNode)>,
@@ -387,7 +400,7 @@ impl Expr {
                         .db
                         .def_type(*d)
                         .and_then(|x| x.result)
-                        .unwrap_or(Val::Error),
+                        .map_or(Val::Error, |x| x.ty),
                     Var::Cons(_, c) => {
                         let (d, split) = cxt.db.lookup_cons_id(*c);
                         cxt.db
@@ -405,17 +418,18 @@ impl Expr {
                 },
             },
             Expr::Elim(head, elim) => match &**elim {
-                Elim::App(_, x) => match head.ty(cxt) {
+                Elim::App(_, x) => match head.ty(cxt).inlined(cxt) {
+                    ty if matches!(&**head, Expr::Head(Head::Var(Var::Meta(_)))) => ty,
                     Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                         clos.apply(x.clone().eval(&mut cxt.env()))
                     }
-                    _ => Val::Error,
+                    ty => unreachable!("{:?}", ty),
                 },
                 Elim::Member(def, idx, _) => {
                     let lhs = (**head).clone().eval(&mut cxt.env());
                     super::elaborate::member_type(&lhs, *def, *idx, cxt)
                 }
-                Elim::Deref => match head.ty(cxt) {
+                Elim::Deref => match head.ty(cxt).inlined(cxt) {
                     Val::RefType(_, t) => *t,
                     _ => unreachable!(),
                 },
@@ -430,7 +444,10 @@ impl Expr {
                 // I don't *think* we need a return type annotation, but there might be edge cases where we do
                 Lam(icit, c) => {
                     cxt.push();
-                    for Par { name, ty, mutable } in params {
+                    for Par {
+                        name, ty, mutable, ..
+                    } in params
+                    {
                         cxt.define_local(
                             *name,
                             ty.clone().eval(&mut cxt.env()),
@@ -502,12 +519,8 @@ impl Pretty for Expr {
                     .pretty(db)
                     .nest(Prec::App)
                     .chain(match icit {
-                        Impl => Doc::none()
-                            .space()
-                            .add('[', ())
-                            .chain(b.pretty(db))
-                            .add(']', ()),
-                        Expl => Doc::none().space().chain(b.pretty(db).nest(Prec::Atom)),
+                        Impl => Doc::none().add('[', ()).chain(b.pretty(db)).add(']', ()),
+                        Expl => Doc::none().add('(', ()).chain(b.pretty(db)).add(')', ()),
                     })
                     .prec(Prec::App),
                 Elim::Member(_, _, m) => a

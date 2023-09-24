@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use super::*;
+use super::{unify::UnifyError, *};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct Meta(u32);
@@ -19,10 +19,17 @@ pub enum SpecialBound {
 pub struct MetaBounds {
     ty: Val,
     special: Option<SpecialBound>,
+    is_impl: bool,
+    stored: Vec<(Size, Vec<Elim<Val>>, Val)>,
 }
 impl MetaBounds {
     pub fn new(ty: Val) -> Self {
-        MetaBounds { ty, special: None }
+        MetaBounds {
+            ty,
+            special: None,
+            is_impl: false,
+            stored: Vec::new(),
+        }
     }
     pub fn int_type(signed: bool, val: u64) -> Self {
         MetaBounds {
@@ -34,11 +41,49 @@ impl MetaBounds {
                     val as i128
                 },
             }),
+            is_impl: false,
+            stored: Vec::new(),
         }
     }
 
-    pub fn check(&self, val: &Val, size: Size, mcxt: &MetaCxt) -> Result<(), MetaSolveError> {
+    pub fn with_impl(self, is_impl: bool) -> Self {
+        MetaBounds { is_impl, ..self }
+    }
+
+    pub fn check(
+        self,
+        val: &Val,
+        spine_len: usize,
+        size: Size,
+        mcxt: &mut MetaCxt,
+    ) -> Result<(), MetaSolveError> {
         // TODO check type
+
+        for (msize, spine, other_val) in self.stored {
+            let size = size.max(msize);
+            let val = spine
+                .into_iter()
+                .skip(spine_len)
+                .fold(val.clone(), |head, elim| {
+                    head.app(elim, &mut Env::new(size))
+                });
+            match mcxt.unify(
+                val.clone(),
+                other_val,
+                size,
+                Env::new(size),
+                CheckReason::UsedAsType,
+            ) {
+                Ok(()) => (),
+                Err(u) => {
+                    return Err(MetaSolveError::Other(
+                        Doc::start("Conflict solving meta: ")
+                            .chain(u.to_error(RelSpan::empty(), mcxt.db).message),
+                    ));
+                }
+            }
+        }
+
         match self.special {
             Some(SpecialBound::IntType { must_fit }) => {
                 let mut val = val.clone();
@@ -94,6 +139,7 @@ pub enum MetaEntry {
     },
     Unsolved {
         bounds: MetaBounds,
+        size: Size,
         introduced_span: RelSpan,
     },
 }
@@ -107,6 +153,7 @@ pub enum MetaSolveError {
     SpineDuplicate(Name),
     BoundsNotInt(Expr),
     BoundsWrongIntSize(IntType),
+    Other(Doc),
 }
 impl MetaSolveError {
     pub fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
@@ -151,6 +198,7 @@ impl MetaSolveError {
                     .debug(t)
                     .add("'", ())
             }
+            MetaSolveError::Other(doc) => doc.clone(),
         }
     }
 }
@@ -263,6 +311,9 @@ impl PartialRename {
 }
 
 #[derive(Clone)]
+pub struct MetaCheckpoint(usize);
+
+#[derive(Clone)]
 pub struct MetaCxt<'a> {
     pub db: &'a dyn Elaborator,
     metas: Vec<MetaEntry>,
@@ -275,11 +326,20 @@ impl MetaCxt<'_> {
         }
     }
 
+    pub fn checkpoint(&self) -> MetaCheckpoint {
+        MetaCheckpoint(self.metas.len())
+    }
+
+    pub fn reset_to(&mut self, MetaCheckpoint(len): MetaCheckpoint) {
+        self.metas.truncate(len);
+    }
+
     /// Creates a new meta which can't use any free variables; mostly for e.g. int types
     pub fn unscoped_meta(&mut self, bounds: MetaBounds, introduced_span: RelSpan) -> Meta {
         let m = Meta(self.metas.len() as u32);
         self.metas.push(MetaEntry::Unsolved {
             bounds,
+            size: Size::zero(),
             introduced_span,
         });
         m
@@ -288,12 +348,14 @@ impl MetaCxt<'_> {
     pub fn new_meta(
         &mut self,
         scope: Vec<(Name, Lvl)>,
+        size: Size,
         bounds: MetaBounds,
         introduced_span: RelSpan,
     ) -> Expr {
         let m = Meta(self.metas.len() as u32);
         self.metas.push(MetaEntry::Unsolved {
             bounds,
+            size,
             introduced_span,
         });
         let size = Size::zero() + scope.len();
@@ -362,21 +424,32 @@ impl MetaCxt<'_> {
         meta: Meta,
         spine: Vec<Elim<Val>>,
         solution: Val,
+        allow_impl: bool,
     ) -> Result<(), MetaSolveError> {
         // TODO smalltt does eta-contraction here
 
         let (bounds, _intro_span) = self
             .metas
-            .get(meta.0 as usize)
+            .get_mut(meta.0 as usize)
             .and_then(|x| match x {
                 MetaEntry::Solved { .. } => None,
                 MetaEntry::Unsolved {
                     bounds,
+                    size: _,
                     introduced_span,
                 } => Some((bounds, introduced_span)),
             })
-            .unwrap_or_else(|| panic!("{:?}: {:?}", meta, self.metas.get(meta.0 as usize)));
-        bounds.check(&solution, start_size, self)?;
+            .unwrap();
+        // If spine.len() > 1, we don't know for sure this is the correct solution
+        // so postpone this solution to see if we find a better one later (and check that they match)
+        if !allow_impl && (bounds.is_impl || spine.len() > 1) {
+            bounds.stored.push((start_size, spine, solution));
+            return Ok(());
+        }
+        // TODO not clone here
+        bounds
+            .clone()
+            .check(&solution, spine.len(), start_size, self)?;
 
         let mut rename = PartialRename {
             meta,
@@ -393,12 +466,8 @@ impl MetaCxt<'_> {
                         Ok((
                             names
                                 .into_iter()
-                                .map(|name| Par {
-                                    name: (name, RelSpan::empty()),
-                                    // TODO is this type ever used? can we actually find the type of this?
-                                    ty: Expr::Error,
-                                    mutable: false,
-                                })
+                                // TODO is this type ever used? can we actually find the type of this?
+                                .map(|name| Par::new((name, RelSpan::empty()), Expr::Error))
                                 .collect(),
                             icit,
                         ))
@@ -441,6 +510,76 @@ impl MetaCxt<'_> {
         };
 
         Ok(())
+    }
+
+    pub fn needed_impls(&self, next_size: Size) -> Vec<(Meta, Size, RelSpan)> {
+        let mut metas = Vec::new();
+        for i in 0..self.metas.len() {
+            match self.metas[i].clone() {
+                MetaEntry::Unsolved {
+                    bounds,
+                    size,
+                    introduced_span,
+                } if bounds.is_impl && size >= next_size => {
+                    metas.push((Meta(i as u32), size, introduced_span));
+                }
+                _ => (),
+            }
+        }
+        metas
+    }
+
+    pub fn mark_meta_error(&mut self, meta: Meta) {
+        // Make sure we don't emit duplicate errors
+        self.metas[meta.0 as usize] = MetaEntry::Solved {
+            solution: Expr::Error,
+            occurs_cache: Default::default(),
+        };
+    }
+
+    pub fn error_unsolved(&mut self) -> Vec<Error> {
+        let mut errors = Vec::new();
+        for i in 0..self.metas.len() {
+            match &mut self.metas[i] {
+                MetaEntry::Solved { .. } => (),
+                MetaEntry::Unsolved {
+                    bounds,
+                    size,
+                    introduced_span,
+                } => {
+                    let intro_span = *introduced_span;
+                    match bounds.stored.pop() {
+                        None => errors.push(
+                            TypeError::Other(
+                                // TODO store a Doc or enum for the reason the meta was introduced
+                                Doc::start("Could not solve metavariable ?")
+                                    .add(i, ())
+                                    .add(" of type '", ())
+                                    .chain(
+                                        bounds.ty.clone().quote(*size, Some(self)).pretty(self.db),
+                                    )
+                                    .add("', introduced here", ()),
+                            )
+                            .to_error(
+                                Severity::Error,
+                                intro_span,
+                                self.db,
+                            ),
+                        ),
+                        Some((msize, spine, solution)) => {
+                            if let Err(e) = self.solve(msize, Meta(i as u32), spine, solution, true)
+                            {
+                                errors.push(
+                                    UnifyError::from_meta_solve(e, intro_span)
+                                        .to_error(intro_span, self.db),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        errors
     }
 }
 

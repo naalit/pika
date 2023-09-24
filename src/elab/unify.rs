@@ -192,6 +192,15 @@ impl UnifyError {
             }
         }
     }
+
+    pub fn from_meta_solve(e: MetaSolveError, span: RelSpan) -> Self {
+        UnifyError {
+            kind: UnifyErrorKind::MetaSolve(e, span),
+            inferred: Expr::Error,
+            expected: Expr::Error,
+            reason: CheckReason::UsedAsType,
+        }
+    }
 }
 
 impl MetaCxt<'_> {
@@ -304,7 +313,7 @@ impl UnifyCxt<'_, '_> {
                         .quote(start_size, None)
                         .eval(&mut self.env(start_size));
                     self.meta_cxt
-                        .solve(start_size, meta, spine, solution)
+                        .solve(start_size, meta, spine, solution, false)
                         .map_err(|e| {
                             UnifyErrorKind::MetaSolve(e, self.meta_cxt.introduced_span(meta))
                         })

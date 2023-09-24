@@ -68,7 +68,7 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
             if words.peek() == Some(&"pub") {
                 words.next();
             }
-            if matches!(words.next(), Some("fun" | "let" | "eff" | "type")) {
+            if matches!(words.next(), Some("fun" | "let" | "eff" | "type" | "trait")) {
                 name = words
                     .next()
                     .map(|x| {

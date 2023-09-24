@@ -161,7 +161,7 @@ mod input {
                                     while env.size < rsize {
                                         env.push(None);
                                     }
-                                    match (&rty, &ty) {
+                                    match (&rty, ty.unref_ty()) {
                                         (Val::Neutral(a), Val::Neutral(b))
                                             if a.head() == b.head() =>
                                         {
@@ -169,7 +169,7 @@ mod input {
                                                 .mcxt
                                                 .local_unify(
                                                     rty,
-                                                    ty.clone(),
+                                                    ty.unref_ty().clone(),
                                                     rsize,
                                                     &mut env,
                                                     reason,
@@ -181,7 +181,7 @@ mod input {
                                             .mcxt
                                             .unify(
                                                 rty.clone(),
-                                                ty.clone(),
+                                                ty.unref_ty().clone(),
                                                 rsize,
                                                 env.clone(),
                                                 reason,
@@ -681,6 +681,7 @@ impl CaseElabCxt<'_, '_> {
                                 ty
                             },
                             mutable: *m,
+                            is_impl: false,
                         })
                         .collect();
                     Dec::Guard(
@@ -1179,6 +1180,7 @@ pub(super) fn elab_case(
                         name: *name,
                         ty: ty.clone().quote(cxt.ecxt.size(), None),
                         mutable: *m,
+                        is_impl: false,
                     });
                     cxt.ecxt.define_local(*name, ty.clone(), None, s_borrow, *m);
                 }

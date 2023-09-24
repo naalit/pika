@@ -105,8 +105,8 @@ pub struct VClos {
     pub body: Expr,
 }
 impl VClos {
-    /// arg: argument type -> argument value
-    pub fn elab_with(self, mut arg: impl FnMut(Val) -> Val) -> Val {
+    /// arg: (argument type, is impl) -> argument value
+    pub fn elab_with(self, mut arg: impl FnMut(Val, bool) -> Val) -> Val {
         let VClos {
             class: _,
             params,
@@ -115,7 +115,7 @@ impl VClos {
         } = self;
         for par in params {
             let ty = par.ty.eval(&mut env);
-            env.push(Some(Ok(arg(ty))));
+            env.push(Some(Ok(arg(ty, par.is_impl))));
         }
         body.eval(&mut env)
     }
@@ -124,18 +124,14 @@ impl VClos {
         let mut env = self.env.clone();
         self.params
             .iter()
-            .rfold(None, |term, Par { name, ty, mutable }| {
+            .rfold(None, |term, par| {
                 let term = match term {
                     Some(term) => Box::new(Expr::Fun(EClos {
                         class: Sigma,
-                        params: vec![Par {
-                            name: *name,
-                            ty: ty.clone(),
-                            mutable: *mutable,
-                        }],
+                        params: vec![par.clone()],
                         body: term,
                     })),
-                    None => Box::new(ty.clone()),
+                    None => Box::new(par.ty.clone()),
                 };
                 Some(term)
             })
@@ -195,12 +191,8 @@ impl VClos {
         } = self;
         let params: Vec<_> = params
             .into_iter()
-            .map(|Par { name, ty, mutable }| {
-                let par = Par {
-                    name,
-                    ty: ty.eval_quote(&mut env, size, inline_metas),
-                    mutable,
-                };
+            .map(|mut par| {
+                par.ty = par.ty.eval_quote(&mut env, size, inline_metas);
                 env.push(Some(Err(size.next_lvl())));
                 size += 1;
                 par
@@ -272,6 +264,13 @@ impl IsTerm for Val {
 }
 
 impl Val {
+    pub fn unref_ty(&self) -> &Val {
+        match self {
+            Val::RefType(_, t) => t.unref_ty(),
+            _ => self,
+        }
+    }
+
     pub fn zip_pair<T>(self, with: &[T]) -> Result<Vec<(Val, &T)>, Val> {
         // ((x, y) => ...) p where p : (A, B) shouldn't panic
         // so first check that we have enough of the pair inlined
@@ -599,6 +598,11 @@ impl Val {
             }
             _ => (),
         }
+    }
+
+    pub fn inlined(mut self, cxt: &Cxt) -> Self {
+        self.inline_head(&mut cxt.env(), &cxt.mcxt);
+        self
     }
 
     pub fn copy_class(&self, cxt: &Cxt) -> CopyClass {

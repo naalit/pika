@@ -1,0 +1,66 @@
+
+trait Display struct
+    fun to_str(&self): Str
+
+fun print0[a](x: a, i: Display[a]): Str = i.to_str(x)
+
+fun print1[a, impl Display[a]](x: a): Str = Display.to_str(x)
+
+trait P[a: Type] struct
+    fun q(self): a
+fun test[a, b, impl P[b, a]](x: b): a = P.q(x)
+trait Q[a: Type] struct
+    t: Type
+    fun q(self): t
+fun test[a, b, q: Q[b, a]](x: b): q.t = Q.q(x)
+
+# fun test_ambiguous[a, b, q: Q[b, a]](x: b): q.t = x.q()
+
+fun print2[a, b, impl Display[a], impl Display[b]](x: a, y: b): Str = do
+    let s = x.to_str()
+    let s2 = y.to_str()
+    s + s2
+
+type Enum of
+    One
+    Two
+
+impl Display[Enum] struct
+    fun to_str(&self): Str = case self of
+        Enum.One => "one"
+        Enum.Two => "two"
+
+impl Display[Str] struct
+    fun to_str(&self): Str = *self
+
+# impl Display[Str] struct
+#     fun to_str(&self): Str = *self
+
+fun main() = do
+    let e = Enum.One
+    let s = print2("value: ", e)
+
+# impl "not a trait"
+# fun bad_impl[impl Str]() = ()
+
+# `[:Type]&->Type` is quite ugly, it'd be nice to make this syntax better
+trait Functor[Self: [:Type]&-> Type] struct
+    fun map[a, b](self: Self[a], f: a &mut -> b): Self[b]
+
+type Result[R, E] of
+    Ok(R)
+    Err(E)
+impl[E] Functor[[R] => Result[R, E]] struct
+    fun map[A, B](self: Result[A, E], mut f: A &mut -> B): Result[B, E] = case self of
+        Result.Err(e) => Result.Err(e)
+        Result.Ok(a) => Result.Ok(f(a))
+
+fun doubleM[M, impl Functor[M]](x: M[U32]): M[U32] = x.map(x => x*2)
+
+fun doubleR[E](x: Result[U32, E]): Result[U32, E] = doubleM(x)
+
+# functor impl for identity functor
+impl Functor[[A] => A] struct
+    fun map[A, B](self: A, mut f: A &mut -> B): B = f(self)
+# using identity functor
+fun doubleQ(x: U32): U32 = doubleM(x)

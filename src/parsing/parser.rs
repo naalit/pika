@@ -318,7 +318,28 @@ impl<'a> Parser<'a> {
 
                 self.pop();
             }
-            Tok::TypeKw | Tok::EffKw => {
+            Tok::ImplKw => {
+                self.push(Tok::ImplDef);
+                self.advance();
+
+                if self.cur() == Tok::SOpen {
+                    if self.params_inner(true).is_some() {
+                        self.expected("impl body", None);
+                    }
+                }
+
+                if matches!((self.cur(), self.peek(1)), (Tok::Name, Tok::Colon)) {
+                    self.var();
+                    self.expect(Tok::Colon);
+                }
+
+                self.push(Tok::Body);
+                self.expr(());
+
+                self.pop();
+                self.pop();
+            }
+            Tok::TypeKw | Tok::EffKw | Tok::TraitKw => {
                 self.push(Tok::TypeDef);
                 self.advance();
 
@@ -642,6 +663,12 @@ impl<'a> Parser<'a> {
                     }
                     Tok::Times => {
                         self.push(Tok::Deref);
+                        self.advance();
+                        self.expr(Prec::App);
+                        self.pop();
+                    }
+                    Tok::ImplKw => {
+                        self.push(Tok::ImplPat);
                         self.advance();
                         self.expr(Prec::App);
                         self.pop();
@@ -1288,7 +1315,7 @@ impl Tok {
     fn starts_def(&self) -> bool {
         matches!(
             self,
-            Tok::TypeKw | Tok::LetKw | Tok::EffKw | Tok::ImplKw | Tok::FunKw
+            Tok::TypeKw | Tok::TraitKw | Tok::LetKw | Tok::EffKw | Tok::ImplKw | Tok::FunKw
         )
     }
 
