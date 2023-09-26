@@ -132,3 +132,13 @@ fun test2(): I32 = takes_fun2(1, 2) do a, b =>
     let a2 = a*a
     let b2 = b*b
     a2*a2 + b2*b2
+
+# tests for new rules about closures returning borrows from their environment
+fun return_borrow3(x: &mut DoNotCopy): () &mut -> &DoNotCopy = () => x
+
+type Loop[R, C] of
+    Continue(C)
+    Break(R)
+fun loop[R, C](start: C, mut iter: C &mut -> Loop[R, C]): R = case iter(start) of
+    Loop.Continue(x) => loop(x, iter)
+    Loop.Break(x) => x

@@ -49,5 +49,5 @@ fun main() = do
     let p = MyStruct struct
         one: "hi"
         two: q
-        three: s
+        three: "bye"
     let m = p.get_two() # : any.ty

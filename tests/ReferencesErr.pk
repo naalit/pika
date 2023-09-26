@@ -122,3 +122,10 @@ fun problems1(x: DoNotCopy): () = do
 fun problems2(mut x: DoNotCopy): () = h_mut(() => move(x))
 fun problems3(mut x: DoNotCopy): () = h_ref(() => mutate(x))
 fun problems4(f: () &mut -> ()): () = h_ref(f)
+
+# tests for new rules about closures returning borrows from their environment
+fun return_borrow1(x: &mut DoNotCopy): () &mut -> &mut DoNotCopy = () => x
+fun return_borrow2(mut x: &mut DoNotCopy): () &mut -> &DoNotCopy = () => do
+    let _ = x = DoNotCopy.New(3)
+    let y: &DoNotCopy = x
+    y

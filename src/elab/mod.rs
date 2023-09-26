@@ -257,7 +257,7 @@ impl TypeError {
                         let kind_doc = match access.kind {
                             AccessKind::Mut => "Mutating",
                             AccessKind::Imm => "Borrowing",
-                            AccessKind::Move => "Moving",
+                            AccessKind::Move => "Consuming",
                             AccessKind::Copy => "Copying",
                         };
                         let mut secondary = vec![Label {

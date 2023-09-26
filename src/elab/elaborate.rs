@@ -875,15 +875,18 @@ fn infer_fun(
                 (Expr::Error, Val::Error)
             }),
     };
-    cxt.finish_deps(bspan); // TODO what do we do with this borrow
     let bty = bty.quote(cxt.size(), None);
     let captures = cxt.pop();
+    // TODO error if copy class doesn't match
     let copy_class = copy_class.unwrap_or_else(|| {
-        captures.as_ref().map_or(CopyClass::Copy, |x| {
+        captures.as_ref().map_or(CopyClass::Copy, |(_, x)| {
             x.iter().fold(CopyClass::Copy, |x, (_, (y, _))| x.max(*y))
         })
     });
-    // TODO error if copy class doesn't match
+    if let &Some((borrow, _)) = &captures {
+        cxt.finish_closure_env(borrow, copy_class, span);
+    }
+    cxt.finish_deps(bspan); // TODO what do we do with this borrow
 
     // We have to evaluate this outside of the scope
     let mut ty = if explicit.is_empty() {
@@ -1523,7 +1526,7 @@ pub(super) fn resolve_member_method(
             _ => {
                 let lhs = lhs
                     .clone()
-                    .finish(AccessKind::from(lhs_ty.copy_class(cxt)), cxt);
+                    .finish(AccessKind::as_move(lhs_ty.copy_class(cxt)), cxt);
                 let mut lhs_val = lhs.clone().eval(&mut cxt.env());
                 lhs_val.inline_head(&mut cxt.env(), &cxt.mcxt);
                 match &lhs_val {
@@ -1693,14 +1696,36 @@ pub enum PlaceOrExpr {
 }
 impl PlaceOrExpr {
     pub fn finish(self, kind: AccessKind, cxt: &mut Cxt) -> Expr {
+        self.finish_and_borrow(kind, kind, cxt)
+    }
+
+    pub fn finish_and_borrow(
+        self,
+        access_kind: AccessKind,
+        borrow_kind: AccessKind,
+        cxt: &mut Cxt,
+    ) -> Expr {
         match self {
             PlaceOrExpr::Place(place) => {
                 place
-                    .try_access(kind, cxt)
+                    .try_access_unborrowed(access_kind, cxt)
                     .unwrap_or_else(|e| cxt.error(place.span(), e));
+                place.borrow(borrow_kind, cxt);
                 place.to_expr(cxt)
             }
-            PlaceOrExpr::Expr(e, _, _, _) => e,
+            PlaceOrExpr::Expr(e, _, b, span) => {
+                if let Some(b) = b {
+                    cxt.add_dep(
+                        b,
+                        Access {
+                            kind: borrow_kind,
+                            point: AccessPoint::Expr,
+                            span,
+                        },
+                    );
+                }
+                e
+            }
         }
     }
 
@@ -1779,68 +1804,34 @@ impl Place {
         }
     }
 
-    /// Makes sure the access is valid, invalidating other borrows appropriately, and adds needed dependencies to the cxt
-    fn try_access(&self, kind: AccessKind, cxt: &mut Cxt) -> Result<(), TypeError> {
+    /// Makes sure the access is valid, invalidating other borrows appropriately, but does not add needed dependencies to the cxt
+    fn try_access_unborrowed(&self, kind: AccessKind, cxt: &mut Cxt) -> Result<(), TypeError> {
         match self {
-            Place::Var(v) => {
-                let r = match kind {
-                    AccessKind::Mut | AccessKind::Imm => {
-                        let mutable = kind == AccessKind::Mut;
-                        v.try_borrow(mutable, mutable, cxt).map_err(Into::into)
-                    }
-                    AccessKind::Move => v
-                        .try_move(self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt)), cxt)
-                        .map_err(Into::into),
-                    AccessKind::Copy => Ok(()),
-                };
-                if let Some(borrow) = v.borrow(cxt) {
-                    cxt.add_dep(borrow, v.access(kind));
+            Place::Var(v) => match kind {
+                AccessKind::Mut | AccessKind::Imm => {
+                    let mutable = kind == AccessKind::Mut;
+                    v.try_borrow(mutable, mutable, cxt).map_err(Into::into)
                 }
-                r
-            }
-            Place::Member(e, _, _, _) => {
-                // Just forward on the access
-                match &**e {
-                    PlaceOrExpr::Place(p) => {
-                        p.try_access(kind, cxt)?;
-                    }
-                    PlaceOrExpr::Expr(_, _, b, s) => {
-                        if let Some(b) = b {
-                            cxt.add_dep(
-                                *b,
-                                Access {
-                                    kind,
-                                    point: AccessPoint::Expr,
-                                    span: *s,
-                                },
-                            );
-                        }
-                    }
-                };
-                Ok(())
-            }
+                AccessKind::Move => v
+                    .try_move(self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt)), cxt)
+                    .map_err(Into::into),
+                AccessKind::Copy => Ok(()),
+            },
+            // Just forward on the access
+            Place::Member(e, _, _, _) => match &**e {
+                PlaceOrExpr::Place(p) => p.try_access_unborrowed(kind, cxt),
+                _ => Ok(()),
+            },
             Place::Deref(_) if kind == AccessKind::Move => {
                 Err("Cannot move out of reference".into())
             } // TODO type information (make this a MoveError variant)
             Place::Deref(e) => {
                 let ty = match &**e {
                     PlaceOrExpr::Place(p) => {
-                        p.try_access(kind, cxt)?;
+                        p.try_access_unborrowed(kind, cxt)?;
                         Cow::Owned(p.ty(cxt)?)
                     }
-                    PlaceOrExpr::Expr(_, t, b, s) => {
-                        if let Some(b) = b {
-                            cxt.add_dep(
-                                *b,
-                                Access {
-                                    kind,
-                                    point: AccessPoint::Expr,
-                                    span: *s,
-                                },
-                            );
-                        }
-                        Cow::Borrowed(t)
-                    }
+                    PlaceOrExpr::Expr(_, t, _, _) => Cow::Borrowed(t),
                 };
                 match kind {
                     AccessKind::Mut | AccessKind::Imm => {
@@ -1861,6 +1852,59 @@ impl Place {
                 Ok(())
             }
         }
+    }
+
+    /// Adds needed dependencies to the cxt
+    fn borrow(&self, kind: AccessKind, cxt: &mut Cxt) {
+        match self {
+            Place::Var(v) => {
+                if let Some(borrow) = v.borrow(cxt) {
+                    cxt.add_dep(borrow, v.access(kind));
+                }
+            }
+            // Just forward on the access
+            Place::Member(e, _, _, _) => match &**e {
+                PlaceOrExpr::Place(p) => {
+                    p.borrow(kind, cxt);
+                }
+                PlaceOrExpr::Expr(_, _, b, s) => {
+                    if let Some(b) = b {
+                        cxt.add_dep(
+                            *b,
+                            Access {
+                                kind,
+                                point: AccessPoint::Expr,
+                                span: *s,
+                            },
+                        );
+                    }
+                }
+            },
+            Place::Deref(e) => match &**e {
+                PlaceOrExpr::Place(p) => {
+                    p.borrow(kind, cxt);
+                }
+                PlaceOrExpr::Expr(_, _, b, s) => {
+                    if let Some(b) = b {
+                        cxt.add_dep(
+                            *b,
+                            Access {
+                                kind,
+                                point: AccessPoint::Expr,
+                                span: *s,
+                            },
+                        );
+                    }
+                }
+            },
+        }
+    }
+
+    /// Makes sure the access is valid, invalidating other borrows appropriately, and adds needed dependencies to the cxt
+    fn try_access(&self, kind: AccessKind, cxt: &mut Cxt) -> Result<(), TypeError> {
+        self.try_access_unborrowed(kind, cxt)?;
+        self.borrow(kind, cxt);
+        Ok(())
     }
 }
 
@@ -1912,6 +1956,7 @@ impl ast::Expr {
                     let copy_class = clos.class.copy_class();
 
                     cxt.push_capture();
+                    cxt.record_deps();
                     let mut implicit_tys: VecDeque<_> = match clos.class.icit() {
                         Some(Impl) => clos.params.iter().collect(),
                         _ => VecDeque::new(),
@@ -2007,18 +2052,31 @@ impl ast::Expr {
                         .check(bty, cxt, reason);
                     let captures2 = cxt.pop();
                     let captures = cxt.pop();
+                    if let &Some((borrow, _)) = &captures {
+                        cxt.finish_closure_env(borrow, copy_class, self.span());
+                    }
+                    if let &Some((borrow, _)) = &captures2 {
+                        cxt.finish_closure_env(borrow, copy_class2, self.span());
+                    }
+                    cxt.finish_deps(x.body().unwrap().span());
                     let access = captures2
-                        .and_then(|x| {
+                        .and_then(|(_, x)| {
                             x.into_iter().find_map(
                                 |(_, (c, a))| if c > copy_class2 { Some(a) } else { None },
                             )
                         })
                         .or_else(|| {
-                            captures.filter(|_| !implicit.is_empty()).and_then(|x| {
-                                x.into_iter().find_map(
-                                    |(_, (c, a))| if c > copy_class { Some(a) } else { None },
-                                )
-                            })
+                            captures
+                                .filter(|_| !implicit.is_empty())
+                                .and_then(|(_, x)| {
+                                    x.into_iter().find_map(|(_, (c, a))| {
+                                        if c > copy_class {
+                                            Some(a)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
                         });
                     if let Some(access) = access {
                         return Err(MoveError::FunAccess(
@@ -2194,15 +2252,19 @@ impl ast::Expr {
     }
 
     pub fn as_args(self) -> Vec<Result<ast::Expr, RelSpan>> {
+        self.as_args_(true)
+    }
+
+    pub fn as_args_(self, parens: bool) -> Vec<Result<ast::Expr, RelSpan>> {
         match self {
-            ast::Expr::GroupedExpr(ref x) => x
+            ast::Expr::GroupedExpr(ref x) if parens => x
                 .expr()
-                .map(|x| x.as_args())
+                .map(|x| x.as_args_(false))
                 .unwrap_or_else(|| vec![Ok(self)]),
             ast::Expr::Pair(x) => {
                 let mut v = x
                     .rhs()
-                    .map(|x| x.as_args())
+                    .map(|x| x.as_args_(false))
                     .unwrap_or_else(|| vec![Err(x.span())]);
                 v.insert(0, x.lhs().ok_or(x.span()));
                 v
@@ -2265,7 +2327,7 @@ impl ast::Expr {
                             let access = Access {
                                 point: name.0.into(),
                                 span: name.1,
-                                kind: AccessKind::from(ty.copy_class(cxt)),
+                                kind: AccessKind::as_move(ty.copy_class(cxt)),
                             };
                             if access.kind == AccessKind::Move {
                                 entry
@@ -2368,11 +2430,13 @@ impl ast::Expr {
                             .elab_place(cxt)
                             .ok_or("Cannot assign to expression")?;
                         let ty = place.ty(cxt)?;
-                        place.try_access(AccessKind::Mut, cxt)?;
                         let expr = x
                             .rhs()
                             .ok_or("Missing right-hand side of assignment")?
                             .check(ty, cxt, CheckReason::MustMatch(x.lhs().unwrap().span()));
+                        // Don't borrow the lhs until after the rhs - this is important for e.g. `self.x = self.calc_x()`
+                        place.try_access(AccessKind::Mut, cxt)?;
+                        // TODO the lhs should now depend on any borrows in the rhs
                         (
                             Expr::Assign(Box::new(place.to_expr(cxt)), Box::new(expr)),
                             Val::var(Var::Builtin(Builtin::UnitType)),
@@ -2384,23 +2448,27 @@ impl ast::Expr {
                             .lhs()
                             .ok_or("Missing left-hand side of application")?
                             .elab_unborrowed(cxt);
-                        let mut self_param = None;
+                        let mut self_arg = None;
                         let self_span = lhs.span();
                         if let Some(member) = x.member() {
                             lhs = match resolve_member_method(lhs.into(), member.clone(), cxt) {
                                 Ok(lhs) => lhs,
                                 Err((lhs, method)) => {
                                     let ty = method.ty(cxt);
-                                    self_param = Some(lhs);
+                                    self_arg = Some(lhs);
                                     PlaceOrExpr::Expr(method, ty, None, member.span())
                                 }
                             }
                         }
                         let mut lhs_ty = lhs.ty(cxt).inlined(cxt);
                         let mut lhs_span = lhs.span();
-                        let mut lhs = lhs.finish(lhs_ty.copy_class(cxt).into(), cxt);
+                        let mut lhs = lhs.finish_and_borrow(
+                            AccessKind::as_ref(lhs_ty.copy_class(cxt)),
+                            AccessKind::Copy,
+                            cxt,
+                        );
 
-                        if x.exp().is_some() && self_param.is_none() {
+                        if x.exp().is_some() && self_arg.is_none() {
                             if let &Expr::Head(Head::Var(Var::Def(_, def))) = &lhs {
                                 let edef = cxt.db.def_type(def);
                                 match edef
@@ -2458,7 +2526,7 @@ impl ast::Expr {
                             let (exp, rty) = match lhs_ty {
                                 Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                                     let aty = clos.par_ty();
-                                    let (self_arg, ety) = if let Some(mut self_param) = self_param {
+                                    let (self_arg, ety) = if let Some(mut self_arg) = self_arg {
                                         let (sty, eclos) = match aty {
                                             Val::Fun(clos) if clos.class == Sigma => {
                                                 (clos.par_ty(), Some(clos))
@@ -2467,15 +2535,17 @@ impl ast::Expr {
                                         };
                                         // Insert proper ref and derefs
                                         loop {
-                                            match (&sty, self_param.ty(cxt)) {
+                                            match (&sty, self_arg.ty(cxt)) {
                                                 (Val::RefType(_, _), Val::RefType(_, _)) => break,
                                                 (Val::RefType(m, _), _) => {
-                                                    let ty = self_param.ty(cxt);
+                                                    let ty = self_arg.ty(cxt);
                                                     cxt.record_deps();
-                                                    let e = self_param
-                                                        .finish(sty.copy_class(cxt).into(), cxt);
+                                                    let e = self_arg.finish(
+                                                        AccessKind::as_ref(sty.copy_class(cxt)),
+                                                        cxt,
+                                                    );
                                                     let b = cxt.finish_deps(self_span);
-                                                    self_param = PlaceOrExpr::Expr(
+                                                    self_arg = PlaceOrExpr::Expr(
                                                         Expr::Ref(*m, Box::new(e)),
                                                         Val::RefType(*m, Box::new(ty)),
                                                         Some(b),
@@ -2484,18 +2554,18 @@ impl ast::Expr {
                                                     break;
                                                 }
                                                 (_, Val::RefType(_, _)) => {
-                                                    self_param = PlaceOrExpr::Place(Place::Deref(
-                                                        Box::new(self_param),
+                                                    self_arg = PlaceOrExpr::Place(Place::Deref(
+                                                        Box::new(self_arg),
                                                     ));
                                                     continue;
                                                 }
                                                 _ => break,
                                             }
                                         }
-                                        let pty = self_param.ty(cxt);
-                                        let kind = sty.copy_class(cxt).into();
+                                        let pty = self_arg.ty(cxt);
+                                        let kind = AccessKind::as_ref(sty.copy_class(cxt));
                                         cxt.unify(pty, sty, CheckReason::ArgOf(lhs_span))?;
-                                        let self_arg = self_param.finish(kind, cxt);
+                                        let self_arg = self_arg.finish(kind, cxt);
                                         (
                                             Some(self_arg.clone()),
                                             eclos.map(|x| x.apply(self_arg.eval(&mut cxt.env()))),
@@ -2552,7 +2622,7 @@ impl ast::Expr {
                                 rty,
                             )
                         } else {
-                            if self_param.is_some() {
+                            if self_arg.is_some() {
                                 cxt.error(
                                     lhs_span,
                                     Doc::start("'").chain(lhs.pretty(cxt.db)).add(

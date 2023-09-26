@@ -529,7 +529,7 @@ impl<'i> fmt::Display for Tok {
             Tok::LPipe => "'<|'",
             Tok::RPipe => "'|>'",
             Tok::FloatLit => "float literal",
-            Tok::IntLit => "float literal",
+            Tok::IntLit => "int literal",
             Tok::Name => "name",
             Tok::StringLit => "string literal",
             Tok::At => "'@'",

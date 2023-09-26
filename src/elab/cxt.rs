@@ -77,7 +77,7 @@ struct LocalScope {
     size: Size,
     start_size: Size,
     names: Vec<LocalVarDef>,
-    captures: Option<Vec<(Lvl, (CopyClass, Access))>>,
+    captures: Option<(Borrow, Vec<(Lvl, (CopyClass, Access))>)>,
 }
 
 pub fn prelude_defs(db: &dyn Elaborator) -> std::sync::Arc<HashMap<Name, VarDef>> {
@@ -167,12 +167,12 @@ impl LocalScope {
             })
     }
 
-    fn new(size: Size, capture: bool) -> Self {
+    fn new(size: Size, capture: Option<Borrow>) -> Self {
         LocalScope {
             size,
             start_size: size,
             names: Vec::new(),
-            captures: capture.then(|| Vec::new()),
+            captures: capture.map(|x| (x, Vec::new())),
         }
     }
 }
@@ -239,9 +239,15 @@ impl AccessKind {
             AccessKind::Move
         }
     }
-}
-impl From<CopyClass> for AccessKind {
-    fn from(value: CopyClass) -> Self {
+
+    pub fn as_ref(value: CopyClass) -> Self {
+        match value {
+            CopyClass::Move => AccessKind::Move,
+            CopyClass::Copy => AccessKind::Imm,
+            CopyClass::Mut => AccessKind::Mut,
+        }
+    }
+    pub fn as_move(value: CopyClass) -> Self {
         match value {
             CopyClass::Move => AccessKind::Move,
             CopyClass::Copy => AccessKind::Copy,
@@ -283,7 +289,7 @@ impl Borrow {
             .unwrap_or_default()
     }
 
-    fn invalidate(self, mut invalid: BorrowInvalid, cxt: &mut Cxt) {
+    fn invalidate(self, invalid: BorrowInvalid, cxt: &mut Cxt) {
         if invalid.skip_borrow == Some(self) {
             return;
         }
@@ -294,7 +300,6 @@ impl Borrow {
                     .iter()
                     .any(|x| x.1.kind == AccessKind::Move)
             {
-                let start = invalid.chain_start.is_none();
                 if def.invalid.is_none() {
                     def.invalid = Some(invalid.clone());
                 }
@@ -306,12 +311,13 @@ impl Borrow {
                     .map(|(&x, &y)| (x, y))
                     .collect::<Vec<_>>()
                 {
-                    if start {
+                    let mut invalid = invalid.clone();
+                    if invalid.chain_start.is_none() {
                         invalid.chain_start = Some(a);
                     } else {
                         invalid.chain_end = Some(a);
                     }
-                    i.invalidate(invalid.clone(), cxt);
+                    i.invalidate(invalid, cxt);
                 }
             }
         }
@@ -430,6 +436,7 @@ pub enum VarEntry {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AccessPoint {
     Expr,
+    Closure(RelSpan, Option<Name>),
     Name(Name),
     Function(Option<Name>),
 }
@@ -448,6 +455,15 @@ impl AccessPoint {
         match self {
             AccessPoint::Expr => {
                 Doc::start(if initial { "T" } else { "t" }).add("he result of this expression", ())
+            }
+            AccessPoint::Closure(_, Some(name)) => Doc::start(if initial {
+                "Captured variable "
+            } else {
+                "captured variable "
+            })
+            .chain(name.pretty(db).style(col)),
+            AccessPoint::Closure(_, None) => {
+                Doc::start(if initial { "T" } else { "t" }).add("his closure's environment", ())
             }
             AccessPoint::Name(name) => {
                 Doc::start(if initial { "Variable " } else { "" }).chain(name.pretty(db).style(col))
@@ -505,6 +521,14 @@ impl AccessError {
                     .add(" was consumed here", ()),
                 false,
             ),
+            _ if matches!(self.dep_access.point, AccessPoint::Closure(_, _)) => (
+                Doc::start("Cannot return value that borrows mutable ").chain(name0(false, false)),
+                name0(true, false).add(
+                    " could be mutated by another call to this closure after it is returned",
+                    (),
+                ),
+                false,
+            ),
             _ if self
                 .dep_chain_start
                 .map_or(self.invalid_access.kind == AccessKind::Mut, |x| {
@@ -545,29 +569,52 @@ impl AccessError {
                     .add(" borrowed here", ()),
             });
         }
-        if let Some(access) = self.dep_chain_end {
-            let mutable = self.dep_chain_start.unwrap().kind == AccessKind::Mut;
-            secondary.push(Label {
-                span: access.span,
-                color: Some(Doc::COLOR4),
-                message: match access.point {
-                    AccessPoint::Function(_) => access
-                        .point
-                        .pretty(true, Doc::COLOR4, db)
-                        .add(" could mutate ", ())
-                        .chain(name1(false, swap))
-                        .add(" and insert", ())
-                        .add(if mutable { " mutably" } else { "" }, ())
-                        .add(" borrowed data from ", ())
-                        .chain(name0(false, swap)),
-                    _ => name1(true, swap)
-                        .add(if mutable { " mutably" } else { "" }, ())
-                        .add(" borrows ", ())
-                        .chain(name0(false, swap))
-                        .add(" through ", ())
-                        .chain(access.point.pretty(false, Doc::COLOR4, db)),
-                },
-            });
+        match self.dep_access.point {
+            AccessPoint::Closure(span, _) => {
+                if span != self.invalid_access.span
+                    && self.dep_chain_start.map_or(true, |x| x.span != span)
+                {
+                    secondary.push(Label {
+                        span,
+                        color: Some(Doc::COLOR4),
+                        message: name0(true, swap).add(
+                            " could be mutated here when the closure is called again",
+                            (),
+                        ),
+                    })
+                }
+            }
+            _ => (),
+        }
+        if secondary.len() < 3 {
+            if let Some(access) = self.dep_chain_end {
+                let mutable = self.dep_chain_start.unwrap().kind == AccessKind::Mut;
+                let span = match self.dep_access.point {
+                    AccessPoint::Closure(span, _) => span,
+                    _ => access.span,
+                };
+                secondary.push(Label {
+                    span,
+                    color: Some(Doc::COLOR4),
+                    message: match access.point {
+                        AccessPoint::Function(_) => access
+                            .point
+                            .pretty(true, Doc::COLOR4, db)
+                            .add(" could mutate ", ())
+                            .chain(name1(false, swap))
+                            .add(" and insert", ())
+                            .add(if mutable { " mutably" } else { "" }, ())
+                            .add(" borrowed data from ", ())
+                            .chain(name0(false, swap)),
+                        _ => name1(true, swap)
+                            .add(if mutable { " mutably" } else { "" }, ())
+                            .add(" borrows ", ())
+                            .chain(name0(false, swap))
+                            .add(" through ", ())
+                            .chain(access.point.pretty(false, Doc::COLOR4, db)),
+                    },
+                });
+            }
         }
 
         let note = if self.dep_access.kind == AccessKind::Move {
@@ -578,6 +625,12 @@ impl AccessError {
                     .chain(ty.pretty(db))
                     .add("' which cannot be copied implicitly", ())
             })
+        } else if let AccessPoint::Closure(_, _) = self.dep_access.point {
+            Some(
+                Doc::start("Closure could be called more than once since it's an '&")
+                    .add("mut", Doc::style_keyword())
+                    .add(" ->' closure, not an owned '->' closure", ()),
+            )
         } else {
             None
         };
@@ -694,12 +747,10 @@ impl VarEntry {
                     let entry = &mut l.names[*var];
                     let lvl = entry.var.as_var().unwrap().as_local();
                     let access = self.access(AccessKind::Move);
-                    entry
-                        .borrow
-                        .unwrap()
-                        .invalidate_self(access, Rc::new(ty), cxt);
+                    let borrow = entry.borrow.unwrap();
+                    borrow.invalidate_self(access, Rc::new(ty), cxt);
                     if let Some(lvl) = lvl {
-                        cxt.record_access(lvl, access);
+                        cxt.record_access(lvl, access, borrow);
                     }
                     Ok(())
                 }
@@ -739,18 +790,19 @@ impl VarEntry {
                             entry.name,
                         ));
                     }
-                    let access = self.access(AccessKind::borrow(mutable));
-                    let borrow = entry.borrow.unwrap();
-                    cxt.check_deps(borrow, access)?;
+                    if let Some(borrow) = entry.borrow {
+                        let access = self.access(AccessKind::borrow(mutable));
+                        cxt.check_deps(borrow, access)?;
 
-                    let lvl = entry.var.as_var().unwrap().as_local();
-                    if mutable {
-                        borrow.invalidate_children(access, cxt);
-                    } else {
-                        borrow.invalidate_mutable(access, cxt);
-                    }
-                    if let Some(lvl) = lvl {
-                        cxt.record_access(lvl, access);
+                        let lvl = entry.var.as_var().unwrap().as_local();
+                        if mutable {
+                            borrow.invalidate_children(access, cxt);
+                        } else {
+                            borrow.invalidate_mutable(access, cxt);
+                        }
+                        if let Some(lvl) = lvl {
+                            cxt.record_access(lvl, access, borrow);
+                        }
                     }
                     Ok(())
                 }
@@ -839,6 +891,30 @@ impl Cxt<'_> {
     }
     pub fn add_dep(&mut self, dep: Borrow, access: Access) {
         dep.add_borrow(*self.expr_borrow.last().unwrap(), access, self)
+    }
+    pub fn finish_closure_env(&mut self, dep: Borrow, class: CopyClass, span: RelSpan) {
+        if class == CopyClass::Mut {
+            match dep.def(self) {
+                Some(def) => {
+                    let def = def.clone();
+                    for i in def.mutable_borrows {
+                        let access = Access {
+                            kind: AccessKind::Mut,
+                            span,
+                            point: AccessPoint::Closure(
+                                i.1.span,
+                                match i.1.point {
+                                    AccessPoint::Name(n) => Some(n),
+                                    _ => None,
+                                },
+                            ),
+                        };
+                        i.0.invalidate_children(access, self);
+                    }
+                }
+                None => (),
+            }
+        }
     }
     pub fn check_deps(&self, borrow: Borrow, access: Access) -> Result<(), MoveError> {
         match borrow.def(self) {
@@ -969,18 +1045,19 @@ impl Cxt<'_> {
         })
     }
 
-    fn record_access(&mut self, lvl: Lvl, access: Access) {
+    fn record_access(&mut self, lvl: Lvl, access: Access, borrow: Borrow) {
         let class = match access.kind {
             AccessKind::Move => CopyClass::Move,
             AccessKind::Mut => CopyClass::Mut,
             AccessKind::Imm | AccessKind::Copy => CopyClass::Copy,
         };
+        let mut deps = Vec::new();
         for i in self.scopes.iter_mut().rev() {
             match i {
                 Scope::Local(l) => {
                     if !lvl.in_scope(l.start_size) {
                         break;
-                    } else if let Some(captures) = &mut l.captures {
+                    } else if let Some((b, captures)) = &mut l.captures {
                         let mut found = false;
                         for (l, x) in captures.iter_mut() {
                             if *l == lvl {
@@ -995,21 +1072,26 @@ impl Cxt<'_> {
                         if !found {
                             captures.push((lvl, (class, access)));
                         }
+                        deps.push(*b);
                     }
                 }
                 _ => (),
             }
         }
+        for b in deps {
+            b.add_borrow(borrow, access, self);
+        }
     }
 
     pub fn push(&mut self) {
         self.scopes
-            .push(Scope::Local(LocalScope::new(self.size(), false)));
+            .push(Scope::Local(LocalScope::new(self.size(), None)));
     }
 
     pub fn push_capture(&mut self) {
+        let borrow = Borrow::new(self);
         self.scopes
-            .push(Scope::Local(LocalScope::new(self.size(), true)));
+            .push(Scope::Local(LocalScope::new(self.size(), Some(borrow))));
     }
 
     pub fn push_def_scope(&mut self, def: Def) {
@@ -1027,7 +1109,7 @@ impl Cxt<'_> {
         self.scopes.push(Scope::Trait(self_arg));
     }
 
-    pub fn pop(&mut self) -> Option<Vec<(Lvl, (CopyClass, Access))>> {
+    pub fn pop(&mut self) -> Option<(Borrow, Vec<(Lvl, (CopyClass, Access))>)> {
         let new_size = self
             .scopes
             .iter()
@@ -1288,6 +1370,10 @@ impl Cxt<'_> {
                 _ => Vec::new(),
             })
             .collect()
+    }
+
+    pub fn has_error(&self) -> bool {
+        self.errors.iter().any(|(s, _, _)| *s == Severity::Error)
     }
 
     pub fn error(&mut self, span: RelSpan, error: impl Into<TypeError>) {

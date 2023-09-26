@@ -258,7 +258,7 @@ mod input {
                             }
                             let ty = lhs.ty(cxt.ecxt);
                             (
-                                lhs.finish(AccessKind::from(ty.copy_class(cxt.ecxt)), cxt.ecxt),
+                                lhs.finish(AccessKind::as_move(ty.copy_class(cxt.ecxt)), cxt.ecxt),
                                 ty,
                             )
                         })
@@ -463,11 +463,11 @@ mod input {
                 }
                 ast::Expr::Pair(x) => {
                     let start_size = *size;
+                    // We insert an extra variable so the type can depend on the lhs even if it's not bound in the pattern
                     *size += 1;
                     let a = x
                         .lhs()
                         .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
-                    // We insert an extra variable so the type can depend on the lhs even if it's not bound in the pattern
                     let b = x
                         .rhs()
                         .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
@@ -783,7 +783,7 @@ impl CaseElabCxt<'_, '_> {
                 }
                 input::RemovedColumn::Pair(a, b, size, span) => {
                     // Make sure to share the PVars for all patterns that match on the same pair
-                    assert!(yes_cons.is_none());
+                    assert!(yes_cons.is_none() || self.ecxt.has_error());
                     if iargs.is_empty() && eargs.is_none() {
                         let (va, vb) = match &sty {
                             Val::Fun(clos) if clos.class == Sigma => {
@@ -1188,11 +1188,12 @@ pub(super) fn elab_case(
                 while env.size < cxt.ecxt.size() {
                     env.push(None);
                 }
+                env.reset_to_size(cxt.ecxt.size());
                 cxt.ecxt.set_env(env);
-                let body = match rty {
-                    Some((rty, reason)) => body
-                        .as_ref()
-                        .map_or(Expr::Error, |x| x.check(rty.clone(), cxt.ecxt, *reason)),
+                let (body, bspan) = match rty {
+                    Some((rty, reason)) => body.as_ref().map_or((Expr::Error, s_span), |x| {
+                        (x.check(rty.clone(), cxt.ecxt, *reason), x.span())
+                    }),
                     None => match body {
                         Some(body) => {
                             let (expr, ty) = body.infer(cxt.ecxt);
@@ -1209,9 +1210,9 @@ pub(super) fn elab_case(
                                 ty
                             };
                             *rty = Some((ty, CheckReason::MustMatch(body.span())));
-                            expr
+                            (expr, body.span())
                         }
-                        None => Expr::Error,
+                        None => (Expr::Error, s_span),
                     },
                 };
                 cxt.ecxt.pop();
@@ -1223,7 +1224,7 @@ pub(super) fn elab_case(
                 });
                 merges.push(cxt.ecxt.borrow_checkpoint());
                 cxt.ecxt.reset_borrows(borrow_checkpoint.clone());
-                deps.push(cxt.ecxt.finish_deps(s_span)); // TODO span
+                deps.push((cxt.ecxt.finish_deps(bspan), bspan)); // TODO span
             }
             None => panic!("env_tys has no entry for body {}", i),
         }
@@ -1232,13 +1233,13 @@ pub(super) fn elab_case(
     for i in merges {
         cxt.ecxt.merge_borrows(i);
     }
-    for i in deps {
+    for (i, span) in deps {
         cxt.ecxt.add_dep(
             i,
             Access {
                 kind: AccessKind::Move,
                 point: AccessPoint::Expr,
-                span: s_span, // TODO span
+                span,
             },
         );
     }
