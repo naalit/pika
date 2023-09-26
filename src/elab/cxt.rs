@@ -51,12 +51,12 @@ impl Namespace {
                 .map(|split| db.def(DefLoc::Root(file, split)))
                 .collect(),
             Namespace::Def(def) => db
-                .def_elab(def)
+                .def_type(def)
                 .and_then(|x| x.result)
                 .map(|x| {
                     x.children
                         .into_iter()
-                        .map(|x| db.def(DefLoc::Child(def, x.0)))
+                        .map(|x| db.def(DefLoc::Child(def, x)))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -926,8 +926,9 @@ impl Cxt<'_> {
         }
     }
 
-    pub fn new_meta(&mut self, bounds: MetaBounds, span: RelSpan) -> Expr {
-        self.mcxt.new_meta(self.locals(), self.size(), bounds, span)
+    pub fn new_meta(&mut self, bounds: MetaBounds, span: RelSpan, source: MetaSource) -> Expr {
+        self.mcxt
+            .new_meta(self.locals(), self.size(), bounds, span, source)
     }
 
     pub fn emit_errors(&mut self) -> Vec<Error> {

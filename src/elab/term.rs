@@ -261,6 +261,12 @@ pub enum DefBody {
     Struct(Vec<(SName, Expr)>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeDefKind {
+    Type(Vec<(SplitId, RelSpan, Val)>),
+    Struct(Vec<(SName, Expr)>),
+}
+
 pub trait IsTerm {
     type Clos: std::fmt::Debug + Clone + PartialEq + Eq + std::hash::Hash;
     type Loc: std::fmt::Debug + Clone + Copy + PartialEq + Eq + std::hash::Hash;
@@ -404,10 +410,9 @@ impl Expr {
                     Var::Cons(_, c) => {
                         let (d, split) = cxt.db.lookup_cons_id(*c);
                         cxt.db
-                            .def_elab(d)
-                            .and_then(|x| x.result)
-                            .and_then(|x| match x.body {
-                                DefBody::Type(v) => v
+                            .def_type(d)
+                            .and_then(|x| match x.result?.type_def? {
+                                TypeDefKind::Type(v) => v
                                     .into_iter()
                                     .find(|(s, _, _)| *s == split)
                                     .map(|(_, _, ty)| ty),
@@ -542,9 +547,9 @@ impl Pretty for Expr {
                 .chain(b.pretty(db).nest(Prec::Pair))
                 .prec(Prec::Pair),
             Expr::Struct(def, fields, _) => {
-                let edef = db.def_elab(*def).unwrap().result.unwrap();
-                let fnames = match edef.body {
-                    DefBody::Struct(f) => f,
+                let edef = db.def_type(*def).unwrap().result.unwrap();
+                let fnames = match edef.type_def {
+                    Some(TypeDefKind::Struct(f)) => f,
                     _ => unreachable!(),
                 };
                 edef.name

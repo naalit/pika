@@ -142,17 +142,32 @@ impl ast::Def {
     ) -> Option<DefType> {
         match self {
             ast::Def::LetDef(l) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
-                Some((_, Some(ty))) => Some(DefType::new(
+                Some((n, Some(ty))) => Some(DefType::new(
+                    n.map_or(
+                        (cxt.db.name("_".into()), l.pat()?.expr()?.span()),
+                        |(_, n)| n,
+                    ),
                     ty.expr()?
                         .check(Val::Type, cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut cxt.env()),
                 )),
+                Some((Some((_, n)), _)) => {
+                    // Infer the type from the value if possible
+                    // TODO would it make sense to call def_elab() instead?
+                    let ty = cxt.db.def_elab_n(def_id, def_node).result?.ty;
+                    Some(DefType::new(
+                        n,
+                        ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                            .eval(&mut cxt.env()),
+                    ))
+                }
                 _ => {
                     // Infer the type from the value if possible
                     // TODO would it make sense to call def_elab() instead?
                     let ty = cxt.db.def_elab_n(def_id, def_node).result?.ty;
                     Some(DefType::new(
+                        (cxt.db.name("_".into()), l.pat()?.expr()?.span()),
                         ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                             .eval(&mut cxt.env()),
                     ))
@@ -180,19 +195,30 @@ impl ast::Def {
                     .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                     .eval(&mut cxt.env());
 
-                Some(DefType::new(ty))
+                Some(DefType::new(
+                    x.name()
+                        .map_or((cxt.db.name("_".into()), x.span()), |x| x.name(cxt.db)),
+                    ty,
+                ))
             }
             ast::Def::TypeDef(_) | ast::Def::ImplDef(_) => {
                 // We usually can't know types of type arguments from just the signature
                 // so in general we need to elaborate the constructor types as well
                 let def = cxt.db.def_elab_n(def_id, def_node).result?;
                 Some(DefType {
+                    name: def.name,
                     ty: def
                         .ty
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut cxt.env()),
                     is_trait: def.is_trait,
                     is_impl: def.is_impl,
+                    children: def.children.into_iter().map(|x| x.0).collect(),
+                    type_def: match def.body {
+                        DefBody::Type(b) => Some(TypeDefKind::Type(b)),
+                        DefBody::Struct(b) => Some(TypeDefKind::Struct(b)),
+                        _ => None,
+                    },
                 })
             }
         }
@@ -1157,9 +1183,13 @@ fn check_par(
                     }
                     ty
                 }
-                None => expected_ty
-                    .map(|(x, _)| x)
-                    .unwrap_or_else(|| cxt.new_meta(MetaBounds::new(Val::Type), x.span())),
+                None => expected_ty.map(|(x, _)| x).unwrap_or_else(|| {
+                    cxt.new_meta(
+                        MetaBounds::new(Val::Type),
+                        x.span(),
+                        MetaSource::TypeOf(name.0),
+                    )
+                }),
             };
             Par {
                 name,
@@ -1296,7 +1326,7 @@ impl Expr {
                     .collect();
                 let mut targs: Vec<Expr> = Vec::new();
                 let par_ty = clos.par_ty();
-                let rty = clos.elab_with(|aty, is_impl| match args.pop_front() {
+                let rty = clos.elab_with(|name, aty, is_impl| match args.pop_front() {
                     Some(arg) => match arg {
                         Ok(arg) => {
                             let arg = arg.check(aty, cxt, CheckReason::ArgOf(span));
@@ -1320,7 +1350,11 @@ impl Expr {
                     },
                     None => {
                         // Apply a new metavariable
-                        let e = cxt.new_meta(MetaBounds::new(aty).with_impl(is_impl), span);
+                        let e = cxt.new_meta(
+                            MetaBounds::new(aty).with_impl(is_impl),
+                            span,
+                            MetaSource::ArgOf(self.pretty(cxt.db), Some(name.0)),
+                        );
                         targs.push(e.clone());
                         e.eval(&mut cxt.env())
                     }
@@ -1370,8 +1404,11 @@ impl Expr {
 }
 
 pub(super) fn member_type(lhs: &Val, def: Def, idx: u64, cxt: &mut Cxt) -> Val {
-    if let Some(DefBody::Struct(fields)) =
-        cxt.db.def_elab(def).and_then(|x| x.result).map(|x| x.body)
+    if let Some(TypeDefKind::Struct(fields)) = cxt
+        .db
+        .def_type(def)
+        .and_then(|x| x.result)
+        .and_then(|x| x.type_def)
     {
         let mut env = cxt.env();
         let lhs_ty = lhs.clone().quote(cxt.size(), Some(&cxt.mcxt)).ty(cxt);
@@ -1447,14 +1484,14 @@ pub(super) fn resolve_member_method(
             }
             Val::Neutral(n) => match n.head() {
                 Head::Var(Var::Def(_, def)) => {
-                    let edef = cxt.db.def_elab(def);
+                    let edef = cxt.db.def_type(def);
                     // Struct fields
                     match edef
                         .as_ref()
                         .and_then(|x| x.result.as_ref())
-                        .map(|x| &x.body)
+                        .and_then(|x| x.type_def.as_ref())
                     {
-                        Some(DefBody::Struct(fields)) => {
+                        Some(TypeDefKind::Struct(fields)) => {
                             if let Some((idx, (_, _))) = fields
                                 .iter()
                                 .enumerate()
@@ -1471,12 +1508,10 @@ pub(super) fn resolve_member_method(
                         _ => (),
                     }
                     // Methods in `where` block
-                    if let Some((split, _)) =
-                        edef.as_ref().and_then(|x| x.result.as_ref()).and_then(|x| {
-                            x.children
-                                .iter()
-                                .find(|(s, _)| *s == SplitId::Named(name.0))
-                        })
+                    if let Some(split) = edef
+                        .as_ref()
+                        .and_then(|x| x.result.as_ref())
+                        .and_then(|x| x.children.iter().find(|s| **s == SplitId::Named(name.0)))
                     {
                         let def = cxt.db.def(DefLoc::Child(def, *split));
                         // TODO check if it actually has a `self` parameter
@@ -1494,11 +1529,11 @@ pub(super) fn resolve_member_method(
                 match &lhs_val {
                     Val::Neutral(n) => match n.head() {
                         Head::Var(Var::Def(def_name, def)) => {
-                            let edef = cxt.db.def_elab(def);
+                            let edef = cxt.db.def_type(def);
                             match edef.as_ref().and_then(|x| x.result.as_ref()) {
                                 Some(edef) => {
-                                    match &edef.body {
-                                        DefBody::Type(ctors) => {
+                                    match &edef.type_def {
+                                        Some(TypeDefKind::Type(ctors)) => {
                                             if let Some((split, _, ty)) = ctors
                                                 .iter()
                                                 .find(|(s, _, _)| *s == SplitId::Named(name.0))
@@ -1514,7 +1549,7 @@ pub(super) fn resolve_member_method(
                                                 ));
                                             }
                                         }
-                                        DefBody::Struct(fields) if edef.is_trait => {
+                                        Some(TypeDefKind::Struct(fields)) if edef.is_trait => {
                                             if let Some((idx, (_, _))) = fields
                                                 .iter()
                                                 .enumerate()
@@ -1527,6 +1562,13 @@ pub(super) fn resolve_member_method(
                                                     MetaBounds::new(lhs_val.clone())
                                                         .with_impl(true),
                                                     span,
+                                                    MetaSource::ArgOf(
+                                                        edef.name
+                                                            .pretty(cxt.db)
+                                                            .add('.', ())
+                                                            .chain(name.pretty(cxt.db)),
+                                                        None,
+                                                    ),
                                                 );
                                                 return Ok(PlaceOrExpr::Place(Place::Member(
                                                     Box::new(PlaceOrExpr::Expr(
@@ -1540,10 +1582,8 @@ pub(super) fn resolve_member_method(
                                         }
                                         _ => (),
                                     }
-                                    if let Some((split, _)) = edef
-                                        .children
-                                        .iter()
-                                        .find(|(s, _)| *s == SplitId::Named(name.0))
+                                    if let Some(split) =
+                                        edef.children.iter().find(|s| **s == SplitId::Named(name.0))
                                     {
                                         let def = cxt.db.def(DefLoc::Child(def, *split));
                                         let ty = cxt
@@ -1579,10 +1619,10 @@ pub(super) fn resolve_member_method(
         // Look for trait methods in scope
         let mut trait_results = Vec::new();
         for trait_def in cxt.all_traits() {
-            let edef = cxt.db.def_elab(trait_def).unwrap().result.unwrap();
+            let edef = cxt.db.def_type(trait_def).unwrap().result.unwrap();
 
-            match &edef.body {
-                DefBody::Struct(fields) => {
+            match &edef.type_def {
+                Some(TypeDefKind::Struct(fields)) => {
                     if let Some((idx, (_, _))) = fields
                         .iter()
                         .enumerate()
@@ -1602,7 +1642,14 @@ pub(super) fn resolve_member_method(
                 let tr_ty = tr.ty(cxt);
                 let (tr, _) = tr.insert_metas(tr_ty, None, span, cxt);
                 let tr = tr.eval(&mut cxt.env());
-                let meta = cxt.new_meta(MetaBounds::new(tr.clone()).with_impl(true), span);
+                let meta = cxt.new_meta(
+                    MetaBounds::new(tr.clone()).with_impl(true),
+                    span,
+                    MetaSource::ArgOf(
+                        tname.pretty(cxt.db).add('.', ()).chain(name.pretty(cxt.db)),
+                        None,
+                    ),
+                );
                 let method = Expr::Elim(
                     Box::new(meta),
                     Box::new(Elim::Member(def, idx as u64, name)),
@@ -2203,9 +2250,13 @@ impl ast::Expr {
                         let name = name.name(cxt.db);
                         if name.0 == cxt.db.name("_".to_string()) {
                             let mty = cxt
-                                .new_meta(MetaBounds::new(Val::Type), self.span())
+                                .new_meta(MetaBounds::new(Val::Type), self.span(), MetaSource::Hole)
                                 .eval(&mut cxt.env());
-                            let meta = cxt.new_meta(MetaBounds::new(mty.clone()), self.span());
+                            let meta = cxt.new_meta(
+                                MetaBounds::new(mty.clone()),
+                                self.span(),
+                                MetaSource::Hole,
+                            );
                             (meta, mty)
                         } else {
                             let entry = cxt.lookup(name).ok_or(TypeError::NotFound(name.0))?;
@@ -2351,13 +2402,15 @@ impl ast::Expr {
 
                         if x.exp().is_some() && self_param.is_none() {
                             if let &Expr::Head(Head::Var(Var::Def(_, def))) = &lhs {
-                                let edef = cxt.db.def_elab(def);
+                                let edef = cxt.db.def_type(def);
                                 match edef
                                     .as_ref()
                                     .and_then(|x| x.result.as_ref())
-                                    .map(|x| (x.name, &x.body))
+                                    .map(|x| (x.name, &x.type_def))
                                 {
-                                    Some((name, DefBody::Type(ctors))) if ctors.len() == 1 => {
+                                    Some((name, Some(TypeDefKind::Type(ctors))))
+                                        if ctors.len() == 1 =>
+                                    {
                                         let (split, _, ty) = ctors.first().unwrap();
                                         if *split == SplitId::Idx(0) {
                                             lhs = Expr::var(Var::Cons(
@@ -2702,17 +2755,17 @@ impl ast::Expr {
                         match &lhs {
                             Val::Neutral(n) => match n.head() {
                                 Head::Var(Var::Def(def_name, def)) => {
-                                    if let Some(Definition {
-                                        body: DefBody::Struct(fields),
+                                    if let Some(DefType {
+                                        type_def: Some(TypeDefKind::Struct(fields)),
                                         is_trait,
                                         ty,
                                         ..
-                                    }) = cxt.db.def_elab(def).and_then(|x| x.result)
+                                    }) = cxt.db.def_type(def).and_then(|x| x.result)
                                     {
                                         if is_trait {
                                             let self_arg = match n.spine().first() {
-                                                Some(Elim::App(Impl, x)) => match ty.unspanned() {
-                                                    Expr::Fun(clos)
+                                                Some(Elim::App(Impl, x)) => match ty {
+                                                    Val::Fun(clos)
                                                         if matches!(clos.class, Pi(Impl, _)) =>
                                                     {
                                                         x.clone()
@@ -2899,15 +2952,19 @@ impl ast::Lit {
             let num = lex_number(l.text()).map_err(|e| format!("Invalid literal: {}", e))?;
             match num {
                 NumLiteral::IPositive(i) => {
-                    let meta = cxt
-                        .mcxt
-                        .unscoped_meta(MetaBounds::int_type(false, i), self.span());
+                    let meta = cxt.mcxt.unscoped_meta(
+                        MetaBounds::int_type(false, i),
+                        self.span(),
+                        MetaSource::Other(Doc::start("type of int literal")),
+                    );
                     Ok(Literal::Int(i, Err((false, meta))))
                 }
                 NumLiteral::INegative(i) => {
-                    let meta = cxt
-                        .mcxt
-                        .unscoped_meta(MetaBounds::int_type(true, i as u64), self.span());
+                    let meta = cxt.mcxt.unscoped_meta(
+                        MetaBounds::int_type(true, i as u64),
+                        self.span(),
+                        MetaSource::Other(Doc::start("type of int literal")),
+                    );
                     Ok(Literal::Int(i as u64, Err((true, meta))))
                 }
                 NumLiteral::Float(_) => todo!(),

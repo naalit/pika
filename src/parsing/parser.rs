@@ -724,6 +724,14 @@ impl<'a> Parser<'a> {
 
                             self.expect(Tok::WideArrow);
 
+                            // Allow single-line do-lambda
+                            if self.cur() != Tok::Indent {
+                                self.push(Tok::Body);
+                                self.expr(());
+                                self.pop();
+                                return;
+                            }
+
                             self.push(Tok::Body);
                             self.push(Tok::Do);
                         } else {

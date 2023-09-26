@@ -105,8 +105,8 @@ pub struct VClos {
     pub body: Expr,
 }
 impl VClos {
-    /// arg: (argument type, is impl) -> argument value
-    pub fn elab_with(self, mut arg: impl FnMut(Val, bool) -> Val) -> Val {
+    /// arg: (arg name, arg type, is impl) -> argument value
+    pub fn elab_with(self, mut arg: impl FnMut(SName, Val, bool) -> Val) -> Val {
         let VClos {
             class: _,
             params,
@@ -115,7 +115,7 @@ impl VClos {
         } = self;
         for par in params {
             let ty = par.ty.eval(&mut env);
-            env.push(Some(Ok(arg(ty, par.is_impl))));
+            env.push(Some(Ok(arg(par.name, ty, par.is_impl))));
         }
         body.eval(&mut env)
     }

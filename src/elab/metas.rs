@@ -131,6 +131,33 @@ impl MetaBounds {
 }
 
 #[derive(Clone, Debug)]
+pub enum MetaSource {
+    Hole,
+    TypeOf(Name),
+    ArgOf(Doc, Option<Name>),
+    Other(Doc),
+}
+impl MetaSource {
+    fn pretty(&self, db: &(impl Elaborator + ?Sized)) -> Doc {
+        match self {
+            MetaSource::Hole => Doc::start("hole"),
+            MetaSource::TypeOf(n) => Doc::start("type of '").chain(n.pretty(db)).add("'", ()),
+            MetaSource::ArgOf(d, Some(n)) if *n != db.name("_".into()) => {
+                Doc::start("implicit argument '")
+                    .chain(n.pretty(db))
+                    .add("' to function '", ())
+                    .chain(d.clone())
+                    .add("'", ())
+            }
+            MetaSource::ArgOf(d, _) => Doc::start("implicit argument to function '")
+                .chain(d.clone())
+                .add("'", ()),
+            MetaSource::Other(d) => d.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum MetaEntry {
     Solved {
         /// A lambda term with no free variables
@@ -141,6 +168,7 @@ pub enum MetaEntry {
         bounds: MetaBounds,
         size: Size,
         introduced_span: RelSpan,
+        source: MetaSource,
     },
 }
 
@@ -335,12 +363,18 @@ impl MetaCxt<'_> {
     }
 
     /// Creates a new meta which can't use any free variables; mostly for e.g. int types
-    pub fn unscoped_meta(&mut self, bounds: MetaBounds, introduced_span: RelSpan) -> Meta {
+    pub fn unscoped_meta(
+        &mut self,
+        bounds: MetaBounds,
+        introduced_span: RelSpan,
+        source: MetaSource,
+    ) -> Meta {
         let m = Meta(self.metas.len() as u32);
         self.metas.push(MetaEntry::Unsolved {
             bounds,
             size: Size::zero(),
             introduced_span,
+            source,
         });
         m
     }
@@ -351,12 +385,14 @@ impl MetaCxt<'_> {
         size: Size,
         bounds: MetaBounds,
         introduced_span: RelSpan,
+        source: MetaSource,
     ) -> Expr {
         let m = Meta(self.metas.len() as u32);
         self.metas.push(MetaEntry::Unsolved {
             bounds,
             size,
             introduced_span,
+            source,
         });
         let size = Size::zero() + scope.len();
         // The order of arguments shouldn't matter as long as they're all there
@@ -437,6 +473,7 @@ impl MetaCxt<'_> {
                     bounds,
                     size: _,
                     introduced_span,
+                    source: _,
                 } => Some((bounds, introduced_span)),
             })
             .unwrap();
@@ -520,6 +557,7 @@ impl MetaCxt<'_> {
                     bounds,
                     size,
                     introduced_span,
+                    source: _,
                 } if bounds.is_impl && size >= next_size => {
                     metas.push((Meta(i as u32), size, introduced_span));
                 }
@@ -546,15 +584,16 @@ impl MetaCxt<'_> {
                     bounds,
                     size,
                     introduced_span,
+                    source,
                 } => {
                     let intro_span = *introduced_span;
                     match bounds.stored.pop() {
                         None => errors.push(
                             TypeError::Other(
                                 // TODO store a Doc or enum for the reason the meta was introduced
-                                Doc::start("Could not solve metavariable ?")
-                                    .add(i, ())
-                                    .add(" of type '", ())
+                                Doc::start("Could not find solution for ")
+                                    .chain(source.pretty(self.db))
+                                    .add(", of type '", ())
                                     .chain(
                                         bounds.ty.clone().quote(*size, Some(self)).pretty(self.db),
                                     )

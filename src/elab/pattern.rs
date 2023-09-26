@@ -997,11 +997,11 @@ mod coverage {
                             let all_ctors: Vec<_> = match cxt
                                 .ecxt
                                 .db
-                                .def_elab(def)
+                                .def_type(def)
                                 .and_then(|d| d.result)
-                                .map(|d| d.body)
+                                .and_then(|d| d.type_def)
                             {
-                                Some(DefBody::Type(ctors)) => ctors
+                                Some(TypeDefKind::Type(ctors)) => ctors
                                     .into_iter()
                                     .filter_map(|(s, _, ty)| {
                                         let mut size = size;

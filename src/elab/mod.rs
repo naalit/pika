@@ -351,16 +351,22 @@ pub struct DefElabResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefType {
-    ty: Val,
-    is_trait: bool,
-    is_impl: bool,
+    pub name: SName,
+    pub ty: Val,
+    pub is_trait: bool,
+    pub is_impl: bool,
+    pub children: Vec<SplitId>,
+    pub type_def: Option<TypeDefKind>,
 }
 impl DefType {
-    pub fn new(ty: Val) -> Self {
+    pub fn new(name: SName, ty: Val) -> Self {
         DefType {
+            name,
             ty,
             is_trait: false,
             is_impl: false,
+            children: Vec::new(),
+            type_def: None,
         }
     }
 }
