@@ -121,7 +121,7 @@ let vec1 = vcons (true) (vcons (false) (vcons (true) (vnil)))
 # Also note the implicit lambdas.
 # ----------------------------------------------------------------------------------
 let Eq : [A:_] &-> A &-> A -> Type =
-    [A] x => y => (P : A &-> Type) &-> P (x) &-> P (y)
+    [A] x => y => (P : A &-> Type) -> P (x) -> P (y)
 
 # TODO violates move semantics
 # let refl : [A][x : A] &-> Eq x x =

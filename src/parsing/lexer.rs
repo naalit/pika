@@ -26,8 +26,6 @@ pub struct LexResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LexError {
     InvalidToken(char),
-    InvalidLiteral(String),
-    InvalidEscape(char),
     UnclosedString,
     /// This is used for specific errors that occur in one place, in the parser or lexer.
     Other(String),
@@ -342,35 +340,8 @@ impl<'i> Lexer<'i> {
                     match self.next() {
                         Some('"') => break self.tok_in_place(Tok::StringLit),
                         Some('\\') => {
-                            // Escape
-                            match self.next() {
-                                Some('\\') => {
-                                    buf.push('\\');
-                                }
-                                Some('n') => {
-                                    buf.push('\n');
-                                }
-                                Some('t') => {
-                                    buf.push('\t');
-                                }
-                                Some(c) => {
-                                    self.errors.push((
-                                        LexError::InvalidEscape(c),
-                                        RelSpan::new(self.pos - 2, self.pos),
-                                    ));
-                                    let r = (Tok::Error, self.tok_start);
-                                    // Try to find the terminating " to avoid further errors
-                                    while self.next().map_or(false, |x| x != '"') {}
-                                    break r;
-                                }
-                                None => {
-                                    self.errors.push((
-                                        LexError::UnclosedString,
-                                        RelSpan::new(self.tok_start, self.pos - 1),
-                                    ));
-                                    break self.tok_in_place(Tok::Error);
-                                }
-                            }
+                            // Escape sequence, which will be processed during elaboration
+                            self.next();
                         }
                         Some(c) => buf.push(c),
                         None => {
@@ -448,13 +419,6 @@ pub fn lexerror_to_error(lex: LexError, span: RelSpan) -> Error {
     let message = match lex {
         LexError::InvalidToken(c) => Doc::start("Invalid token: '")
             .add(c, Doc::COLOR1)
-            .add("'", ()),
-        LexError::InvalidLiteral(e) => Doc::start("Invalid literal: '")
-            .add(e, Doc::COLOR1)
-            .add("'", ()),
-        LexError::InvalidEscape(e) => Doc::start("Invalid escape sequence: '")
-            .add('\\', Doc::COLOR1)
-            .add(e, Doc::COLOR1)
             .add("'", ()),
         LexError::UnclosedString => Doc::start("Unclosed ")
             .add("string literal", Doc::COLOR1)

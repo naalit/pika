@@ -649,9 +649,9 @@ impl AccessError {
 
 pub enum MoveError {
     AccessError(AccessError),
-    InvalidMove(Doc, Name, Box<Expr>),
+    InvalidMove(Doc, Option<Name>, Box<Expr>),
     InvalidBorrow(Doc, Name),
-    FunAccess(Access, Expr, CheckReason),
+    FunAccess(Access, CopyClass, Option<(Expr, CheckReason)>),
     InvalidAccess(Doc, Access),
 }
 impl From<AccessError> for MoveError {
@@ -755,12 +755,12 @@ impl VarEntry {
             } => Err(MoveError::InvalidMove(
                 Doc::start("Cannot move out of definition ")
                     .chain(name.pretty(cxt.db).style(Doc::COLOR1)),
-                name.0,
+                Some(name.0),
                 Box::new(ty),
             )),
             VarEntry::Other { var, name } => Err(MoveError::InvalidMove(
                 Doc::start("Cannot move out of ").debug(var),
-                name.0,
+                Some(name.0),
                 Box::new(ty),
             )),
         }
@@ -1081,10 +1081,16 @@ impl Cxt<'_> {
             .push(Scope::Local(LocalScope::new(self.size(), None)));
     }
 
-    pub fn push_capture(&mut self) {
+    pub fn mark_top_scope_capture(&mut self) {
         let borrow = Borrow::new(self);
-        self.scopes
-            .push(Scope::Local(LocalScope::new(self.size(), Some(borrow))));
+        assert!(
+            self.scope_mut()
+                .unwrap()
+                .captures
+                .replace((borrow, Vec::new()))
+                .is_none(),
+            "Cannot mark_capture() a scope that is already capture"
+        );
     }
 
     pub fn push_def_scope(&mut self, def: Def) {

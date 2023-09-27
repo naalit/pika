@@ -224,7 +224,10 @@ impl TypeError {
                         secondary: vec![],
                         note: Some(
                             Doc::start("Move occurs because ")
-                                .chain(name.pretty(db))
+                                .chain(name.map_or_else(
+                                    || Doc::start("this expression"),
+                                    |x| x.pretty(db),
+                                ))
                                 .add(" has type '", ())
                                 .chain(ty.pretty(db))
                                 .add("' which cannot be copied implicitly", ()),
@@ -242,17 +245,14 @@ impl TypeError {
                         secondary: vec![],
                         note: None,
                     },
-                    MoveError::FunAccess(access, ety, reason) => {
+                    MoveError::FunAccess(access, class, Some((ety, reason))) => {
                         let (secondary2, note) = self::unify::UnifyError::pretty_reason(*reason);
-                        let ty_doc = match ety.unspanned() {
-                            Expr::Fun(clos) => match clos.class.copy_class() {
-                                CopyClass::Copy => Doc::start("'&->' function"),
-                                CopyClass::Mut => Doc::start("'&")
-                                    .add("mut", Doc::style_keyword())
-                                    .add(" ->' function", ()),
-                                CopyClass::Move => Doc::start("'->' function"),
-                            },
-                            _ => Doc::start("function"),
+                        let ty_doc = match class {
+                            CopyClass::Copy => Doc::start("'&->' function"),
+                            CopyClass::Mut => Doc::start("'&")
+                                .add("mut", Doc::style_keyword())
+                                .add(" ->' function", ()),
+                            CopyClass::Move => Doc::start("'->' function"),
                         };
                         let kind_doc = match access.kind {
                             AccessKind::Mut => "Mutating",
@@ -281,6 +281,40 @@ impl TypeError {
                             },
                             secondary,
                             note,
+                        }
+                    }
+                    MoveError::FunAccess(access, class, None) => {
+                        let ty_doc = match class {
+                            CopyClass::Copy => Doc::start("'&->' function"),
+                            CopyClass::Mut => Doc::start("'&")
+                                .add("mut", Doc::style_keyword())
+                                .add(" ->' function", ()),
+                            CopyClass::Move => Doc::start("'->' function"),
+                        };
+                        let kind_doc = match access.kind {
+                            AccessKind::Mut => "Mutating",
+                            AccessKind::Imm => "Borrowing",
+                            AccessKind::Move => "Consuming",
+                            AccessKind::Copy => "Copying",
+                        };
+                        let secondary = vec![Label {
+                            span,
+                            message: Doc::start("This is expected to be a ").chain(ty_doc.clone()),
+                            color: Some(Doc::COLOR2),
+                        }];
+                        Error {
+                            severity,
+                            message_lsp: None,
+                            message: Doc::start(kind_doc)
+                                .add(" captured variables is not allowed in ", ())
+                                .chain(ty_doc),
+                            primary: Label {
+                                span: access.span,
+                                message: Doc::start(kind_doc).add(" this captured variable", ()),
+                                color: Some(Doc::COLOR1),
+                            },
+                            secondary,
+                            note: None,
                         }
                     }
                     MoveError::AccessError(e) => e.to_error(severity, db),

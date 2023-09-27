@@ -152,7 +152,6 @@ impl ast::Def {
                 )),
                 Some((Some((_, n)), _)) => {
                     // Infer the type from the value if possible
-                    // TODO would it make sense to call def_elab() instead?
                     let ty = cxt.db.def_elab_n(def_id, def_node).result?.ty;
                     Some(DefType::new(
                         n,
@@ -162,7 +161,6 @@ impl ast::Def {
                 }
                 _ => {
                     // Infer the type from the value if possible
-                    // TODO would it make sense to call def_elab() instead?
                     let ty = cxt.db.def_elab_n(def_id, def_node).result?.ty;
                     Some(DefType::new(
                         (cxt.db.name("_".into()), l.pat()?.expr()?.span()),
@@ -756,7 +754,7 @@ fn infer_fun(
     // -->
     // [a, b, c, d] => ((e, f) => ...)
 
-    cxt.push_capture();
+    cxt.push();
     let mut extra_pars: Vec<_> = pars.extra_imp().into_iter().cloned().collect();
     for i in &extra_pars {
         cxt.define_local(
@@ -784,6 +782,11 @@ fn infer_fun(
     extra_pars.append(&mut implicit);
     let implicit = extra_pars;
 
+    // Variable accesses in the parameter types don't count as captures,
+    // but accesses to the parameters inside the body don't count either
+    // That's why we do this instead of pushing a capture scope (bc then that wouldn't include parameters)
+    cxt.mark_top_scope_capture();
+
     cxt.record_deps();
     let bspan = body.as_ref().map_or(span, |x| x.span());
     let (body, bty) = match ret_ty {
@@ -810,18 +813,31 @@ fn infer_fun(
     };
     let bty = bty.quote(cxt.size(), None);
     let captures = cxt.pop();
-    // TODO error if copy class doesn't match
-    let copy_class = copy_class.unwrap_or_else(|| {
-        captures.as_ref().map_or(CopyClass::Copy, |(_, x)| {
-            x.iter().fold(CopyClass::Copy, |x, (_, (y, _))| x.max(*y))
-        })
+    let (captures_class, max_a) = captures.as_ref().map_or((CopyClass::Copy, None), |(_, x)| {
+        x.iter()
+            .fold((CopyClass::Copy, None), |(x, xa), (_, (y, a))| {
+                if *y > x {
+                    (*y, Some(*a))
+                } else {
+                    (x, xa)
+                }
+            })
     });
+    if let Some(copy_class) = copy_class {
+        if copy_class < captures_class {
+            let access = max_a.unwrap();
+            cxt.error(bspan, MoveError::FunAccess(access, copy_class, None));
+        }
+    }
+    let copy_class = copy_class.unwrap_or(captures_class);
     if let &Some((borrow, _)) = &captures {
         cxt.finish_closure_env(borrow, copy_class, span);
     }
-    cxt.finish_deps(bspan); // TODO what do we do with this borrow
+    // This is the borrow of the returned expression, so we'll use this if we do dependency annotations
+    cxt.finish_deps(bspan);
 
     // We have to evaluate this outside of the scope
+    // TODO figure out how copy classes work with pi (can a pi type depend by-move on an argument? a capture?)
     let mut ty = if explicit.is_empty() {
         bty
     } else {
@@ -1832,8 +1848,14 @@ impl Place {
                 _ => Ok(()),
             },
             Place::Deref(_) if kind == AccessKind::Move => {
-                Err("Cannot move out of reference".into())
-            } // TODO type information (make this a MoveError variant)
+                let ty = self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt));
+                Err(MoveError::InvalidMove(
+                    Doc::start("Cannot move out of reference"),
+                    None,
+                    Box::new(ty),
+                )
+                .into())
+            }
             Place::Deref(e) => {
                 let ty = match &**e {
                     PlaceOrExpr::Place(p) => {
@@ -1964,7 +1986,7 @@ impl ast::Expr {
                     let mut clos = clos.move_env(&mut cxt.env());
                     let copy_class = clos.class.copy_class();
 
-                    cxt.push_capture();
+                    cxt.push();
                     cxt.record_deps();
                     let mut implicit_tys: VecDeque<_> = match clos.class.icit() {
                         Some(Impl) => clos.params.iter().collect(),
@@ -2017,8 +2039,9 @@ impl ast::Expr {
                         }
                     }
 
+                    cxt.mark_top_scope_capture();
                     let copy_class2 = clos.class.copy_class();
-                    cxt.push_capture();
+                    cxt.push();
 
                     let (explicit, bty) = if x.pars().and_then(|x| x.exp()).is_some() {
                         (
@@ -2041,6 +2064,8 @@ impl ast::Expr {
                             },
                         )
                     };
+
+                    cxt.mark_top_scope_capture();
 
                     // let bty = clos.body.eval(&mut cxt.env());
                     let body = x
@@ -2079,8 +2104,8 @@ impl ast::Expr {
                     if let Some(access) = access {
                         return Err(MoveError::FunAccess(
                             access,
-                            ty.quote(cxt.size(), Some(&cxt.mcxt)),
-                            reason,
+                            copy_class,
+                            Some((ty.quote(cxt.size(), Some(&cxt.mcxt)), reason)),
                         )
                         .into());
                     }
@@ -2388,28 +2413,8 @@ impl ast::Expr {
                     ast::Expr::Deref(_) => {
                         let place = self.elab_place(cxt).ok_or("Expected reference after *")?;
                         let xty = place.ty(cxt)?;
-                        // A bare deref must be a copy
-                        place.try_access(AccessKind::Copy, cxt)?;
+                        place.try_access(AccessKind::as_move(xty.copy_class(cxt)), cxt)?;
                         let x = place.to_expr(cxt);
-                        if xty.copy_class(cxt) != CopyClass::Copy {
-                            match x.unspanned() {
-                                Expr::Head(Head::Var(Var::Local((n, _), _))) => {
-                                    return Err(MoveError::InvalidMove(
-                                        Doc::start("Cannot move out of reference"),
-                                        *n,
-                                        Box::new(xty.quote(cxt.size(), Some(&cxt.mcxt))),
-                                    )
-                                    .into())
-                                }
-                                _ => {
-                                    return Err(TypeError::Other(
-                                        Doc::start("Cannot move out of reference of type ").chain(
-                                            xty.quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db),
-                                        ),
-                                    ))
-                                }
-                            }
-                        }
                         (x, xty)
                     }
                     ast::Expr::Assign(x) => {
@@ -2662,8 +2667,8 @@ impl ast::Expr {
                                     Ok(t) => Val::var(Var::Builtin(Builtin::IntType(t))),
                                     Err((_, m)) => Val::var(Var::Meta(m)),
                                 },
-                                Literal::F64(_) => todo!(),
-                                Literal::F32(_) => todo!(),
+                                Literal::F64(_) => todo!("floats"),
+                                Literal::F32(_) => todo!("floats"),
                                 Literal::String(_) => Val::var(Var::Builtin(Builtin::StringType)),
                             },
                         ),
@@ -2752,8 +2757,8 @@ impl ast::Expr {
                             }
                         }
                     }
-                    ast::Expr::If(_) => todo!(),
-                    ast::Expr::Box(_) => todo!(),
+                    ast::Expr::If(_) => todo!("if"),
+                    ast::Expr::Box(_) => todo!("box"),
                     ast::Expr::Type(_) => (Expr::Type, Val::Type),
                     ast::Expr::GroupedExpr(e) => match e.expr() {
                         Some(e) => e.infer(cxt),
@@ -2961,7 +2966,6 @@ impl ast::Expr {
                 }
             })
         };
-        // TODO auto-applying implicits (probably? only allowing them on function calls is also an option to consider)
         match result() {
             Ok((x, t)) => (Expr::Spanned(self.span(), Box::new(x)), t),
             Err(e) => {
@@ -2976,8 +2980,6 @@ impl ast::Lit {
     pub(super) fn to_literal(&self, cxt: &mut Cxt) -> Result<Literal, String> {
         if let Some(l) = self.string() {
             // Process escape sequences to get the string's actual contents
-            // This work is also done by the lexer, which then throws it away;
-            // TODO move all error checking here and simplify the lexer code (same for numbers)
             let mut buf = String::new();
             let mut chars = l.text().chars().skip_while(|x| x.is_whitespace());
             loop {
@@ -2995,15 +2997,14 @@ impl ast::Lit {
                             Some('t') => {
                                 buf.push('\t');
                             }
-                            _ => {
-                                panic!("Invalid escape should have been caught in lexer");
+                            Some(c) => {
+                                return Err(format!("Invalid escape sequence \\{}", c));
                             }
+                            None => panic!("Unclosed string should have been caught in lexer"),
                         }
                     }
                     Some(c) => buf.push(c),
-                    None => {
-                        panic!("Unclosed string should have been caught in lexer")
-                    }
+                    None => panic!("Unclosed string should have been caught in lexer"),
                 }
             }
             Ok(Literal::String(cxt.db.name(buf)))
@@ -3026,10 +3027,10 @@ impl ast::Lit {
                     );
                     Ok(Literal::Int(i as u64, Err((true, meta))))
                 }
-                NumLiteral::Float(_) => todo!(),
+                NumLiteral::Float(_) => todo!("floats"),
             }
         } else {
-            todo!("invalid literal: {:?}", self.syntax());
+            panic!("invalid literal: {:?}", self.syntax());
         }
     }
 }
