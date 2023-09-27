@@ -82,11 +82,6 @@ pub enum SyntaxKind {
     Eof,
 
     // Composite nodes
-    /// A parameter where a bare name is a binding
-    PatPar,
-    /// A parameter where a bare name is a reference
-    TermPar,
-
     Pat,
     Binder,
     Pair,
@@ -94,8 +89,13 @@ pub enum SyntaxKind {
 
     ImpArg,
     ImpArgs,
+
+    ExpPar,
     ImpPar,
-    ImpPars,
+    FunPars,
+    PiPars,
+    TypePars,
+    ImplPars,
 
     Reference,
     RefMut,

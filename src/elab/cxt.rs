@@ -232,13 +232,6 @@ impl AccessKind {
             AccessKind::Imm
         }
     }
-    pub fn copy_move(copy: bool) -> Self {
-        if copy {
-            AccessKind::Copy
-        } else {
-            AccessKind::Move
-        }
-    }
 
     pub fn as_ref(value: CopyClass) -> Self {
         match value {

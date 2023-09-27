@@ -193,19 +193,22 @@ make_nodes! {
 
 
     Pat = expr: Expr;
-    PatPar = pat: Pat;
-    TermPar = expr: Expr;
     Binder = pat: Pat, ty: Ty;
     Pair = lhs: Expr, rhs: (1 Expr);
 
-    ImpPar = par: PatPar;
-    ImpPars = pars: [ImpPar];
+    ExpPar = expr: Expr;
+    ImpPar = expr: Expr;
+    FunPars = imp: ImpPar, exp: ExpPar;
+    PiPars = imp: ImpPar, exp: ExpPar;
+    TypePars = imp: ImpPar, exp: ExpPar;
+    ImplPars = imp: ImpPar;
+
     ImpArg = expr: Expr;
     ImpArgs = args: [ImpArg];
 
     WithClause = effs: [Expr];
-    Lam = imp_par: ImpPars, exp_par: PatPar, body: Body;
-    Pi = imp_par: ImpPars, exp_par: TermPar, class: FunClass, body: Body, with: WithClause;
+    Lam = pars: FunPars, body: Body;
+    Pi = pars: PiPars, class: FunClass, body: Body, with: WithClause;
     FunClass = refkw: (!BitAnd), mutkw: (!MutKw);
 
     StructInit = lhs: Expr, fields: StructFields;
@@ -277,10 +280,10 @@ make_nodes! {
 
     // Definitions
     LetDef = pat: Pat, body: Body;
-    FunDef = name: Var, imp_par: ImpPars, exp_par: PatPar, ret_ty: Ty, with: WithClause, body: Body;
-    ConsDef = name: Var, imp_par: ImpPars, exp_par: TermPar, ret_ty: Ty;
-    TypeDef = name: Var, imp_par: ImpPars, exp_par: TermPar, body: TypeDefBody, block: BlockDef;
-    ImplDef = pars: ImpPars, name: Var, body: Body;
+    FunDef = name: Var, pars: FunPars, ret_ty: Ty, with: WithClause, body: Body;
+    ConsDef = name: Var, pars: TypePars, ret_ty: Ty;
+    TypeDef = name: Var, pars: TypePars, body: TypeDefBody, block: BlockDef;
+    ImplDef = pars: ImplPars, name: Var, body: Body;
     enum TypeDefBody = TypeDefStruct, TypeDefCtors;
     TypeDefCtors = cons: [ConsDef];
     TypeDefStruct = fields: StructFields;
@@ -364,16 +367,6 @@ impl Pretty for Body {
     }
 }
 
-impl Pretty for TermPar {
-    fn pretty(&self) -> Doc {
-        self.expr().pretty()
-    }
-}
-impl Pretty for PatPar {
-    fn pretty(&self) -> Doc {
-        self.pat().pretty()
-    }
-}
 impl Pretty for Pat {
     fn pretty(&self) -> Doc {
         self.expr().pretty()
@@ -381,7 +374,12 @@ impl Pretty for Pat {
 }
 impl Pretty for ImpPar {
     fn pretty(&self) -> Doc {
-        Doc::start('[').chain(self.par().pretty()).add(']', ())
+        Doc::start('[').chain(self.expr().pretty()).add(']', ())
+    }
+}
+impl Pretty for ExpPar {
+    fn pretty(&self) -> Doc {
+        Doc::start('(').chain(self.expr().pretty()).add(')', ())
     }
 }
 impl Pretty for ImpArg {
@@ -394,9 +392,25 @@ impl Pretty for ImpArgs {
         Doc::intersperse(self.args().iter().map(|x| x.pretty()), Doc::none())
     }
 }
-impl Pretty for ImpPars {
+
+impl Pretty for FunPars {
     fn pretty(&self) -> Doc {
-        Doc::intersperse(self.pars().iter().map(|x| x.pretty()), Doc::none())
+        self.imp().pretty().chain(self.exp().pretty())
+    }
+}
+impl Pretty for PiPars {
+    fn pretty(&self) -> Doc {
+        self.imp().pretty().chain(self.exp().pretty())
+    }
+}
+impl Pretty for TypePars {
+    fn pretty(&self) -> Doc {
+        self.imp().pretty().chain(self.exp().pretty())
+    }
+}
+impl Pretty for ImplPars {
+    fn pretty(&self) -> Doc {
+        self.imp().pretty()
     }
 }
 
@@ -404,9 +418,7 @@ impl Pretty for ConsDef {
     fn pretty(&self) -> Doc {
         self.name()
             .pretty()
-            .space()
-            .chain(self.imp_par().pretty())
-            .chain(self.exp_par().pretty())
+            .chain(self.pars().pretty())
             .add(':', ())
             .space()
             .chain(self.ret_ty().pretty())
@@ -429,8 +441,7 @@ impl Pretty for Def {
                 .space()
                 .chain(x.name().pretty())
                 .space()
-                .chain(x.imp_par().pretty())
-                .chain(x.exp_par().pretty())
+                .chain(x.pars().pretty())
                 .add(':', ())
                 .space()
                 .chain(x.ret_ty().pretty())
@@ -443,8 +454,7 @@ impl Pretty for Def {
                 .space()
                 .chain(x.name().pretty())
                 .space()
-                .chain(x.imp_par().pretty())
-                .chain(x.exp_par().pretty())
+                .chain(x.pars().pretty())
                 .space()
                 .chain(match x.body() {
                     None => Doc::none(),
@@ -514,15 +524,13 @@ impl Pretty for Expr {
             Expr::Var(n) => n.pretty(),
             Expr::Type(_) => Doc::none().add("Type", Doc::style_keyword()),
             Expr::Lam(l) => Doc::none()
-                .chain(l.imp_par().pretty())
-                .chain(l.exp_par().pretty())
+                .chain(l.pars().pretty())
                 .space()
                 .add("=>", ())
                 .space()
                 .chain(l.body().pretty()),
             Expr::Pi(l) => Doc::none()
-                .chain(l.imp_par().pretty())
-                .chain(l.exp_par().pretty())
+                .chain(l.pars().pretty())
                 .space()
                 .chain(match l.class() {
                     None => Doc::none(),

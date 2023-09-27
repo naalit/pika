@@ -285,7 +285,7 @@ impl<'a> Parser<'a> {
 
                 self.var();
 
-                self.params(true, true);
+                self.params(Tok::FunPars, false);
 
                 // Allow newline before the colon, for long parameter lists
                 self.maybe(Tok::Newline);
@@ -323,9 +323,7 @@ impl<'a> Parser<'a> {
                 self.advance();
 
                 if self.cur() == Tok::SOpen {
-                    if self.params_inner(true).is_some() {
-                        self.expected("impl body", None);
-                    }
+                    self.params(Tok::ImplPars, false);
                 }
 
                 if matches!((self.cur(), self.peek(1)), (Tok::Name, Tok::Colon)) {
@@ -349,7 +347,7 @@ impl<'a> Parser<'a> {
                     self.cur(),
                     Tok::Equals | Tok::OfKw | Tok::StructKw | Tok::Newline
                 ) {
-                    self.params(false, true);
+                    self.params(Tok::TypePars, false);
                 }
 
                 if self.maybe(Tok::StructKw) {
@@ -389,7 +387,7 @@ impl<'a> Parser<'a> {
                             }
 
                             if self.cur() != Tok::Colon {
-                                self.params(false, true);
+                                self.params(Tok::TypePars, false);
                             }
 
                             if self.maybe(Tok::Colon) {
@@ -506,63 +504,53 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Returns the checkpoint for explicit parameters, so they can be set as PatPar or TermPar as needed
-    fn params_inner(&mut self, require_parens: bool) -> Option<Checkpoint> {
-        // First implicit params
+    fn params_inner(&mut self, allow_expl: bool, allow_bare_expl: bool) -> Checkpoint {
         let cp = self.checkpoint();
-        let mut had_imp = false;
-        while self.cur() == Tok::SOpen {
-            had_imp = true;
-            self.push(Tok::ImpPar);
-            self.push(Tok::PatPar);
-            self.push(Tok::Pat);
 
+        let mut had_imp = false;
+        if self.cur() == Tok::SOpen {
+            had_imp = true;
+
+            self.push(Tok::ImpPar);
             self.advance();
             if self.cur() != Tok::SClose {
                 self.expr(Prec::Pat);
             }
             self.expect(Tok::SClose);
+            self.pop();
+        }
 
-            self.pop();
-            self.pop();
-            self.pop();
-        }
-        if had_imp {
-            self.push_at(cp, Tok::ImpPars);
-            self.pop();
-        }
         if self.cur() == Tok::POpen
             || self.cur() == Tok::Indent
-            || (!require_parens && self.cur().starts_atom())
+            || (allow_bare_expl && self.cur().starts_atom())
         {
             // Explicit parameters
-            let cp = self.checkpoint();
-            if require_parens {
+            if !allow_expl {
+                self.expected("impl body", "impl cannot have explicit parameters");
+            }
+            self.push(Tok::ExpPar);
+            if !allow_bare_expl {
                 self.atom()
             } else {
                 self.expr(ExprParams::no_arrow())
             };
-            Some(cp)
+            self.pop();
         } else {
             if !had_imp {
                 // Explicit parameters are required if implicit ones don't exist
                 self.expected("parameters", None);
             }
-            None
         }
+
+        cp
     }
 
-    fn params(&mut self, pat: bool, require_parens: bool) {
-        if let Some(cp) = self.params_inner(require_parens) {
-            if pat {
-                self.push_at(cp, Tok::PatPar);
-                self.push_at(cp, Tok::Pat);
-                self.pop();
-            } else {
-                self.push_at(cp, Tok::TermPar);
-            }
-            self.pop();
-        }
+    fn params(&mut self, ty: Tok, allow_bare_expl: bool) {
+        self.push(ty);
+
+        self.params_inner(ty != Tok::ImplPars, allow_bare_expl);
+
+        self.pop();
     }
 
     fn arguments(&mut self) {
@@ -720,7 +708,7 @@ impl<'a> Parser<'a> {
 
                             self.advance();
 
-                            self.params(true, false);
+                            self.params(Tok::FunPars, true);
 
                             self.expect(Tok::WideArrow);
 
@@ -833,17 +821,13 @@ impl<'a> Parser<'a> {
                     }
                     // If it starts with [, it must be a lambda or pi
                     Tok::SOpen => {
-                        let par_cp = self.params_inner(false);
+                        let par_cp = self.params_inner(true, true);
                         match self.cur() {
                             Tok::WideArrow => {
                                 self.push_at(cp, Tok::Lam);
 
-                                if let Some(par_cp) = par_cp {
-                                    self.push_at(par_cp, Tok::PatPar);
-                                    self.push_at(par_cp, Tok::Pat);
-                                    self.pop();
-                                    self.pop();
-                                }
+                                self.push_at(par_cp, Tok::FunPars);
+                                self.pop();
 
                                 self.advance();
 
@@ -856,10 +840,8 @@ impl<'a> Parser<'a> {
                             Tok::Arrow => {
                                 self.push_at(cp, Tok::Pi);
 
-                                if let Some(par_cp) = par_cp {
-                                    self.push_at(par_cp, Tok::TermPar);
-                                    self.pop();
-                                }
+                                self.push_at(par_cp, Tok::PiPars);
+                                self.pop();
 
                                 self.advance();
 
@@ -874,10 +856,8 @@ impl<'a> Parser<'a> {
                             Tok::BitAnd => {
                                 self.push_at(cp, Tok::Pi);
 
-                                if let Some(par_cp) = par_cp {
-                                    self.push_at(par_cp, Tok::TermPar);
-                                    self.pop();
-                                }
+                                self.push_at(par_cp, Tok::PiPars);
+                                self.pop();
 
                                 self.push(Tok::FunClass);
                                 self.advance();
@@ -1020,8 +1000,8 @@ impl<'a> Parser<'a> {
                 Tok::WideArrow if allow_lambda && Prec::Comma > min_prec => {
                     self.push_at(lhs, Tok::Lam);
 
-                    self.push_at(lhs, Tok::PatPar);
-                    self.push_at(lhs, Tok::Pat);
+                    self.push_at(lhs, Tok::FunPars);
+                    self.push_at(lhs, Tok::ExpPar);
                     self.pop();
                     self.pop();
 
@@ -1036,7 +1016,9 @@ impl<'a> Parser<'a> {
                 Tok::Arrow if allow_arrow && Prec::Arrow >= min_prec => {
                     self.push_at(lhs, Tok::Pi);
 
-                    self.push_at(lhs, Tok::TermPar);
+                    self.push_at(lhs, Tok::PiPars);
+                    self.push_at(lhs, Tok::ExpPar);
+                    self.pop();
                     self.pop();
 
                     self.advance();
@@ -1060,7 +1042,9 @@ impl<'a> Parser<'a> {
                     } else {
                         self.push_at(lhs, Tok::Pi);
 
-                        self.push_at(lhs, Tok::TermPar);
+                        self.push_at(lhs, Tok::PiPars);
+                        self.push_at(lhs, Tok::ExpPar);
+                        self.pop();
                         self.pop();
 
                         self.push(Tok::FunClass);

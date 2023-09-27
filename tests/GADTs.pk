@@ -18,9 +18,9 @@ fun h [a] (x: GADT[a], y: a) : Type = case x of
 
 
 type MyGADT[_: Type] of
-    Pair : [a] (MyGADT[a], MyGADT[a]) -> MyGADT[a]
-    Value : [a] a -> MyGADT[a]
-    IsUnit : MyGADT[()]
+    Pair[a](MyGADT[a], MyGADT[a]): MyGADT[a]
+    Value[a](a): MyGADT[a]
+    IsUnit: MyGADT[()]
 
 fun myFun [a] (x: MyGADT[a]): Str = case x of
     MyGADT.Pair (MyGADT.IsUnit, MyGADT.Value ()) => "It's (IsUnit, ())!"

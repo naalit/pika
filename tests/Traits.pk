@@ -43,8 +43,7 @@ fun main() = do
 # impl "not a trait"
 # fun bad_impl[impl Str]() = ()
 
-# `[:Type]&->Type` is quite ugly, it'd be nice to make this syntax better
-trait Functor[Self: [:Type]&-> Type] struct
+trait Functor[Self: [Type] &-> Type] struct
     fun map[a, b](self: Self[a], f: a &mut -> b): Self[b]
 
 type Result[R, E] of

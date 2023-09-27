@@ -63,8 +63,7 @@ impl ast::Stmt {
             },
             ast::Stmt::Def(ast::Def::FunDef(x)) => {
                 let (_, ty) = infer_fun(
-                    x.imp_par(),
-                    x.exp_par().as_par(),
+                    x.pars(),
                     x.ret_ty().and_then(|x| x.expr()),
                     None,
                     Some(CopyClass::Copy),
@@ -102,8 +101,7 @@ impl ast::Stmt {
             },
             ast::Stmt::Def(ast::Def::FunDef(x)) => {
                 let (expr, ty) = infer_fun(
-                    x.imp_par(),
-                    x.exp_par().as_par(),
+                    x.pars(),
                     x.ret_ty().and_then(|x| x.expr()),
                     x.body(),
                     Some(CopyClass::Copy),
@@ -183,8 +181,7 @@ impl ast::Def {
                         expr: None,
                     }));
                 let (_, ty) = infer_fun(
-                    x.imp_par(),
-                    x.exp_par().as_par(),
+                    x.pars(),
                     Some(rty),
                     None,
                     Some(CopyClass::Copy),
@@ -305,8 +302,7 @@ impl ast::Def {
                     }));
 
                 let (term, ty) = infer_fun(
-                    x.imp_par(),
-                    x.exp_par().as_par(),
+                    x.pars(),
                     Some(rty),
                     x.body(),
                     Some(CopyClass::Copy),
@@ -334,17 +330,7 @@ impl ast::Def {
 
                 cxt.push();
                 let pars = check_params(
-                    x.pars()
-                        .into_iter()
-                        .flat_map(|x| x.pars())
-                        .flat_map(
-                            |x| match x.par().and_then(|x| x.pat()).and_then(|x| x.expr()) {
-                                Some(x) => x.as_args(),
-                                None => vec![Err(x.span())],
-                            },
-                        )
-                        .collect(),
-                    true,
+                    x.pars().imp(),
                     ParamTys::Inferred(Impl),
                     CheckReason::UsedAsType,
                     None,
@@ -409,24 +395,22 @@ impl ast::Def {
 
                 cxt.push();
                 let has_self = x
-                    .imp_par()
-                    .and_then(|x| x.pars().first().cloned())
-                    .and_then(|x| x.par())
-                    .and_then(|x| x.pat())
-                    .and_then(|x| x.expr())
+                    .pars()
+                    .imp()
+                    .and_then(|x| x.pars.first().cloned())
+                    .and_then(|x| x.ok())
                     .and_then(|x| x.as_let_def_pat(cxt.db))
                     .and_then(|x| x.0)
                     .map_or(false, |(_, (n, _))| n == cxt.db.name("Self".into()));
                 let (_, ty) = infer_fun(
-                    ImpPars {
-                        imp_pars: x.imp_par(),
-                        extra: if is_trait && !has_self {
-                            vec![Par::new((cxt.db.name("Self".into()), span), Expr::Type)]
+                    TraitPars(
+                        if is_trait && !has_self {
+                            Some(Par::new((cxt.db.name("Self".into()), span), Expr::Type))
                         } else {
-                            Vec::new()
+                            None
                         },
-                    },
-                    None,
+                        x.pars().imp(),
+                    ),
                     Some(ast::Expr::Type(ast::Type::Val {
                         span: x.name().map_or_else(|| x.span(), |n| n.span()),
                         kw: None,
@@ -485,9 +469,9 @@ impl ast::Def {
                 };
 
                 let body = match x.body() {
-                    Some(_) if x.exp_par().is_some() => {
+                    Some(_) if x.pars().and_then(|x| x.exp()).is_some() => {
                         cxt.error(
-                            x.exp_par().map_or(x.span(), |x| x.span()),
+                            x.pars().unwrap().exp().unwrap().span(),
                             "Type definitions can only have implicit parameters",
                         );
                         DefBody::Let(Box::new(Expr::Error))
@@ -508,16 +492,13 @@ impl ast::Def {
                                     false,
                                 );
                             }
-                            let explicit = x.exp_par().as_par().map_or(Vec::new(), |x| {
-                                check_params(
-                                    x.par.as_args(),
-                                    x.pat,
-                                    ParamTys::Inferred(Expl),
-                                    CheckReason::UsedAsType,
-                                    None,
-                                    cxt,
-                                )
-                            });
+                            let explicit = check_params(
+                                x.pars().exp(),
+                                ParamTys::Inferred(Expl),
+                                CheckReason::UsedAsType,
+                                None,
+                                cxt,
+                            );
 
                             let mut ty = default_rty.clone().quote(cxt.size(), Some(&cxt.mcxt));
                             if !explicit.is_empty() {
@@ -565,8 +546,7 @@ impl ast::Def {
                             // If the return type is given, nothing is implied and the types and parameters are as given.
                             let cty = if c.ret_ty().is_some() {
                                 let (_, cty) = infer_fun(
-                                    c.imp_par(),
-                                    c.exp_par().as_par(),
+                                    c.pars(),
                                     c.ret_ty().and_then(|x| x.expr()),
                                     None,
                                     Some(CopyClass::Copy),
@@ -618,36 +598,19 @@ impl ast::Def {
                                     );
                                 }
                                 implicit.append(&mut check_params(
-                                    c.imp_par()
-                                        .into_iter()
-                                        .flat_map(|x| x.pars())
-                                        .flat_map(|x| {
-                                            match x
-                                                .par()
-                                                .and_then(|x| x.pat())
-                                                .and_then(|x| x.expr())
-                                            {
-                                                Some(x) => x.as_args(),
-                                                None => vec![Err(x.span())],
-                                            }
-                                        })
-                                        .collect(),
-                                    true,
+                                    c.pars().imp(),
                                     ParamTys::Inferred(Impl),
                                     CheckReason::UsedAsType,
                                     None,
                                     cxt,
                                 ));
-                                let explicit = c.exp_par().as_par().map_or(Vec::new(), |x| {
-                                    check_params(
-                                        x.par.as_args(),
-                                        x.pat,
-                                        ParamTys::Inferred(Expl),
-                                        CheckReason::UsedAsType,
-                                        None,
-                                        cxt,
-                                    )
-                                });
+                                let explicit = check_params(
+                                    c.pars().exp(),
+                                    ParamTys::Inferred(Expl),
+                                    CheckReason::UsedAsType,
+                                    None,
+                                    cxt,
+                                );
 
                                 let mut ty = default_rty.clone().quote(cxt.size(), Some(&cxt.mcxt));
                                 if !explicit.is_empty() {
@@ -781,22 +744,8 @@ impl ast::Def {
     }
 }
 
-struct ImpPars {
-    imp_pars: Option<ast::ImpPars>,
-    extra: Vec<Par>,
-}
-impl From<Option<ast::ImpPars>> for ImpPars {
-    fn from(value: Option<ast::ImpPars>) -> Self {
-        ImpPars {
-            imp_pars: value,
-            extra: Vec::new(),
-        }
-    }
-}
-
 fn infer_fun(
-    implicit: impl Into<ImpPars>,
-    explicit: Option<SomePar>,
+    pars: impl HasPars,
     ret_ty: Option<ast::Expr>,
     body: Option<ast::Body>,
     copy_class: Option<CopyClass>,
@@ -808,10 +757,7 @@ fn infer_fun(
     // [a, b, c, d] => ((e, f) => ...)
 
     cxt.push_capture();
-    let ImpPars {
-        imp_pars,
-        extra: mut extra_pars,
-    } = implicit.into();
+    let mut extra_pars: Vec<_> = pars.extra_imp().into_iter().cloned().collect();
     for i in &extra_pars {
         cxt.define_local(
             i.name,
@@ -822,32 +768,19 @@ fn infer_fun(
         );
     }
     let mut implicit = check_params(
-        imp_pars
-            .into_iter()
-            .flat_map(|x| x.pars())
-            .flat_map(
-                |x| match x.par().and_then(|x| x.pat()).and_then(|x| x.expr()) {
-                    Some(x) => x.as_args(),
-                    None => vec![Err(x.span())],
-                },
-            )
-            .collect(),
-        true,
+        pars.imp(),
         ParamTys::Inferred(Impl),
         CheckReason::UsedAsType,
         None,
         cxt,
     );
-    let explicit = explicit.map_or(Vec::new(), |x| {
-        check_params(
-            x.par.as_args(),
-            x.pat,
-            ParamTys::Inferred(Expl),
-            CheckReason::UsedAsType,
-            Some(&mut extra_pars),
-            cxt,
-        )
-    });
+    let explicit = check_params(
+        pars.exp(),
+        ParamTys::Inferred(Expl),
+        CheckReason::UsedAsType,
+        Some(&mut extra_pars),
+        cxt,
+    );
     extra_pars.append(&mut implicit);
     let implicit = extra_pars;
 
@@ -925,95 +858,172 @@ fn infer_fun(
     (term, ty)
 }
 
-struct SomePar {
-    par: ast::Expr,
+#[derive(Clone, Debug)]
+struct Pars {
+    pars: Vec<Result<ast::Expr, RelSpan>>,
     pat: bool,
 }
-trait IsPar {
-    fn as_par(self) -> Option<SomePar>;
-}
-impl IsPar for ast::PatPar {
-    fn as_par(self) -> Option<SomePar> {
-        Some(SomePar {
-            par: self.pat()?.expr()?,
-            pat: true,
-        })
+
+trait HasPars {
+    fn exp(&self) -> Option<Pars>;
+    fn imp(&self) -> Option<Pars>;
+    fn extra_imp(&self) -> Option<&Par> {
+        None
     }
 }
-impl IsPar for ast::TermPar {
-    fn as_par(self) -> Option<SomePar> {
-        Some(SomePar {
-            par: self.expr()?,
+impl<T: HasPars> HasPars for Option<T> {
+    fn exp(&self) -> Option<Pars> {
+        self.as_ref()?.exp()
+    }
+
+    fn imp(&self) -> Option<Pars> {
+        self.as_ref()?.imp()
+    }
+
+    fn extra_imp(&self) -> Option<&Par> {
+        self.as_ref()?.extra_imp()
+    }
+}
+struct SigmaPars(Option<ast::Expr>);
+impl HasPars for SigmaPars {
+    fn exp(&self) -> Option<Pars> {
+        Some(Pars {
+            pars: vec![Ok(self.0.clone()?)],
             pat: false,
         })
     }
+
+    fn imp(&self) -> Option<Pars> {
+        None
+    }
 }
-impl<T: IsPar> IsPar for Option<T> {
-    fn as_par(self) -> Option<SomePar> {
-        self.and_then(T::as_par)
+struct TraitPars(Option<Par>, Option<Pars>);
+impl HasPars for TraitPars {
+    fn exp(&self) -> Option<Pars> {
+        None
+    }
+
+    fn imp(&self) -> Option<Pars> {
+        self.1.clone()
+    }
+
+    fn extra_imp(&self) -> Option<&Par> {
+        self.0.as_ref()
+    }
+}
+impl HasPars for ast::FunPars {
+    fn exp(&self) -> Option<Pars> {
+        self.exp()
+            .and_then(|x| x.expr())
+            .map(|x| x.as_args())
+            .map(|pars| Pars { pars, pat: true })
+    }
+
+    fn imp(&self) -> Option<Pars> {
+        self.imp()
+            .and_then(|x| x.expr())
+            .map(|x| x.as_args())
+            .map(|pars| Pars { pars, pat: true })
+    }
+}
+impl HasPars for ast::TypePars {
+    fn exp(&self) -> Option<Pars> {
+        self.exp()
+            .and_then(|x| x.expr())
+            .map(|x| x.as_args())
+            .map(|pars| Pars { pars, pat: false })
+    }
+
+    fn imp(&self) -> Option<Pars> {
+        self.imp()
+            .and_then(|x| x.expr())
+            .map(|x| x.as_args())
+            .map(|pars| Pars { pars, pat: true })
+    }
+}
+impl HasPars for ast::PiPars {
+    fn exp(&self) -> Option<Pars> {
+        self.exp()
+            .and_then(|x| x.expr())
+            .map(|x| x.as_args())
+            .map(|pars| Pars { pars, pat: false })
+    }
+
+    fn imp(&self) -> Option<Pars> {
+        self.imp()
+            .and_then(|x| x.expr())
+            .map(|x| x.as_args())
+            .map(|pars| Pars { pars, pat: false })
+    }
+}
+impl HasPars for ast::ImplPars {
+    fn exp(&self) -> Option<Pars> {
+        None
+    }
+
+    fn imp(&self) -> Option<Pars> {
+        self.imp()
+            .and_then(|x| x.expr())
+            .map(|x| x.as_args())
+            .map(|pars| Pars { pars, pat: true })
     }
 }
 
 fn check_params(
-    pars: Vec<Result<ast::Expr, RelSpan>>,
-    pat: bool,
+    pars: Option<Pars>,
     tys: ParamTys,
     reason: CheckReason,
     mut extra_pars: Option<&mut Vec<Par>>,
     cxt: &mut Cxt,
 ) -> Vec<Par> {
+    let Pars { pars, pat } = pars.unwrap_or(Pars {
+        pars: Vec::new(),
+        pat: false,
+    });
     let err_missing = tys.err_missing();
     let mut first = true;
     let allow_impl = tys.allow_impl();
-    tys.zip_with(
-        pars.into_iter()
-            .flat_map(|x| match x {
-                Ok(x) => x.as_args(),
-                e => vec![e],
-            })
-            .collect::<Vec<_>>()
-            .into_iter(),
-    )
-    .into_iter()
-    .map(|(ty, mut x)| {
-        let x = match x.len() {
-            1 => x.pop().unwrap(),
-            _ => todo!("probably should do pattern elaboration"),
-        };
-        if ty.is_none() && err_missing {
-            let span = match x.as_ref() {
-                Ok(x) => x.span(),
-                Err(span) => *span,
+    tys.zip_with(pars.into_iter())
+        .into_iter()
+        .map(|(ty, mut x)| {
+            let x = match x.len() {
+                1 => x.pop().unwrap(),
+                _ => todo!("probably should do pattern elaboration"),
             };
-            let (_m, name) = x
-                .as_ref()
-                .ok()
-                .and_then(|x| x.as_simple_pat(cxt.db))
-                .and_then(|x| x.0)
-                .unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), span)));
-            cxt.error(
-                span,
-                Doc::start("Lambda contains extra parameter ")
-                    .add(cxt.db.lookup_name(name.0), Doc::COLOR1)
-                    .add(" which is not present in expected type", ()),
-            );
-        }
-        check_par(
-            x,
-            pat,
-            ty.map(|x| (x, reason)),
-            if first {
-                first = false;
-                // Rust should make this easier
-                extra_pars.as_mut().map(|x| &mut **x)
-            } else {
-                None
-            },
-            allow_impl,
-            cxt,
-        )
-    })
-    .collect()
+            if ty.is_none() && err_missing {
+                let span = match x.as_ref() {
+                    Ok(x) => x.span(),
+                    Err(span) => *span,
+                };
+                let (_m, name) = x
+                    .as_ref()
+                    .ok()
+                    .and_then(|x| x.as_simple_pat(cxt.db))
+                    .and_then(|x| x.0)
+                    .unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), span)));
+                cxt.error(
+                    span,
+                    Doc::start("Lambda contains extra parameter ")
+                        .add(cxt.db.lookup_name(name.0), Doc::COLOR1)
+                        .add(" which is not present in expected type", ()),
+                );
+            }
+            check_par(
+                x,
+                pat,
+                ty.map(|x| (x, reason)),
+                if first {
+                    first = false;
+                    // Rust should make this easier
+                    extra_pars.as_mut().map(|x| &mut **x)
+                } else {
+                    None
+                },
+                allow_impl,
+                cxt,
+            )
+        })
+        .collect()
 }
 
 impl ast::Expr {
@@ -1233,8 +1243,7 @@ impl ast::Pair {
     fn elab_sigma(&self, cxt: &mut Cxt) -> Result<Expr, TypeError> {
         {
             let (_, ty) = infer_fun(
-                None,
-                self.lhs().map(|par| SomePar { par, pat: false }),
+                SigmaPars(self.lhs()),
                 self.rhs(),
                 None,
                 None, // TODO copy classes for sigma
@@ -1962,17 +1971,7 @@ impl ast::Expr {
                         _ => VecDeque::new(),
                     };
                     let mut implicit: Vec<_> = check_params(
-                        x.imp_par()
-                            .into_iter()
-                            .flat_map(|x| x.pars())
-                            .map(|x| {
-                                x.par()
-                                    .and_then(|x| x.pat())
-                                    .and_then(|x| x.expr())
-                                    .ok_or_else(|| x.span())
-                            })
-                            .collect(),
-                        true,
+                        x.pars().imp(),
                         ParamTys::Impl(&mut implicit_tys),
                         reason,
                         None,
@@ -2003,7 +2002,7 @@ impl ast::Expr {
                                 }
                             }
                             body => {
-                                if x.exp_par().is_some() {
+                                if x.pars().and_then(|x| x.exp()).is_some() {
                                     // TODO better error here (include type)
                                     return Err("Lambda contains explicit parameters which are not present in expected type".into());
                                 } else {
@@ -2021,11 +2020,10 @@ impl ast::Expr {
                     let copy_class2 = clos.class.copy_class();
                     cxt.push_capture();
 
-                    let (explicit, bty) = if let Some(e) = x.exp_par() {
+                    let (explicit, bty) = if x.pars().and_then(|x| x.exp()).is_some() {
                         (
                             check_params(
-                                vec![e.pat().and_then(|e| e.expr()).ok_or_else(|| x.span())],
-                                true,
+                                x.pars().exp(),
                                 ParamTys::Expl(clos.par_ty().quote(cxt.size(), None)),
                                 reason,
                                 None,
@@ -2346,15 +2344,7 @@ impl ast::Expr {
                         }
                     }
                     ast::Expr::Lam(x) => {
-                        let (term, ty) = infer_fun(
-                            x.imp_par(),
-                            x.exp_par().as_par(),
-                            None,
-                            x.body(),
-                            None,
-                            x.span(),
-                            cxt,
-                        );
+                        let (term, ty) = infer_fun(x.pars(), None, x.body(), None, x.span(), cxt);
                         (term, ty.eval(&mut cxt.env()))
                     }
                     ast::Expr::Pi(x) => {
@@ -2370,8 +2360,7 @@ impl ast::Expr {
                             })
                             .unwrap_or(CopyClass::Move);
                         let (_, pi) = infer_fun(
-                            x.imp_par(),
-                            x.exp_par().as_par(),
+                            x.pars(),
                             x.body().and_then(|x| x.expr()),
                             None,
                             Some(copy_class),

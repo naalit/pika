@@ -317,7 +317,12 @@ impl Val {
                 _ => unreachable!("Cannot resolve application to non-Lam"),
             },
             Elim::Member(def, idx, name) => match self {
-                // TODO Val::Struct
+                Val::Struct(def2, mut vals, _) => {
+                    assert_eq!(def, def2);
+                    // I feel like there should be a better way to move out of a specific index in a vec
+                    vals.truncate(idx as usize + 1);
+                    vals.pop().unwrap()
+                }
                 Val::Neutral(ref mut neutral) => {
                     neutral.app(Elim::Member(def, idx, name));
                     self
