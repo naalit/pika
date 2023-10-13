@@ -649,12 +649,6 @@ impl<'a> Parser<'a> {
                         self.expr(Prec::App);
                         self.pop();
                     }
-                    Tok::Times => {
-                        self.push(Tok::Deref);
-                        self.advance();
-                        self.expr(Prec::App);
-                        self.pop();
-                    }
                     Tok::ImplKw => {
                         self.push(Tok::ImplPat);
                         self.advance();
@@ -1062,6 +1056,11 @@ impl<'a> Parser<'a> {
 
                         self.pop();
                     }
+                }
+                Tok::Times if !self.peek(1).starts_atom() => {
+                    self.push_at(lhs, Tok::Deref);
+                    self.advance();
+                    self.pop();
                 }
                 op if op.binop_prec().is_some() => {
                     let prec = op.binop_prec().unwrap();

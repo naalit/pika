@@ -31,10 +31,10 @@ impl Display[Enum] struct
         Enum.Two => "two"
 
 impl Display[Str] struct
-    fun to_str(&self): Str = *self
+    fun to_str(&self): Str = self*
 
 # impl Display[Str] struct
-#     fun to_str(&self): Str = *self
+#     fun to_str(&self): Str = self*
 
 fun main() = do
     let e = Enum.One
