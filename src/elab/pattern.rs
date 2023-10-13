@@ -1263,7 +1263,7 @@ pub(super) fn elab_case(
     )
 }
 
-impl ast::Case {
+impl ast::Match {
     pub(super) fn elaborate(
         &self,
         rty: &mut Option<(Val, CheckReason)>,

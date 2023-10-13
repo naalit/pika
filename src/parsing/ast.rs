@@ -219,11 +219,11 @@ make_nodes! {
     Do = block: [Stmt];
     AppDo = expr: Expr;
 
-    CaseKw = ;
+    MatchKw = ;
     CatchKw = ;
-    enum CaseTy = CaseKw, CatchKw;
+    enum CaseTy = MatchKw, CatchKw;
     CaseBranch = pat: Expr, body: Body;
-    Case = ty: CaseTy, scrutinee: Expr, branches: [CaseBranch];
+    Match = ty: CaseTy, scrutinee: Expr, branches: [CaseBranch];
 
     Lit = float: (!FloatLit), int: (!IntLit), string: (!StringLit);
 
@@ -251,7 +251,7 @@ make_nodes! {
         Pi,
         App,
         Do,
-        Case,
+        Match,
         Lit,
         BinOp,
         If,
@@ -592,12 +592,11 @@ impl Pretty for Expr {
                     Doc::none().hardline(),
                 ))
                 .indent(),
-            Expr::Case(x) => Doc::none()
-                .add("case", Doc::style_keyword())
+            Expr::Match(x) => x
+                .scrutinee()
+                .pretty()
                 .space()
-                .chain(x.scrutinee().pretty())
-                .space()
-                .add("of", Doc::style_keyword())
+                .add("match", Doc::style_keyword())
                 .hardline()
                 .chain(Doc::intersperse(
                     x.branches().into_iter().map(|branch| {

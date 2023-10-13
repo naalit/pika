@@ -80,21 +80,21 @@ fun lease(x: &mut I32): &mut I32 = do
 #     borrow_move(x, y) # so this should be illegal
 #     x
 
-# Merging reference invalidations across case branches
+# Merging reference invalidations across match branches
 fun move(x: DoNotCopy): () = ()
 fun borrow(x: &DoNotCopy): () = ()
 fun mutate(x: &mut DoNotCopy): () = ()
-fun good(a: I32, x: DoNotCopy): () = case a of
+fun good(a: I32, x: DoNotCopy): () = a match
     1 => move(x)
     _ => move(x) # fine, the other move was in another branch
 # fun bad(a: I32, x: DoNotCopy) = do
-#     case a of
+#     a match
 #         0 => ()
 #         1 => move(x)
 #         _ => ()
 #     move(x) # not allowed, x may have been moved
 # fun bad2(a: I32, x: DoNotCopy, y: DoNotCopy): &DoNotCopy = do
-#     let q = case a of
+#     let q = a match
 #         0 => y
 #         _ => x
 #     move(x) # whether this moves x or y, it invalidates q either way
@@ -103,7 +103,7 @@ type Cow[a] of
     Own(a)
     Borrow(&a)
 # fun bad3(a: I32, x: DoNotCopy): Cow[DoNotCopy] = do
-#     let q = case a of
+#     let q = a match
 #         0 => Cow.Own(x)
 #         _ => Cow.Borrow(x)
 #     borrow(x) # not allowed, x might be moved
@@ -139,7 +139,7 @@ fun return_borrow3(x: &mut DoNotCopy): () &mut -> &DoNotCopy = () => x
 type Loop[R, C] of
     Continue(C)
     Break(R)
-fun loop[R, C](start: C, mut iter: C &mut -> Loop[R, C]): R = case iter(start) of
+fun loop[R, C](start: C, mut iter: C &mut -> Loop[R, C]): R = iter(start) match
     Loop.Continue(x) => loop(x, iter)
     Loop.Break(x) => x
 

@@ -7,7 +7,6 @@
 	"repository": {
 		"expression": {
 			"patterns": [
-				{ "include": "#type-dec" },
 				{ "include": "#keywords" },
 				{ "include": "#symbols" },
 				{ "include": "#types" },
@@ -51,26 +50,13 @@
 				}
 			}
 		},
-		"type-dec": {
-			"_comment": "This makes `of` highlight correctly if on the same line as `eff`/`type`",
-			"begin": "\\b(type|eff)\\b",
-			"end": "\\b($|of)\\b",
-			"captures": {
-				"1": {
-					"name": "keyword.other.pika"
-				}
-			},
-			"patterns": [
-				{"include": "#expression" }
-			]
-		},
 		"keywords": {
 			"patterns": [{
 				"name": "keyword.control.pika",
-				"match": "\\b(case|catch|of|if|then|else)\\b"
+				"match": "\\b(catch|match|if|then|else)\\b"
 			},  {
                 "name": "keyword.other.pika",
-                "match": "\\b(type|eff|with|struct|let|fun|where|impl|box|unbox|mut|do|self|trait)\\b"
+                "match": "\\b(type|eff|of|with|struct|let|fun|where|impl|box|unbox|mut|do|self|trait)\\b"
             }]
 		},
 		"symbols": {

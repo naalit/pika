@@ -729,46 +729,6 @@ impl<'a> Parser<'a> {
                             self.pop();
                         }
                     }
-                    Tok::CaseKw => {
-                        self.push(Tok::Case);
-                        self.advance();
-                        // scrutinee
-                        self.expr(());
-                        self.expect(Tok::OfKw);
-                        self.expect(Tok::Indent);
-
-                        let mut made_error = false;
-                        loop {
-                            self.push(Tok::CaseBranch);
-
-                            // Pattern
-                            self.expr(ExprParams::no_lambda());
-                            self.expect(Tok::WideArrow);
-
-                            // Body
-                            self.push(Tok::Body);
-                            self.expr(());
-                            self.pop();
-
-                            self.pop();
-
-                            match self.cur() {
-                                Tok::Newline => self.advance(),
-                                Tok::Dedent | Tok::Eof => {
-                                    self.advance();
-                                    break;
-                                }
-                                _ => {
-                                    if !made_error {
-                                        made_error = true;
-                                        self.expect(Tok::Dedent);
-                                    }
-                                    self.advance();
-                                }
-                            }
-                        }
-                        self.pop();
-                    }
                     // This should be able to handle
                     //
                     // if a
@@ -1057,6 +1017,43 @@ impl<'a> Parser<'a> {
                         self.pop();
                     }
                 }
+                Tok::MatchKw if Prec::Arrow >= min_prec => {
+                    self.push_at(lhs, Tok::Match);
+                    self.advance();
+                    self.expect(Tok::Indent);
+
+                    let mut made_error = false;
+                    loop {
+                        self.push(Tok::CaseBranch);
+
+                        // Pattern
+                        self.expr(ExprParams::no_lambda());
+                        self.expect(Tok::WideArrow);
+
+                        // Body
+                        self.push(Tok::Body);
+                        self.expr(());
+                        self.pop();
+
+                        self.pop();
+
+                        match self.cur() {
+                            Tok::Newline => self.advance(),
+                            Tok::Dedent | Tok::Eof => {
+                                self.advance();
+                                break;
+                            }
+                            _ => {
+                                if !made_error {
+                                    made_error = true;
+                                    self.expect(Tok::Dedent);
+                                }
+                                self.advance();
+                            }
+                        }
+                    }
+                    self.pop();
+                }
                 Tok::Times if !self.peek(1).starts_atom() => {
                     self.push_at(lhs, Tok::Deref);
                     self.advance();
@@ -1318,7 +1315,7 @@ impl Tok {
                 | Tok::FloatLit
                 | Tok::POpen
                 | Tok::TypeTypeKw
-                | Tok::CaseKw
+                | Tok::MatchKw
                 | Tok::CatchKw
                 | Tok::DoKw
                 | Tok::StringLit

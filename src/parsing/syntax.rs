@@ -10,7 +10,7 @@ pub enum SyntaxKind {
     SigKw,
     /// This is lowercase `type`
     TypeKw,
-    CaseKw,
+    MatchKw,
     OfKw,
     /// This is uppercase `Type`. TODO make it a builtin instead of a keyword?
     TypeTypeKw,
@@ -118,7 +118,7 @@ pub enum SyntaxKind {
     Do,
     DotExpr,
     EffPat,
-    Case,
+    Match,
     Lit,
     BinOpKind,
     BinOp,

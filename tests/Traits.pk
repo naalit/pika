@@ -26,7 +26,7 @@ type Enum of
     Two
 
 impl Display[Enum] struct
-    fun to_str(&self): Str = case self of
+    fun to_str(&self): Str = self match
         Enum.One => "one"
         Enum.Two => "two"
 
@@ -50,7 +50,7 @@ type Result[R, E] of
     Ok(R)
     Err(E)
 impl[E] Functor[[R] => Result[R, E]] struct
-    fun map[A, B](self: Result[A, E], mut f: A &mut -> B): Result[B, E] = case self of
+    fun map[A, B](self: Result[A, E], mut f: A &mut -> B): Result[B, E] = self match
         Result.Err(e) => Result.Err(e)
         Result.Ok(a) => Result.Ok(f(a))
 

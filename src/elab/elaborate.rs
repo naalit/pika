@@ -2155,7 +2155,7 @@ impl ast::Expr {
                 }
 
                 // Propagate through case/do/etc.
-                (ast::Expr::Case(case), ty) => {
+                (ast::Expr::Match(case), ty) => {
                     let mut rty = Some((ty, reason.clone()));
                     let (scrutinee, case, cty) = case.elaborate(&mut rty, cxt);
                     Ok(Expr::Elim(
@@ -2675,7 +2675,7 @@ impl ast::Expr {
                         let rty = rty.map(|(x, _)| x).unwrap_or(Val::Error);
                         (expr, rty)
                     }
-                    ast::Expr::Case(case) => {
+                    ast::Expr::Match(case) => {
                         let mut rty = None;
                         let (scrutinee, case, cty) = case.elaborate(&mut rty, cxt);
                         let rty = rty.map(|(x, _)| x).unwrap_or(Val::Error);
