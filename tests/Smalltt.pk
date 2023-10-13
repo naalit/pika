@@ -121,7 +121,7 @@ let vec1 = vcons (true) (vcons (false) (vcons (true) (vnil)))
 # Also note the implicit lambdas.
 # ----------------------------------------------------------------------------------
 let Eq : [A:_] &-> A &-> A -> Type =
-    [A] x => y => (P : A &-> Type) -> P (x) -> P (y)
+    [A] x => y => (P : &A &-> Type) -> P (x) -> P (y)
 
 # TODO violates move semantics
 # let refl : [A][x : A] &-> Eq x x =
@@ -168,11 +168,12 @@ let Bot : Type =
 # Dependent function composition (higher-order unification example)
 # --------------------------------------------------------------------------------
 
-let comp : [A : _, B : A &-> Type, C : [a:_] &-> B (a) &-> Type] &-> (f : [a:_](b : B (a)) &-> C (b)) &-> (g : (a : A) &-> B (a)) &-> (x : A) &-> C (g (x)) =
-    f => g => a => f (g (a))
+# g needs to take &A instead of A because we need to call it multiple times, once in the term and once in the type
+let comp : [A : _, B : &A &-> Type, C : [a:&A] &-> &B(a) &-> Type] &-> (f : [a:&A](b : B (a)) &-> C (b)) &-> (g : (a : &A) &-> B (a)) &-> (x : &A) &-> C (g (x)) =
+    f => g => a => f(g(a))
 
-let compTest1 : Nat &-> Nat =
-    comp ([_] => suc) (suc)
+let compTest1 : &Nat &-> Nat =
+    comp ([_] => suc) (x => suc(*x))
 
 # TODO violates move semantics
 # let compTest2 : [m, A] &-> A &-> Vec A m &-> Vec A (suc (suc m)) =

@@ -133,9 +133,14 @@ fn def_type_n(db: &dyn Elaborator, def_id: Def, def_node: DefNode) -> DefTypeRes
     let (def, cxt) = db.lookup_def_node(def_node);
     let mut cxt = Cxt::new(db, cxt);
     let result = def.elab_type(def_id, def_node, &mut cxt);
+    let keep_errors = match def {
+        ast::Def::LetDef(_) => true,
+        // These definitions will elaborate the type again during regular elaboration, so any errors will reappear then
+        ast::Def::FunDef(_) | ast::Def::TypeDef(_) | ast::Def::ImplDef(_) => false,
+    };
     DefTypeResult {
         result,
-        errors: cxt.emit_errors(),
+        errors: keep_errors.then(|| cxt.emit_errors()).unwrap_or_default(),
     }
 }
 
@@ -245,7 +250,28 @@ impl TypeError {
                         secondary: vec![],
                         note: None,
                     },
-                    MoveError::FunAccess(access, class, Some((ety, reason))) => {
+                    MoveError::FunAccess(access, None, _) => {
+                        let kind_doc = match access.kind {
+                            AccessKind::Mut => "Mutating",
+                            AccessKind::Imm => "Borrowing",
+                            AccessKind::Move => "Consuming",
+                            AccessKind::Copy => "Copying",
+                        };
+                        Error {
+                            severity,
+                            message_lsp: None,
+                            message: Doc::start(kind_doc)
+                                .add(" captured variables or parameters is not allowed in a function type", ()),
+                            primary: Label {
+                                span: access.span,
+                                message: Doc::start(kind_doc).add(" this captured variable or parameter", ()),
+                                color: Some(Doc::COLOR1),
+                            },
+                            secondary: Vec::new(),
+                            note: None,
+                        }
+                    }
+                    MoveError::FunAccess(access, Some(class), Some((ety, reason))) => {
                         let (secondary2, note) = self::unify::UnifyError::pretty_reason(*reason);
                         let ty_doc = match class {
                             CopyClass::Copy => Doc::start("'&->' function"),
@@ -283,7 +309,7 @@ impl TypeError {
                             note,
                         }
                     }
-                    MoveError::FunAccess(access, class, None) => {
+                    MoveError::FunAccess(access, Some(class), None) => {
                         let ty_doc = match class {
                             CopyClass::Copy => Doc::start("'&->' function"),
                             CopyClass::Mut => Doc::start("'&")

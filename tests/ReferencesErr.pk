@@ -129,3 +129,24 @@ fun return_borrow2(mut x: &mut DoNotCopy): () &mut -> &DoNotCopy = () => do
     let _ = x = DoNotCopy.New(3)
     let y: &DoNotCopy = x
     y
+
+# tests for ownership semantics of pi-types
+# borrowing parameters is allowed in pi types
+fun calc_type_borrow(x: &DoNotCopy): Type = I32
+fun p1_good(x: DoNotCopy): calc_type_borrow(x) = 3
+# but if the result borrows x, then we better not move it later
+fun p1_bad(x: DoNotCopy): calc_type_borrow(x) = do
+    move(x)
+    3
+
+# mutating and moving parameters is not allowed for pi types
+fun calc_type_mut(x: &mut DoNotCopy): Type = I32
+fun p2_bad(mut x: DoNotCopy): calc_type_mut(x) = 3
+
+fun calc_type_own(x: DoNotCopy): Type = I32
+fun p3_bad(x: DoNotCopy): calc_type_own(x) = 3
+
+# same with captures
+fun p4_good(x: DoNotCopy): Type = () -> calc_type_borrow(x)
+fun p4_bad(mut x: DoNotCopy): Type = () -> calc_type_mut(x)
+fun p5_bad(x: DoNotCopy): Type = () -> calc_type_own(x)

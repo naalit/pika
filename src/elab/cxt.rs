@@ -651,7 +651,8 @@ pub enum MoveError {
     AccessError(AccessError),
     InvalidMove(Doc, Option<Name>, Box<Expr>),
     InvalidBorrow(Doc, Name),
-    FunAccess(Access, CopyClass, Option<(Expr, CheckReason)>),
+    // If the CopyClass is None, it means a pi type
+    FunAccess(Access, Option<CopyClass>, Option<(Expr, CheckReason)>),
     InvalidAccess(Doc, Access),
 }
 impl From<AccessError> for MoveError {

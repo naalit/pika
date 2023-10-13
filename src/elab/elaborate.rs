@@ -786,13 +786,36 @@ fn infer_fun(
     // but accesses to the parameters inside the body don't count either
     // That's why we do this instead of pushing a capture scope (bc then that wouldn't include parameters)
     cxt.mark_top_scope_capture();
+    // But we do want to consider the return type separate from the body, and the return type can't move/mutate parameters
+    cxt.push();
+    cxt.mark_top_scope_capture();
 
     cxt.record_deps();
+    let mut had_capture_err = false;
     let bspan = body.as_ref().map_or(span, |x| x.span());
     let (body, bty) = match ret_ty {
         Some(bty) => {
             let span = bty.span();
             let bty = bty.check(Val::Type, cxt, CheckReason::UsedAsType);
+
+            let captures = cxt.pop();
+            let (captures_class, max_a) =
+                captures.as_ref().map_or((CopyClass::Copy, None), |(_, x)| {
+                    x.iter()
+                        .fold((CopyClass::Copy, None), |(x, xa), (_, (y, a))| {
+                            if *y > x {
+                                (*y, Some(*a))
+                            } else {
+                                (x, xa)
+                            }
+                        })
+                });
+            if captures_class > CopyClass::Copy {
+                let access = max_a.unwrap();
+                cxt.error(bspan, MoveError::FunAccess(access, None, None));
+                had_capture_err = true;
+            }
+
             let bty = bty.eval(&mut cxt.env());
             let body = body
                 .and_then(|x| x.expr())
@@ -803,13 +826,15 @@ fn infer_fun(
                 });
             (body, bty)
         }
-        None => body
-            .and_then(|x| x.expr())
-            .map(|x| x.infer(cxt))
-            .unwrap_or_else(|| {
-                // cxt.error(span, "Missing function body");
-                (Expr::Error, Val::Error)
-            }),
+        None => {
+            cxt.pop();
+            body.and_then(|x| x.expr())
+                .map(|x| x.infer(cxt))
+                .unwrap_or_else(|| {
+                    // cxt.error(span, "Missing function body");
+                    (Expr::Error, Val::Error)
+                })
+        }
     };
     let bty = bty.quote(cxt.size(), None);
     let captures = cxt.pop();
@@ -824,9 +849,9 @@ fn infer_fun(
             })
     });
     if let Some(copy_class) = copy_class {
-        if copy_class < captures_class {
+        if copy_class < captures_class && !had_capture_err {
             let access = max_a.unwrap();
-            cxt.error(bspan, MoveError::FunAccess(access, copy_class, None));
+            cxt.error(bspan, MoveError::FunAccess(access, Some(copy_class), None));
         }
     }
     let copy_class = copy_class.unwrap_or(captures_class);
@@ -2104,7 +2129,7 @@ impl ast::Expr {
                     if let Some(access) = access {
                         return Err(MoveError::FunAccess(
                             access,
-                            copy_class,
+                            Some(copy_class),
                             Some((ty.quote(cxt.size(), Some(&cxt.mcxt)), reason)),
                         )
                         .into());

@@ -142,3 +142,11 @@ type Loop[R, C] of
 fun loop[R, C](start: C, mut iter: C &mut -> Loop[R, C]): R = case iter(start) of
     Loop.Continue(x) => loop(x, iter)
     Loop.Break(x) => x
+
+# tests for ownership semantics of pi-types
+# borrowing parameters is allowed in pi types
+fun calc_type_borrow(x: &DoNotCopy): Type = I32
+fun p1_good(x: DoNotCopy): calc_type_borrow(x) = 3
+
+# same with captures
+fun p4_good(x: DoNotCopy): Type = () -> calc_type_borrow(x)

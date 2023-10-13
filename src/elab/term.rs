@@ -513,12 +513,11 @@ impl Pretty for Expr {
                 .add(" = ", ())
                 .chain(expr.pretty(db))
                 .prec(Prec::Term),
-            Expr::Ref(m, x) => Doc::start("<ref ")
-                .add(m, ())
-                .add('>', ())
-                .space()
-                .chain(x.pretty(db).nest(Prec::App))
-                .prec(Prec::App),
+            Expr::Ref(m, x) => x
+                .pretty(db)
+                .nest(Prec::App)
+                .add('&', ())
+                .add(if *m { "mut" } else { "" }, Doc::style_keyword()),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)
