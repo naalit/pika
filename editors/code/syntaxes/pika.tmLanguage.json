@@ -56,7 +56,7 @@
 				"match": "\\b(catch|match|if|then|else)\\b"
 			},  {
                 "name": "keyword.other.pika",
-                "match": "\\b(type|eff|of|with|struct|let|fun|where|impl|box|unbox|mut|do|self|trait)\\b"
+                "match": "\\b(type|eff|of|with|struct|let|fun|where|impl|box|unbox|mut|do|self|trait|own|imm|ref)\\b"
             }]
 		},
 		"symbols": {

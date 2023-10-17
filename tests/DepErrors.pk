@@ -1,11 +1,11 @@
 type Data of
     New(I32)
 
-fun borrow(x: &Data): () = ()
-fun move(x: Data): () = ()
+fun borrow(x: Data): () = ()
+fun move(x: own Data): () = ()
 
-fun fail1(x: Data): &Data = do
-    let y: &Data = x # x is borrowed here
+fun fail1(x: own Data): imm Data = do
+    let y: imm Data = x # x is borrowed here
     let z = y
     let w = z # w depends on x through z
     move(x) # x is moved here

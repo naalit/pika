@@ -187,10 +187,10 @@ impl From<MoveError> for TypeError {
     }
 }
 impl TypeError {
-    fn to_error(&self, severity: Severity, mut span: RelSpan, db: &dyn Elaborator) -> Error {
+    fn to_error(self, severity: Severity, mut span: RelSpan, db: &dyn Elaborator) -> Error {
         let (msg, label, note) = match self {
             TypeError::NotFound(name) => (
-                Doc::start("Name not found: ").add(db.lookup_name(*name), Doc::COLOR1),
+                Doc::start("Name not found: ").add(db.lookup_name(name), Doc::COLOR1),
                 Doc::start("This name not found"),
                 None,
             ),
@@ -198,13 +198,13 @@ impl TypeError {
             TypeError::Other(msg) => (msg.clone(), msg.clone(), None),
             TypeError::InvalidPattern(msg, ty) => (
                 Doc::start("Invalid pattern: ")
-                    .add(msg, ())
+                    .add(&msg, ())
                     .chain(ty.pretty(db)),
                 Doc::start(msg),
                 None,
             ),
             TypeError::NotFunction(ty, fspan) => {
-                span = *fspan;
+                span = fspan;
                 (
                     Doc::start("Expected function type in application, got '")
                         .chain(ty.pretty(db))
@@ -252,10 +252,9 @@ impl TypeError {
                     },
                     MoveError::FunAccess(access, None, _) => {
                         let kind_doc = match access.kind {
-                            AccessKind::Mut => "Mutating",
-                            AccessKind::Imm => "Borrowing",
-                            AccessKind::Move => "Consuming",
-                            AccessKind::Copy => "Copying",
+                            Cap::Mut => "Mutating",
+                            Cap::Imm => "Borrowing",
+                            Cap::Own => "Consuming",
                         };
                         Error {
                             severity,
@@ -272,19 +271,11 @@ impl TypeError {
                         }
                     }
                     MoveError::FunAccess(access, Some(class), Some((ety, reason))) => {
-                        let (secondary2, note) = self::unify::UnifyError::pretty_reason(*reason);
-                        let ty_doc = match class {
-                            CopyClass::Copy => Doc::start("'&->' function"),
-                            CopyClass::Mut => Doc::start("'&")
-                                .add("mut", Doc::style_keyword())
-                                .add(" ->' function", ()),
-                            CopyClass::Move => Doc::start("'->' function"),
-                        };
+                        let (secondary2, note) = self::unify::UnifyError::pretty_reason(reason);
                         let kind_doc = match access.kind {
-                            AccessKind::Mut => "Mutating",
-                            AccessKind::Imm => "Borrowing",
-                            AccessKind::Move => "Consuming",
-                            AccessKind::Copy => "Copying",
+                            Cap::Mut => "Mutating",
+                            Cap::Imm => "Borrowing",
+                            Cap::Own => "Consuming",
                         };
                         let mut secondary = vec![Label {
                             span,
@@ -299,7 +290,8 @@ impl TypeError {
                             message_lsp: None,
                             message: Doc::start(kind_doc)
                                 .add(" captured variables is not allowed in ", ())
-                                .chain(ty_doc),
+                                .add(class, Doc::style_keyword())
+                                .add(" functions", ()),
                             primary: Label {
                                 span: access.span,
                                 message: Doc::start(kind_doc).add(" this captured variable", ()),
@@ -310,22 +302,16 @@ impl TypeError {
                         }
                     }
                     MoveError::FunAccess(access, Some(class), None) => {
-                        let ty_doc = match class {
-                            CopyClass::Copy => Doc::start("'&->' function"),
-                            CopyClass::Mut => Doc::start("'&")
-                                .add("mut", Doc::style_keyword())
-                                .add(" ->' function", ()),
-                            CopyClass::Move => Doc::start("'->' function"),
-                        };
                         let kind_doc = match access.kind {
-                            AccessKind::Mut => "Mutating",
-                            AccessKind::Imm => "Borrowing",
-                            AccessKind::Move => "Consuming",
-                            AccessKind::Copy => "Copying",
+                            Cap::Mut => "Mutating",
+                            Cap::Imm => "Borrowing",
+                            Cap::Own => "Consuming",
                         };
                         let secondary = vec![Label {
                             span,
-                            message: Doc::start("This is expected to be a ").chain(ty_doc.clone()),
+                            message: Doc::start("This is expected to be a ")
+                                .add(class, Doc::style_keyword())
+                                .add(" function", ()),
                             color: Some(Doc::COLOR2),
                         }];
                         Error {
@@ -333,7 +319,8 @@ impl TypeError {
                             message_lsp: None,
                             message: Doc::start(kind_doc)
                                 .add(" captured variables is not allowed in ", ())
-                                .chain(ty_doc),
+                                .add(class, Doc::style_keyword())
+                                .add(" functions", ()),
                             primary: Label {
                                 span: access.span,
                                 message: Doc::start(kind_doc).add(" this captured variable", ()),

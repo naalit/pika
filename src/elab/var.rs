@@ -178,6 +178,15 @@ impl Env {
         }
     }
 
+    pub fn copy_at(&self, size: Size) -> Self {
+        let mut other = self.clone();
+        other.reset_to_size(size);
+        while other.size < size {
+            other.push(None);
+        }
+        other
+    }
+
     pub fn state(&self) -> EnvState {
         EnvState(self.size)
     }

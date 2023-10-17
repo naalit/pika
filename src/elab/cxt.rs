@@ -77,7 +77,7 @@ struct LocalScope {
     size: Size,
     start_size: Size,
     names: Vec<LocalVarDef>,
-    captures: Option<(Borrow, Vec<(Lvl, (CopyClass, Access))>)>,
+    captures: Option<(Borrow, Vec<(Lvl, Access)>)>,
 }
 
 pub fn prelude_defs(db: &dyn Elaborator) -> std::sync::Arc<HashMap<Name, VarDef>> {
@@ -218,38 +218,6 @@ impl BorrowDef {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum AccessKind {
-    Mut,
-    Imm,
-    Move,
-    Copy,
-}
-impl AccessKind {
-    pub fn borrow(mutable: bool) -> Self {
-        if mutable {
-            AccessKind::Mut
-        } else {
-            AccessKind::Imm
-        }
-    }
-
-    pub fn as_ref(value: CopyClass) -> Self {
-        match value {
-            CopyClass::Move => AccessKind::Move,
-            CopyClass::Copy => AccessKind::Imm,
-            CopyClass::Mut => AccessKind::Mut,
-        }
-    }
-    pub fn as_move(value: CopyClass) -> Self {
-        match value {
-            CopyClass::Move => AccessKind::Move,
-            CopyClass::Copy => AccessKind::Copy,
-            CopyClass::Mut => AccessKind::Mut,
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Borrow(NonZeroU64);
 impl Borrow {
     fn new(cxt: &mut Cxt) -> Borrow {
@@ -287,15 +255,8 @@ impl Borrow {
             return;
         }
         if let Some(def) = self.def_mut(cxt) {
-            if def.invalid.is_none()
-                || def
-                    .move_or_copy
-                    .iter()
-                    .any(|x| x.1.kind == AccessKind::Move)
-            {
-                if def.invalid.is_none() {
-                    def.invalid = Some(invalid.clone());
-                }
+            if def.invalid.is_none() {
+                def.invalid = Some(invalid.clone());
                 for (i, a) in def
                     .immutable_borrows
                     .iter()
@@ -304,6 +265,16 @@ impl Borrow {
                     .map(|(&x, &y)| (x, y))
                     .collect::<Vec<_>>()
                 {
+                    let mut invalid = invalid.clone();
+                    if invalid.chain_start.is_none() {
+                        invalid.chain_start = Some(a);
+                    } else {
+                        invalid.chain_end = Some(a);
+                    }
+                    i.invalidate(invalid, cxt);
+                }
+            } else if !def.move_or_copy.is_empty() {
+                for (i, a) in def.move_or_copy.clone() {
                     let mut invalid = invalid.clone();
                     if invalid.chain_start.is_none() {
                         invalid.chain_start = Some(a);
@@ -375,19 +346,16 @@ impl Borrow {
     pub fn add_borrow(self, borrow: Borrow, access: Access, cxt: &mut Cxt) {
         if let Some(def) = self.def_mut(cxt) {
             match access.kind {
-                AccessKind::Mut => {
+                Cap::Mut => {
                     def.mutable_borrows.insert(borrow, access);
                     if let Some(def) = borrow.def_mut(cxt) {
                         def.mutable_parents.insert(self, access);
                     }
                 }
-                AccessKind::Imm => {
+                Cap::Imm => {
                     def.immutable_borrows.insert(borrow, access);
                 }
-                AccessKind::Move => {
-                    def.move_or_copy.insert(borrow, access);
-                }
-                AccessKind::Copy => {
+                Cap::Own => {
                     def.move_or_copy.insert(borrow, access);
                 }
             }
@@ -473,7 +441,7 @@ impl AccessPoint {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Access {
-    pub kind: AccessKind,
+    pub kind: Cap,
     pub point: AccessPoint,
     pub span: RelSpan,
 }
@@ -500,7 +468,7 @@ impl AccessError {
         let dep =
             self.dep_access.point != self.invalid_access.point || self.dep_chain_start.is_some();
         let (message, dep_message, swap) = match self.dep_access.kind {
-            AccessKind::Move => (
+            Cap::Own => (
                 if dep {
                     name1(true, false)
                         .add(" borrows ", ())
@@ -524,9 +492,7 @@ impl AccessError {
             ),
             _ if self
                 .dep_chain_start
-                .map_or(self.invalid_access.kind == AccessKind::Mut, |x| {
-                    x.kind == AccessKind::Mut
-                }) =>
+                .map_or(self.invalid_access.kind == Cap::Mut, |x| x.kind == Cap::Mut) =>
             {
                 (
                     name0(true, true).add(" cannot be accessed while mutably borrowed", ()),
@@ -534,7 +500,7 @@ impl AccessError {
                     true,
                 )
             }
-            AccessKind::Mut => (
+            Cap::Mut => (
                 name0(true, true).add(" cannot be accessed mutably while it is borrowed", ()),
                 Doc::start("Borrow later used here"),
                 true,
@@ -552,7 +518,7 @@ impl AccessError {
             color: Some(Doc::COLOR2),
         }];
         if let Some(access) = self.dep_chain_start {
-            let mutable = access.kind == AccessKind::Mut;
+            let mutable = access.kind == Cap::Mut;
             secondary.push(Label {
                 span: access.span,
                 color: Some(Doc::COLOR3),
@@ -581,7 +547,7 @@ impl AccessError {
         }
         if secondary.len() < 3 {
             if let Some(access) = self.dep_chain_end {
-                let mutable = self.dep_chain_start.unwrap().kind == AccessKind::Mut;
+                let mutable = self.dep_chain_start.unwrap().kind == Cap::Mut;
                 let span = match self.dep_access.point {
                     AccessPoint::Closure(span, _) => span,
                     _ => access.span,
@@ -610,19 +576,19 @@ impl AccessError {
             }
         }
 
-        let note = if self.dep_access.kind == AccessKind::Move {
+        let note = if self.dep_access.kind == Cap::Own {
             self.move_type.as_ref().map(|ty| {
                 Doc::start("Move occurs because ")
                     .chain(name0(false, swap))
                     .add(" has type '", ())
                     .chain(ty.pretty(db))
-                    .add("' which cannot be copied implicitly", ())
+                    .add("' which is mutable", ())
             })
         } else if let AccessPoint::Closure(_, _) = self.dep_access.point {
             Some(
-                Doc::start("Closure could be called more than once since it's an '&")
+                Doc::start("Closure could be called more than once since it's a '")
                     .add("mut", Doc::style_keyword())
-                    .add(" ->' closure, not an owned '->' closure", ()),
+                    .add("->' closure, not an owned '->' closure", ()),
             )
         } else {
             None
@@ -651,8 +617,8 @@ pub enum MoveError {
     AccessError(AccessError),
     InvalidMove(Doc, Option<Name>, Box<Expr>),
     InvalidBorrow(Doc, Name),
-    // If the CopyClass is None, it means a pi type
-    FunAccess(Access, Option<CopyClass>, Option<(Expr, CheckReason)>),
+    // If the Cap is None, it means a pi type
+    FunAccess(Access, Option<Cap>, Option<(Expr, CheckReason)>),
     InvalidAccess(Doc, Access),
 }
 impl From<AccessError> for MoveError {
@@ -719,7 +685,7 @@ impl VarEntry {
         }
     }
 
-    pub fn access(&self, kind: AccessKind) -> Access {
+    pub fn access(&self, kind: Cap) -> Access {
         let &(name, span) = match self {
             VarEntry::Local { name, .. } => name,
             VarEntry::Other { name, .. } => name,
@@ -731,16 +697,17 @@ impl VarEntry {
         }
     }
 
+    // TODO do we need the type for anything? if not we should combine these into `try_access(cap: Cap)`
     pub fn try_move(&self, ty: Expr, cxt: &mut Cxt) -> Result<(), MoveError> {
         if let Some(borrow) = self.borrow(cxt) {
-            cxt.check_deps(borrow, self.access(AccessKind::Move))?;
+            cxt.check_deps(borrow, self.access(Cap::Own))?;
         }
         match self {
             VarEntry::Local { scope, var, .. } => match &mut cxt.scopes[*scope] {
                 Scope::Local(l) => {
                     let entry = &mut l.names[*var];
                     let lvl = entry.var.as_var().unwrap().as_local();
-                    let access = self.access(AccessKind::Move);
+                    let access = self.access(Cap::Own);
                     let borrow = entry.borrow.unwrap();
                     borrow.invalidate_self(access, Rc::new(ty), cxt);
                     if let Some(lvl) = lvl {
@@ -785,7 +752,7 @@ impl VarEntry {
                         ));
                     }
                     if let Some(borrow) = entry.borrow {
-                        let access = self.access(AccessKind::borrow(mutable));
+                        let access = self.access(if mutable { Cap::Mut } else { Cap::Imm });
                         cxt.check_deps(borrow, access)?;
 
                         let lvl = entry.var.as_var().unwrap().as_local();
@@ -802,11 +769,8 @@ impl VarEntry {
                 }
                 _ => unreachable!(),
             },
-            // It's fine to borrow definitions immutably, they can't ever be mutated
-            VarEntry::Other {
-                var: VarDef::Def(_),
-                ..
-            } if !mutable => Ok(()),
+            // It's fine to borrow definitions/builtins immutably, they can't ever be mutated
+            VarEntry::Other { .. } if !mutable => Ok(()),
             VarEntry::Other { var, name } => Err(MoveError::InvalidBorrow(
                 Doc::start("Cannot move out of ").debug(var),
                 name.0,
@@ -872,7 +836,7 @@ impl Cxt<'_> {
         let borrow = self.expr_borrow.pop().unwrap();
         // If an error occurs here, it's because of an invalid access within the expression
         let access = Access {
-            kind: AccessKind::Imm,
+            kind: Cap::Imm,
             point: AccessPoint::Expr,
             span,
         };
@@ -886,14 +850,15 @@ impl Cxt<'_> {
     pub fn add_dep(&mut self, dep: Borrow, access: Access) {
         dep.add_borrow(*self.expr_borrow.last().unwrap(), access, self)
     }
-    pub fn finish_closure_env(&mut self, dep: Borrow, class: CopyClass, span: RelSpan) {
-        if class == CopyClass::Mut {
+    // TODO do we still need this?
+    pub fn finish_closure_env(&mut self, dep: Borrow, cap: Cap, span: RelSpan) {
+        if cap == Cap::Mut {
             match dep.def(self) {
                 Some(def) => {
                     let def = def.clone();
                     for i in def.mutable_borrows {
                         let access = Access {
-                            kind: AccessKind::Mut,
+                            kind: Cap::Mut,
                             span,
                             point: AccessPoint::Closure(
                                 i.1.span,
@@ -1001,11 +966,11 @@ impl Cxt<'_> {
             .new_meta(self.locals(), self.size(), bounds, span, source)
     }
 
-    pub fn emit_errors(&mut self) -> Vec<Error> {
+    pub fn emit_errors(mut self) -> Vec<Error> {
         let errors = self.mcxt.error_unsolved();
         self.errors
-            .iter()
-            .map(|(severity, x, span)| x.to_error(*severity, *span, self.db))
+            .into_iter()
+            .map(|(severity, x, span)| x.to_error(severity, span, self.db))
             .chain(errors)
             .collect()
     }
@@ -1040,11 +1005,6 @@ impl Cxt<'_> {
     }
 
     fn record_access(&mut self, lvl: Lvl, access: Access, borrow: Borrow) {
-        let class = match access.kind {
-            AccessKind::Move => CopyClass::Move,
-            AccessKind::Mut => CopyClass::Mut,
-            AccessKind::Imm | AccessKind::Copy => CopyClass::Copy,
-        };
         let mut deps = Vec::new();
         for i in self.scopes.iter_mut().rev() {
             match i {
@@ -1055,16 +1015,15 @@ impl Cxt<'_> {
                         let mut found = false;
                         for (l, x) in captures.iter_mut() {
                             if *l == lvl {
-                                match x {
-                                    (c, _) if *c >= class => (),
-                                    _ => *x = (class, access),
+                                if access.kind > x.kind {
+                                    *x = access;
                                 }
                                 found = true;
                                 break;
                             }
                         }
                         if !found {
-                            captures.push((lvl, (class, access)));
+                            captures.push((lvl, access));
                         }
                         deps.push(*b);
                     }
@@ -1109,7 +1068,7 @@ impl Cxt<'_> {
         self.scopes.push(Scope::Trait(self_arg));
     }
 
-    pub fn pop(&mut self) -> Option<(Borrow, Vec<(Lvl, (CopyClass, Access))>)> {
+    pub fn pop(&mut self) -> Option<(Borrow, Vec<(Lvl, Access)>)> {
         let new_size = self
             .scopes
             .iter()
@@ -1141,8 +1100,10 @@ impl Cxt<'_> {
                 .map(|(n, l)| (n, l, self.local_ty(l)))
                 .collect();
             for (meta, msize, mspan) in metas {
-                let mty = self.mcxt.meta_ty(meta).unwrap();
-                let trait_def = match &mty {
+                // Traits must always be immutable
+                // TODO this is unneeded once we have `type imm` and can enforce that for traits
+                let mty = Val::Cap(Cap::Imm, Box::new(self.mcxt.meta_ty(meta).unwrap()));
+                let trait_def = match mty.uncap_ty() {
                     Val::Neutral(neutral) => match neutral.head() {
                         Head::Var(Var::Def(_, trait_def)) => trait_def,
                         _ => unreachable!(),
@@ -1158,7 +1119,9 @@ impl Cxt<'_> {
                     let cp = self.mcxt.checkpoint();
                     let (lval, lty) = Expr::var(Var::Local((*n, mspan), l.idx(self.size())))
                         .insert_metas(lty.clone(), None, mspan, self);
-                    match &lty {
+                    // TODO same as above
+                    let lty = Val::Cap(Cap::Imm, Box::new(lty));
+                    match lty.uncap_ty() {
                         Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
                             match self.mcxt.unify(
                                 lty.clone(),
@@ -1208,7 +1171,9 @@ impl Cxt<'_> {
                         let (ival, ity) =
                             Expr::var(Var::Def((self.db.name("_".into()), mspan), idef))
                                 .insert_metas(ity, None, mspan, self);
-                        match &ity {
+                        // TODO same as above
+                        let ity = Val::Cap(Cap::Imm, Box::new(ity));
+                        match ity.uncap_ty() {
                             Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
                                 match self.mcxt.unify(
                                     ity.clone(),

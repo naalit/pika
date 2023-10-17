@@ -27,6 +27,8 @@ pub enum SyntaxKind {
     BoxKw,
     UnboxKw,
     MutKw,
+    ImmKw,
+    OwnKw,
     TraitKw,
 
     // Symbols the lexer recognizes as a "binary operator"
@@ -97,11 +99,9 @@ pub enum SyntaxKind {
     TypePars,
     ImplPars,
 
-    Reference,
-    RefMut,
-    Deref,
+    Cap,
+    CapTok,
     Assign,
-    MutVar,
     FunClass,
     AppDo,
     ImplPat,

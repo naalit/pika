@@ -167,7 +167,7 @@ impl VClos {
                 return arg.app(
                     Elim::Case(
                         super::pattern::CaseOf::make_simple_args(EClos {
-                            class: Lam(Expl, CopyClass::Move),
+                            class: Lam(Expl, Cap::Own),
                             params: self.params,
                             body: Box::new(body),
                         })
@@ -254,8 +254,7 @@ pub enum Val {
     Lit(Literal),
     Pair(Box<Val>, Box<Val>, Box<Val>),
     Struct(Def, Vec<Val>, Box<Val>),
-    RefType(bool, Box<Val>),
-    Ref(bool, Box<Val>),
+    Cap(Cap, Box<Val>),
     Error,
 }
 impl IsTerm for Val {
@@ -264,9 +263,15 @@ impl IsTerm for Val {
 }
 
 impl Val {
-    pub fn unref_ty(&self) -> &Val {
+    pub fn uncap_ty(&self) -> &Val {
         match self {
-            Val::RefType(_, t) => t.unref_ty(),
+            Val::Cap(_, t) => t.uncap_ty(),
+            _ => self,
+        }
+    }
+    pub fn uncap_ty_own(self) -> Val {
+        match self {
+            Val::Cap(_, t) => t.uncap_ty_own(),
             _ => self,
         }
     }
@@ -341,15 +346,6 @@ impl Val {
                     x => todo!("couldn't eval case of {:?}", x),
                 },
             },
-            Elim::Deref => match self {
-                Val::Ref(_, v) => *v,
-                Val::Neutral(ref mut neutral) => {
-                    neutral.app(Elim::Deref);
-                    self
-                }
-                Val::Error => Val::Error,
-                _ => unreachable!("Cannot dereference non-reference {:?}", self),
-            },
         }
     }
 
@@ -364,7 +360,6 @@ impl Elim<Expr> {
             Elim::App(icit, arg) => Elim::App(icit, arg.eval(env)),
             Elim::Member(def, idx, name) => Elim::Member(def, idx, name),
             Elim::Case(case, ty) => Elim::Case(case.map(|x| x.eval(env)), ty.eval(env)),
-            Elim::Deref => Elim::Deref,
         }
     }
 }
@@ -377,7 +372,6 @@ impl Elim<Val> {
                 case.map(|x| x.quote(size, inline_metas)),
                 ty.quote(size, inline_metas),
             ),
-            Elim::Deref => Elim::Deref,
         }
     }
 }
@@ -437,8 +431,7 @@ impl Expr {
                 Box::new(ty.eval(env)),
             ),
             Expr::Assign(_, _) => todo!("handle partial evaluation failing"),
-            Expr::RefType(m, x) => Val::RefType(m, Box::new(x.eval(env))),
-            Expr::Ref(m, x) => Val::Ref(m, Box::new(x.eval(env))),
+            Expr::Cap(m, x) => Val::Cap(m, Box::new(x.eval(env))),
             Expr::Error => Val::Error,
             Expr::Spanned(_, x) => x.eval(env),
         }
@@ -465,7 +458,7 @@ impl Expr {
                 },
                 _ => (),
             },
-            Expr::RefType(_, x) | Expr::Ref(_, x) => x.eval_quote_in_place(env, size, inline_metas),
+            Expr::Cap(_, x) => x.eval_quote_in_place(env, size, inline_metas),
             Expr::Assign(place, expr) => {
                 place.eval_quote_in_place(env, size, inline_metas);
                 expr.eval_quote_in_place(env, size, inline_metas);
@@ -482,7 +475,7 @@ impl Expr {
                         }
                         _ => x.eval_quote_in_place(env, size, inline_metas),
                     },
-                    Elim::Member(_, _, _) | Elim::Deref => (),
+                    Elim::Member(_, _, _) => (),
                     Elim::Case(case, ty) => {
                         case.visit_mut(|x| x.eval_quote_in_place(env, size, inline_metas));
                         ty.eval_quote_in_place(env, size, inline_metas);
@@ -531,15 +524,6 @@ impl Expr {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum CopyClass {
-    Copy,
-    /// This means the type works like a mutable reference in that there can only be one active reference to it,
-    /// but we can copy it as long as we get rid of the copy before we use the original again
-    Mut,
-    Move,
-}
-
 impl Val {
     pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
         match self {
@@ -568,8 +552,7 @@ impl Val {
                     res
                 }
             }
-            Val::RefType(m, x) => Expr::RefType(m, Box::new(x.quote(size, inline_metas))),
-            Val::Ref(m, x) => Expr::Ref(m, Box::new(x.quote(size, inline_metas))),
+            Val::Cap(m, x) => Expr::Cap(m, Box::new(x.quote(size, inline_metas))),
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),
             Val::Pair(a, b, t) => Expr::Pair(
@@ -597,10 +580,14 @@ impl Val {
                 let mut n2 = Neutral::new(Head::Var(Var::Builtin(Builtin::Unit)), Vec::new());
                 std::mem::swap(n, &mut n2);
                 match n2.resolve(env, &mcxt) {
-                    Ok(x) => *self = x,
+                    Ok(x) => {
+                        *self = x;
+                        self.inline_head(env, mcxt);
+                    }
                     Err(n2) => *n = n2,
                 }
             }
+            Val::Cap(_, x) => x.inline_head(env, mcxt),
             _ => (),
         }
     }
@@ -610,35 +597,34 @@ impl Val {
         self
     }
 
-    pub fn copy_class(&self, cxt: &Cxt) -> CopyClass {
-        self.copy_class_(cxt, true)
+    pub fn own_cap(&self, cxt: &Cxt) -> Cap {
+        self.own_cap_(&cxt.mcxt, &cxt.env(), true)
     }
 
-    fn copy_class_(&self, cxt: &Cxt, inline: bool) -> CopyClass {
+    pub fn own_cap_(&self, mcxt: &MetaCxt, env: &Env, inline: bool) -> Cap {
         match self {
-            Val::Type => CopyClass::Copy,
+            Val::Type => Cap::Imm,
             Val::Neutral(n) => match n.head() {
-                // Currently all builtin types are copyable
-                Head::Var(Var::Builtin(_)) => CopyClass::Copy,
-                Head::Var(Var::Meta(_)) => CopyClass::Copy, // TODO add a Copy constraint to the meta somehow
+                // Currently all builtin types are immutable
+                Head::Var(Var::Builtin(_)) => Cap::Imm,
                 _ if inline => {
                     let mut s = self.clone();
-                    s.inline_head(&mut cxt.env(), &cxt.mcxt);
-                    s.copy_class_(cxt, false)
+                    s.inline_head(&mut env.clone(), &mcxt);
+                    s.own_cap_(mcxt, env, false)
                 }
-                _ => CopyClass::Move,
+                Head::Var(Var::Meta(_)) => Cap::Own,
+                _ => Cap::Own,
             },
             Val::Fun(clos) => match clos.class {
-                // TODO check if all components can be copied; may require eval-ing
-                Sigma => CopyClass::Move,
+                // TODO check if all components are immutable
+                Sigma => Cap::Own,
                 Lam(_, c) | Pi(_, c) => c,
             },
-            Val::Lit(_) | Val::Pair(_, _, _) | Val::Ref(_, _) | Val::Struct { .. } => {
+            Val::Lit(_) | Val::Pair(_, _, _) | Val::Struct { .. } => {
                 unreachable!("not a type")
             }
-            Val::RefType(false, _) => CopyClass::Copy,
-            Val::RefType(true, _) => CopyClass::Mut,
-            Val::Error => CopyClass::Copy,
+            Val::Cap(c, _) => *c,
+            Val::Error => Cap::Imm,
         }
     }
 
@@ -659,7 +645,7 @@ impl Val {
                 n.spine().iter().fold(Ok(()), |acc, x| {
                     acc.and_then(|()| match x {
                         Elim::App(_, x) => x.check_scope(size),
-                        Elim::Member(_, _, _) | Elim::Deref => Ok(()),
+                        Elim::Member(_, _, _) => Ok(()),
                         Elim::Case(case, ty) => {
                             let mut res = Ok(());
                             case.visit(|x| {
@@ -672,7 +658,7 @@ impl Val {
                     })
                 })
             }
-            Val::RefType(_, x) | Val::Ref(_, x) => x.check_scope(size),
+            Val::Cap(_, x) => x.check_scope(size),
             Val::Fun(clos) => clos.check_scope(size),
             Val::Lit(_) => Ok(()),
             Val::Pair(a, b, t) => {
@@ -747,7 +733,7 @@ impl Expr {
                 a.check_scope(allowed, inner_size, size)
                     .and_then(|()| match &**e {
                         Elim::App(_, x) => x.check_scope(allowed, inner_size, size),
-                        Elim::Member(_, _, _) | Elim::Deref => Ok(()),
+                        Elim::Member(_, _, _) => Ok(()),
                         Elim::Case(case, ty) => {
                             let mut res = Ok(());
                             case.visit(|x| {
@@ -759,7 +745,7 @@ impl Expr {
                         }
                     })
             }
-            Expr::RefType(_, x) | Expr::Ref(_, x) => x.check_scope(allowed, inner_size, size),
+            Expr::Cap(_, x) => x.check_scope(allowed, inner_size, size),
             Expr::Assign(place, expr) => {
                 place.check_scope(allowed, inner_size, size)?;
                 expr.check_scope(allowed, inner_size, size)

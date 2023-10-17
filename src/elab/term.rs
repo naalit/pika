@@ -10,8 +10,8 @@ pub enum FunClass {
     /// So their representation is the same (as is that for lambdas), and they're evaluated the same etc.
     /// TODO: we'll eventually annotate pis and probably lambdas with effects, but this will not happen for sigmas.
     Sigma,
-    Lam(Icit, CopyClass),
-    Pi(Icit, CopyClass),
+    Lam(Icit, Cap),
+    Pi(Icit, Cap),
 }
 impl FunClass {
     pub fn icit(self) -> Option<Icit> {
@@ -21,9 +21,9 @@ impl FunClass {
             Pi(i, _) => Some(i),
         }
     }
-    pub fn copy_class(self) -> CopyClass {
+    pub fn cap(self) -> Cap {
         match self {
-            Sigma => CopyClass::Move,
+            Sigma => Cap::Own,
             Lam(_, c) | Pi(_, c) => c,
         }
     }
@@ -277,6 +277,13 @@ pub enum Head<L> {
     Var(Var<L>),
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Cap {
+    Imm,
+    Mut,
+    Own,
+}
+
 /* AST -> Term mapping:
     Var,
     Lam, }
@@ -300,7 +307,6 @@ pub enum Head<L> {
 pub enum Elim<T: IsTerm> {
     App(Icit, T),
     Member(Def, u64, SName),
-    Deref,
     Case(super::pattern::CaseOf<T>, T),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -321,9 +327,8 @@ pub enum Expr {
     /// (consider `(I32, 3)`, which may be `(Type, I32)` or `(a: Type, a)`)
     Pair(Box<Expr>, Box<Expr>, Box<Expr>),
     /// (mutable, referent type)
-    RefType(bool, Box<Expr>),
+    Cap(Cap, Box<Expr>),
     Assign(Box<Expr>, Box<Expr>),
-    Ref(bool, Box<Expr>),
     Spanned(RelSpan, Box<Expr>),
     /// (def, fields, type)
     Struct(Def, Vec<Expr>, Box<Expr>),
@@ -337,7 +342,7 @@ impl PartialEq for Expr {
             (Self::Fun(l0), Self::Fun(r0)) => l0 == r0,
             (Self::Lit(l0), Self::Lit(r0)) => l0 == r0,
             (Self::Pair(l0, l1, l2), Self::Pair(r0, r1, r2)) => l0 == r0 && l1 == r1 && l2 == r2,
-            (Self::RefType(a, x), Self::RefType(b, y)) => a == b && x == y,
+            (Self::Cap(a, x), Self::Cap(b, y)) => a == b && x == y,
             // Ignore spans
             (Self::Spanned(_, l1), Self::Spanned(_, r1)) => l1 == r1,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
@@ -385,9 +390,8 @@ impl Expr {
 
     pub fn ty(&self, cxt: &mut Cxt) -> Val {
         match self {
-            Expr::Type | Expr::RefType(_, _) => Val::Type,
+            Expr::Type | Expr::Cap(_, _) => Val::Type,
             Expr::Assign(_, _) => Val::var(Var::Builtin(Builtin::UnitType)),
-            Expr::Ref(m, x) => Val::RefType(*m, Box::new(x.ty(cxt))),
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
                     Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
@@ -423,21 +427,18 @@ impl Expr {
                 },
             },
             Expr::Elim(head, elim) => match &**elim {
-                Elim::App(_, x) => match head.ty(cxt).inlined(cxt) {
+                Elim::App(_, x) => match head.ty(cxt).inlined(cxt).uncap_ty_own() {
                     ty if matches!(&**head, Expr::Head(Head::Var(Var::Meta(_)))) => ty,
                     Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                         clos.apply(x.clone().eval(&mut cxt.env()))
                     }
+                    Val::Error => Val::Error,
                     ty => unreachable!("{:?}", ty),
                 },
                 Elim::Member(def, idx, _) => {
                     let lhs = (**head).clone().eval(&mut cxt.env());
                     super::elaborate::member_type(&lhs, *def, *idx, cxt)
                 }
-                Elim::Deref => match head.ty(cxt).inlined(cxt) {
-                    Val::RefType(_, t) => *t,
-                    _ => unreachable!(),
-                },
                 Elim::Case(_, ty) => ty.clone().eval(&mut cxt.env()),
             },
             Expr::Fun(EClos {
@@ -485,6 +486,15 @@ impl Expr {
         }
     }
 }
+impl std::fmt::Display for Cap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Cap::Imm => f.write_str("imm"),
+            Cap::Mut => f.write_str("mut"),
+            Cap::Own => f.write_str("own"),
+        }
+    }
+}
 impl Pretty for Expr {
     fn pretty(&self, db: &(impl Elaborator + ?Sized)) -> Doc {
         match self {
@@ -500,11 +510,8 @@ impl Pretty for Expr {
                     Var::Cons(n, _) => n.pretty(db),
                 },
             },
-            Expr::RefType(false, x) => Doc::start('&')
-                .chain(x.pretty(db).nest(Prec::App))
-                .prec(Prec::App),
-            Expr::RefType(true, x) => Doc::start('&')
-                .add("mut", Doc::style_keyword())
+            Expr::Cap(c, x) => Doc::start(c)
+                .style(Doc::style_keyword())
                 .space()
                 .chain(x.pretty(db).nest(Prec::App))
                 .prec(Prec::App),
@@ -513,11 +520,6 @@ impl Pretty for Expr {
                 .add(" = ", ())
                 .chain(expr.pretty(db))
                 .prec(Prec::Term),
-            Expr::Ref(m, x) => x
-                .pretty(db)
-                .nest(Prec::App)
-                .add('&', ())
-                .add(if *m { "mut" } else { "" }, Doc::style_keyword()),
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => a
                     .pretty(db)
@@ -531,9 +533,6 @@ impl Pretty for Expr {
                     .pretty(db)
                     .add('.', ())
                     .chain(m.pretty(db))
-                    .prec(Prec::App),
-                Elim::Deref => Doc::start('*')
-                    .chain(a.pretty(db).nest(Prec::App))
                     .prec(Prec::App),
                 Elim::Case(c, _) => c.pretty(a.pretty(db), db).prec(Prec::Term),
             },
@@ -633,11 +632,7 @@ impl Pretty for EClos {
                 .prec(Prec::Term),
             Pi(_, c) => d_params
                 .space()
-                .chain(match c {
-                    CopyClass::Move => Doc::none(),
-                    CopyClass::Copy => Doc::start('&'),
-                    CopyClass::Mut => Doc::start('&').add("mut", Doc::style_keyword()).space(),
-                })
+                .add(c, Doc::style_keyword())
                 .add("->", ())
                 .space()
                 .chain(body.pretty(db).nest(Prec::Pi))

@@ -178,6 +178,8 @@ impl<'i> Lexer<'i> {
             "sig" => Tok::SigKw,
             "of" => Tok::OfKw,
             "mut" => Tok::MutKw,
+            "imm" => Tok::ImmKw,
+            "own" => Tok::OwnKw,
             "trait" => Tok::TraitKw,
             _ => Tok::Name,
         };
@@ -467,6 +469,8 @@ impl<'i> fmt::Display for Tok {
             Tok::BoxKw => "'box'",
             Tok::UnboxKw => "'unbox'",
             Tok::MutKw => "'mut'",
+            Tok::ImmKw => "'imm'",
+            Tok::OwnKw => "'own'",
             Tok::TraitKw => "'trait'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",

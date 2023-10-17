@@ -638,27 +638,18 @@ impl<'a> Parser<'a> {
                         self.expect(Tok::Dedent);
                         self.pop();
                     }
-                    Tok::BitAnd => {
-                        let cp = self.checkpoint();
-                        self.advance();
-                        if self.maybe(Tok::MutKw) {
-                            self.push_at(cp, Tok::RefMut);
-                        } else {
-                            self.push_at(cp, Tok::Reference);
-                        }
-                        self.expr(Prec::App);
-                        self.pop();
-                    }
                     Tok::ImplKw => {
                         self.push(Tok::ImplPat);
                         self.advance();
                         self.expr(Prec::App);
                         self.pop();
                     }
-                    Tok::MutKw => {
-                        self.push(Tok::MutVar);
+                    Tok::MutKw | Tok::OwnKw | Tok::ImmKw => {
+                        self.push(Tok::Cap);
+                        self.push(Tok::CapTok);
                         self.advance();
-                        self.var();
+                        self.pop();
+                        self.expr(Prec::App);
                         self.pop();
                     }
                     Tok::BoxKw | Tok::UnboxKw => {
@@ -807,15 +798,16 @@ impl<'a> Parser<'a> {
 
                                 self.pop();
                             }
-                            Tok::BitAnd => {
+                            Tok::MutKw | Tok::ImmKw | Tok::OwnKw => {
                                 self.push_at(cp, Tok::Pi);
 
                                 self.push_at(par_cp, Tok::PiPars);
                                 self.pop();
 
                                 self.push(Tok::FunClass);
+                                self.push(Tok::CapTok);
                                 self.advance();
-                                self.maybe(Tok::MutKw);
+                                self.pop();
                                 self.pop();
 
                                 self.expect(Tok::Arrow);
@@ -985,12 +977,8 @@ impl<'a> Parser<'a> {
 
                     self.pop();
                 }
-                // () &mut -> ()
-                // we should avoid parsing the & as a binop even if we can't parse it as a pi right now
-                Tok::BitAnd
-                    if self.peek(1) == Tok::Arrow
-                        || (self.peek(1) == Tok::MutKw && self.peek(2) == Tok::Arrow) =>
-                {
+                // () mut -> ()
+                Tok::MutKw | Tok::OwnKw | Tok::ImmKw if self.peek(1) == Tok::Arrow => {
                     if !allow_arrow || Prec::Arrow < min_prec {
                         break;
                     } else {
@@ -1002,8 +990,9 @@ impl<'a> Parser<'a> {
                         self.pop();
 
                         self.push(Tok::FunClass);
+                        self.push(Tok::CapTok);
                         self.advance();
-                        self.maybe(Tok::MutKw);
+                        self.pop();
                         self.pop();
 
                         self.expect(Tok::Arrow);
@@ -1052,11 +1041,6 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
-                    self.pop();
-                }
-                Tok::Times if !self.peek(1).starts_atom() => {
-                    self.push_at(lhs, Tok::Deref);
-                    self.advance();
                     self.pop();
                 }
                 op if op.binop_prec().is_some() => {

@@ -75,7 +75,6 @@ impl Expr {
                         ));
                     }
                 }
-                Elim::Deref => a.find_span(span, cxt)?,
                 Elim::Case(case, _) => {
                     a.find_span(span, cxt)?;
                     let mut r = Ok(());
@@ -99,7 +98,7 @@ impl Expr {
                     i.find_span(span, cxt)?;
                 }
             }
-            Expr::RefType(_, x) | Expr::Ref(_, x) => x.find_span(span, cxt)?,
+            Expr::Cap(_, x) => x.find_span(span, cxt)?,
             Expr::Assign(place, expr) => {
                 place.find_span(span, cxt)?;
                 expr.find_span(span, cxt)?;

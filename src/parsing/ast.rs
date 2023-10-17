@@ -209,7 +209,8 @@ make_nodes! {
     WithClause = effs: [Expr];
     Lam = pars: FunPars, body: Body;
     Pi = pars: PiPars, class: FunClass, body: Body, with: WithClause;
-    FunClass = refkw: (!BitAnd), mutkw: (!MutKw);
+    CapTok = mutkw: (!MutKw), immkw: (!ImmKw), ownkw: (!OwnKw);
+    FunClass = cap: CapTok;
 
     StructInit = lhs: Expr, fields: StructFields;
 
@@ -236,11 +237,8 @@ make_nodes! {
     // ??? TODO what do we include as the token argument
     Box = expr: Expr;
 
-    Reference = expr: Expr;
-    RefMut = expr: Expr;
-    Deref = expr: Expr;
+    Cap = captok: CapTok, expr: Expr;
     Assign = lhs: Expr, rhs: (1 Expr);
-    MutVar = var: Var;
     ImplPat = expr: Expr;
 
     GroupedExpr = expr: Expr;
@@ -263,11 +261,8 @@ make_nodes! {
         EffPat,
         Binder,
         StructInit,
-        Reference,
-        RefMut,
-        Deref,
+        Cap,
         Assign,
-        MutVar,
         ImplPat
         ;
 
@@ -518,6 +513,21 @@ impl Pretty for BinOpKind {
     }
 }
 
+impl Pretty for CapTok {
+    fn pretty(&self) -> Doc {
+        Doc::start(if self.immkw().is_some() {
+            "imm"
+        } else if self.mutkw().is_some() {
+            "mut"
+        } else if self.ownkw().is_some() {
+            "own"
+        } else {
+            "<unknown cap>"
+        })
+        .style(Doc::style_keyword())
+    }
+}
+
 impl Pretty for Expr {
     fn pretty(&self) -> Doc {
         let p = match self {
@@ -534,10 +544,7 @@ impl Pretty for Expr {
                 .space()
                 .chain(match l.class() {
                     None => Doc::none(),
-                    Some(x) => Doc::start(if x.refkw().is_some() { "&" } else { "" }).add(
-                        if x.mutkw().is_some() { "mut " } else { "" },
-                        Doc::style_keyword(),
-                    ),
+                    Some(x) => x.cap().pretty(),
                 })
                 .add("->", ())
                 .space()
@@ -659,17 +666,8 @@ impl Pretty for Expr {
             Expr::ImplPat(r) => Doc::start("impl ")
                 .style(Doc::style_keyword())
                 .chain(r.expr().pretty()),
-            Expr::Reference(r) => Doc::start('&').chain(r.expr().pretty()),
-            Expr::RefMut(r) => Doc::start('&')
-                .add("mut", Doc::style_keyword())
-                .space()
-                .chain(r.expr().pretty()),
-            Expr::Deref(r) => Doc::start('*').chain(r.expr().pretty()),
+            Expr::Cap(r) => Doc::start("<cap> ").chain(r.expr().pretty()),
             Expr::Assign(x) => x.lhs().pretty().add(" = ", ()).chain(x.rhs().pretty()),
-            Expr::MutVar(v) => Doc::start("mut")
-                .style(Doc::style_keyword())
-                .space()
-                .chain(v.var().pretty()),
         };
         Doc::start('{').chain(p).add('}', ())
     }

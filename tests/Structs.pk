@@ -10,9 +10,9 @@ type Data struct
     let length: U64
     let message: Str
 where
-    fun to_str(self: &Data): Str = self.message
-    fun len(&self): U64 = self.length
-    fun process(&mut self) = do
+    fun to_str(self: Data): Str = self.message
+    fun len(self): U64 = self.length
+    fun process(mut self) = do
         self.length = self.length + 2
         self.message = "Done processing"
 
@@ -21,11 +21,11 @@ type Any struct
     ty: Type
     val: ty
 where
-    fun new[a](val: a): Any = Any struct
+    fun new[a](val: own a): Any = Any struct
         ty: a
         val
 
-    fun get(&self): &self.ty = self.val
+    fun get(self): imm self.ty = self.val
 
 # verifying structs and methods with implicit parameters
 type MyStruct[a, b, c] struct
@@ -33,8 +33,8 @@ type MyStruct[a, b, c] struct
     two: b
     three: c
 where
-    fun get_one(self): a = self.one
-    fun get_two(self): b = self.two
+    fun get_one(own self): a = self.one
+    fun get_two(own self): b = self.two
 
 fun main() = do
     let mut data = Data struct

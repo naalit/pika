@@ -126,7 +126,14 @@ impl UnifyError {
         }
     }
 
-    pub fn to_error(&self, span: RelSpan, db: &dyn Elaborator) -> Error {
+    pub fn to_error(mut self, span: RelSpan, db: &dyn Elaborator) -> Error {
+        // If we have an error about mismatched capabilities, we can insert `own` on one side so they both have capabilities
+        match (self.expected.unspanned(), self.inferred.unspanned()) {
+            (Expr::Cap(_, _), Expr::Cap(_, _)) => (),
+            (Expr::Cap(_, _), _) => self.inferred = Expr::Cap(Cap::Own, Box::new(self.inferred)),
+            (_, Expr::Cap(_, _)) => self.expected = Expr::Cap(Cap::Own, Box::new(self.expected)),
+            _ => (),
+        }
         match &self.kind {
             UnifyErrorKind::Conversion => {
                 let (secondary, note) = Self::pretty_reason(self.reason);
@@ -350,7 +357,6 @@ impl UnifyCxt<'_, '_> {
                     self.unify(a.clone(), b.clone(), size, state)?;
                 }
                 (Elim::Member(d1, i1, _), Elim::Member(d2, i2, _)) if d1 == d2 && i1 == i2 => (),
-                (Elim::Deref, Elim::Deref) => (),
                 (Elim::Case(_, _), Elim::Case(_, _)) => todo!(),
 
                 _ => return Ok(false),
@@ -385,10 +391,29 @@ impl UnifyCxt<'_, '_> {
                 self.unify(*a1, *b1, size, state)?;
                 self.unify(*a2, *b2, size, state)
             }
-            (Val::RefType(m1, a), Val::RefType(m2, b)) if m1 == m2 => {
-                self.unify(*a, *b, size, state)
+            // Get rid of nested capabilities
+            (Val::Cap(c, a), b) | (b, Val::Cap(c, a)) if matches!(*a, Val::Cap(_, _)) => match *a {
+                Val::Cap(c2, a) => self.unify(Val::Cap(c.min(c2), a), b, size, state),
+                _ => unreachable!(),
+            },
+            (Val::Cap(m1, a), Val::Cap(m2, b)) if m1 == m2 => self.unify(*a, *b, size, state),
+            (Val::Cap(Cap::Own, a), b) | (b, Val::Cap(Cap::Own, a)) => {
+                self.unify(*a, b, size, state)
             }
-            (Val::Ref(m1, a), Val::Ref(m2, b)) if m1 == m2 => self.unify(*a, *b, size, state),
+            // For immutable types, `imm T = mut T = own T`
+            (Val::Cap(_, a), b) | (b, Val::Cap(_, a))
+                if a.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Imm
+                    || b.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Imm =>
+            {
+                self.unify(*a, b, size, state)
+            }
+            // For specific `mut` types (currently only `mut` functions), `mut T = own T`
+            (Val::Cap(Cap::Mut, a), b) | (b, Val::Cap(Cap::Mut, a))
+                if a.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Mut
+                    || b.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Mut =>
+            {
+                self.unify(*a, b, size, state)
+            }
 
             // Now handle neutrals as directed by the unfolding state
             // If possible, try approximate conversion checking, unfolding if it fails (and if that's allowed)

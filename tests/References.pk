@@ -1,108 +1,103 @@
 type DoNotCopy of
     New(I32)
 
-fun copy_ref (x: &DoNotCopy): (&DoNotCopy, &DoNotCopy) = (x, x)
-fun move_once (x: DoNotCopy): DoNotCopy = x
-fun reference (x: DoNotCopy): &DoNotCopy = x
-# fun move_twice (x: DoNotCopy): (DoNotCopy, DoNotCopy) = (x, x)
-# fun in_block (x: DoNotCopy): (DoNotCopy, DoNotCopy) = do
+fun copy_ref (x: DoNotCopy): (imm DoNotCopy, imm DoNotCopy) = (x, x)
+fun move_once (x: own DoNotCopy): DoNotCopy = x
+fun reference (x: own DoNotCopy): imm DoNotCopy = x
+# fun make_own (x: DoNotCopy): DoNotCopy = x
+# fun move_twice (x: own DoNotCopy): (DoNotCopy, DoNotCopy) = (x, x)
+# fun in_block (x: own DoNotCopy): (DoNotCopy, DoNotCopy) = do
 #     let y = x
 #     (y, x)
-# fun borrowed (x: DoNotCopy): (&DoNotCopy, DoNotCopy) = (x, x)
-# fun borrowed2 (x: DoNotCopy): (DoNotCopy, &DoNotCopy) = (x, x)
-# fun borrowed3 (x: DoNotCopy): () = do
-#     let y: &DoNotCopy = x
+# fun borrowed (x: own DoNotCopy): (imm DoNotCopy, DoNotCopy) = (x, x)
+# fun borrowed2 (x: DoNotCopy): (DoNotCopy, imm DoNotCopy) = (x, x)
+# fun borrowed3 (x: own DoNotCopy): () = do
+#     let y: imm DoNotCopy = x
 #     let z: DoNotCopy = x
-#     let w: &DoNotCopy = y
+#     let w: imm DoNotCopy = y
 
-fun borrow_move(x: &DoNotCopy, y: DoNotCopy): DoNotCopy = y
-# fun same_variable(x: DoNotCopy): DoNotCopy = borrow_move(x, x)
-fun shadow(x: &DoNotCopy, y: DoNotCopy): DoNotCopy = do
+fun borrow_move(x: DoNotCopy, y: own DoNotCopy): DoNotCopy = y
+# fun same_variable(x: own DoNotCopy): DoNotCopy = borrow_move(x, x)
+fun shadow(x: DoNotCopy, y: own DoNotCopy): DoNotCopy = do
     let z = y
     borrow_move(x, z)
 
 type Ref[a] of
-    Ref(&a)
+    Ref(imm a)
 
-fun borrow_move_s(x: Ref[DoNotCopy], y: DoNotCopy): DoNotCopy = y
-fun borrow_move_s2(x: &Ref[DoNotCopy], y: DoNotCopy): DoNotCopy = y
-# fun same_variable_s(x: DoNotCopy): DoNotCopy = do
-#     let r = Ref.Ref x
+fun borrow_move_s(x: Ref[DoNotCopy], y: own DoNotCopy): DoNotCopy = y
+fun borrow_move_s2(x: own Ref[DoNotCopy], y: own DoNotCopy): DoNotCopy = y
+# fun same_variable_s(x: own DoNotCopy): DoNotCopy = do
+#     let r = Ref.Ref(x)
 #     borrow_move_s(r, x)
-fun shadow_s(x: Ref[DoNotCopy], y: DoNotCopy): DoNotCopy = do
+fun shadow_s(x: Ref[DoNotCopy], y: own DoNotCopy): DoNotCopy = do
     let r = Ref.Ref(y)
     let z = y
     borrow_move_s(x, z)
-# fun same_variable_s2(x: DoNotCopy): DoNotCopy = do
-#     let r = Ref.Ref x
+# fun same_variable_s2(x: own DoNotCopy): DoNotCopy = do
+#     let r = Ref.Ref(x)
 #     borrow_move_s2(r, x)
 
-fun degrade(x: &mut DoNotCopy): &DoNotCopy = x
-# fun upgrade(x: &DoNotCopy): &mut DoNotCopy = x
-fun make_mut(mut x: DoNotCopy): &mut DoNotCopy = x
-fun borrow_r(x: DoNotCopy): (&DoNotCopy, &DoNotCopy) = (x, x)
-# fun borrow_m(x: DoNotCopy): (&mut DoNotCopy, &mut DoNotCopy) = (x, x)
-# fun borrow_c(x: DoNotCopy): (&mut DoNotCopy, &DoNotCopy) = (x, x)
-# fun borrow_d(x: DoNotCopy): (&DoNotCopy, &mut DoNotCopy) = (x, x)
+fun degrade(x: mut DoNotCopy): imm DoNotCopy = x
+# fun upgrade(x: DoNotCopy): mut DoNotCopy = x
+fun make_mut(mut x: own DoNotCopy): mut DoNotCopy = x
+fun borrow_r(x: own DoNotCopy): (imm DoNotCopy, imm DoNotCopy) = (x, x)
+# fun borrow_m(mut x: own DoNotCopy): (mut DoNotCopy, mut DoNotCopy) = (x, x)
+# fun borrow_c(mut x: own DoNotCopy): (mut DoNotCopy, imm DoNotCopy) = (x, x)
+# fun borrow_d(mut x: own DoNotCopy): (imm DoNotCopy, mut DoNotCopy) = (x, x)
 
 fun copy(mut x: I32): I32 = do
     let y: I32 = x
-    let z: &mut I32 = x
+    let z: mut I32 = x
     y
 
-# fun deref(x: &mut DoNotCopy): DoNotCopy = x*
-fun deref_copy(x: &mut I32): I32 = x*
-
-# fun assign_imm(x: &I32): () = x* = 3
-# fun assign_imm_chain1(x: &&mut I32): () = x** = 4
-# fun assign_imm_chain2(x: &mut &I32): () = x** = 5
-fun assign_var(mut x: &mut I32, mut y: &mut I32): I32 = do
+# fun assign_imm(x: I32): () = x = 3
+fun assign_var(mut x: I32, mut y: I32): I32 = do
     let a: I32 = 3
     let mut b = 4
     b = a
-    x* = 6
-    y* = x*
+    x = 6
     y = x
-    y*
+    y
 
-fun leaser(x: &mut I32): &mut I32 = x
-fun lease(x: &mut I32): &mut I32 = do
+fun leaser(x: mut I32): mut I32 = x
+fun lease(x: mut I32): mut I32 = do
     leaser(x)
     x
-# fun lease_err(x: &mut I32): &mut I32 = do
-#     let y = leaser(x)
+# fun lease_err(x: mut I32): mut I32 = do
+#     let mut y = leaser(x)
 #     leaser(x)
 #     y
 
-# fun magic1(x: &mut DoNotCopy, y: &mut DoNotCopy): () = () # theoretically this could put (mutable) references in y into x
-# fun magic2(x: &mut DoNotCopy, mut y: DoNotCopy): &mut DoNotCopy = do
+fun magic1(x: mut DoNotCopy, y: mut DoNotCopy): () = () # theoretically this could put (mutable) references in y into x
+# fun magic2(x: mut DoNotCopy, mut y: own DoNotCopy): mut DoNotCopy = do
 #     magic1(x, y) # now y could be mutably borrowed
 #     borrow_move(x, y) # so this should be illegal
 #     x
 
 # Merging reference invalidations across match branches
-fun move(x: DoNotCopy): () = ()
-fun borrow(x: &DoNotCopy): () = ()
-fun mutate(x: &mut DoNotCopy): () = ()
-fun good(a: I32, x: DoNotCopy): () = a match
+fun move(x: own DoNotCopy): () = ()
+fun borrow(x: DoNotCopy): () = ()
+fun mutate(x: mut DoNotCopy): () = ()
+fun good(a: I32, x: own DoNotCopy): () = a match
     1 => move(x)
     _ => move(x) # fine, the other move was in another branch
-# fun bad(a: I32, x: DoNotCopy) = do
+# fun bad(a: I32, x: own DoNotCopy) = do
 #     a match
 #         0 => ()
 #         1 => move(x)
 #         _ => ()
 #     move(x) # not allowed, x may have been moved
-# fun bad2(a: I32, x: DoNotCopy, y: DoNotCopy): &DoNotCopy = do
-#     let q = a match
+# fun bad2(a: I32, x: own DoNotCopy, y: own DoNotCopy): imm DoNotCopy = do
+#     let q: imm DoNotCopy = a match
 #         0 => y
 #         _ => x
 #     move(x) # whether this moves x or y, it invalidates q either way
 #     q
 type Cow[a] of
     Own(a)
-    Borrow(&a)
-# fun bad3(a: I32, x: DoNotCopy): Cow[DoNotCopy] = do
+    Borrow(imm a)
+# fun bad3(a: I32, x: own DoNotCopy): Cow[DoNotCopy] = do
 #     let q = a match
 #         0 => Cow.Own(x)
 #         _ => Cow.Borrow(x)
@@ -110,10 +105,10 @@ type Cow[a] of
 #     q
 
 fun h_own(f: () -> ()) = ()
-fun h_ref(f: () &-> ()) = ()
-fun h_mut(f: () &mut -> ()) = ()
+fun h_ref(f: () imm -> ()) = ()
+fun h_mut(f: () mut -> ()) = ()
 
-fun test(mut f: () &mut -> ()): () = do
+fun test(f: () mut -> ()): () = do
     f()
     f()
     h_own(() => f())
@@ -134,19 +129,19 @@ fun test2(): I32 = takes_fun2(1, 2) do a, b =>
     a2*a2 + b2*b2
 
 # tests for new rules about closures returning borrows from their environment
-fun return_borrow3(x: &mut DoNotCopy): () &mut -> &DoNotCopy = () => x
+fun return_borrow3(x: mut DoNotCopy): () mut -> imm DoNotCopy = () => x
 
 type Loop[R, C] of
     Continue(C)
     Break(R)
-fun loop[R, C](start: C, mut iter: C &mut -> Loop[R, C]): R = iter(start) match
+fun loop[R, C](start: own C, iter: own C mut -> Loop[R, C]): R = iter(start) match
     Loop.Continue(x) => loop(x, iter)
     Loop.Break(x) => x
 
 # tests for ownership semantics of pi-types
 # borrowing parameters is allowed in pi types
-fun calc_type_borrow(x: &DoNotCopy): Type = I32
-fun p1_good(x: DoNotCopy): calc_type_borrow(x) = 3
+fun calc_type_borrow(x: DoNotCopy): Type = I32
+fun p1_good(x: own DoNotCopy): calc_type_borrow(x) = 3
 
 # same with captures
-fun p4_good(x: DoNotCopy): Type = () -> calc_type_borrow(x)
+fun p4_good(x: own DoNotCopy): Type = () -> calc_type_borrow(x)

@@ -211,7 +211,6 @@ impl MetaSolveError {
                         Elim::App(_, _) => unreachable!(),
                         Elim::Member(_, _, _) => "member access",
                         Elim::Case(_, _) => "case-of",
-                        Elim::Deref => "dereference",
                     },
                     (),
                 ),
@@ -535,7 +534,7 @@ impl MetaCxt<'_> {
 
         for (params, icit) in params.into_iter().rev() {
             solution = Expr::Fun(EClos {
-                class: Lam(icit, CopyClass::Copy),
+                class: Lam(icit, Cap::Imm),
                 params,
                 body: Box::new(solution),
             })
@@ -635,7 +634,6 @@ impl Elim<Expr> {
                 x.check_solution(cxt, mode, s_from, s_to)?;
             }
             Elim::Member(_, _, _) => (),
-            Elim::Deref => (),
             Elim::Case(_, _) => todo!(),
         }
         Ok(())
@@ -686,7 +684,7 @@ impl Expr {
                 // TODO unfold here instead of in solve()
                 _ => (),
             },
-            Expr::RefType(_, x) | Expr::Ref(_, x) => x.check_solution(cxt, mode, s_from, s_to)?,
+            Expr::Cap(_, x) => x.check_solution(cxt, mode, s_from, s_to)?,
             Expr::Assign(place, expr) => {
                 place.check_solution(cxt, mode, s_from, s_to)?;
                 expr.check_solution(cxt, mode, s_from, s_to)?;

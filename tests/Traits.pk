@@ -1,6 +1,6 @@
 
 trait Display struct
-    fun to_str(&self): Str
+    fun to_str(self): Str
 
 fun print0[a](x: a, i: Display[a]): Str = i.to_str(x)
 
@@ -26,15 +26,15 @@ type Enum of
     Two
 
 impl Display[Enum] struct
-    fun to_str(&self): Str = self match
+    fun to_str(self): Str = self match
         Enum.One => "one"
         Enum.Two => "two"
 
 impl Display[Str] struct
-    fun to_str(&self): Str = self*
+    fun to_str(self): Str = self
 
 # impl Display[Str] struct
-#     fun to_str(&self): Str = self*
+#     fun to_str(self): Str = self
 
 fun main() = do
     let e = Enum.One
@@ -43,14 +43,14 @@ fun main() = do
 # impl "not a trait"
 # fun bad_impl[impl Str]() = ()
 
-trait Functor[Self: [Type] &-> Type] struct
-    fun map[a, b](self: Self[a], f: a &mut -> b): Self[b]
+trait Functor[Self: [Type] imm-> Type] struct
+    fun map[a, b](self: Self[a], f: a mut-> b): Self[b]
 
 type Result[R, E] of
     Ok(R)
     Err(E)
 impl[E] Functor[[R] => Result[R, E]] struct
-    fun map[A, B](self: Result[A, E], mut f: A &mut -> B): Result[B, E] = self match
+    fun map[A, B](self: Result[A, E], f: A mut-> B): Result[B, E] = self match
         Result.Err(e) => Result.Err(e)
         Result.Ok(a) => Result.Ok(f(a))
 
@@ -60,6 +60,6 @@ fun doubleR[E](x: Result[U32, E]): Result[U32, E] = doubleM(x)
 
 # functor impl for identity functor
 impl Functor[[A] => A] struct
-    fun map[A, B](self: A, mut f: A &mut -> B): B = f(self)
+    fun map[A, B](self: A, f: imm A mut-> B): B = f(self)
 # using identity functor
 fun doubleQ(x: U32): U32 = doubleM(x)

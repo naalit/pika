@@ -161,7 +161,7 @@ mod input {
                                     while env.size < rsize {
                                         env.push(None);
                                     }
-                                    match (&rty, ty.unref_ty()) {
+                                    match (&rty, ty.uncap_ty()) {
                                         (Val::Neutral(a), Val::Neutral(b))
                                             if a.head() == b.head() =>
                                         {
@@ -169,7 +169,7 @@ mod input {
                                                 .mcxt
                                                 .local_unify(
                                                     rty,
-                                                    ty.unref_ty().clone(),
+                                                    ty.uncap_ty().clone(),
                                                     rsize,
                                                     &mut env,
                                                     reason,
@@ -181,7 +181,7 @@ mod input {
                                             .mcxt
                                             .unify(
                                                 rty.clone(),
-                                                ty.unref_ty().clone(),
+                                                ty.uncap_ty().clone(),
                                                 rsize,
                                                 env.clone(),
                                                 reason,
@@ -241,13 +241,19 @@ mod input {
                     *size += 1;
                     Pattern::Var(false, v.name(cxt.ecxt.db))
                 }
-                ast::Expr::MutVar(v) => match v.var() {
-                    Some(v) => {
-                        *size += 1;
-                        Pattern::Var(true, v.name(cxt.ecxt.db))
+                ast::Expr::Cap(x) if x.captok().and_then(|x| x.mutkw()).is_some() => {
+                    match x.expr() {
+                        Some(ast::Expr::Var(v)) => {
+                            *size += 1;
+                            Pattern::Var(true, v.name(cxt.ecxt.db))
+                        }
+                        _ => {
+                            cxt.ecxt
+                                .error(self.span(), "`mut` only allowed for variables in patterns");
+                            Pattern::Any
+                        }
                     }
-                    None => Pattern::Any,
-                },
+                }
                 ast::Expr::App(x) => {
                     let (lhs, mut lhs_ty) = x
                         .lhs()
@@ -257,10 +263,7 @@ mod input {
                                 lhs = resolve_member(lhs, member, cxt.ecxt);
                             }
                             let ty = lhs.ty(cxt.ecxt);
-                            (
-                                lhs.finish(AccessKind::as_move(ty.copy_class(cxt.ecxt)), cxt.ecxt),
-                                ty,
-                            )
+                            (lhs.finish(ty.own_cap(&cxt.ecxt), cxt.ecxt), ty)
                         })
                         .unwrap_or((Expr::Error, Val::Error));
                     let cons = match lhs {
@@ -686,7 +689,7 @@ impl CaseElabCxt<'_, '_> {
                         .collect();
                     Dec::Guard(
                         EClos {
-                            class: Lam(Expl, CopyClass::Move),
+                            class: Lam(Expl, Cap::Own),
                             params,
                             body: Box::new(guard),
                         },
@@ -785,7 +788,7 @@ impl CaseElabCxt<'_, '_> {
                     // Make sure to share the PVars for all patterns that match on the same pair
                     assert!(yes_cons.is_none() || self.ecxt.has_error());
                     if iargs.is_empty() && eargs.is_none() {
-                        let (va, vb) = match &sty {
+                        let (va, vb) = match sty.uncap_ty() {
                             Val::Fun(clos) if clos.class == Sigma => {
                                 assert_eq!(clos.params.len(), 1);
                                 let ta = clos.par_ty();
@@ -1218,7 +1221,7 @@ pub(super) fn elab_case(
                 cxt.ecxt.pop();
                 cxt.ecxt.set_env(old_env);
                 rhs.push(EClos {
-                    class: Lam(Expl, CopyClass::Move),
+                    class: Lam(Expl, Cap::Own),
                     params,
                     body: Box::new(body),
                 });
@@ -1237,7 +1240,7 @@ pub(super) fn elab_case(
         cxt.ecxt.add_dep(
             i,
             Access {
-                kind: AccessKind::Move,
+                kind: Cap::Own,
                 point: AccessPoint::Expr,
                 span,
             },
