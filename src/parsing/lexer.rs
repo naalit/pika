@@ -180,6 +180,7 @@ impl<'i> Lexer<'i> {
             "mut" => Tok::MutKw,
             "imm" => Tok::ImmKw,
             "own" => Tok::OwnKw,
+            "ref" => Tok::RefKw,
             "trait" => Tok::TraitKw,
             _ => Tok::Name,
         };
@@ -471,6 +472,7 @@ impl<'i> fmt::Display for Tok {
             Tok::MutKw => "'mut'",
             Tok::ImmKw => "'imm'",
             Tok::OwnKw => "'own'",
+            Tok::RefKw => "'ref'",
             Tok::TraitKw => "'trait'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",

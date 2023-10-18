@@ -1,16 +1,16 @@
 type DoNotCopy of
     New(I32)
 
-fun copy_ref (x: DoNotCopy): (imm DoNotCopy, imm DoNotCopy) = (x, x)
+fun copy_ref (x: ref DoNotCopy): (imm DoNotCopy, imm DoNotCopy) = (x, x)
 fun move_once (x: own DoNotCopy): DoNotCopy = x
 fun reference (x: own DoNotCopy): imm DoNotCopy = x
-fun make_own (x: DoNotCopy): DoNotCopy = x
+fun make_own (x: ref DoNotCopy): DoNotCopy = x
 fun move_twice (x: own DoNotCopy): (DoNotCopy, DoNotCopy) = (x, x)
 fun in_block (x: own DoNotCopy): (DoNotCopy, DoNotCopy) = do
     let y = x
     (y, x)
 fun borrowed (x: own DoNotCopy): (imm DoNotCopy, DoNotCopy) = (x, x)
-fun borrowed2 (x: DoNotCopy): (DoNotCopy, imm DoNotCopy) = (x, x)
+fun borrowed2 (x: own DoNotCopy): (DoNotCopy, imm DoNotCopy) = (x, x)
 fun borrowed3 (x: own DoNotCopy): () = do
     let y: imm DoNotCopy = x
     let z: DoNotCopy = x
@@ -38,8 +38,8 @@ fun same_variable_s2(x: own DoNotCopy): DoNotCopy = do
     let r = Ref.Ref(x)
     borrow_move_s2(r, x)
 
-fun degrade(x: mut DoNotCopy): imm DoNotCopy = x
-fun upgrade(x: DoNotCopy): mut DoNotCopy = x
+fun degrade(x: ref mut DoNotCopy): imm DoNotCopy = x
+fun upgrade(x: ref DoNotCopy): mut DoNotCopy = x
 fun make_mut(mut x: own DoNotCopy): mut DoNotCopy = x
 fun borrow_r(x: own DoNotCopy): (imm DoNotCopy, imm DoNotCopy) = (x, x)
 fun borrow_m(mut x: own DoNotCopy): (mut DoNotCopy, mut DoNotCopy) = (x, x)
@@ -60,17 +60,17 @@ fun assign_var(mut x: I32, mut y: I32): I32 = do
     y = x
     y
 
-fun leaser(x: mut I32): mut I32 = x
-fun lease(x: mut I32): mut I32 = do
+fun leaser(x: ref mut DoNotCopy): mut DoNotCopy = x
+fun lease(x: ref mut DoNotCopy): mut DoNotCopy = do
     leaser(x)
     x
-fun lease_err(x: mut I32): mut I32 = do
+fun lease_err(x: ref mut DoNotCopy): mut DoNotCopy = do
     let mut y = leaser(x)
     leaser(x)
     y
 
-fun magic1(x: mut DoNotCopy, y: mut DoNotCopy): () = () # theoretically this could put (mutable) references in y into x
-fun magic2(x: mut DoNotCopy, mut y: own DoNotCopy): mut DoNotCopy = do
+fun magic1(x: mut DoNotCopy, y: ref mut DoNotCopy): () = () # theoretically this could put (mutable) references in y into x
+fun magic2(x: ref mut DoNotCopy, mut y: own DoNotCopy): mut DoNotCopy = do
     magic1(x, y) # now y could be mutably borrowed
     borrow_move(x, y) # so this should be illegal
     x
@@ -108,21 +108,26 @@ fun h_own(f: () -> ()) = ()
 fun h_ref(f: () imm -> ()) = ()
 fun h_mut(f: () mut -> ()) = ()
 
-fun problems1(x: DoNotCopy): () = do
+fun problems1(x: own DoNotCopy): () = do
     let f = () => move(x)
     f()
     f()
-fun problems2(mut x: DoNotCopy): () = h_mut(() => move(x))
-fun problems3(mut x: DoNotCopy): () = h_ref(() => mutate(x))
-fun problems4(f: () mut -> ()): () = h_ref(f)
+fun problems2(mut x: own DoNotCopy): () = h_mut(() => move(x))
+fun problems3(mut x: own DoNotCopy): () = h_ref(() => mutate(x))
+fun problems4(f: ref () mut -> ()): () = h_ref(f)
 
 # tests for new rules about closures returning borrows from their environment
-fun return_borrow1(x: mut DoNotCopy): () mut -> mut DoNotCopy = () => x
-fun return_borrow2(x: mut DoNotCopy): () mut -> imm DoNotCopy = () => do
+fun return_borrow1(x: ref mut DoNotCopy): () mut -> mut DoNotCopy = () => x
+fun return_borrow2(x: ref mut DoNotCopy): () mut -> imm DoNotCopy = () => do
     let _ = x = DoNotCopy.New(3)
     let y: imm DoNotCopy = x
     y
-fun return_borrow3(x: mut DoNotCopy): () mut -> imm DoNotCopy = () => x
+fun return_borrow3(x: ref mut DoNotCopy): () mut -> imm DoNotCopy = () => x
+fun return_borrow4(x: ref mut DoNotCopy): () mut -> imm DoNotCopy = do
+    let mut f: () mut -> imm DoNotCopy = () => x
+    mutate(x)
+    f
+fun return_borrow5(x: mut DoNotCopy): () mut -> imm DoNotCopy = () => x
 
 type Loop[R, C] of
     Continue(C)
@@ -133,7 +138,7 @@ fun loop[R, C](start: own C, iter: C mut -> Loop[R, C]): R = iter(start) match
 
 # tests for ownership semantics of pi-types
 # borrowing parameters is allowed in pi types
-fun calc_type_borrow(x: DoNotCopy): Type = I32
+fun calc_type_borrow(x: ref DoNotCopy): Type = I32
 fun p1_good(x: own DoNotCopy): calc_type_borrow(x) = 3
 # but if the result borrows x, then we better not move it later
 fun p1_bad(x: own DoNotCopy): calc_type_borrow(x) = do
@@ -151,3 +156,7 @@ fun p3_bad(x: own DoNotCopy): calc_type_own(x) = 3
 fun p4_good(x: own DoNotCopy): Type = () -> calc_type_borrow(x)
 fun p4_bad(mut x: own DoNotCopy): Type = () -> calc_type_mut(x)
 fun p5_bad(x: own DoNotCopy): Type = () -> calc_type_own(x)
+
+fun escaping_via_closure(x: imm DoNotCopy): () imm-> imm DoNotCopy = do
+    let f = () => x
+    f

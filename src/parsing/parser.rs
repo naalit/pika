@@ -652,6 +652,20 @@ impl<'a> Parser<'a> {
                         self.expr(Prec::App);
                         self.pop();
                     }
+                    Tok::RefKw => {
+                        self.push(Tok::Ref);
+                        self.advance();
+
+                        self.expr(ExprParams {
+                            min_prec,
+                            lhs: None,
+                            allow_lambda,
+                            allow_arrow,
+                        });
+
+                        self.pop();
+                        return;
+                    }
                     Tok::BoxKw | Tok::UnboxKw => {
                         self.push(Tok::Box);
                         self.advance();

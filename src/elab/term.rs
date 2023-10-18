@@ -220,14 +220,16 @@ pub struct Par {
     pub ty: Expr,
     pub mutable: bool,
     pub is_impl: bool,
+    pub is_ref: bool,
 }
 impl Par {
-    pub fn new(name: SName, ty: Expr) -> Self {
+    pub fn new(name: SName, ty: Expr, is_ref: bool) -> Self {
         Par {
             name,
             ty,
             mutable: false,
             is_impl: false,
+            is_ref,
         }
     }
 }

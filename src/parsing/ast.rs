@@ -238,6 +238,7 @@ make_nodes! {
     Box = expr: Expr;
 
     Cap = captok: CapTok, expr: Expr;
+    Ref = expr: Expr;
     Assign = lhs: Expr, rhs: (1 Expr);
     ImplPat = expr: Expr;
 
@@ -262,6 +263,7 @@ make_nodes! {
         Binder,
         StructInit,
         Cap,
+        Ref,
         Assign,
         ImplPat
         ;
@@ -667,6 +669,9 @@ impl Pretty for Expr {
                 .style(Doc::style_keyword())
                 .chain(r.expr().pretty()),
             Expr::Cap(r) => Doc::start("<cap> ").chain(r.expr().pretty()),
+            Expr::Ref(x) => Doc::start("ref ")
+                .style(Doc::style_keyword())
+                .chain(x.expr().pretty()),
             Expr::Assign(x) => x.lhs().pretty().add(" = ", ()).chain(x.rhs().pretty()),
         };
         Doc::start('{').chain(p).add('}', ())

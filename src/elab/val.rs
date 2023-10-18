@@ -613,6 +613,14 @@ impl Val {
                     s.own_cap_(mcxt, env, false)
                 }
                 Head::Var(Var::Meta(_)) => Cap::Own,
+                // Traits are immutable; we'll replace this with a notion of immutable datatypes later
+                Head::Var(Var::Def(_, d)) => mcxt
+                    .db
+                    .def_type(d)
+                    .and_then(|x| x.result)
+                    .map_or(false, |x| x.is_trait)
+                    .then_some(Cap::Imm)
+                    .unwrap_or(Cap::Own),
                 _ => Cap::Own,
             },
             Val::Fun(clos) => match clos.class {
@@ -623,8 +631,19 @@ impl Val {
             Val::Lit(_) | Val::Pair(_, _, _) | Val::Struct { .. } => {
                 unreachable!("not a type")
             }
-            Val::Cap(c, _) => *c,
+            // `own (imm T)` has cap `imm`, not `own`
+            Val::Cap(c, x) => x.own_cap_(mcxt, env, inline).min(*c),
             Val::Error => Cap::Imm,
+        }
+    }
+
+    pub fn with_max_cap(mut self, cap: Cap) -> Self {
+        match &mut self {
+            Val::Cap(c, _) => {
+                *c = cap.min(*c);
+                self
+            }
+            _ => Val::Cap(cap, Box::new(self)),
         }
     }
 

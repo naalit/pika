@@ -503,7 +503,7 @@ impl MetaCxt<'_> {
                             names
                                 .into_iter()
                                 // TODO is this type ever used? can we actually find the type of this?
-                                .map(|name| Par::new((name, RelSpan::empty()), Expr::Error))
+                                .map(|name| Par::new((name, RelSpan::empty()), Expr::Error, false))
                                 .collect(),
                             icit,
                         ))

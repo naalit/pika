@@ -44,22 +44,22 @@ fun main() = do
 # fun bad_impl[impl Str]() = ()
 
 trait Functor[Self: [Type] imm-> Type] struct
-    fun map[a, b](self: Self[a], f: a mut-> b): Self[b]
+    fun map[a, b](self: own Self[a], f: a mut-> b): Self[b]
 
 type Result[R, E] of
     Ok(R)
     Err(E)
 impl[E] Functor[[R] => Result[R, E]] struct
-    fun map[A, B](self: Result[A, E], f: A mut-> B): Result[B, E] = self match
+    fun map[A, B](self: own Result[A, E], f: A mut-> B): Result[B, E] = self match
         Result.Err(e) => Result.Err(e)
         Result.Ok(a) => Result.Ok(f(a))
 
-fun doubleM[M, impl Functor[M]](x: M[U32]): M[U32] = x.map(x => x*2)
+fun doubleM[M, impl Functor[M]](x: own M[U32]): M[U32] = x.map(x => x*2)
 
-fun doubleR[E](x: Result[U32, E]): Result[U32, E] = doubleM(x)
+fun doubleR[E](x: own Result[U32, E]): Result[U32, E] = doubleM(x)
 
 # functor impl for identity functor
 impl Functor[[A] => A] struct
-    fun map[A, B](self: A, f: imm A mut-> B): B = f(self)
+    fun map[A, B](self: own A, f: imm A mut-> B): B = f(self)
 # using identity functor
 fun doubleQ(x: U32): U32 = doubleM(x)

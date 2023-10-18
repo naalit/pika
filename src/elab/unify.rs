@@ -376,7 +376,12 @@ impl UnifyCxt<'_, '_> {
             (Val::Type, Val::Type) => Ok(()),
             (Val::Error, _) | (_, Val::Error) => Ok(()),
             (Val::Fun(a), Val::Fun(b))
-                if a.class == b.class && a.params.len() == b.params.len() =>
+                if a.class == b.class
+                    && a.params.len() == b.params.len()
+                    && a.params
+                        .iter()
+                        .zip(&b.params)
+                        .all(|(a, b)| a.is_ref == b.is_ref) =>
             {
                 // First unify parameters
                 self.unify(a.par_ty(), b.par_ty(), size, state)?;
@@ -442,12 +447,12 @@ impl UnifyCxt<'_, '_> {
             {
                 self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
             }
-            // Similar for solving locals, but solving the outermost (lowest level) first works better in practice
+            // Similar for solving locals
             (Val::Neutral(a), Val::Neutral(b))
                 if state.can_solve_metas()
                     && self.solve_locals
                     && matches!((a.head(), b.head()), (Head::Var(Var::Local(_, a)), Head::Var(Var::Local(_, b)))
-                        if a > b) =>
+                        if a < b) =>
             {
                 self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
             }

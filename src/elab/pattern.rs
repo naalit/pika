@@ -685,6 +685,7 @@ impl CaseElabCxt<'_, '_> {
                             },
                             mutable: *m,
                             is_impl: false,
+                            is_ref: false,
                         })
                         .collect();
                     Dec::Guard(
@@ -756,18 +757,18 @@ impl CaseElabCxt<'_, '_> {
         let mut eargs = None;
         let mut start_ipats = Vec::new();
 
+        let scap = sty.own_cap_(&self.ecxt.mcxt, &mut env.clone(), true);
+
         for mut row in rows.iter().cloned() {
             match self.remove_column(&mut row, switch_var, &sty, sreason, &mut yes_cons, env) {
                 input::RemovedColumn::Yes(_cons, iargs2, eargs2, env) => {
                     if iargs.is_empty() && eargs.is_none() && yes_env.is_none() {
-                        iargs.extend(
-                            iargs2
-                                .iter()
-                                .map(|(_, ty)| self.pvar(ty.clone(), sreason.clone())),
-                        );
-                        eargs2
-                            .as_deref()
-                            .map(|(_, ty)| eargs = Some(self.pvar(ty.clone(), sreason.clone())));
+                        iargs.extend(iargs2.iter().map(|(_, ty)| {
+                            self.pvar(ty.clone().with_max_cap(scap), sreason.clone())
+                        }));
+                        eargs2.as_deref().map(|(_, ty)| {
+                            eargs = Some(self.pvar(ty.clone().with_max_cap(scap), sreason.clone()))
+                        });
                         yes_env = env;
                     }
                     row.columns.extend(
@@ -793,8 +794,8 @@ impl CaseElabCxt<'_, '_> {
                                 assert_eq!(clos.params.len(), 1);
                                 let ta = clos.par_ty();
                                 let tb = clos.clone().open(size);
-                                let va = self.pvar(ta, sreason.clone());
-                                let vb = self.pvar(tb, sreason.clone());
+                                let va = self.pvar(ta.with_max_cap(scap), sreason.clone());
+                                let vb = self.pvar(tb.with_max_cap(scap), sreason.clone());
                                 (va, vb)
                             }
                             Val::Error => (
@@ -1184,8 +1185,24 @@ pub(super) fn elab_case(
                         ty: ty.clone().quote(cxt.ecxt.size(), None),
                         mutable: *m,
                         is_impl: false,
+                        is_ref: false,
                     });
-                    cxt.ecxt.define_local(*name, ty.clone(), None, s_borrow, *m);
+                    let cap = ty.own_cap(&cxt.ecxt);
+                    let borrow = s_borrow.map(|s_borrow| {
+                        let cap = if cap == Cap::Imm { Cap::Own } else { cap };
+                        let borrow = Borrow::new(&mut cxt.ecxt);
+                        s_borrow.add_borrow(
+                            borrow,
+                            Access {
+                                kind: cap,
+                                point: AccessPoint::Name(name.0),
+                                span: name.1,
+                            },
+                            &mut cxt.ecxt,
+                        );
+                        borrow
+                    });
+                    cxt.ecxt.define_local(*name, ty.clone(), None, borrow, *m);
                 }
                 let mut env = env.clone();
                 while env.size < cxt.ecxt.size() {
@@ -1272,17 +1289,24 @@ impl ast::Match {
         rty: &mut Option<(Val, CheckReason)>,
         ecxt: &mut Cxt,
     ) -> (Expr, CaseOf<Expr>, Expr) {
-        ecxt.record_deps();
-        let (scrutinee, sty) = self
-            .scrutinee()
-            .map(|x| x.infer(ecxt))
-            .unwrap_or((Expr::Error, Val::Error));
-        let borrow = ecxt.finish_deps(self.scrutinee().map_or(self.span(), |x| x.span()));
+        let (scrutinee, sty, borrow) = if let Some(scrutinee) = self.scrutinee() {
+            let scrutinee = scrutinee.elab_unborrowed(ecxt);
+            let sty = scrutinee.ty(ecxt);
+            let borrow = scrutinee.get_borrow(ecxt);
+            let cap = sty.own_cap(ecxt);
+            // Throw away the dependency here, because the `match` only depends on the scrutinee through variables
+            ecxt.record_deps();
+            let scrutinee = scrutinee.finish(cap, ecxt);
+            ecxt.finish_deps(self.span());
+            (scrutinee, sty, borrow)
+        } else {
+            (Expr::Error, Val::Error, None)
+        };
         let (case_of, ty) = elab_case(
             sty,
             self.scrutinee().map_or_else(|| self.span(), |s| s.span()),
             CheckReason::MustMatch(self.scrutinee().map(|x| x.span()).unwrap_or(self.span())),
-            Some(borrow),
+            borrow,
             self.branches().into_iter().map(|x| x.as_row()),
             rty,
             ecxt,

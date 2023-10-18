@@ -406,7 +406,11 @@ impl ast::Def {
                 let (_, ty) = infer_fun(
                     TraitPars(
                         if is_trait && !has_self {
-                            Some(Par::new((cxt.db.name("Self".into()), span), Expr::Type))
+                            Some(Par::new(
+                                (cxt.db.name("Self".into()), span),
+                                Expr::Type,
+                                false,
+                            ))
                         } else {
                             None
                         },
@@ -768,14 +772,14 @@ fn infer_fun(
             i.mutable,
         );
     }
-    let mut implicit = check_params(
+    let (mut implicit, ideps) = check_params_deps(
         pars.imp(),
         ParamTys::Inferred(Impl),
         CheckReason::UsedAsType,
         None,
         cxt,
     );
-    let explicit = check_params(
+    let (explicit, edeps) = check_params_deps(
         pars.exp(),
         ParamTys::Inferred(Expl),
         CheckReason::UsedAsType,
@@ -855,11 +859,52 @@ fn infer_fun(
         }
     }
     let capability = capability.unwrap_or(captures_class);
-    if let &Some((borrow, _)) = &captures {
-        cxt.finish_closure_env(borrow, capability, span);
+    let borrow = if let &Some((borrow, _)) = &captures {
+        Some(cxt.finish_closure_env(borrow, capability, span))
+    } else {
+        None
+    };
+    let mut env = cxt.env();
+    for (i, p) in ideps
+        .iter()
+        .chain(&edeps)
+        .copied()
+        .zip(implicit.iter().chain(&explicit))
+    {
+        if let Some(i) = i {
+            // Sometimes when the parameter is created its type is a meta
+            // so if it gets resolved to an immutable type we're still allowed to let it escape
+            if p.ty
+                .clone()
+                .eval(&mut env)
+                .uncap_ty()
+                .own_cap_(&cxt.mcxt, &env, true)
+                != Cap::Imm
+            {
+                i.invalidate_children(
+                    Access {
+                        kind: Cap::Mut,
+                        point: AccessPoint::EscapingParam(p.name),
+                        span: p.name.1,
+                    },
+                    cxt,
+                )
+            }
+        }
+        env.push(None);
     }
     // This is the borrow of the returned expression, so we'll use this if we do dependency annotations
     cxt.finish_deps(bspan);
+    if let Some(borrow) = borrow {
+        cxt.add_dep(
+            borrow,
+            Access {
+                kind: capability,
+                point: AccessPoint::Expr,
+                span,
+            },
+        );
+    }
 
     // We have to evaluate this outside of the scope
     let mut ty = if explicit.is_empty() {
@@ -1043,9 +1088,21 @@ fn check_params(
     pars: Option<Pars>,
     tys: ParamTys,
     reason: CheckReason,
-    mut extra_pars: Option<&mut Vec<Par>>,
+    extra_pars: Option<&mut Vec<Par>>,
     cxt: &mut Cxt,
 ) -> Vec<Par> {
+    check_params_deps(pars, tys, reason, extra_pars, cxt).0
+}
+
+/// Each value in the second returned Vec is Some iff the corresponding parameter is not allowed to escape
+/// and the borrow should be used to track escaping
+fn check_params_deps(
+    pars: Option<Pars>,
+    tys: ParamTys,
+    reason: CheckReason,
+    mut extra_pars: Option<&mut Vec<Par>>,
+    cxt: &mut Cxt,
+) -> (Vec<Par>, Vec<Option<Borrow>>) {
     let Pars {
         pars,
         pat,
@@ -1087,7 +1144,7 @@ fn check_params(
                 x,
                 pat,
                 default_cap,
-                ty.map(|x| (x, reason)),
+                ty.map(|(x, r)| (x, reason, r)),
                 if first {
                     first = false;
                     // Rust should make this easier
@@ -1099,26 +1156,36 @@ fn check_params(
                 cxt,
             )
         })
-        .collect()
+        .unzip()
 }
 
 impl ast::Expr {
-    fn is_self_pat(&self, incl_cap: bool, cxt: &Cxt) -> bool {
+    fn is_self_pat(&self, incl_cap: bool, incl_ref: bool, cxt: &Cxt) -> bool {
         match self {
-            ast::Expr::Cap(x) if incl_cap => x.expr().map_or(false, |x| x.is_self_pat(false, cxt)),
+            ast::Expr::Cap(x) if incl_cap => {
+                x.expr().map_or(false, |x| x.is_self_pat(false, false, cxt))
+            }
+            ast::Expr::Ref(x) if incl_ref => x
+                .expr()
+                .map_or(false, |x| x.is_self_pat(incl_cap, false, cxt)),
             ast::Expr::Var(x) => x.name(cxt.db).0 == cxt.db.name("self".into()),
             _ => false,
         }
     }
 
-    fn as_self_pat(&self, ty: Expr) -> (bool, Expr) {
+    // (mutable, ref, type)
+    fn as_self_pat(&self, ty: Expr) -> (bool, bool, Expr) {
         match self {
             ast::Expr::Cap(x) => match x.captok().map(|x| x.as_cap()).unwrap_or(Cap::Imm) {
-                Cap::Mut => (true, Expr::Cap(Cap::Mut, Box::new(ty))),
-                Cap::Own => (true, Expr::Cap(Cap::Own, Box::new(ty))),
-                Cap::Imm => (false, Expr::Cap(Cap::Imm, Box::new(ty))),
+                Cap::Mut => (true, false, Expr::Cap(Cap::Mut, Box::new(ty))),
+                Cap::Own => (true, false, Expr::Cap(Cap::Own, Box::new(ty))),
+                Cap::Imm => (false, false, Expr::Cap(Cap::Imm, Box::new(ty))),
             },
-            ast::Expr::Var(_) => (false, ty),
+            ast::Expr::Ref(x) => {
+                let (m, _, t) = x.expr().unwrap().as_self_pat(ty);
+                (m, true, t)
+            }
+            ast::Expr::Var(_) => (false, false, ty),
             _ => unreachable!(),
         }
     }
@@ -1128,14 +1195,15 @@ fn check_par(
     x: Result<ast::Expr, RelSpan>,
     pat: bool,
     default_cap: Cap,
-    expected_ty: Option<(Expr, CheckReason)>,
+    // (type, reason, is_ref)
+    expected_ty: Option<(Expr, CheckReason, bool)>,
     extra_pars: Option<&mut Vec<Par>>,
     allow_impl: bool,
     cxt: &mut Cxt,
-) -> Par {
+) -> (Par, Option<Borrow>) {
     let mut par = match x {
-        Ok(x) if x.is_self_pat(true, cxt) => {
-            let (m, ty) = match cxt.resolve_self(x.span()) {
+        Ok(x) if x.is_self_pat(true, true, cxt) => {
+            let (m, is_ref, ty) = match cxt.resolve_self(x.span()) {
                 Some(rty) if extra_pars.is_some() => {
                     let ty = rty.ty(cxt);
                     let (mut ty_params, rty) = match ty {
@@ -1169,7 +1237,7 @@ fn check_par(
                 }
                 _ => {
                     cxt.error(x.span(), "`self` cannot be used in this context");
-                    (false, Expr::Error)
+                    (false, false, Expr::Error)
                 }
             };
             Par {
@@ -1177,6 +1245,7 @@ fn check_par(
                 mutable: m,
                 ty,
                 is_impl: false,
+                is_ref,
             }
         }
         Ok(ast::Expr::ImplPat(x)) => {
@@ -1205,6 +1274,7 @@ fn check_par(
                 ty,
                 mutable: false,
                 is_impl: true,
+                is_ref: false,
             }
         }
         Ok(ast::Expr::Binder(x)) => {
@@ -1224,9 +1294,11 @@ fn check_par(
                     "Binder '_: _' not allowed in pattern of another binder",
                 );
             }
-            let ty = x
-                .ty()
-                .and_then(|x| x.expr())
+            let (ty, is_ref) = match x.ty().and_then(|x| x.expr()) {
+                Some(ast::Expr::Ref(x)) => (x.expr(), true),
+                ty => (ty, false),
+            };
+            let ty = ty
                 .map(|x| x.check(Val::Type, cxt, CheckReason::UsedAsType))
                 .unwrap_or_else(|| {
                     cxt.error(
@@ -1235,17 +1307,28 @@ fn check_par(
                     );
                     Expr::Error
                 });
-            if let Some((expected_ty, reason)) = expected_ty {
+            if let Some((expected_ty, reason, r)) = expected_ty {
                 let ty = ty.clone().eval(&mut cxt.env());
                 let expected_ty = expected_ty.clone().eval(&mut cxt.env());
                 cxt.unify(ty, expected_ty, reason)
                     .unwrap_or_else(|e| cxt.error(x.span(), e));
+                if is_ref && !r {
+                    // TODO more type information w/ reason
+                    cxt.error(
+                        name.1,
+                        Doc::start("Parameter ")
+                            .chain(name.pretty(cxt.db))
+                            .add(" is not expected to be ", ())
+                            .add("ref", Doc::style_keyword()),
+                    );
+                }
             }
             Par {
                 name,
                 ty,
                 mutable,
                 is_impl: false,
+                is_ref,
             }
         }
         Ok(x) if pat => {
@@ -1257,17 +1340,32 @@ fn check_par(
             });
             let (mutable, name) =
                 name.unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), x.span())));
+            let (ty, is_ref) = match ty {
+                Some(ast::Expr::Ref(x)) => (x.expr(), true),
+                // If no given type we can also check the `ref` status against the expected type
+                ty => (ty, expected_ty.as_ref().map_or(false, |(_, _, b)| *b)),
+            };
             let ty = match ty.map(|x| x.check(Val::Type, cxt, CheckReason::UsedAsType)) {
                 Some(ty) => {
-                    if let Some((expected_ty, reason)) = expected_ty {
+                    if let Some((expected_ty, reason, r)) = expected_ty {
                         let ty = ty.clone().eval(&mut cxt.env());
                         let expected_ty = expected_ty.clone().eval(&mut cxt.env());
                         cxt.unify(ty, expected_ty, reason)
                             .unwrap_or_else(|e| cxt.error(x.span(), e));
+                        if is_ref && !r {
+                            // TODO more type information w/ reason
+                            cxt.error(
+                                name.1,
+                                Doc::start("Parameter ")
+                                    .chain(name.pretty(cxt.db))
+                                    .add(" is not expected to be ", ())
+                                    .add("ref", Doc::style_keyword()),
+                            );
+                        }
                     }
                     ty
                 }
-                None => expected_ty.map(|(x, _)| x).unwrap_or_else(|| {
+                None => expected_ty.map(|(x, _, _)| x).unwrap_or_else(|| {
                     cxt.new_meta(
                         MetaBounds::new(Val::Type),
                         x.span(),
@@ -1280,15 +1378,22 @@ fn check_par(
                 ty,
                 mutable,
                 is_impl: false,
+                is_ref,
             }
         }
         Ok(x) => {
-            let ty = x.check(Val::Type, cxt, CheckReason::UsedAsType);
+            let (ty, is_ref) = match &x {
+                ast::Expr::Ref(x) => (x.expr(), true),
+                ty => (Some(ty.clone()), false),
+            };
+            let ty = ty.map_or(Expr::Error, |x| {
+                x.check(Val::Type, cxt, CheckReason::UsedAsType)
+            });
 
-            Par::new((cxt.db.name("_".to_string()), x.span()), ty)
+            Par::new((cxt.db.name("_".to_string()), x.span()), ty, is_ref)
         }
         Err(span) => {
-            if let Some((ty, reason)) = expected_ty {
+            if let Some((ty, reason, _)) = expected_ty {
                 let ty = ty.eval(&mut cxt.env());
                 cxt.unify(Val::var(Var::Builtin(Builtin::UnitType)), ty, reason)
                     .unwrap_or_else(|e| cxt.error(span, e));
@@ -1296,6 +1401,7 @@ fn check_par(
             Par::new(
                 (cxt.db.name("_".to_string()), span),
                 Expr::var(Var::Builtin(Builtin::UnitType)),
+                false,
             )
         }
     };
@@ -1314,15 +1420,24 @@ fn check_par(
             _ => par.ty = Expr::Cap(default_cap, Box::new(par.ty)),
         }
     }
+    let cap = match par.ty.unspanned() {
+        Expr::Cap(c, _)
+        | Expr::Fun(EClos {
+            class: Pi(_, c), ..
+        }) => *c,
+        _ => Cap::Own,
+    };
+    let ty = par.ty.clone().eval(&mut cxt.env());
+    let needs_ref = cap != Cap::Own && ty.uncap_ty().own_cap(cxt) != Cap::Imm;
+    // When the default cap is Own, everything is allowed to escape
+    // That means the type will have implicit `ref` where needed
+    if needs_ref && default_cap == Cap::Own {
+        par.is_ref = true;
+    }
+    let borrow = (needs_ref && !par.is_ref).then(|| Borrow::new(cxt));
     // Define each parameter so it can be used by the types of the rest
-    cxt.define_local(
-        par.name,
-        par.ty.clone().eval(&mut cxt.env()),
-        None,
-        None,
-        par.mutable,
-    );
-    par
+    cxt.define_local(par.name, ty, None, borrow, par.mutable);
+    (par, borrow)
 }
 
 impl ast::Pair {
@@ -1355,7 +1470,7 @@ impl ast::Pair {
 
 enum ParamTys<'a, 'b> {
     Impl(&'a mut VecDeque<&'b Par>),
-    Expl(Expr),
+    Expl(Expr, &'a [Par]),
     Inferred(Icit),
 }
 impl ParamTys<'_, '_> {
@@ -1367,13 +1482,21 @@ impl ParamTys<'_, '_> {
         matches!(self, ParamTys::Impl(_) | ParamTys::Inferred(Impl))
     }
 
-    fn zip_with<T>(self, it: impl ExactSizeIterator<Item = T>) -> Vec<(Option<Expr>, Vec<T>)> {
+    fn zip_with<T>(
+        self,
+        it: impl ExactSizeIterator<Item = T>,
+    ) -> Vec<(Option<(Expr, bool)>, Vec<T>)> {
         match self {
             ParamTys::Inferred(_) => it.map(|x| (None, vec![x])).collect(),
             ParamTys::Impl(v) => it
-                .map(|x| (v.pop_front().map(|par| par.ty.clone()), vec![x]))
+                .map(|x| {
+                    (
+                        v.pop_front().map(|par| (par.ty.clone(), par.is_ref)),
+                        vec![x],
+                    )
+                })
                 .collect(),
-            ParamTys::Expl(t) => {
+            ParamTys::Expl(t, pars) => {
                 let len = it.len();
                 let (t, vec) =
                     it.enumerate()
@@ -1385,11 +1508,17 @@ impl ParamTys<'_, '_> {
                             })) if i + 1 != len => {
                                 assert_eq!(params.len(), 1);
                                 let ty = params.pop().unwrap().ty;
-                                vec.push((Some(ty), vec![x]));
+                                let is_ref = pars.get(i).unwrap_or(pars.last().unwrap()).is_ref;
+                                vec.push((Some((ty, is_ref)), vec![x]));
                                 (Some(*body), vec)
                             }
                             Some(t) => {
-                                vec.push((Some(t), vec![x]));
+                                let is_ref = if pars.len() == i + 1 {
+                                    pars.last().unwrap().is_ref
+                                } else {
+                                    false
+                                };
+                                vec.push((Some((t, is_ref)), vec![x]));
                                 (None, vec)
                             }
                             None => {
@@ -1834,6 +1963,13 @@ impl PlaceOrExpr {
             PlaceOrExpr::Expr(_, _, _, s) => *s,
         }
     }
+
+    pub fn get_borrow(&self, cxt: &Cxt) -> Option<Borrow> {
+        match self {
+            PlaceOrExpr::Place(p) => p.get_borrow(cxt),
+            PlaceOrExpr::Expr(_, _, b, _) => *b,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1856,6 +1992,13 @@ impl Place {
                 let lhs = e.clone().to_expr(cxt).eval(&mut cxt.env());
                 Ok(member_type(&lhs, *def, *idx, cxt))
             }
+        }
+    }
+
+    fn get_borrow(&self, cxt: &Cxt) -> Option<Borrow> {
+        match self {
+            Place::Var(e) => e.borrow(cxt),
+            Place::Member(a, _, _, _) => a.get_borrow(cxt),
         }
     }
 
@@ -1898,23 +2041,31 @@ impl Place {
                 }
             }
             // Just forward on the access
-            Place::Member(e, _, _, _) => match &**e {
-                PlaceOrExpr::Place(p) => {
-                    p.borrow(kind, cxt);
-                }
-                PlaceOrExpr::Expr(_, _, b, s) => {
-                    if let Some(b) = b {
-                        cxt.add_dep(
-                            *b,
-                            Access {
-                                kind,
-                                point: AccessPoint::Expr,
-                                span: *s,
-                            },
-                        );
+            Place::Member(e, _, _, _) => {
+                let lhs_kind = match self.ty(cxt).unwrap_or(Val::Error).own_cap(cxt) {
+                    // If the member is immutable through the lhs, then the lhs can be mutated/moved
+                    // without affecting the member, so it's not borrowed
+                    Cap::Imm => Cap::Own,
+                    Cap::Mut | Cap::Own => kind,
+                };
+                match &**e {
+                    PlaceOrExpr::Place(p) => {
+                        p.borrow(lhs_kind, cxt);
+                    }
+                    PlaceOrExpr::Expr(_, _, b, s) => {
+                        if let Some(b) = b {
+                            cxt.add_dep(
+                                *b,
+                                Access {
+                                    kind: lhs_kind,
+                                    point: AccessPoint::Expr,
+                                    span: *s,
+                                },
+                            );
+                        }
                     }
                 }
-            },
+            }
         }
     }
 
@@ -1930,35 +2081,50 @@ fn coerce(
     a: PlaceOrExpr,
     aty: Val,
     expected_ty: Val,
+    as_non_ref: bool,
     cxt: &mut Cxt,
     reason: CheckReason,
 ) -> Result<Expr, TypeError> {
     if cxt.unify(aty.clone(), expected_ty.clone(), reason).is_ok() {
-        return Ok(a.finish(aty.own_cap(cxt), cxt));
+        let cap = aty.own_cap(cxt);
+        return Ok(a.finish_and_borrow(cap, if as_non_ref { Cap::Own } else { cap }, cxt));
     }
     let (ity, ty) = match (aty, expected_ty) {
         // Downgrade value capability
         (Val::Cap(c1, ity), Val::Cap(c2, ty)) if c1 > c2 => {
-            return coerce(a, Val::Cap(c2, ity), Val::Cap(c2, ty), cxt, reason)
+            return coerce(
+                a,
+                Val::Cap(c2, ity),
+                Val::Cap(c2, ty),
+                as_non_ref,
+                cxt,
+                reason,
+            )
         }
         (ity, Val::Cap(c, ty)) => {
             let span = a.span();
             let c = c.min(ity.own_cap(cxt));
-            let a = PlaceOrExpr::Expr(a.finish(c, cxt), ity.clone(), None, span);
-            return coerce(a, ity, *ty, cxt, reason);
+            let a = PlaceOrExpr::Expr(
+                a.finish_and_borrow(c, if as_non_ref { Cap::Own } else { c }, cxt),
+                ity.clone(),
+                None,
+                span,
+            );
+            return coerce(a, ity, *ty, as_non_ref, cxt, reason);
         }
         // Upgrade closure capability
         (Val::Fun(mut clos1), Val::Fun(clos2)) => match (&mut clos1.class, &clos2.class) {
             (Pi(_, c1), Pi(_, c2)) if *c1 < *c2 => {
                 *c1 = *c2;
-                return coerce(a, Val::Fun(clos1), Val::Fun(clos2), cxt, reason);
+                return coerce(a, Val::Fun(clos1), Val::Fun(clos2), as_non_ref, cxt, reason);
             }
             _ => (Val::Fun(clos1), Val::Fun(clos2)),
         },
         (ity, ty) => (ity, ty),
     };
     let span = a.span();
-    let a = a.finish(ity.own_cap(cxt), cxt);
+    let cap = ity.own_cap(cxt);
+    let a = a.finish_and_borrow(cap, if as_non_ref { Cap::Own } else { cap }, cxt);
     let (a, ity) = match &ty {
         Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => (a, ity),
         _ => a.insert_metas(ity, None, span, cxt),
@@ -1966,6 +2132,142 @@ fn coerce(
 
     cxt.unify(ity, ty, reason)?;
     Ok(a)
+}
+
+fn elab_args(
+    fspan: RelSpan,
+    clos: VClos,
+    self_arg: Option<PlaceOrExpr>,
+    args: ast::Expr,
+    cxt: &mut Cxt,
+) -> (Expr, Val, Borrow) {
+    let par_tys = ParamTys::Expl(clos.par_ty().quote(cxt.size(), None), &clos.params);
+    let args = match args {
+        ast::Expr::GroupedExpr(x) if x.expr().is_none() && self_arg.is_some() => None,
+        x => Some(x),
+    };
+    let pars = par_tys.zip_with(
+        self_arg
+            .into_iter()
+            .map(|x| Ok(x))
+            .chain(args.into_iter().flat_map(|x| {
+                x.as_args().into_iter().map(|x| match x {
+                    Ok(x) => Err(x),
+                    Err(span) => Ok(PlaceOrExpr::Expr(
+                        Expr::var(Var::Builtin(Builtin::Unit)),
+                        Val::var(Var::Builtin(Builtin::UnitType)),
+                        None,
+                        span,
+                    )),
+                })
+            }))
+            .collect::<Vec<_>>()
+            .into_iter(),
+    );
+    let mut args = Vec::new();
+    let extra_borrow = Borrow::new(cxt);
+    let mut env = cxt.env();
+    for (a, mut val) in pars {
+        let (ty, is_ref) = a.unwrap();
+        let val = match val.len() {
+            0 => unreachable!("how did this happen"),
+            1 => val.pop().unwrap(),
+            _ => val
+                .into_iter()
+                .rev()
+                .fold(None::<Result<PlaceOrExpr, ast::Expr>>, |acc, x| match acc {
+                    Some(acc) => {
+                        let acc = acc.unwrap_or_else(|acc| acc.elab_unborrowed(cxt));
+                        let x = x.unwrap_or_else(|x| x.elab_unborrowed(cxt));
+                        let xspan = x.span();
+                        let span = RelSpan {
+                            start: xspan.start,
+                            end: acc.span().end,
+                        };
+                        let aty = acc.ty(cxt);
+                        let acc = acc.finish(aty.own_cap(cxt), cxt);
+                        let xty = x.ty(cxt);
+                        let x = x.finish(xty.own_cap(cxt), cxt);
+                        Some(Ok(PlaceOrExpr::Expr(
+                            Expr::Pair(Box::new(x), Box::new(acc), Box::new(Expr::Error)),
+                            Val::Fun(Box::new(VClos {
+                                class: FunClass::Sigma,
+                                params: vec![Par::new(
+                                    (cxt.db.name("_".into()), xspan),
+                                    xty.quote(cxt.size(), None),
+                                    false,
+                                )],
+                                env: cxt.env(),
+                                body: aty.quote(cxt.size().inc(), None),
+                            })),
+                            None,
+                            span,
+                        )))
+                    }
+                    None => Some(x),
+                })
+                .unwrap(),
+        };
+        let mut expected_ty = ty.eval(&mut env);
+        expected_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
+        let cap = expected_ty.own_cap(cxt);
+        let as_non_ref =
+            !is_ref && cap != Cap::Own && expected_ty.uncap_ty().own_cap(cxt) != Cap::Imm;
+        let val = match val {
+            // TODO this might not handle do/match/() correctly since we're not calling check()
+            Err(val) => val
+                .check_direct(&expected_ty, cxt, CheckReason::ArgOf(fspan))
+                .unwrap_or_else(|e| {
+                    cxt.error(val.span(), e);
+                    PlaceOrExpr::Expr(Expr::Error, Val::Error, None, val.span())
+                }),
+            Ok(val) => val,
+        };
+        let vty = val.ty(cxt);
+        let vspan = val.span();
+        let vborrow = val.get_borrow(cxt);
+        let val = coerce(
+            val,
+            vty,
+            expected_ty,
+            as_non_ref,
+            cxt,
+            CheckReason::ArgOf(fspan),
+        )
+        .unwrap_or_else(|e| {
+            cxt.error(vspan, e);
+            Expr::Error
+        });
+        if as_non_ref {
+            if let Some(borrow) = vborrow {
+                borrow.add_borrow(
+                    extra_borrow,
+                    Access {
+                        kind: cap,
+                        point: AccessPoint::Expr,
+                        span: vspan,
+                    },
+                    cxt,
+                );
+            }
+        }
+        env.push(Some(Ok(val.clone().eval(&mut cxt.env()))));
+        args.push(val);
+    }
+    let mut arg = None;
+    for val in args {
+        arg = match arg {
+            Some(arg) => Some(Expr::Pair(
+                Box::new(val),
+                Box::new(arg),
+                Box::new(Expr::Error), // TODO does this type ever matter?
+            )),
+            None => Some(val),
+        }
+    }
+    let arg = arg.unwrap();
+    let varg = arg.clone().eval(&mut cxt.env());
+    (arg, clos.apply(varg), extra_borrow)
 }
 
 impl ast::Expr {
@@ -1991,7 +2293,7 @@ impl ast::Expr {
         let x = self.check_direct(&ty, cxt, reason);
         match x.and_then(|x| {
             let xty = x.ty(cxt);
-            coerce(x, xty, ty, cxt, reason)
+            coerce(x, xty, ty, false, cxt, reason)
         }) {
             Ok(x) => Expr::Spanned(self.span(), Box::new(x)),
             Err(e) => {
@@ -2057,7 +2359,7 @@ impl ast::Expr {
                     Some(Impl) => clos.params.iter().collect(),
                     _ => VecDeque::new(),
                 };
-                let mut implicit: Vec<_> = check_params(
+                let (mut implicit, ideps) = check_params_deps(
                     x.pars().imp(),
                     ParamTys::Impl(&mut implicit_tys),
                     reason,
@@ -2108,11 +2410,11 @@ impl ast::Expr {
                 let capability2 = clos.class.cap();
                 cxt.push();
 
-                let (explicit, bty) = if x.pars().and_then(|x| x.exp()).is_some() {
+                let ((explicit, edeps), bty) = if x.pars().and_then(|x| x.exp()).is_some() {
                     (
-                        check_params(
+                        check_params_deps(
                             x.pars().exp(),
-                            ParamTys::Expl(clos.par_ty().quote(cxt.size(), None)),
+                            ParamTys::Expl(clos.par_ty().quote(cxt.size(), None), &clos.params),
                             reason,
                             None,
                             cxt,
@@ -2121,7 +2423,7 @@ impl ast::Expr {
                     )
                 } else {
                     (
-                        Vec::new(),
+                        (Vec::new(), Vec::new()),
                         match clos.params.len() {
                             0 => clos.body.eval(&mut cxt.env()),
                             // Try to curry the explicit parameters onto the body
@@ -2140,11 +2442,44 @@ impl ast::Expr {
                     .check(bty, cxt, reason);
                 let captures2 = cxt.pop();
                 let captures = cxt.pop();
-                if let &Some((borrow, _)) = &captures {
-                    cxt.finish_closure_env(borrow, capability, self.span());
-                }
-                if let &Some((borrow, _)) = &captures2 {
-                    cxt.finish_closure_env(borrow, capability2, self.span());
+                let borrow1 = if let &Some((borrow, _)) = &captures {
+                    Some(cxt.finish_closure_env(borrow, capability, self.span()))
+                } else {
+                    None
+                };
+                let borrow2 = if let &Some((borrow, _)) = &captures2 {
+                    Some(cxt.finish_closure_env(borrow, capability2, self.span()))
+                } else {
+                    None
+                };
+                let mut env = cxt.env();
+                for (i, p) in ideps
+                    .iter()
+                    .chain(&edeps)
+                    .copied()
+                    .zip(implicit.iter().chain(&explicit))
+                {
+                    if let Some(i) = i {
+                        // Sometimes when the parameter is created its type is a meta
+                        // so if it gets resolved to an immutable type we're still allowed to let it escape
+                        if p.ty
+                            .clone()
+                            .eval(&mut env)
+                            .uncap_ty()
+                            .own_cap_(&cxt.mcxt, &env, true)
+                            != Cap::Imm
+                        {
+                            i.invalidate_children(
+                                Access {
+                                    kind: Cap::Mut,
+                                    point: AccessPoint::EscapingParam(p.name),
+                                    span: p.name.1,
+                                },
+                                cxt,
+                            )
+                        }
+                    }
+                    env.push(None);
                 }
                 cxt.finish_deps(x.body().unwrap().span());
                 let access =
@@ -2178,6 +2513,26 @@ impl ast::Expr {
                         Some((ty.quote(cxt.size(), Some(&cxt.mcxt)), reason)),
                     )
                     .into());
+                }
+                if let Some(borrow) = borrow1 {
+                    cxt.add_dep(
+                        borrow,
+                        Access {
+                            kind: capability,
+                            point: AccessPoint::Expr,
+                            span: x.span(),
+                        },
+                    );
+                }
+                if let Some(borrow) = borrow2 {
+                    cxt.add_dep(
+                        borrow,
+                        Access {
+                            kind: capability,
+                            point: AccessPoint::Expr,
+                            span: x.span(),
+                        },
+                    );
                 }
 
                 let mut term = if explicit.is_empty() {
@@ -2363,6 +2718,7 @@ impl ast::Expr {
                         (Expr::Cap(cap, Box::new(x)), Val::Type)
                     }
                     ast::Expr::Assign(x) => {
+                        cxt.record_deps();
                         let place = x
                             .lhs()
                             .ok_or("Missing left-hand side of assignment")?
@@ -2376,6 +2732,7 @@ impl ast::Expr {
                         // Don't borrow the lhs until after the rhs - this is important for e.g. `self.x = self.calc_x()`
                         place.try_access(Cap::Mut, cxt)?;
                         // TODO the lhs should now depend on any borrows in the rhs
+                        cxt.finish_deps(x.lhs().map_or(x.span(), |x| x.span()));
                         (
                             Expr::Assign(Box::new(place.to_expr(cxt)), Box::new(expr)),
                             Val::var(Var::Builtin(Builtin::UnitType)),
@@ -2436,7 +2793,7 @@ impl ast::Expr {
                             Expr::Head(Head::Var(v)) => v.name(cxt.db),
                             _ => None,
                         };
-                        let (expr, ty) = if let Some(mut exp) = x.exp() {
+                        let (expr, ty, extra_borrow) = if let Some(mut exp) = x.exp() {
                             if let Some(block) = x.do_expr() {
                                 // Reassociate to put the do block on the right side
                                 exp = exp.as_args().into_iter().rev().fold(
@@ -2457,66 +2814,15 @@ impl ast::Expr {
                                     },
                                 );
                             }
-                            let (exp, rty) = match lhs_ty.uncap_ty_own() {
+                            let (exp, rty, extra_borrow) = match lhs_ty.uncap_ty_own() {
                                 Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
-                                    let aty = clos.par_ty();
-                                    let (self_arg, ety) = if let Some(self_arg) = self_arg {
-                                        let (sty, eclos) = match aty {
-                                            Val::Fun(clos) if clos.class == Sigma => {
-                                                (clos.par_ty(), Some(clos))
-                                            }
-                                            aty => (aty, None),
-                                        };
-                                        let pty = self_arg.ty(cxt);
-                                        let self_arg = coerce(
-                                            self_arg,
-                                            pty,
-                                            sty,
-                                            cxt,
-                                            CheckReason::ArgOf(lhs_span),
-                                        )?;
-                                        (
-                                            Some(self_arg.clone()),
-                                            eclos.map(|x| x.apply(self_arg.eval(&mut cxt.env()))),
-                                        )
-                                    } else {
-                                        (None, Some(aty))
-                                    };
-                                    let exp = match (ety, exp) {
-                                        (None, ast::Expr::GroupedExpr(x)) if x.expr().is_none() => {
-                                            self_arg.expect("pretty sure this case is impossible")
-                                        }
-                                        (None, x) => {
-                                            cxt.error(
-                                                x.span(),
-                                                "Unexpected extra arguments to method call",
-                                            );
-                                            Expr::Error
-                                        }
-                                        (Some(ety), exp) => {
-                                            let exp =
-                                                exp.check(ety, cxt, CheckReason::ArgOf(lhs_span));
-                                            match self_arg {
-                                                Some(arg) => Expr::Pair(
-                                                    Box::new(arg),
-                                                    Box::new(exp),
-                                                    Box::new(
-                                                        clos.par_ty()
-                                                            .quote(cxt.size(), Some(&cxt.mcxt)),
-                                                    ),
-                                                ),
-                                                None => exp,
-                                            }
-                                        }
-                                    };
-                                    let vexp = exp.clone().eval(&mut cxt.env());
-                                    let rty = clos.apply(vexp);
-                                    (exp, rty)
+                                    let (a, b, c) = elab_args(lhs_span, *clos, self_arg, exp, cxt);
+                                    (a, b, Some(c))
                                 }
                                 Val::Error => {
                                     // Still try inferring the argument to catch errors
                                     let (exp, _) = exp.infer(cxt);
-                                    (exp, Val::Error)
+                                    (exp, Val::Error, None)
                                 }
                                 lhs_ty => {
                                     cxt.finish_deps(x.span());
@@ -2529,6 +2835,7 @@ impl ast::Expr {
                             (
                                 Expr::Elim(Box::new(lhs), Box::new(Elim::App(Expl, exp))),
                                 rty,
+                                extra_borrow,
                             )
                         } else {
                             if self_arg.is_some() {
@@ -2540,14 +2847,31 @@ impl ast::Expr {
                                     ),
                                 );
                             }
-                            (lhs, lhs_ty)
+                            (lhs, lhs_ty, None)
                         };
+                        if let Some(extra_borrow) = extra_borrow {
+                            cxt.check_deps(
+                                extra_borrow,
+                                Access {
+                                    point: AccessPoint::Function(fun_name),
+                                    kind: Cap::Own,
+                                    span: lhs_span,
+                                },
+                            )?;
+                        }
                         let arg_borrow = cxt.finish_deps(x.span());
                         let parents = arg_borrow.mutable_dependencies(cxt);
                         for (parent, mut access) in parents {
                             access.point = AccessPoint::Function(fun_name);
                             access.span = lhs_span;
                             arg_borrow.add_borrow(parent, access, cxt);
+                        }
+                        if let Some(extra_borrow) = extra_borrow {
+                            for (borrow, mut access) in extra_borrow.mutable_dependencies(cxt) {
+                                access.point = AccessPoint::Function(fun_name);
+                                access.span = lhs_span;
+                                arg_borrow.add_borrow(borrow, access, cxt);
+                            }
                         }
                         cxt.add_dep(
                             arg_borrow,
@@ -2654,6 +2978,7 @@ impl ast::Expr {
                                                             x.a().unwrap().span(),
                                                         ),
                                                         ty.clone().quote(cxt.size(), None),
+                                                        false,
                                                     )],
                                                     body: Box::new(
                                                         ty.clone().quote(cxt.size().inc(), None),
@@ -2699,6 +3024,7 @@ impl ast::Expr {
                             params: vec![Par::new(
                                 (cxt.db.name("_".to_string()), x.lhs().unwrap().span()),
                                 aty,
+                                false,
                             )],
                             body: Box::new(bty),
                         });
@@ -2718,6 +3044,11 @@ impl ast::Expr {
                     ast::Expr::ImplPat(_) => {
                         return Err(TypeError::Other(Doc::start(
                             "'impl' not allowed in this context",
+                        )))
+                    }
+                    ast::Expr::Ref(_) => {
+                        return Err(TypeError::Other(Doc::start(
+                            "'ref' not allowed in this context",
                         )))
                     }
                     ast::Expr::StructInit(x) => {

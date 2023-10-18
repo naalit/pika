@@ -192,8 +192,8 @@ struct BorrowDef {
     /// borrowed separately in two different case branches
     mutable_borrows: HashMap<Borrow, Access>,
     immutable_borrows: HashMap<Borrow, Access>,
-    /// These are borrows that don't borrow this one, but do depend on it by-value - so if this gets invalidated, they will too
-    move_or_copy: HashMap<Borrow, Access>,
+    /// These are borrows that don't borrow this one, but do depend on it by-value - so if this gets invalidated indirectly, they will too
+    owned_dependents: HashMap<Borrow, Access>,
     invalid: Option<BorrowInvalid>,
 }
 impl BorrowDef {
@@ -205,7 +205,7 @@ impl BorrowDef {
         }
         self.mutable_borrows.extend(other.mutable_borrows);
         self.immutable_borrows.extend(other.immutable_borrows);
-        self.move_or_copy.extend(other.move_or_copy);
+        self.owned_dependents.extend(other.owned_dependents);
         self.mutable_parents.extend(other.mutable_parents);
         if was_valid || other_valid {
             // It got invalidated in only one of the branches, invalidate it again now
@@ -220,7 +220,7 @@ impl BorrowDef {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Borrow(NonZeroU64);
 impl Borrow {
-    fn new(cxt: &mut Cxt) -> Borrow {
+    pub fn new(cxt: &mut Cxt) -> Borrow {
         cxt.borrows.push(BorrowDef::default());
         Borrow(
             (cxt.borrows_start + cxt.borrows.len() as u64)
@@ -260,7 +260,7 @@ impl Borrow {
                 for (i, a) in def
                     .immutable_borrows
                     .iter()
-                    .chain(&def.move_or_copy)
+                    .chain(&def.owned_dependents)
                     .chain(&def.mutable_borrows)
                     .map(|(&x, &y)| (x, y))
                     .collect::<Vec<_>>()
@@ -273,8 +273,8 @@ impl Borrow {
                     }
                     i.invalidate(invalid, cxt);
                 }
-            } else if !def.move_or_copy.is_empty() {
-                for (i, a) in def.move_or_copy.clone() {
+            } else if !def.owned_dependents.is_empty() {
+                for (i, a) in def.owned_dependents.clone() {
                     let mut invalid = invalid.clone();
                     if invalid.chain_start.is_none() {
                         invalid.chain_start = Some(a);
@@ -286,7 +286,7 @@ impl Borrow {
             }
         }
     }
-    fn invalidate_children(self, access: Access, cxt: &mut Cxt) {
+    pub fn invalidate_children(self, access: Access, cxt: &mut Cxt) {
         if let Some(def) = self.def_mut(cxt) {
             if def.invalid.is_none() {
                 // Don't include move_or_copy - those are conceptually on the same level as this borrow, not children
@@ -330,16 +330,19 @@ impl Borrow {
         }
     }
     fn invalidate_self(self, access: Access, move_type: Rc<Expr>, cxt: &mut Cxt) {
-        self.invalidate(
-            BorrowInvalid {
-                skip_borrow: None,
-                base_access: access,
-                chain_start: None,
-                chain_end: None,
-                move_type: Some(move_type),
-            },
-            cxt,
-        )
+        // Don't invalidate owned dependents
+        self.invalidate_children(access, cxt);
+        if let Some(def) = self.def_mut(cxt) {
+            if def.invalid.is_none() {
+                def.invalid = Some(BorrowInvalid {
+                    skip_borrow: None,
+                    base_access: access,
+                    chain_start: None,
+                    chain_end: None,
+                    move_type: Some(move_type),
+                });
+            }
+        }
     }
 
     /// Does not check validity or invalidate old borrows - do that before calling this
@@ -356,7 +359,7 @@ impl Borrow {
                     def.immutable_borrows.insert(borrow, access);
                 }
                 Cap::Own => {
-                    def.move_or_copy.insert(borrow, access);
+                    def.owned_dependents.insert(borrow, access);
                 }
             }
         }
@@ -397,7 +400,8 @@ pub enum VarEntry {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AccessPoint {
     Expr,
-    Closure(RelSpan, Option<Name>),
+    ClosureEnv(RelSpan, Option<Name>),
+    EscapingParam(SName),
     Name(Name),
     Function(Option<Name>),
 }
@@ -417,13 +421,18 @@ impl AccessPoint {
             AccessPoint::Expr => {
                 Doc::start(if initial { "T" } else { "t" }).add("he result of this expression", ())
             }
-            AccessPoint::Closure(_, Some(name)) => Doc::start(if initial {
+            AccessPoint::ClosureEnv(_, Some(name)) => Doc::start(if initial {
                 "Captured variable "
             } else {
                 "captured variable "
             })
             .chain(name.pretty(db).style(col)),
-            AccessPoint::Closure(_, None) => {
+            AccessPoint::EscapingParam((name, _)) => Doc::start(if initial { "N" } else { "n" })
+                .add("on-", ())
+                .add("ref", Doc::style_keyword())
+                .add(" parameter ", ())
+                .chain(name.pretty(db).style(col)),
+            AccessPoint::ClosureEnv(_, None) => {
                 Doc::start(if initial { "T" } else { "t" }).add("his closure's environment", ())
             }
             AccessPoint::Name(name) => {
@@ -482,12 +491,20 @@ impl AccessError {
                     .add(" was consumed here", ()),
                 false,
             ),
-            _ if matches!(self.dep_access.point, AccessPoint::Closure(_, _)) => (
+            _ if matches!(self.dep_access.point, AccessPoint::ClosureEnv(_, _)) => (
                 Doc::start("Cannot return value that borrows mutable ").chain(name0(false, false)),
                 name0(true, false).add(
                     " could be mutated by another call to this closure after it is returned",
                     (),
                 ),
+                false,
+            ),
+            _ if matches!(self.dep_access.point, AccessPoint::EscapingParam(_)) => (
+                Doc::start("Cannot return value that borrows mutable ").chain(name0(false, false)),
+                name0(true, false)
+                    .add(" is mutable and must be annotated with ", ())
+                    .add("ref", Doc::style_keyword())
+                    .add(" in order to escape the function", ()),
                 false,
             ),
             _ if self
@@ -529,7 +546,7 @@ impl AccessError {
             });
         }
         match self.dep_access.point {
-            AccessPoint::Closure(span, _) => {
+            AccessPoint::ClosureEnv(span, _) => {
                 if span != self.invalid_access.span
                     && self.dep_chain_start.map_or(true, |x| x.span != span)
                 {
@@ -549,30 +566,32 @@ impl AccessError {
             if let Some(access) = self.dep_chain_end {
                 let mutable = self.dep_chain_start.unwrap().kind == Cap::Mut;
                 let span = match self.dep_access.point {
-                    AccessPoint::Closure(span, _) => span,
+                    AccessPoint::ClosureEnv(span, _) => span,
                     _ => access.span,
                 };
-                secondary.push(Label {
-                    span,
-                    color: Some(Doc::COLOR4),
-                    message: match access.point {
-                        AccessPoint::Function(_) => access
-                            .point
-                            .pretty(true, Doc::COLOR4, db)
-                            .add(" could mutate ", ())
-                            .chain(name1(false, swap))
-                            .add(" and insert", ())
-                            .add(if mutable { " mutably" } else { "" }, ())
-                            .add(" borrowed data from ", ())
-                            .chain(name0(false, swap)),
-                        _ => name1(true, swap)
-                            .add(if mutable { " mutably" } else { "" }, ())
-                            .add(" borrows ", ())
-                            .chain(name0(false, swap))
-                            .add(" through ", ())
-                            .chain(access.point.pretty(false, Doc::COLOR4, db)),
-                    },
-                });
+                if self.dep_chain_start.map_or(true, |x| span != x.span) {
+                    secondary.push(Label {
+                        span,
+                        color: Some(Doc::COLOR4),
+                        message: match access.point {
+                            AccessPoint::Function(_) => access
+                                .point
+                                .pretty(true, Doc::COLOR4, db)
+                                .add(" could mutate ", ())
+                                .chain(name1(false, swap))
+                                .add(" and insert", ())
+                                .add(if mutable { " mutably" } else { "" }, ())
+                                .add(" borrowed data from ", ())
+                                .chain(name0(false, swap)),
+                            _ => name1(true, swap)
+                                .add(if mutable { " mutably" } else { "" }, ())
+                                .add(" borrows ", ())
+                                .chain(name0(false, swap))
+                                .add(" through ", ())
+                                .chain(access.point.pretty(false, Doc::COLOR4, db)),
+                        },
+                    });
+                }
             }
         }
 
@@ -584,7 +603,7 @@ impl AccessError {
                     .chain(ty.pretty(db))
                     .add("' which is mutable", ())
             })
-        } else if let AccessPoint::Closure(_, _) = self.dep_access.point {
+        } else if let AccessPoint::ClosureEnv(_, _) = self.dep_access.point {
             Some(
                 Doc::start("Closure could be called more than once since it's a '")
                     .add("mut", Doc::style_keyword())
@@ -851,16 +870,17 @@ impl Cxt<'_> {
         dep.add_borrow(*self.expr_borrow.last().unwrap(), access, self)
     }
     // TODO do we still need this?
-    pub fn finish_closure_env(&mut self, dep: Borrow, cap: Cap, span: RelSpan) {
-        if cap == Cap::Mut {
-            match dep.def(self) {
-                Some(def) => {
-                    let def = def.clone();
-                    for i in def.mutable_borrows {
+    pub fn finish_closure_env(&mut self, dep: Borrow, cap: Cap, span: RelSpan) -> Borrow {
+        let new_borrow = Borrow::new(self);
+        match dep.def(self) {
+            Some(def) => {
+                let def = def.clone();
+                if cap == Cap::Mut {
+                    for i in &def.mutable_borrows {
                         let access = Access {
                             kind: Cap::Mut,
                             span,
-                            point: AccessPoint::Closure(
+                            point: AccessPoint::ClosureEnv(
                                 i.1.span,
                                 match i.1.point {
                                     AccessPoint::Name(n) => Some(n),
@@ -871,9 +891,18 @@ impl Cxt<'_> {
                         i.0.invalidate_children(access, self);
                     }
                 }
-                None => (),
+                for (&i, &a) in def
+                    .immutable_borrows
+                    .iter()
+                    .chain(&def.owned_dependents)
+                    .chain(&def.mutable_borrows)
+                {
+                    i.add_borrow(new_borrow, a, self);
+                }
             }
+            None => (),
         }
+        new_borrow
     }
     pub fn check_deps(&self, borrow: Borrow, access: Access) -> Result<(), MoveError> {
         match borrow.def(self) {
@@ -1100,9 +1129,7 @@ impl Cxt<'_> {
                 .map(|(n, l)| (n, l, self.local_ty(l)))
                 .collect();
             for (meta, msize, mspan) in metas {
-                // Traits must always be immutable
-                // TODO this is unneeded once we have `type imm` and can enforce that for traits
-                let mty = Val::Cap(Cap::Imm, Box::new(self.mcxt.meta_ty(meta).unwrap()));
+                let mty = self.mcxt.meta_ty(meta).unwrap();
                 let trait_def = match mty.uncap_ty() {
                     Val::Neutral(neutral) => match neutral.head() {
                         Head::Var(Var::Def(_, trait_def)) => trait_def,
@@ -1119,8 +1146,6 @@ impl Cxt<'_> {
                     let cp = self.mcxt.checkpoint();
                     let (lval, lty) = Expr::var(Var::Local((*n, mspan), l.idx(self.size())))
                         .insert_metas(lty.clone(), None, mspan, self);
-                    // TODO same as above
-                    let lty = Val::Cap(Cap::Imm, Box::new(lty));
                     match lty.uncap_ty() {
                         Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
                             match self.mcxt.unify(
@@ -1171,8 +1196,6 @@ impl Cxt<'_> {
                         let (ival, ity) =
                             Expr::var(Var::Def((self.db.name("_".into()), mspan), idef))
                                 .insert_metas(ity, None, mspan, self);
-                        // TODO same as above
-                        let ity = Val::Cap(Cap::Imm, Box::new(ity));
                         match ity.uncap_ty() {
                             Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
                                 match self.mcxt.unify(

@@ -12,8 +12,8 @@ fun g[a](x: GADT[a]) : a = x match
     GADT.Two(t) => t
 
 # And finally, here it needs to figure out that the other argument has type Type in one branch
-fun h [a] (x: GADT[a], y: a) : Type = x match
-    GADT.Two(t) => (y -> t)
+fun h [a] (x: GADT[a], y: ref a) : Type = x match # technically the `ref` isn't needed, because in the only branch where we use it we know it's an immutable type
+    GADT.Two(t) => (y -> t)                       # but that's a difficult thing for the compiler to catch; I'm fine with the `ref` being required for now
     GADT.One => Type
 
 

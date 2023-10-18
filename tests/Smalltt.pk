@@ -100,7 +100,7 @@ let lcons : [a:_] imm -> own a -> own List(a) -> List(a) = a => as => l => c => 
 
 let list1 = lcons (true) (lcons (false) (lcons (false) (lnil)))
 
-let map : [a:_, b:_] imm -> (a imm -> b) imm -> List (a) imm -> List (b) =
+let map : [a:_, b:_] imm -> (a imm -> b) imm -> own List (a) imm -> List (b) =
     f => as => l => c => as (l) (a => c (f (a)))
 
 # Church vectors
@@ -120,8 +120,8 @@ let vec1 = vcons (true) (vcons (false) (vcons (true) (vnil)))
 # Leibniz (Church) propositional equality, useful for testing conversion.
 # Also note the implicit lambdas.
 # ----------------------------------------------------------------------------------
-let Eq : [A:_] imm -> A imm -> A -> Type =
-    [A] x => y => (P : imm A imm -> Type) -> P (x) -> P (y)
+let Eq : [A:_] imm -> (ref A) imm -> (ref A) -> Type =
+    [A] x => y => (P : A imm -> Type) -> P (x) -> P (y)
 
 # TODO violates move semantics
 # let refl : [A][x : A] imm -> Eq x x =

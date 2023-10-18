@@ -25,7 +25,7 @@ where
         ty: a
         val
 
-    fun get(self): imm self.ty = self.val
+    fun get(ref self): imm self.ty = self.val
 
 # verifying structs and methods with implicit parameters
 type MyStruct[a, b, c] struct
