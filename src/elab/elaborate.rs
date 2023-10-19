@@ -325,9 +325,17 @@ impl ast::Def {
                 })
             }
             ast::Def::ImplDef(x) => {
-                let name = self
-                    .name(cxt.db)
-                    .unwrap_or((cxt.db.name("_".into()), x.span()));
+                let name = self.name(cxt.db).unwrap_or((
+                    cxt.db.name("_".into()),
+                    x.syntax()
+                        .unwrap()
+                        .children_with_tokens()
+                        .filter_map(|x| x.as_token().cloned())
+                        .find(|x| x.kind() == SyntaxKind::ImplKw)
+                        .unwrap()
+                        .text_range()
+                        .into(),
+                ));
 
                 cxt.push();
                 let pars = check_params(
@@ -1935,7 +1943,7 @@ impl PlaceOrExpr {
                         },
                     );
                 }
-                e
+                Expr::Spanned(span, Box::new(e))
             }
         }
     }
@@ -2003,13 +2011,15 @@ impl Place {
     }
 
     fn to_expr(self, cxt: &Cxt) -> Expr {
-        match self {
+        let span = self.span();
+        let expr = match self {
             Place::Var(v) => Expr::var(v.var(cxt).cvt(cxt.size())),
             Place::Member(e, def, idx, name) => Expr::Elim(
                 Box::new(e.to_expr(cxt)),
                 Box::new(Elim::Member(def, idx, name)),
             ),
-        }
+        };
+        Expr::Spanned(span, Box::new(expr))
     }
 
     /// Makes sure the access is valid, invalidating other borrows appropriately, but does not add needed dependencies to the cxt
@@ -2760,7 +2770,7 @@ impl ast::Expr {
                         let mut lhs = lhs.finish_and_borrow(lhs_ty.own_cap(cxt), Cap::Own, cxt);
 
                         if x.exp().is_some() && self_arg.is_none() {
-                            if let &Expr::Head(Head::Var(Var::Def(_, def))) = &lhs {
+                            if let &Expr::Head(Head::Var(Var::Def(_, def))) = lhs.unspanned() {
                                 let edef = cxt.db.def_type(def);
                                 match edef
                                     .as_ref()

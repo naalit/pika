@@ -657,14 +657,17 @@ impl<'a> Parser<'a> {
                         self.advance();
 
                         self.expr(ExprParams {
-                            min_prec,
+                            min_prec: if Prec::Comma >= min_prec {
+                                Prec::Binder
+                            } else {
+                                min_prec
+                            },
                             lhs: None,
                             allow_lambda,
                             allow_arrow,
                         });
 
                         self.pop();
-                        return;
                     }
                     Tok::BoxKw | Tok::UnboxKw => {
                         self.push(Tok::Box);

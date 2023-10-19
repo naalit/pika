@@ -585,6 +585,7 @@ impl Pretty for EClos {
                             .pretty(db)
                             .add(':', ())
                             .space()
+                            .add(if x.is_ref { "ref " } else { "" }, Doc::style_keyword())
                             .chain(x.ty.pretty(db).nest(Prec::App))
                     }),
                     Doc::start(',').space(),
@@ -597,6 +598,7 @@ impl Pretty for EClos {
                             .pretty(db)
                             .add(':', ())
                             .space()
+                            .add(if x.is_ref { "ref " } else { "" }, Doc::style_keyword())
                             .chain(x.ty.pretty(db).nest(Prec::App))
                     }),
                     Doc::start(',').space(),

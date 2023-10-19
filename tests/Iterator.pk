@@ -1,0 +1,57 @@
+type Option[A] of
+    None
+    Some(A)
+
+trait Iterator[A] struct
+    fun next(mut self): Option[A]
+trait LendingIterator[A] struct
+    fun next(ref mut self): Option[A]
+
+type List[A: Type] of # TODO don't require this type annotation
+    Nil
+    Cons(A, List[A])
+where
+    fun get(ref self, idx: U64): Option[imm A] = self match
+        Cons(x, rest) => idx match
+            0 => Option.Some(x)
+            _ => rest.get(idx - 1)
+        Nil => Option.None
+    fun get_mut(ref mut self, idx: U64): Option[mut A] = self match
+        Cons(mut x, mut rest) => idx match
+            0 => Option.Some(x)
+            _ => rest.get_mut(idx - 1)
+        Nil => Option.None
+
+    type Iter[A] struct
+        list: imm List[A]
+        idx: U64
+    impl[A] Iterator[Iter[A], imm A] struct
+        fun next(mut self): Option[imm A] = do
+            self.idx = self.idx + 1
+            self.list.get(self.idx - 1)
+
+    # Like Rust, it's impossible to implement IterMut as an Iterator in safe code (using only `get`)
+    # But we can implement it as a LendingIterator:
+    type IterMut[A] struct
+        list: mut List[A]
+        idx: U64
+    impl[A] LendingIterator[IterMut[A], mut A] struct
+        fun next(ref mut self): Option[mut A] = do
+            let idx = self.idx
+            self.idx = idx + 1
+            self.list.get_mut(idx - 1)
+
+    # We could also use this technique to implement it as an Iterator, which also works for IntoIter:
+    # type IntoIter[A] struct
+    #     list: List[A]
+    # impl[A] Iterator[IntoIter[A], A] struct
+    #     fun next(mut self): Option[A] = do
+    #         let own list = self.list
+    #         list match
+    #             Nil => do
+    #                 self.list = Nil
+    #                 Option.None
+    #             Cons(x, rest) => do
+    #                 self.list = rest
+    #                 Option.Some(x)
+    # TODO 1) track fields like variables 2) track invalidation and revalidation (and check validity at possible return/effect points)

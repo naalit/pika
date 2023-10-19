@@ -408,14 +408,21 @@ impl UnifyCxt<'_, '_> {
             // For immutable types, `imm T = mut T = own T`
             (Val::Cap(_, a), b) | (b, Val::Cap(_, a))
                 if a.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Imm
-                    || b.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Imm =>
+                    // Allow solving e.g. `imm ?2 = Type`
+                    || (state.can_solve_metas()
+                        && matches!(&*a, Val::Neutral(n) if self.can_solve(n.head()))
+                        && b.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true)
+                            == Cap::Imm) =>
             {
                 self.unify(*a, b, size, state)
             }
             // For specific `mut` types (currently only `mut` functions), `mut T = own T`
             (Val::Cap(Cap::Mut, a), b) | (b, Val::Cap(Cap::Mut, a))
                 if a.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Mut
-                    || b.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Mut =>
+                    || (state.can_solve_metas()
+                        && matches!(&*a, Val::Neutral(n) if self.can_solve(n.head()))
+                        && b.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true)
+                            == Cap::Mut) =>
             {
                 self.unify(*a, b, size, state)
             }

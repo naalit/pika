@@ -72,3 +72,8 @@ fn structs() {
 fn traits() {
     test(&["Traits.pk"]).succeeds();
 }
+
+#[test]
+fn iterator() {
+    test(&["Iterator.pk"]).succeeds();
+}

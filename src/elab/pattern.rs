@@ -113,7 +113,7 @@ mod input {
                 columns: VecDeque::from(vec![Column { var, pat }]),
                 guard: None,
                 end_ipats: VecDeque::new(),
-                body: cxt.add_body(body),
+                body: cxt.add_body(body, span),
             }
         }
 
@@ -238,6 +238,21 @@ mod input {
             let pat = match self {
                 // TODO datatype constructors
                 ast::Expr::Var(v) => {
+                    match cxt
+                        .ecxt
+                        .lookup(v.name(cxt.ecxt.db))
+                        .map(|e| (e.var(cxt.ecxt), e))
+                    {
+                        Some((Var::Cons(_, cons), entry)) => {
+                            let ty = entry.ty(&cxt.ecxt);
+                            let ty = ty.quote(*size, None).eval(&mut Env::new(*size));
+                            return (
+                                self.build_cons_pattern(size, None, None, v.span(), ty, cxt, cons),
+                                self.span(),
+                            );
+                        }
+                        _ => (),
+                    }
                     *size += 1;
                     Pattern::Var(false, v.name(cxt.ecxt.db))
                 }
@@ -255,7 +270,7 @@ mod input {
                     }
                 }
                 ast::Expr::App(x) => {
-                    let (lhs, mut lhs_ty) = x
+                    let (lhs, lhs_ty) = x
                         .lhs()
                         .map(|x| x.elab_unborrowed(cxt.ecxt))
                         .map(|mut lhs| {
@@ -266,8 +281,8 @@ mod input {
                             (lhs.finish(ty.own_cap(&cxt.ecxt), cxt.ecxt), ty)
                         })
                         .unwrap_or((Expr::Error, Val::Error));
-                    let cons = match lhs {
-                        Expr::Head(Head::Var(Var::Cons(_, cons))) => cons,
+                    let cons = match lhs.unspanned() {
+                        Expr::Head(Head::Var(Var::Cons(_, cons))) => *cons,
                         Expr::Error => return (Pattern::Any, self.span()),
                         _ => {
                             cxt.ecxt.error(
@@ -277,166 +292,15 @@ mod input {
                             return (Pattern::Any, self.span());
                         }
                     };
-                    let start_size = *size;
-                    let implicit = if let Some(args) = x.imp() {
-                        match lhs_ty {
-                            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
-                                let args: Vec<_> = args
-                                    .args()
-                                    .into_iter()
-                                    .flat_map(|x| match x.expr() {
-                                        Some(x) => x.as_args(),
-                                        None => vec![Err(x.span())],
-                                    })
-                                    .collect();
-                                if args.len() > clos.params.len() {
-                                    cxt.ecxt.error(
-                                        x.span(),
-                                        "Extra implicit arguments to constructor in pattern",
-                                    );
-                                }
-                                let args: Vec<_> = args
-                                    .into_iter()
-                                    .map(Some)
-                                    .chain(std::iter::repeat(None))
-                                    .zip(&clos.params)
-                                    .map(|(a, b)| {
-                                        let mut env = Env::new(*size);
-                                        match a {
-                                            Some(Ok(e)) => (
-                                                (e.to_pattern(cxt, size)),
-                                                (b.ty.clone().eval(&mut env)),
-                                            ),
-                                            Some(Err(span)) => {
-                                                cxt.ecxt
-                                                    .unify(
-                                                        Val::var(Var::Builtin(Builtin::UnitType)),
-                                                        b.ty.clone().eval(&mut env),
-                                                        CheckReason::ArgOf(x.lhs().unwrap().span()),
-                                                    )
-                                                    .unwrap_or_else(|e| cxt.ecxt.error(span, e));
-                                                (
-                                                    (Pattern::Any, span),
-                                                    (Val::var(Var::Builtin(Builtin::UnitType))),
-                                                )
-                                            }
-                                            None => {
-                                                *size += 1;
-                                                (
-                                                    (
-                                                        Pattern::Var(
-                                                            false,
-                                                            (
-                                                                cxt.ecxt.db.name("_".into()),
-                                                                RelSpan::empty(),
-                                                            ),
-                                                        ),
-                                                        RelSpan::empty(),
-                                                    ),
-                                                    (b.ty.clone().eval(&mut env)),
-                                                )
-                                            }
-                                        }
-                                    })
-                                    .collect();
-                                let mut tsize = start_size;
-                                let arg = args
-                                    .iter()
-                                    .map(|x| x.0 .0.to_term(cxt.ecxt.db, &mut tsize))
-                                    .collect::<Vec<_>>()
-                                    .into_iter()
-                                    .rfold(None, |acc, x| match acc {
-                                        None => Some(x),
-                                        Some(y) => Some(Val::Pair(
-                                            Box::new(x),
-                                            Box::new(y),
-                                            Box::new(Val::Error),
-                                        )),
-                                    })
-                                    .unwrap();
-                                lhs_ty = clos.apply(arg);
-                                args
-                            }
-                            Val::Error => {
-                                lhs_ty = Val::Error;
-                                Vec::new()
-                            }
-                            lty => {
-                                cxt.ecxt.error(
-                                    args.span(),
-                                    "Extra implicit arguments to constructor in pattern",
-                                );
-                                lhs_ty = lty;
-                                Vec::new()
-                            }
-                        }
-                    } else {
-                        match lhs_ty {
-                            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
-                                let args: Vec<_> = clos
-                                    .params
-                                    .iter()
-                                    .map(|b| {
-                                        *size += 1;
-                                        (
-                                            (
-                                                Pattern::Var(
-                                                    false,
-                                                    (
-                                                        cxt.ecxt.db.name("_".into()),
-                                                        RelSpan::empty(),
-                                                    ),
-                                                ),
-                                                RelSpan::empty(),
-                                            ),
-                                            (b.ty.clone().eval(&mut Env::new(*size))),
-                                        )
-                                    })
-                                    .collect();
-                                // This is correct since they're all var patterns
-                                lhs_ty = clos.open(start_size);
-                                args
-                            }
-                            _ => Vec::new(),
-                        }
-                    };
-                    let start_size = *size;
-                    let explicit = match (x.exp(), lhs_ty) {
-                        (Some(args), Val::Fun(clos)) if matches!(clos.class, Pi(Expl, _)) => {
-                            let r = Some(Box::new((args.to_pattern(cxt, size), clos.par_ty())));
-                            lhs_ty = clos.apply(
-                                r.as_ref()
-                                    .unwrap()
-                                    .0
-                                     .0
-                                    .to_term(cxt.ecxt.db, &mut start_size.clone()),
-                            );
-                            r
-                        }
-                        (None, Val::Fun(clos)) => {
-                            cxt.ecxt.error(
-                                self.span(),
-                                "Expected explicit arguments to constructor in pattern",
-                            );
-                            let r = Some(Box::new(((Pattern::Any, self.span()), clos.par_ty())));
-                            lhs_ty = clos.apply(Val::Error);
-                            r
-                        }
-                        (Some(_), lty) => {
-                            cxt.ecxt.error(
-                                self.span(),
-                                "Extra explicit arguments to constructor in pattern",
-                            );
-                            lhs_ty = lty;
-                            None
-                        }
-                        (_, lty) => {
-                            lhs_ty = lty;
-                            None
-                        }
-                    };
-                    lhs_ty = lhs_ty.quote(*size, None).eval(&mut Env::new(*size));
-                    Pattern::Cons(PCons::Cons(cons), implicit, explicit, lhs_ty, *size)
+                    self.build_cons_pattern(
+                        size,
+                        x.imp(),
+                        x.exp(),
+                        x.lhs().unwrap().span(),
+                        lhs_ty,
+                        cxt,
+                        cons,
+                    )
                 }
                 ast::Expr::Lit(l) => match l.to_literal(cxt.ecxt) {
                     Ok(l) => Pattern::Cons(
@@ -532,6 +396,172 @@ mod input {
             };
             (pat, self.span())
         }
+
+        fn build_cons_pattern(
+            &self,
+            size: &mut Size,
+            implicit: Option<ast::ImpArgs>,
+            explicit: Option<ast::Expr>,
+            lhs_span: RelSpan,
+            mut lhs_ty: Val,
+            cxt: &mut CaseElabCxt<'_, '_>,
+            cons: Cons,
+        ) -> Pattern {
+            let start_size = *size;
+            let implicit = if let Some(args) = implicit {
+                match lhs_ty {
+                    Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
+                        let args: Vec<_> = args
+                            .args()
+                            .into_iter()
+                            .flat_map(|x| match x.expr() {
+                                Some(x) => x.as_args(),
+                                None => vec![Err(x.span())],
+                            })
+                            .collect();
+                        if args.len() > clos.params.len() {
+                            cxt.ecxt.error(
+                                self.span(),
+                                "Extra implicit arguments to constructor in pattern",
+                            );
+                        }
+                        let args: Vec<_> = args
+                            .into_iter()
+                            .map(Some)
+                            .chain(std::iter::repeat(None))
+                            .zip(&clos.params)
+                            .map(|(a, b)| {
+                                let mut env = Env::new(*size);
+                                match a {
+                                    Some(Ok(e)) => {
+                                        ((e.to_pattern(cxt, size)), (b.ty.clone().eval(&mut env)))
+                                    }
+                                    Some(Err(span)) => {
+                                        cxt.ecxt
+                                            .unify(
+                                                Val::var(Var::Builtin(Builtin::UnitType)),
+                                                b.ty.clone().eval(&mut env),
+                                                CheckReason::ArgOf(lhs_span),
+                                            )
+                                            .unwrap_or_else(|e| cxt.ecxt.error(span, e));
+                                        (
+                                            (Pattern::Any, span),
+                                            (Val::var(Var::Builtin(Builtin::UnitType))),
+                                        )
+                                    }
+                                    None => {
+                                        *size += 1;
+                                        (
+                                            (
+                                                Pattern::Var(
+                                                    false,
+                                                    (
+                                                        cxt.ecxt.db.name("_".into()),
+                                                        RelSpan::empty(),
+                                                    ),
+                                                ),
+                                                RelSpan::empty(),
+                                            ),
+                                            (b.ty.clone().eval(&mut env)),
+                                        )
+                                    }
+                                }
+                            })
+                            .collect();
+                        let mut tsize = start_size;
+                        let arg = args
+                            .iter()
+                            .map(|x| x.0 .0.to_term(cxt.ecxt.db, &mut tsize))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rfold(None, |acc, x| match acc {
+                                None => Some(x),
+                                Some(y) => {
+                                    Some(Val::Pair(Box::new(x), Box::new(y), Box::new(Val::Error)))
+                                }
+                            })
+                            .unwrap();
+                        lhs_ty = clos.apply(arg);
+                        args
+                    }
+                    Val::Error => {
+                        lhs_ty = Val::Error;
+                        Vec::new()
+                    }
+                    lty => {
+                        cxt.ecxt.error(
+                            args.span(),
+                            "Extra implicit arguments to constructor in pattern",
+                        );
+                        lhs_ty = lty;
+                        Vec::new()
+                    }
+                }
+            } else {
+                match lhs_ty {
+                    Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
+                        let args: Vec<_> = clos
+                            .params
+                            .iter()
+                            .map(|b| {
+                                *size += 1;
+                                (
+                                    (
+                                        Pattern::Var(
+                                            false,
+                                            (cxt.ecxt.db.name("_".into()), RelSpan::empty()),
+                                        ),
+                                        RelSpan::empty(),
+                                    ),
+                                    (b.ty.clone().eval(&mut Env::new(*size))),
+                                )
+                            })
+                            .collect();
+                        // This is correct since they're all var patterns
+                        lhs_ty = clos.open(start_size);
+                        args
+                    }
+                    _ => Vec::new(),
+                }
+            };
+            let start_size = *size;
+            let explicit = match (explicit, lhs_ty) {
+                (Some(args), Val::Fun(clos)) if matches!(clos.class, Pi(Expl, _)) => {
+                    let r = Some(Box::new((args.to_pattern(cxt, size), clos.par_ty())));
+                    lhs_ty = clos.apply(
+                        r.as_ref()
+                            .unwrap()
+                            .0
+                             .0
+                            .to_term(cxt.ecxt.db, &mut start_size.clone()),
+                    );
+                    r
+                }
+                (None, Val::Fun(clos)) => {
+                    cxt.ecxt.error(
+                        self.span(),
+                        "Expected explicit arguments to constructor in pattern",
+                    );
+                    let r = Some(Box::new(((Pattern::Any, self.span()), clos.par_ty())));
+                    lhs_ty = clos.apply(Val::Error);
+                    r
+                }
+                (Some(_), lty) => {
+                    cxt.ecxt.error(
+                        self.span(),
+                        "Extra explicit arguments to constructor in pattern",
+                    );
+                    lhs_ty = lty;
+                    None
+                }
+                (_, lty) => {
+                    lhs_ty = lty;
+                    None
+                }
+            };
+            lhs_ty = lhs_ty.quote(*size, None).eval(&mut Env::new(*size));
+            Pattern::Cons(PCons::Cons(cons), implicit, explicit, lhs_ty, *size)
+        }
     }
 
     impl ast::CaseBranch {
@@ -599,7 +629,7 @@ struct CaseElabCxt<'a, 'b> {
     ecxt: &'a mut Cxt<'b>,
     env_tys: HashMap<Body, (PEnv, bool, Env)>,
     var_tys: Vec<(Val, CheckReason)>,
-    bodies: Vec<Option<ast::Expr>>,
+    bodies: Vec<(Option<ast::Expr>, RelSpan)>,
 }
 
 impl CaseElabCxt<'_, '_> {
@@ -609,9 +639,9 @@ impl CaseElabCxt<'_, '_> {
         PVar(l)
     }
 
-    fn add_body(&mut self, body: Option<ast::Expr>) -> Body {
+    fn add_body(&mut self, body: Option<ast::Expr>, span: RelSpan) -> Body {
         let l = self.bodies.len();
-        self.bodies.push(body);
+        self.bodies.push((body, span));
         Body(l)
     }
 
@@ -1166,15 +1196,12 @@ pub(super) fn elab_case(
     let borrow_checkpoint = cxt.ecxt.borrow_checkpoint();
     let mut merges = Vec::new();
     let mut deps = Vec::new();
-    for (i, body) in cxt.bodies.iter().enumerate() {
+    for (i, (body, body_span)) in cxt.bodies.iter().enumerate() {
         match cxt.env_tys.get(&Body(i)) {
             Some((penv, reachable, env)) => {
                 cxt.ecxt.record_deps();
                 if !reachable {
-                    // If there's no body we have a bigger problem
-                    if let Some(span) = body.as_ref().map(|x| x.span()) {
-                        cxt.ecxt.warning(span, "Unreachable case branch");
-                    }
+                    cxt.ecxt.warning(*body_span, "Unreachable match branch");
                 }
                 let old_env = cxt.ecxt.env();
                 cxt.ecxt.push();

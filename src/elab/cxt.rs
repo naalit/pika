@@ -5,13 +5,11 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DefCxt {
     scopes: Vec<Scope>,
-    n_borrows: u64,
 }
 impl DefCxt {
     pub fn global(file: File) -> Self {
         DefCxt {
             scopes: vec![Scope::Prelude, Scope::Namespace(Namespace::Global(file))],
-            n_borrows: 0,
         }
     }
 }
@@ -222,25 +220,15 @@ pub struct Borrow(NonZeroU64);
 impl Borrow {
     pub fn new(cxt: &mut Cxt) -> Borrow {
         cxt.borrows.push(BorrowDef::default());
-        Borrow(
-            (cxt.borrows_start + cxt.borrows.len() as u64)
-                .try_into()
-                .unwrap(),
-        )
+        Borrow((cxt.borrows.len() as u64).try_into().unwrap())
     }
 
     fn def_mut<'a>(self, cxt: &'a mut Cxt) -> Option<&'a mut BorrowDef> {
-        if self.0.get() <= cxt.borrows_start {
-            return None;
-        }
-        let idx = self.0.get() - cxt.borrows_start - 1;
+        let idx = self.0.get() - 1;
         cxt.borrows.get_mut(idx as usize)
     }
     fn def<'a>(self, cxt: &'a Cxt) -> Option<&'a BorrowDef> {
-        if self.0.get() <= cxt.borrows_start {
-            return None;
-        }
-        let idx = self.0.get() - cxt.borrows_start - 1;
+        let idx = self.0.get() - 1;
         cxt.borrows.get(idx as usize)
     }
 
@@ -809,7 +797,6 @@ pub struct Cxt<'a> {
     pub mcxt: MetaCxt<'a>,
     expr_borrow: Vec<Borrow>,
     borrows: Vec<BorrowDef>,
-    borrows_start: u64,
 }
 impl Cxt<'_> {
     pub fn new(db: &dyn Elaborator, def_cxt: DefCxt) -> Cxt {
@@ -821,7 +808,6 @@ impl Cxt<'_> {
             mcxt: MetaCxt::new(db),
             expr_borrow: Vec::new(),
             borrows: Vec::new(),
-            borrows_start: def_cxt.n_borrows,
         };
         cxt.record_deps();
         cxt.env = Env::new(cxt.size());
@@ -986,7 +972,6 @@ impl Cxt<'_> {
     pub fn def_cxt(&self) -> DefCxt {
         DefCxt {
             scopes: self.scopes.clone(),
-            n_borrows: self.borrows_start + self.borrows.len() as u64,
         }
     }
 

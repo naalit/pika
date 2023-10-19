@@ -74,6 +74,7 @@ impl Expr {
                             Cow::Owned(self.ty(cxt).quote(cxt.size(), Some(&cxt.mcxt))),
                         ));
                     }
+                    a.find_span(span, cxt)?;
                 }
                 Elim::Case(case, _) => {
                     a.find_span(span, cxt)?;
@@ -217,6 +218,10 @@ pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc
                                                 .pretty(db)
                                                 .add(':', ())
                                                 .space()
+                                                .add(
+                                                    if x.is_ref { "ref " } else { "" },
+                                                    Doc::style_keyword(),
+                                                )
                                                 .chain(x.ty.pretty(db).nest(Prec::App))
                                         }),
                                         Doc::start(',').space(),
@@ -247,6 +252,10 @@ pub fn def_hover_type(db: &dyn Elaborator, def_id: Def, pos: u32) -> Option<(Doc
                                                         .pretty(db)
                                                         .add(':', ())
                                                         .space()
+                                                        .add(
+                                                            if x.is_ref { "ref " } else { "" },
+                                                            Doc::style_keyword(),
+                                                        )
                                                         .chain(x.ty.pretty(db).nest(Prec::App))
                                                 }),
                                                 Doc::start(',').space(),
