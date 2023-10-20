@@ -230,6 +230,7 @@ impl MetaSolveError {
     }
 }
 
+#[derive(Debug)]
 enum SolutionCheckMode {
     Occurs(Meta),
     Full(PartialRename, Size),
@@ -266,6 +267,7 @@ impl SolutionCheckMode {
     }
 }
 
+#[derive(Debug)]
 struct PartialRename {
     meta: Meta,
     vars: HashMap<Lvl, Lvl>,
@@ -321,6 +323,11 @@ impl PartialRename {
 
                 let mut rhs = self.add_arg(*b, inner_size.inc(), mcxt)?;
                 rhs.insert(0, n.0);
+                Ok(rhs)
+            }
+            Val::Pair(_, b, _) => {
+                let mut rhs = self.add_arg(*b, inner_size.inc(), mcxt)?;
+                rhs.insert(0, mcxt.db.name("_".into()));
                 Ok(rhs)
             }
             // TODO handle Val::Error without creating more errors?
@@ -715,7 +722,7 @@ impl Expr {
                     s_from += 1;
                     s_to += 1;
                 }
-                body.check_solution(cxt, mode, s_from + params.len(), s_to + params.len())?;
+                body.check_solution(cxt, mode, s_from, s_to)?;
             }
             Expr::Lit(_) | Expr::Type | Expr::Error => (),
         }

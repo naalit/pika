@@ -5,7 +5,7 @@ type Option[A] of
 trait Iterator[A] struct
     fun next(mut self): Option[A]
 trait LendingIterator[A] struct
-    fun next(ref mut self): Option[A]
+    fun lend_next(ref mut self): Option[A]
 
 type List[A: Type] of # TODO don't require this type annotation
     Nil
@@ -25,10 +25,10 @@ where
     type Iter[A] struct
         list: imm List[A]
         idx: U64
-    impl[A] Iterator[Iter[A], imm A] struct
-        fun next(mut self): Option[imm A] = do
-            self.idx = self.idx + 1
-            self.list.get(self.idx - 1)
+    
+    fun iter(ref self): Iter[A] = Iter struct
+        list: self
+        idx: 0
 
     # Like Rust, it's impossible to implement IterMut as an Iterator in safe code (using only `get`)
     # But we can implement it as a LendingIterator:
@@ -36,7 +36,7 @@ where
         list: mut List[A]
         idx: U64
     impl[A] LendingIterator[IterMut[A], mut A] struct
-        fun next(ref mut self): Option[mut A] = do
+        fun lend_next(ref mut self): Option[mut A] = do
             let idx = self.idx
             self.idx = idx + 1
             self.list.get_mut(idx - 1)
@@ -55,3 +55,37 @@ where
     #                 self.list = rest
     #                 Option.Some(x)
     # TODO 1) track fields like variables 2) track invalidation and revalidation (and check validity at possible return/effect points)
+
+# TODO allow this to go inside the where block of List
+impl[A] Iterator[List.Iter[A], imm A] struct
+        fun next(mut self): Option[imm A] = do
+            self.idx = self.idx + 1
+            self.list.get(self.idx - 1)
+
+trait ToList[A] struct
+    fun to_list(own self): List[A]
+
+# TODO The order of these matters with the current impl resolution system, but in the future we should fix that
+impl[A] ToList[(A, A), A] struct
+    fun to_list(own self): List[A] = do
+        let (a, b) = self
+        List.Cons(a, List.Cons(b, List.Nil))
+impl[A, B, impl ToList[B, A]] ToList[(A, B), A] struct
+    fun to_list(own self): List[A] = do
+        let (a, b) = self
+        List.Cons(a, b.to_list())
+
+fun list[A, X, impl ToList[X, A]](x: own X): List[A] = x.to_list()
+
+# TODO allow LendingIterator to also have a next() method (currently that would make this error as ambiguous)
+fun each[A, I, impl Iterator[I, A]](mut x: own I, f: A mut-> ()) = x.next() match
+    Option.None => ()
+    Option.Some(val) => do
+        f(val)
+        each(x, f)
+
+fun main() = do
+    let list: List[U64] = list(1, 2, 3, 4)
+    each(list.iter()) do x =>
+        x + 1 # pretend we're printing this out
+        ()

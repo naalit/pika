@@ -325,6 +325,8 @@ impl ast::Def {
                 })
             }
             ast::Def::ImplDef(x) => {
+                cxt.set_ignore_def(def_id);
+
                 let name = self.name(cxt.db).unwrap_or((
                     cxt.db.name("_".into()),
                     x.syntax()
@@ -2723,7 +2725,7 @@ impl ast::Expr {
                         let cap = x.captok().map(|x| x.as_cap()).unwrap_or(Cap::Imm);
                         let x = x
                             .expr()
-                            .ok_or(format!("Expected type after '{}'", cap))?
+                            .ok_or(&format!("Expected type after '{}'", cap))?
                             .check(Val::Type, cxt, CheckReason::UsedAsType);
                         (Expr::Cap(cap, Box::new(x)), Val::Type)
                     }
@@ -2859,6 +2861,10 @@ impl ast::Expr {
                             }
                             (lhs, lhs_ty, None)
                         };
+
+                        // Now that all arguments have been applied, resolve any implicits lying around
+                        cxt.resolve_impls(cxt.size());
+
                         if let Some(extra_borrow) = extra_borrow {
                             cxt.check_deps(
                                 extra_borrow,
@@ -2922,7 +2928,7 @@ impl ast::Expr {
                             },
                         ),
                         Err(e) => {
-                            cxt.error(self.span(), e);
+                            cxt.error(self.span(), &e);
                             (Expr::Error, Val::Error)
                         }
                     },

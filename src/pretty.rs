@@ -49,9 +49,16 @@ pub struct Doc {
     indent: usize,
     prec: Prec,
 }
-impl<T: std::fmt::Display> From<T> for Doc {
-    fn from(x: T) -> Self {
+impl<T: std::fmt::Display + ?Sized> From<&T> for Doc {
+    fn from(x: &T) -> Self {
         Doc::start(x)
+    }
+}
+impl std::fmt::Display for Doc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut buf = String::new();
+        self.clone().add_string(true, 0, &mut buf);
+        f.write_str(&buf)
     }
 }
 

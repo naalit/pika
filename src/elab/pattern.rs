@@ -312,7 +312,7 @@ mod input {
                     ),
                     Err(e) => {
                         // TODO do we actually want to assume Any for malformed patterns?
-                        cxt.ecxt.error(self.span(), e);
+                        cxt.ecxt.error(self.span(), &e);
                         Pattern::Any
                     }
                 },

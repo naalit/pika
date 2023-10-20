@@ -64,9 +64,15 @@ pub fn split(db: &dyn Parser, file: File) -> Vec<TextSplit> {
         let mut name = None;
         for i in text.lines() {
             let words = i.to_string();
-            let mut words = words.split_whitespace().peekable();
+            let mut words = words
+                .split_whitespace()
+                .flat_map(|x| x.split(&['[', '(', ':', '=']))
+                .peekable();
             if words.peek() == Some(&"pub") {
                 words.next();
+            }
+            if words.peek() == Some(&"impl") {
+                break;
             }
             if matches!(words.next(), Some("fun" | "let" | "eff" | "type" | "trait")) {
                 name = words

@@ -542,6 +542,7 @@ impl Pretty for Expr {
             Expr::Lit(l) => l.pretty(db).style(Doc::style_literal()),
             Expr::Pair(a, b, _) => a
                 .pretty(db)
+                .nest(Prec::Pi)
                 .add(',', ())
                 .space()
                 .chain(b.pretty(db).nest(Prec::Pair))
@@ -607,7 +608,7 @@ impl Pretty for EClos {
             Sigma | Pi(Expl, _) if params.len() == 1 => {
                 assert_eq!(params.len(), 1);
                 let x = &params[0];
-                pretty_bind(x.name, x.ty.pretty(db).nest(Prec::App), db, *class != Sigma)
+                pretty_bind(x.name, x.ty.pretty(db).nest(Prec::Pi), db, *class != Sigma)
             }
             Pi(Expl, _) => Doc::start('(')
                 .chain(Doc::intersperse(

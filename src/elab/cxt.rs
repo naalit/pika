@@ -791,6 +791,7 @@ pub struct BorrowCheckpoint(Vec<BorrowDef>);
 
 pub struct Cxt<'a> {
     pub db: &'a dyn Elaborator,
+    ignore_def: Option<Def>,
     scopes: Vec<Scope>,
     env: Env,
     errors: Vec<(Severity, TypeError, RelSpan)>,
@@ -808,10 +809,23 @@ impl Cxt<'_> {
             mcxt: MetaCxt::new(db),
             expr_borrow: Vec::new(),
             borrows: Vec::new(),
+            ignore_def: None,
         };
         cxt.record_deps();
         cxt.env = Env::new(cxt.size());
         cxt
+    }
+
+    // For definitions that must elaborate the body to determine the type, so they don't cause cycles in Salsa
+    pub fn set_ignore_def(&mut self, def: Def) {
+        if let Some(def2) = self.ignore_def {
+            panic!(
+                "Called set_ignore_def({}) on a cxt that is already ignoring def {}",
+                def.fallback_repr(self.db),
+                def2.fallback_repr(self.db)
+            );
+        }
+        self.ignore_def = Some(def);
     }
 
     pub fn borrow_checkpoint(&self) -> BorrowCheckpoint {
@@ -1083,20 +1097,6 @@ impl Cxt<'_> {
     }
 
     pub fn pop(&mut self) -> Option<(Borrow, Vec<(Lvl, Access)>)> {
-        let new_size = self
-            .scopes
-            .iter()
-            .rev()
-            .skip(1)
-            .find_map(|x| match x {
-                Scope::Local(l) => Some(l.size),
-                _ => None,
-            })
-            .unwrap_or(self.size());
-        if matches!(self.scopes.last(), Some(Scope::Local(_))) {
-            self.resolve_impls(new_size);
-        }
-
         let scope = self.scopes.pop();
         self.env.reset_to_size(self.size());
         scope.and_then(|x| match x {
@@ -1105,93 +1105,47 @@ impl Cxt<'_> {
         })
     }
 
-    fn resolve_impls(&mut self, new_size: Size) {
-        let metas = self.mcxt.needed_impls(new_size);
-        if !metas.is_empty() {
-            let locals: Vec<_> = self
-                .locals()
-                .into_iter()
-                .map(|(n, l)| (n, l, self.local_ty(l)))
-                .collect();
-            for (meta, msize, mspan) in metas {
-                let mty = self.mcxt.meta_ty(meta).unwrap();
-                let trait_def = match mty.uncap_ty() {
-                    Val::Neutral(neutral) => match neutral.head() {
-                        Head::Var(Var::Def(_, trait_def)) => trait_def,
+    pub fn resolve_impls(&mut self, new_size: Size) {
+        loop {
+            let metas = self.mcxt.needed_impls(new_size);
+            if metas.is_empty() {
+                break;
+            } else {
+                let locals: Vec<_> = self
+                    .locals()
+                    .into_iter()
+                    .map(|(n, l)| (n, l, self.local_ty(l)))
+                    .collect();
+                for (meta, msize, mspan) in metas {
+                    assert_eq!(msize, self.size());
+                    let mty = self.mcxt.meta_ty(meta).unwrap();
+                    let trait_def = match mty.uncap_ty() {
+                        Val::Neutral(neutral) => match neutral.head() {
+                            Head::Var(Var::Def(_, trait_def)) => trait_def,
+                            _ => unreachable!(),
+                        },
                         _ => unreachable!(),
-                    },
-                    _ => unreachable!(),
-                };
+                    };
 
-                // Start by searching locals
-                let mut solutions = Vec::new();
-                for (n, l, lty) in locals.iter().take(msize.as_u32() as usize) {
-                    // on this insert_metas and the next one, we need to save a checkpoint of the mcxt
-                    // bc if unification fails we could get random metas lying around that will go unsolved
-                    let cp = self.mcxt.checkpoint();
-                    let (lval, lty) = Expr::var(Var::Local((*n, mspan), l.idx(self.size())))
-                        .insert_metas(lty.clone(), None, mspan, self);
-                    match lty.uncap_ty() {
-                        Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
-                            match self.mcxt.unify(
-                                lty.clone(),
-                                mty.clone(),
-                                msize,
-                                self.env(),
-                                CheckReason::MustMatch(mspan),
-                            ) {
-                                Ok(()) => {
-                                    solutions.push(lval.eval(&mut self.env()));
-                                }
-                                Err(_) => self.mcxt.reset_to(cp),
-                            }
-                        }
-                        _ => self.mcxt.reset_to(cp),
-                    }
-                }
-
-                // Now search impls in scope
-                if solutions.is_empty() {
-                    let impls: Vec<_> = self
-                        .scopes
-                        .iter()
-                        .rev()
-                        .flat_map(|x| match x {
-                            Scope::Local(l) => l
-                                .names
-                                .iter()
-                                .filter_map(|x| match x.var {
-                                    VarDef::Var(_, _) => None,
-                                    VarDef::Def(d) => Some(d),
-                                })
-                                .collect(),
-                            Scope::Namespace(n) => n.all_defs(self.db),
-                            _ => vec![],
-                        })
-                        .filter(|x| {
-                            self.db
-                                .def_type(*x)
-                                .and_then(|x| x.result)
-                                .map_or(false, |x| x.is_impl)
-                        })
-                        .collect();
-                    for idef in impls {
+                    // Start by searching locals
+                    let mut solutions = Vec::new();
+                    for (n, l, lty) in &locals {
+                        // on this insert_metas and the next one, we need to save a checkpoint of the mcxt
+                        // bc if unification fails we could get random metas lying around that will go unsolved
                         let cp = self.mcxt.checkpoint();
-                        let ity = self.db.def_type(idef).unwrap().result.unwrap().ty;
-                        let (ival, ity) =
-                            Expr::var(Var::Def((self.db.name("_".into()), mspan), idef))
-                                .insert_metas(ity, None, mspan, self);
-                        match ity.uncap_ty() {
+                        let (lval, lty) = Expr::var(Var::Local((*n, mspan), l.idx(self.size())))
+                            .insert_metas(lty.clone(), None, mspan, self);
+                        match lty.uncap_ty() {
                             Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
                                 match self.mcxt.unify(
-                                    ity.clone(),
+                                    lty.clone(),
                                     mty.clone(),
                                     msize,
                                     self.env(),
                                     CheckReason::MustMatch(mspan),
                                 ) {
                                     Ok(()) => {
-                                        solutions.push(ival.eval(&mut self.env()));
+                                        solutions.push(lval.eval(&mut self.env()));
                                     }
                                     Err(_) => self.mcxt.reset_to(cp),
                                 }
@@ -1199,64 +1153,116 @@ impl Cxt<'_> {
                             _ => self.mcxt.reset_to(cp),
                         }
                     }
-                }
 
-                match solutions.len() {
-                    0 => {
-                        self.error(
-                            mspan,
-                            TypeError::Other(
-                                Doc::start("Could not find impl for '")
-                                    .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
-                                    .add("' in this scope", ()),
-                            ),
-                        );
-                        self.mcxt.mark_meta_error(meta);
-                    }
-                    1 => {
-                        let spine = locals
+                    // Now search impls in scope
+                    if solutions.is_empty() {
+                        let impls: Vec<_> = self
+                            .scopes
                             .iter()
-                            // We might have defined more locals since the meta intro, so make sure we have the right spine length
-                            .take(msize.as_u32() as usize)
-                            .fold(None, |rest, &(n, l, _)| {
-                                let x = Expr::var(Var::Local((n, RelSpan::empty()), l.idx(msize)));
-                                match rest {
-                                    // TODO do we ever need these types?
-                                    Some(rest) => Some(Expr::Pair(
-                                        Box::new(x),
-                                        Box::new(rest),
-                                        Box::new(Expr::Error),
-                                    )),
-                                    None => Some(x),
-                                }
+                            .rev()
+                            .flat_map(|x| match x {
+                                Scope::Local(l) => l
+                                    .names
+                                    .iter()
+                                    .filter_map(|x| match x.var {
+                                        VarDef::Var(Var::Def(_, d), _) => Some(d),
+                                        VarDef::Var(_, _) => None,
+                                        VarDef::Def(d) => Some(d),
+                                    })
+                                    .collect(),
+                                Scope::Namespace(n) => n.all_defs(self.db),
+                                _ => vec![],
                             })
-                            .unwrap()
-                            .eval(&mut Env::new(msize));
-                        if let Err(e) = self.mcxt.solve(
-                            msize,
-                            meta,
-                            vec![Elim::App(Expl, spine)],
-                            solutions.pop().unwrap(),
-                            true,
-                        ) {
-                            self.error(
-                                mspan,
-                                Doc::start("Error resolving impl for '")
-                                    .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
-                                    .add(": ", ())
-                                    .chain(e.pretty(self.db)),
-                            );
+                            .filter(|&x| self.ignore_def.map_or(true, |y| x != y))
+                            .filter(|x| {
+                                self.db
+                                    .def_type(*x)
+                                    .and_then(|x| x.result)
+                                    .map_or(false, |x| x.is_impl)
+                            })
+                            .collect();
+                        for idef in impls {
+                            let cp = self.mcxt.checkpoint();
+                            let ity = self.db.def_type(idef).unwrap().result.unwrap().ty;
+                            let (ival, ity) =
+                                Expr::var(Var::Def((self.db.name("_".into()), mspan), idef))
+                                    .insert_metas(ity, None, mspan, self);
+                            match ity.uncap_ty() {
+                                Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d == trait_def) => {
+                                    match self.mcxt.unify(
+                                        ity.clone(),
+                                        mty.clone(),
+                                        msize,
+                                        self.env(),
+                                        CheckReason::MustMatch(mspan),
+                                    ) {
+                                        Ok(()) => {
+                                            solutions.push(ival.eval(&mut self.env()));
+                                        }
+                                        Err(_) => self.mcxt.reset_to(cp),
+                                    }
+                                }
+                                _ => self.mcxt.reset_to(cp),
+                            }
                         }
                     }
-                    _ => {
-                        // TODO incorporate spans of candidates
-                        self.error(
-                            mspan,
-                            Doc::start("Multiple ambiguous impls for '")
-                                .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
-                                .add("'", ()),
-                        );
-                        self.mcxt.mark_meta_error(meta);
+
+                    match solutions.len() {
+                        0 => {
+                            self.error(
+                                mspan,
+                                TypeError::Other(
+                                    Doc::start("Could not find impl for '")
+                                        .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
+                                        .add("' in this scope", ()),
+                                ),
+                            );
+                            self.mcxt.mark_meta_error(meta);
+                        }
+                        1 => {
+                            let spine = locals
+                                .iter()
+                                .fold(None, |rest, &(n, l, _)| {
+                                    let x =
+                                        Expr::var(Var::Local((n, RelSpan::empty()), l.idx(msize)));
+                                    match rest {
+                                        // TODO do we ever need these types?
+                                        Some(rest) => Some(Expr::Pair(
+                                            Box::new(x),
+                                            Box::new(rest),
+                                            Box::new(Expr::Error),
+                                        )),
+                                        None => Some(x),
+                                    }
+                                })
+                                .unwrap()
+                                .eval(&mut Env::new(msize));
+                            if let Err(e) = self.mcxt.solve(
+                                msize,
+                                meta,
+                                vec![Elim::App(Expl, spine)],
+                                solutions.pop().unwrap(),
+                                true,
+                            ) {
+                                self.error(
+                                    mspan,
+                                    Doc::start("Error resolving impl for '")
+                                        .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
+                                        .add("': ", ())
+                                        .chain(e.pretty(self.db)),
+                                );
+                            }
+                        }
+                        _ => {
+                            // TODO incorporate spans of candidates
+                            self.error(
+                                mspan,
+                                Doc::start("Multiple ambiguous impls for '")
+                                    .chain(mty.quote(msize, Some(&self.mcxt)).pretty(self.db))
+                                    .add("'", ()),
+                            );
+                            self.mcxt.mark_meta_error(meta);
+                        }
                     }
                 }
             }
@@ -1287,6 +1293,7 @@ impl Cxt<'_> {
                 Scope::Namespace(n) => n.all_defs(self.db),
                 _ => vec![],
             })
+            .filter(|&x| self.ignore_def.map_or(true, |y| x != y))
             .filter(|x| {
                 self.db
                     .def_type(*x)
