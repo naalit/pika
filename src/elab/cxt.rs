@@ -184,34 +184,51 @@ struct BorrowInvalid {
     move_type: Option<Rc<Expr>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BorrowIndex(pub Vec<u32>);
+impl BorrowIndex {
+    pub const ROOT: Self = BorrowIndex(Vec::new());
+
+    fn has(&self, other: &BorrowIndex) -> bool {
+        // We only care about the shortest index - if a part of the whole is invalid, the whole thing is, and vice versa
+        self.0.iter().zip(&other.0).all(|(x, y)| x == y)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct InvalidTree(Vec<(BorrowIndex, BorrowInvalid)>);
+impl InvalidTree {
+    fn get(&self, index: &BorrowIndex) -> Option<&BorrowInvalid> {
+        self.0.iter().find(|(i, _)| index.has(i)).map(|(_, x)| x)
+    }
+    fn set(&mut self, index: BorrowIndex, invalid: BorrowInvalid) {
+        self.0.push((index, invalid))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct BorrowDef {
     mutable_parents: HashMap<Borrow, Access>,
     /// Only one mutable borrow can be active at once, but there could still be multiple entries here if it gets mutably
     /// borrowed separately in two different case branches
-    mutable_borrows: HashMap<Borrow, Access>,
-    immutable_borrows: HashMap<Borrow, Access>,
+    mutable_borrows: HashMap<Borrow, (BorrowIndex, Access)>,
+    immutable_borrows: HashMap<Borrow, (BorrowIndex, Access)>,
     /// These are borrows that don't borrow this one, but do depend on it by-value - so if this gets invalidated indirectly, they will too
-    owned_dependents: HashMap<Borrow, Access>,
-    invalid: Option<BorrowInvalid>,
+    owned_dependents: HashMap<Borrow, (BorrowIndex, Access)>,
+    invalid: InvalidTree,
 }
 impl BorrowDef {
-    fn merge_with(&mut self, other: BorrowDef) -> Option<BorrowInvalid> {
-        let was_valid = self.invalid.is_none();
-        let other_valid = other.invalid.is_none();
-        if was_valid {
-            self.invalid = other.invalid;
-        }
+    fn merge_with(&mut self, other: BorrowDef) -> InvalidTree {
         self.mutable_borrows.extend(other.mutable_borrows);
         self.immutable_borrows.extend(other.immutable_borrows);
         self.owned_dependents.extend(other.owned_dependents);
         self.mutable_parents.extend(other.mutable_parents);
-        if was_valid || other_valid {
-            // It got invalidated in only one of the branches, invalidate it again now
-            self.invalid.clone()
-        } else {
-            // If it's invalid now, it already was in both branches so we don't care
-            None
-        }
+        InvalidTree(
+            other
+                .invalid
+                .0
+                .into_iter()
+                // Return the indices that aren't already covered
+                .filter(|(x, _)| self.invalid.0.iter().all(|(y, _)| !x.has(y)))
+                .collect(),
+        )
     }
 }
 
@@ -238,116 +255,135 @@ impl Borrow {
             .unwrap_or_default()
     }
 
-    fn invalidate(self, invalid: BorrowInvalid, cxt: &mut Cxt) {
+    fn invalidate(self, index: &BorrowIndex, invalid: BorrowInvalid, cxt: &mut Cxt) {
         if invalid.skip_borrow == Some(self) {
             return;
         }
         if let Some(def) = self.def_mut(cxt) {
-            if def.invalid.is_none() {
-                def.invalid = Some(invalid.clone());
-                for (i, a) in def
+            if def.invalid.get(index).is_none() {
+                def.invalid.set(index.clone(), invalid.clone());
+                for (i, (idx, a)) in def
                     .immutable_borrows
                     .iter()
                     .chain(&def.owned_dependents)
                     .chain(&def.mutable_borrows)
-                    .map(|(&x, &y)| (x, y))
+                    .map(|(&x, y)| (x, y.clone()))
                     .collect::<Vec<_>>()
                 {
-                    let mut invalid = invalid.clone();
-                    if invalid.chain_start.is_none() {
-                        invalid.chain_start = Some(a);
-                    } else {
-                        invalid.chain_end = Some(a);
+                    if idx.has(index) {
+                        let mut invalid = invalid.clone();
+                        if invalid.chain_start.is_none() {
+                            invalid.chain_start = Some(a);
+                        } else {
+                            invalid.chain_end = Some(a);
+                        }
+                        i.invalidate(&BorrowIndex::ROOT, invalid, cxt);
                     }
-                    i.invalidate(invalid, cxt);
                 }
             } else if !def.owned_dependents.is_empty() {
-                for (i, a) in def.owned_dependents.clone() {
-                    let mut invalid = invalid.clone();
-                    if invalid.chain_start.is_none() {
-                        invalid.chain_start = Some(a);
-                    } else {
-                        invalid.chain_end = Some(a);
+                for (i, (idx, a)) in def.owned_dependents.clone() {
+                    if idx.has(index) {
+                        let mut invalid = invalid.clone();
+                        if invalid.chain_start.is_none() {
+                            invalid.chain_start = Some(a);
+                        } else {
+                            invalid.chain_end = Some(a);
+                        }
+                        i.invalidate(&BorrowIndex::ROOT, invalid, cxt);
                     }
-                    i.invalidate(invalid, cxt);
                 }
             }
         }
     }
-    pub fn invalidate_children(self, access: Access, cxt: &mut Cxt) {
+    pub fn invalidate_children(self, index: &BorrowIndex, access: Access, cxt: &mut Cxt) {
         if let Some(def) = self.def_mut(cxt) {
-            if def.invalid.is_none() {
+            if def.invalid.get(index).is_none() {
                 // Don't include move_or_copy - those are conceptually on the same level as this borrow, not children
-                for (i, a) in def
+                for (i, (idx, a)) in def
                     .immutable_borrows
                     .iter()
                     .chain(&def.mutable_borrows)
-                    .map(|(&x, &y)| (x, y))
+                    .map(|(&x, y)| (x, y.clone()))
                     .collect::<Vec<_>>()
                 {
-                    i.invalidate(
-                        BorrowInvalid {
-                            skip_borrow: Some(self),
-                            base_access: access,
-                            chain_start: Some(a),
-                            chain_end: None,
-                            move_type: None,
-                        },
-                        cxt,
-                    );
+                    if idx.has(index) {
+                        i.invalidate(
+                            &BorrowIndex::ROOT,
+                            BorrowInvalid {
+                                skip_borrow: Some(self),
+                                base_access: access,
+                                chain_start: Some(a),
+                                chain_end: None,
+                                move_type: None,
+                            },
+                            cxt,
+                        );
+                    }
                 }
             }
         }
     }
-    fn invalidate_mutable(self, access: Access, cxt: &mut Cxt) {
+    fn invalidate_mutable(self, index: &BorrowIndex, access: Access, cxt: &mut Cxt) {
         if let Some(def) = self.def_mut(cxt) {
-            if def.invalid.is_none() {
-                for (i, a) in def.mutable_borrows.clone() {
-                    i.invalidate(
-                        BorrowInvalid {
-                            skip_borrow: Some(self),
-                            base_access: access,
-                            chain_start: Some(a),
-                            chain_end: None,
-                            move_type: None,
-                        },
-                        cxt,
-                    )
+            if def.invalid.get(index).is_none() {
+                for (i, (idx, a)) in def.mutable_borrows.clone() {
+                    if idx.has(index) {
+                        i.invalidate(
+                            &BorrowIndex::ROOT,
+                            BorrowInvalid {
+                                skip_borrow: Some(self),
+                                base_access: access,
+                                chain_start: Some(a),
+                                chain_end: None,
+                                move_type: None,
+                            },
+                            cxt,
+                        )
+                    }
                 }
             }
         }
     }
-    fn invalidate_self(self, access: Access, move_type: Rc<Expr>, cxt: &mut Cxt) {
+    fn invalidate_self(
+        self,
+        index: &BorrowIndex,
+        access: Access,
+        move_type: Rc<Expr>,
+        cxt: &mut Cxt,
+    ) {
         // Don't invalidate owned dependents
-        self.invalidate_children(access, cxt);
+        self.invalidate_children(index, access, cxt);
         if let Some(def) = self.def_mut(cxt) {
-            if def.invalid.is_none() {
-                def.invalid = Some(BorrowInvalid {
-                    skip_borrow: None,
-                    base_access: access,
-                    chain_start: None,
-                    chain_end: None,
-                    move_type: Some(move_type),
-                });
+            if def.invalid.get(index).is_none() {
+                def.invalid.set(
+                    index.clone(),
+                    BorrowInvalid {
+                        skip_borrow: None,
+                        base_access: access,
+                        chain_start: None,
+                        chain_end: None,
+                        move_type: Some(move_type),
+                    },
+                );
             }
         }
     }
 
     /// Does not check validity or invalidate old borrows - do that before calling this
-    pub fn add_borrow(self, borrow: Borrow, access: Access, cxt: &mut Cxt) {
+    pub fn add_borrow(self, borrow: Borrow, access: Access, index: BorrowIndex, cxt: &mut Cxt) {
         if let Some(def) = self.def_mut(cxt) {
             match access.kind {
                 Cap::Mut => {
-                    def.mutable_borrows.insert(borrow, access);
+                    def.mutable_borrows.insert(borrow, (index, access));
                     if let Some(def) = borrow.def_mut(cxt) {
                         def.mutable_parents.insert(self, access);
                     }
                 }
                 Cap::Imm => {
-                    def.immutable_borrows.insert(borrow, access);
+                    def.immutable_borrows.insert(borrow, (index, access));
                 }
                 Cap::Own => {
-                    def.owned_dependents.insert(borrow, access);
+                    def.owned_dependents.insert(borrow, (index, access));
                 }
             }
         }
@@ -390,13 +426,10 @@ pub enum AccessPoint {
     Expr,
     ClosureEnv(RelSpan, Option<Name>),
     EscapingParam(SName),
-    Name(Name),
+    Var(Name),
+    // TODO make this not Copy so we can display nested fields
+    Field(Name, bool, Name),
     Function(Option<Name>),
-}
-impl From<Name> for AccessPoint {
-    fn from(value: Name) -> Self {
-        AccessPoint::Name(value)
-    }
 }
 impl AccessPoint {
     fn pretty(
@@ -423,7 +456,7 @@ impl AccessPoint {
             AccessPoint::ClosureEnv(_, None) => {
                 Doc::start(if initial { "T" } else { "t" }).add("his closure's environment", ())
             }
-            AccessPoint::Name(name) => {
+            AccessPoint::Var(name) => {
                 Doc::start(if initial { "Variable " } else { "" }).chain(name.pretty(db).style(col))
             }
             AccessPoint::Function(func) => Doc::start(if initial { "T" } else { "t" })
@@ -432,6 +465,12 @@ impl AccessPoint {
                     Some(name) => Doc::start(" to ").chain(name.pretty(db).style(col)),
                     None => Doc::none(),
                 }),
+            AccessPoint::Field(name, cont, field) => {
+                Doc::start(if initial { "Field " } else { "field " })
+                    .chain(name.pretty(db).style(col))
+                    .add(if *cont { "..." } else { "." }, col)
+                    .chain(field.pretty(db).style(col))
+            }
         }
     }
 }
@@ -692,33 +731,42 @@ impl VarEntry {
         }
     }
 
-    pub fn access(&self, kind: Cap) -> Access {
+    pub fn access(&self, field: Option<(bool, SName)>, kind: Cap) -> Access {
         let &(name, span) = match self {
             VarEntry::Local { name, .. } => name,
             VarEntry::Other { name, .. } => name,
         };
-        Access {
-            kind,
-            point: name.into(),
-            span,
-        }
+        let (point, span) = match field {
+            None => (AccessPoint::Var(name), span),
+            Some((c, (f, s))) => (
+                AccessPoint::Field(name, c, f),
+                RelSpan::new(span.start, s.end),
+            ),
+        };
+        Access { kind, point, span }
     }
 
     // TODO do we need the type for anything? if not we should combine these into `try_access(cap: Cap)`
-    pub fn try_move(&self, ty: Expr, cxt: &mut Cxt) -> Result<(), MoveError> {
+    pub fn try_move(
+        &self,
+        index: BorrowIndex,
+        field: Option<(bool, SName)>,
+        ty: Expr,
+        cxt: &mut Cxt,
+    ) -> Result<(), MoveError> {
         if let Some(borrow) = self.borrow(cxt) {
-            cxt.check_deps(borrow, self.access(Cap::Own))?;
+            cxt.check_deps(&index, borrow, self.access(field, Cap::Own))?;
         }
         match self {
             VarEntry::Local { scope, var, .. } => match &mut cxt.scopes[*scope] {
                 Scope::Local(l) => {
                     let entry = &mut l.names[*var];
                     let lvl = entry.var.as_var().unwrap().as_local();
-                    let access = self.access(Cap::Own);
+                    let access = self.access(field, Cap::Own);
                     let borrow = entry.borrow.unwrap();
-                    borrow.invalidate_self(access, Rc::new(ty), cxt);
+                    borrow.invalidate_self(&index, access, Rc::new(ty), cxt);
                     if let Some(lvl) = lvl {
-                        cxt.record_access(lvl, access, borrow);
+                        cxt.record_access(lvl, access, borrow, index);
                     }
                     Ok(())
                 }
@@ -743,6 +791,8 @@ impl VarEntry {
 
     pub fn try_borrow(
         &self,
+        index: BorrowIndex,
+        field: Option<(bool, SName)>,
         mutable: bool,
         mutable_access: bool,
         cxt: &mut Cxt,
@@ -759,17 +809,17 @@ impl VarEntry {
                         ));
                     }
                     if let Some(borrow) = entry.borrow {
-                        let access = self.access(if mutable { Cap::Mut } else { Cap::Imm });
-                        cxt.check_deps(borrow, access)?;
+                        let access = self.access(field, if mutable { Cap::Mut } else { Cap::Imm });
+                        cxt.check_deps(&index, borrow, access)?;
 
                         let lvl = entry.var.as_var().unwrap().as_local();
                         if mutable {
-                            borrow.invalidate_children(access, cxt);
+                            borrow.invalidate_children(&index, access, cxt);
                         } else {
-                            borrow.invalidate_mutable(access, cxt);
+                            borrow.invalidate_mutable(&index, access, cxt);
                         }
                         if let Some(lvl) = lvl {
-                            cxt.record_access(lvl, access, borrow);
+                            cxt.record_access(lvl, access, borrow, index);
                         }
                     }
                     Ok(())
@@ -841,8 +891,8 @@ impl Cxt<'_> {
     }
     pub fn merge_borrows(&mut self, checkpoint: BorrowCheckpoint) {
         for (i, b) in checkpoint.0.into_iter().enumerate() {
-            if let Some(invalid) = self.borrows[i].merge_with(b) {
-                Borrow((i as u64 + 1).try_into().unwrap()).invalidate(invalid, self);
+            for (index, invalid) in self.borrows[i].merge_with(b).0 {
+                Borrow((i as u64 + 1).try_into().unwrap()).invalidate(&index, invalid, self);
             }
         }
     }
@@ -859,15 +909,15 @@ impl Cxt<'_> {
             point: AccessPoint::Expr,
             span,
         };
-        self.check_deps(borrow, access)
+        self.check_deps(&BorrowIndex::ROOT, borrow, access)
             .map(|()| borrow)
             .unwrap_or_else(|e| {
                 self.error(RelSpan::empty(), e);
                 borrow
             })
     }
-    pub fn add_dep(&mut self, dep: Borrow, access: Access) {
-        dep.add_borrow(*self.expr_borrow.last().unwrap(), access, self)
+    pub fn add_dep(&mut self, dep: Borrow, access: Access, index: BorrowIndex) {
+        dep.add_borrow(*self.expr_borrow.last().unwrap(), access, index, self)
     }
     // TODO do we still need this?
     pub fn finish_closure_env(&mut self, dep: Borrow, cap: Cap, span: RelSpan) -> Borrow {
@@ -876,35 +926,40 @@ impl Cxt<'_> {
             Some(def) => {
                 let def = def.clone();
                 if cap == Cap::Mut {
-                    for i in &def.mutable_borrows {
+                    for (i, (idx, a)) in &def.mutable_borrows {
                         let access = Access {
                             kind: Cap::Mut,
                             span,
                             point: AccessPoint::ClosureEnv(
-                                i.1.span,
-                                match i.1.point {
-                                    AccessPoint::Name(n) => Some(n),
+                                a.span,
+                                match a.point {
+                                    AccessPoint::Var(n) => Some(n),
                                     _ => None,
                                 },
                             ),
                         };
-                        i.0.invalidate_children(access, self);
+                        i.invalidate_children(idx, access, self);
                     }
                 }
-                for (&i, &a) in def
+                for (&i, (idx, a)) in def
                     .immutable_borrows
                     .iter()
                     .chain(&def.owned_dependents)
                     .chain(&def.mutable_borrows)
                 {
-                    i.add_borrow(new_borrow, a, self);
+                    i.add_borrow(new_borrow, *a, idx.clone(), self);
                 }
             }
             None => (),
         }
         new_borrow
     }
-    pub fn check_deps(&self, borrow: Borrow, access: Access) -> Result<(), MoveError> {
+    pub fn check_deps(
+        &self,
+        index: &BorrowIndex,
+        borrow: Borrow,
+        access: Access,
+    ) -> Result<(), MoveError> {
         match borrow.def(self) {
             Some(def) => {
                 if let Some(BorrowInvalid {
@@ -913,7 +968,7 @@ impl Cxt<'_> {
                     chain_start,
                     chain_end,
                     move_type,
-                }) = def.invalid.clone()
+                }) = def.invalid.get(index).cloned()
                 {
                     return Err(AccessError {
                         invalid_access: access,
@@ -1032,7 +1087,7 @@ impl Cxt<'_> {
         })
     }
 
-    fn record_access(&mut self, lvl: Lvl, access: Access, borrow: Borrow) {
+    fn record_access(&mut self, lvl: Lvl, access: Access, borrow: Borrow, index: BorrowIndex) {
         let mut deps = Vec::new();
         for i in self.scopes.iter_mut().rev() {
             match i {
@@ -1060,7 +1115,7 @@ impl Cxt<'_> {
             }
         }
         for b in deps {
-            b.add_borrow(borrow, access, self);
+            b.add_borrow(borrow, access, index.clone(), self);
         }
     }
 

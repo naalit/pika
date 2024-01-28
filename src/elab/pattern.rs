@@ -1222,9 +1222,10 @@ pub(super) fn elab_case(
                             borrow,
                             Access {
                                 kind: cap,
-                                point: AccessPoint::Name(name.0),
+                                point: AccessPoint::Var(name.0),
                                 span: name.1,
                             },
+                            BorrowIndex::ROOT,
                             &mut cxt.ecxt,
                         );
                         borrow
@@ -1288,6 +1289,7 @@ pub(super) fn elab_case(
                 point: AccessPoint::Expr,
                 span,
             },
+            BorrowIndex::ROOT,
         );
     }
     let missing = dec.missing_patterns(svar, &cxt);

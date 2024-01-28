@@ -892,6 +892,7 @@ fn infer_fun(
                 != Cap::Imm
             {
                 i.invalidate_children(
+                    &BorrowIndex::ROOT,
                     Access {
                         kind: Cap::Mut,
                         point: AccessPoint::EscapingParam(p.name),
@@ -913,6 +914,7 @@ fn infer_fun(
                 point: AccessPoint::Expr,
                 span,
             },
+            BorrowIndex::ROOT,
         );
     }
 
@@ -1929,9 +1931,9 @@ impl PlaceOrExpr {
         match self {
             PlaceOrExpr::Place(place) => {
                 place
-                    .try_access_unborrowed(access_kind, cxt)
+                    .try_access_unborrowed(BorrowIndex::ROOT, None, access_kind, cxt)
                     .unwrap_or_else(|e| cxt.error(place.span(), e));
-                place.borrow(borrow_kind, cxt);
+                place.borrow(BorrowIndex::ROOT, None, borrow_kind, cxt);
                 place.to_expr(cxt)
             }
             PlaceOrExpr::Expr(e, _, b, span) => {
@@ -1943,6 +1945,7 @@ impl PlaceOrExpr {
                             point: AccessPoint::Expr,
                             span,
                         },
+                        BorrowIndex::ROOT,
                     );
                 }
                 Expr::Spanned(span, Box::new(e))
@@ -1990,7 +1993,7 @@ pub enum Place {
 impl Place {
     fn span(&self) -> RelSpan {
         match self {
-            Place::Var(entry) => entry.access(Cap::Imm).span,
+            Place::Var(entry) => entry.access(None, Cap::Imm).span,
             Place::Member(b, _, _, n) => RelSpan::new(b.span().start, n.1.end),
         }
     }
@@ -2025,35 +2028,55 @@ impl Place {
     }
 
     /// Makes sure the access is valid, invalidating other borrows appropriately, but does not add needed dependencies to the cxt
-    fn try_access_unborrowed(&self, kind: Cap, cxt: &mut Cxt) -> Result<(), TypeError> {
+    fn try_access_unborrowed(
+        &self,
+        index: BorrowIndex,
+        field: Option<(bool, SName)>,
+        kind: Cap,
+        cxt: &mut Cxt,
+    ) -> Result<(), TypeError> {
         match self {
             Place::Var(v) => match kind {
                 Cap::Mut | Cap::Imm => {
                     let mutable = kind == Cap::Mut;
-                    v.try_borrow(mutable, mutable, cxt).map_err(Into::into)
+                    v.try_borrow(index, field, mutable, mutable, cxt)
+                        .map_err(Into::into)
                 }
                 Cap::Own => v
-                    .try_move(self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt)), cxt)
+                    .try_move(
+                        index,
+                        field,
+                        self.ty(cxt)?.quote(cxt.size(), Some(&cxt.mcxt)),
+                        cxt,
+                    )
                     .map_err(Into::into),
             },
             // Just forward on the access
-            Place::Member(e, _, _, _) => match &**e {
-                PlaceOrExpr::Place(p) => p.try_access_unborrowed(kind, cxt),
+            Place::Member(e, _, i, f) => match &**e {
+                PlaceOrExpr::Place(p) => {
+                    let mut index = index;
+                    index.0.push(*i as u32);
+                    let field = Some(match field {
+                        Some((_, f)) => (true, f),
+                        None => (false, *f),
+                    });
+                    p.try_access_unborrowed(index, field, kind, cxt)
+                }
                 _ => Ok(()),
             },
         }
     }
 
     /// Adds needed dependencies to the cxt
-    fn borrow(&self, kind: Cap, cxt: &mut Cxt) {
+    fn borrow(&self, index: BorrowIndex, field: Option<(bool, SName)>, kind: Cap, cxt: &mut Cxt) {
         match self {
             Place::Var(v) => {
                 if let Some(borrow) = v.borrow(cxt) {
-                    cxt.add_dep(borrow, v.access(kind));
+                    cxt.add_dep(borrow, v.access(field, kind), index);
                 }
             }
             // Just forward on the access
-            Place::Member(e, _, _, _) => {
+            Place::Member(e, _, i, f) => {
                 let lhs_kind = match self.ty(cxt).unwrap_or(Val::Error).own_cap(cxt) {
                     // If the member is immutable through the lhs, then the lhs can be mutated/moved
                     // without affecting the member, so it's not borrowed
@@ -2062,7 +2085,13 @@ impl Place {
                 };
                 match &**e {
                     PlaceOrExpr::Place(p) => {
-                        p.borrow(lhs_kind, cxt);
+                        let mut index = index;
+                        index.0.push(*i as u32);
+                        let field = Some(match field {
+                            Some((_, f)) => (true, f),
+                            None => (false, *f),
+                        });
+                        p.borrow(index, field, lhs_kind, cxt);
                     }
                     PlaceOrExpr::Expr(_, _, b, s) => {
                         if let Some(b) = b {
@@ -2073,6 +2102,7 @@ impl Place {
                                     point: AccessPoint::Expr,
                                     span: *s,
                                 },
+                                index,
                             );
                         }
                     }
@@ -2083,8 +2113,8 @@ impl Place {
 
     /// Makes sure the access is valid, invalidating other borrows appropriately, and adds needed dependencies to the cxt
     fn try_access(&self, kind: Cap, cxt: &mut Cxt) -> Result<(), TypeError> {
-        self.try_access_unborrowed(kind, cxt)?;
-        self.borrow(kind, cxt);
+        self.try_access_unborrowed(BorrowIndex::ROOT, None, kind, cxt)?;
+        self.borrow(BorrowIndex::ROOT, None, kind, cxt);
         Ok(())
     }
 }
@@ -2259,6 +2289,7 @@ fn elab_args(
                         point: AccessPoint::Expr,
                         span: vspan,
                     },
+                    BorrowIndex::ROOT,
                     cxt,
                 );
             }
@@ -2482,6 +2513,7 @@ impl ast::Expr {
                             != Cap::Imm
                         {
                             i.invalidate_children(
+                                &BorrowIndex::ROOT,
                                 Access {
                                     kind: Cap::Mut,
                                     point: AccessPoint::EscapingParam(p.name),
@@ -2534,6 +2566,7 @@ impl ast::Expr {
                             point: AccessPoint::Expr,
                             span: x.span(),
                         },
+                        BorrowIndex::ROOT,
                     );
                 }
                 if let Some(borrow) = borrow2 {
@@ -2544,6 +2577,7 @@ impl ast::Expr {
                             point: AccessPoint::Expr,
                             span: x.span(),
                         },
+                        BorrowIndex::ROOT,
                     );
                 }
 
@@ -2683,19 +2717,29 @@ impl ast::Expr {
                             let ty = entry.ty(cxt);
 
                             let access = Access {
-                                point: name.0.into(),
+                                point: AccessPoint::Var(name.0),
                                 span: name.1,
                                 kind: ty.own_cap(cxt),
                             };
                             if access.kind == Cap::Own {
-                                entry
-                                    .try_move(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)), cxt)?
+                                entry.try_move(
+                                    BorrowIndex::ROOT,
+                                    None,
+                                    ty.clone().quote(cxt.size(), Some(&cxt.mcxt)),
+                                    cxt,
+                                )?
                             } else {
-                                entry.try_borrow(access.kind == Cap::Mut, false, cxt)?
+                                entry.try_borrow(
+                                    BorrowIndex::ROOT,
+                                    None,
+                                    access.kind == Cap::Mut,
+                                    false,
+                                    cxt,
+                                )?
                             }
                             // This expression depends on everything the variable depends on
                             if let Some(borrow) = entry.borrow(cxt) {
-                                cxt.add_dep(borrow, access);
+                                cxt.add_dep(borrow, access, BorrowIndex::ROOT);
                             }
 
                             (Expr::var(entry.var(cxt).cvt(cxt.size())), ty)
@@ -2867,6 +2911,7 @@ impl ast::Expr {
 
                         if let Some(extra_borrow) = extra_borrow {
                             cxt.check_deps(
+                                &BorrowIndex::ROOT,
                                 extra_borrow,
                                 Access {
                                     point: AccessPoint::Function(fun_name),
@@ -2880,13 +2925,13 @@ impl ast::Expr {
                         for (parent, mut access) in parents {
                             access.point = AccessPoint::Function(fun_name);
                             access.span = lhs_span;
-                            arg_borrow.add_borrow(parent, access, cxt);
+                            arg_borrow.add_borrow(parent, access, BorrowIndex::ROOT, cxt);
                         }
                         if let Some(extra_borrow) = extra_borrow {
                             for (borrow, mut access) in extra_borrow.mutable_dependencies(cxt) {
                                 access.point = AccessPoint::Function(fun_name);
                                 access.span = lhs_span;
-                                arg_borrow.add_borrow(borrow, access, cxt);
+                                arg_borrow.add_borrow(borrow, access, BorrowIndex::ROOT, cxt);
                             }
                         }
                         cxt.add_dep(
@@ -2896,6 +2941,7 @@ impl ast::Expr {
                                 kind: Cap::Own,
                                 span: x.span(),
                             },
+                            BorrowIndex::ROOT,
                         );
                         (expr, ty)
                     }

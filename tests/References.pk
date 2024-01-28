@@ -155,3 +155,23 @@ fun magic3(x: ref mut DoNotCopy, mut y: own DoNotCopy): () = do
     magic1(x, y)
     move(y)
     borrow(x)
+
+type X struct
+    a: DoNotCopy
+    b: DoNotCopy
+fun separate(x: own X): (DoNotCopy, DoNotCopy) = (x.a, x.b)
+
+fun mut_two(x: mut X) = do
+    let mut y = x.b
+    mutate(x.a)
+    mutate(y)
+
+type Y struct
+    x: X
+    t: DoNotCopy
+fun y_test(mut y: own Y) = do
+    let mut x: mut _ = y.x
+    mutate(y.t)
+    mutate(x.a)
+    mutate(y.x.a) # `x` is no longer live
+    mutate(y.t)
