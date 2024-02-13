@@ -68,11 +68,11 @@ trait ToList[A] struct
 # TODO The order of these matters with the current impl resolution system, but in the future we should fix that
 impl[A] ToList[(A, A), A] struct
     fun to_list(own self): List[A] = do
-        let (a, b) = self
+        let (own a, own b) = self # TODO own (a, b)
         List.Cons(a, List.Cons(b, List.Nil))
 impl[A, B, impl ToList[B, A]] ToList[(A, B), A] struct
     fun to_list(own self): List[A] = do
-        let (a, b) = self
+        let (own a, own b) = self
         List.Cons(a, b.to_list())
 
 fun list[A, X, impl ToList[X, A]](x: own X): List[A] = x.to_list()

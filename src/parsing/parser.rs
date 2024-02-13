@@ -426,9 +426,10 @@ impl<'a> Parser<'a> {
 
                 self.pop();
             }
-            Tok::LetKw => {
+            // A line starting with a capability is a let definition
+            Tok::LetKw | Tok::OwnKw | Tok::MutKw | Tok::ImmKw => {
                 self.push(Tok::LetDef);
-                self.advance();
+                self.maybe(Tok::LetKw);
 
                 self.push(Tok::Pat);
                 self.expr(Prec::Pat);
@@ -1304,7 +1305,15 @@ impl Tok {
     fn starts_def(&self) -> bool {
         matches!(
             self,
-            Tok::TypeKw | Tok::TraitKw | Tok::LetKw | Tok::EffKw | Tok::ImplKw | Tok::FunKw
+            Tok::TypeKw
+                | Tok::TraitKw
+                | Tok::LetKw
+                | Tok::EffKw
+                | Tok::ImplKw
+                | Tok::FunKw
+                | Tok::OwnKw
+                | Tok::MutKw
+                | Tok::ImmKw
         )
     }
 

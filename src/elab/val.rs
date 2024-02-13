@@ -263,6 +263,15 @@ impl IsTerm for Val {
 }
 
 impl Val {
+    pub fn with_cap(self, cap: Cap, replace: bool) -> Val {
+        match (cap, self) {
+            (Cap::Own, s) => s,
+            (c, Val::Cap(c2, s)) if replace => Val::Cap(c.min(c2), s),
+            (_, Val::Cap(c2, s)) => Val::Cap(c2, s),
+            (c, s) => Val::Cap(c, Box::new(s)),
+        }
+    }
+
     pub fn uncap_ty(&self) -> &Val {
         match self {
             Val::Cap(_, t) => t.uncap_ty(),
@@ -634,16 +643,6 @@ impl Val {
             // `own (imm T)` has cap `imm`, not `own`
             Val::Cap(c, x) => x.own_cap_(mcxt, env, inline).min(*c),
             Val::Error => Cap::Imm,
-        }
-    }
-
-    pub fn with_max_cap(mut self, cap: Cap) -> Self {
-        match &mut self {
-            Val::Cap(c, _) => {
-                *c = cap.min(*c);
-                self
-            }
-            _ => Val::Cap(cap, Box::new(self)),
         }
     }
 

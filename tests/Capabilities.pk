@@ -1,0 +1,19 @@
+type DoNotCopy of
+    New(I32)
+
+type T struct
+    x: DoNotCopy
+    y: mut DoNotCopy
+    z: own DoNotCopy
+
+fun a(x: DoNotCopy) = ()
+fun b(x: mut DoNotCopy) = ()
+fun c(x: own DoNotCopy) = ()
+
+fun f(t: mut T) = do
+    own t2 = t
+    mut q: I32 = 3
+    q = 4
+    a(t.x)
+    b(t.y)
+    # c(t.z)

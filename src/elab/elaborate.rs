@@ -2,29 +2,6 @@ use crate::parsing::SyntaxKind;
 
 use super::*;
 
-impl ast::Expr {
-    pub(super) fn as_let_def_pat(
-        &self,
-        db: &dyn Elaborator,
-    ) -> Option<(Option<(bool, SName)>, Option<ast::Ty>)> {
-        match self {
-            ast::Expr::Var(n) => Some((Some((false, n.name(db))), None)),
-            ast::Expr::GroupedExpr(x) => x.expr().and_then(|x| x.as_let_def_pat(db)),
-            ast::Expr::Binder(x) => {
-                let (name, ty) = x
-                    .pat()
-                    .and_then(|x| x.expr())
-                    .and_then(|x| x.as_let_def_pat(db))?;
-                if ty.is_some() {
-                    return None;
-                }
-                Some((name, x.ty()))
-            }
-            _ => None,
-        }
-    }
-}
-
 impl ast::CapTok {
     pub fn as_cap(&self) -> Cap {
         if self.immkw().is_some() {
@@ -51,26 +28,33 @@ impl ast::Stmt {
                 cxt.error(f.span(), "Only declarations are allowed in this context");
                 None
             }
-            ast::Stmt::Def(ast::Def::LetDef(l)) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
-                Some((Some((_, name)), Some(ty))) => Some((
+            ast::Stmt::Def(ast::Def::LetDef(l)) => match l.pat()?.expr()?.as_simple_pat(cxt.db) {
+                Some((Some((Some(_), _)), Some(_))) => {
+                    cxt.error(
+                        l.span(),
+                        "Capabilities on struct fields should go in the type",
+                    );
+                    None
+                }
+                Some((Some((None, name)), Some(ty))) => Some((
                     name,
-                    ty.expr()?
-                        .check(Val::Type, cxt, CheckReason::UsedAsType)
+                    ty.check(Val::Type, cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
-                        .eval(&mut cxt.env()),
+                        .eval(&mut cxt.env())
+                        .with_cap(Cap::Imm, false),
                 )),
                 _ => {
                     cxt.error(l.span(), "Could not determine type of 'let' declaration");
                     None
                 }
             },
-            ast::Stmt::Expr(e @ ast::Expr::Binder(_)) => match e.as_let_def_pat(cxt.db) {
-                Some((Some((_, name)), Some(ty))) => Some((
+            ast::Stmt::Expr(e @ ast::Expr::Binder(_)) => match e.as_simple_pat(cxt.db) {
+                Some((Some((c, name)), Some(ty))) => Some((
                     name,
-                    ty.expr()?
-                        .check(Val::Type, cxt, CheckReason::UsedAsType)
+                    ty.check(Val::Type, cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
-                        .eval(&mut cxt.env()),
+                        .eval(&mut cxt.env())
+                        .with_cap(c.unwrap_or(Cap::Imm), false),
                 )),
                 _ => {
                     cxt.error(e.span(), "Could not determine type of field declaration");
@@ -111,8 +95,8 @@ impl ast::Stmt {
         cxt: &mut Cxt,
     ) -> Option<(SName, Result<(Expr, Val), ast::Expr>)> {
         match self {
-            ast::Stmt::Def(ast::Def::LetDef(l)) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
-                Some((Some((_, name)), _)) => Some((name, Err(l.body()?.expr()?))),
+            ast::Stmt::Def(ast::Def::LetDef(l)) => match l.pat()?.expr()?.as_simple_pat(cxt.db) {
+                Some((Some((None, name)), _)) => Some((name, Err(l.body()?.expr()?))),
                 _ => None,
             },
             ast::Stmt::Def(ast::Def::FunDef(x)) => {
@@ -139,7 +123,7 @@ impl ast::Stmt {
             }
             ast::Stmt::Expr(e @ ast::Expr::Var(x)) => Some((x.name(cxt.db), Err(e.clone()))),
             ast::Stmt::Expr(ast::Expr::Binder(x)) => Some((
-                x.pat()?.expr()?.as_let_def_pat(cxt.db)?.0?.1,
+                x.pat()?.expr()?.as_simple_pat(cxt.db)?.0?.1,
                 Err(x.ty()?.expr()?),
             )),
             _ => None,
@@ -155,24 +139,25 @@ impl ast::Def {
         cxt: &mut Cxt,
     ) -> Option<DefType> {
         match self {
-            ast::Def::LetDef(l) => match l.pat()?.expr()?.as_let_def_pat(cxt.db) {
+            ast::Def::LetDef(l) => match l.pat()?.expr()?.as_simple_pat(cxt.db) {
                 Some((n, Some(ty))) => Some(DefType::new(
                     n.map_or(
                         (cxt.db.name("_".into()), l.pat()?.expr()?.span()),
                         |(_, n)| n,
                     ),
-                    ty.expr()?
-                        .check(Val::Type, cxt, CheckReason::UsedAsType)
+                    ty.check(Val::Type, cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
-                        .eval(&mut cxt.env()),
+                        .eval(&mut cxt.env())
+                        .with_cap(n.and_then(|(c, _)| c).unwrap_or(Cap::Imm), false),
                 )),
-                Some((Some((_, n)), _)) => {
+                Some((Some((c, n)), _)) => {
                     // Infer the type from the value if possible
                     let ty = cxt.db.def_elab_n(def_id, def_node).result?.ty;
                     Some(DefType::new(
                         n,
                         ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
-                            .eval(&mut cxt.env()),
+                            .eval(&mut cxt.env())
+                            .with_cap(c.unwrap_or(Cap::Imm), true),
                     ))
                 }
                 _ => {
@@ -181,7 +166,8 @@ impl ast::Def {
                     Some(DefType::new(
                         (cxt.db.name("_".into()), l.pat()?.expr()?.span()),
                         ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
-                            .eval(&mut cxt.env()),
+                            .eval(&mut cxt.env())
+                            .with_cap(Cap::Imm, true),
                     ))
                 }
             },
@@ -231,22 +217,19 @@ impl ast::Def {
     pub(super) fn elab(&self, def_id: Def, def_node: DefNode, cxt: &mut Cxt) -> Option<Definition> {
         match self {
             ast::Def::LetDef(x) => {
-                match x.pat()?.expr()?.as_let_def_pat(cxt.db) {
-                    Some((Some((m, name)), None)) => {
-                        if m {
-                            cxt.error(
-                                x.pat()?.span(),
-                                "Only 'let' definitions in blocks can be mutable",
-                            );
-                        }
-                        let (body, ty) = x.body()?.expr()?.infer(cxt);
+                match x.pat()?.expr()?.as_simple_pat(cxt.db) {
+                    Some((Some((c, name)), None)) => {
+                        let (body, ty) = x.body()?.expr()?.infer(cxt, c);
                         // inline metas in the term
                         let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
                         Some(Definition {
                             name,
                             is_trait: false,
                             is_impl: false,
-                            ty: Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
+                            ty: Box::new(
+                                ty.with_cap(c.unwrap_or(Cap::Imm), true)
+                                    .quote(cxt.size(), Some(&cxt.mcxt)),
+                            ),
                             body: DefBody::Let(Box::new(Expr::Spanned(
                                 x.body().unwrap().span(),
                                 Box::new(body),
@@ -254,13 +237,7 @@ impl ast::Def {
                             children: Vec::new(),
                         })
                     }
-                    Some((Some((m, name)), Some(pty))) => {
-                        if m {
-                            cxt.error(
-                                x.pat()?.span(),
-                                "Only 'let' definitions in blocks can be mutable",
-                            );
-                        }
+                    Some((Some((c, name)), Some(pty))) => {
                         // We already elaborated the type, so avoid doing that twice
                         let ty = cxt.db.def_type_n(def_id, def_node).result?.ty;
                         let body = x.body()?.expr()?.check(
@@ -275,7 +252,10 @@ impl ast::Def {
                             is_impl: false,
                             ty: Box::new(Expr::Spanned(
                                 pty.span(),
-                                Box::new(ty.quote(cxt.size(), Some(&cxt.mcxt))),
+                                Box::new(
+                                    ty.with_cap(c.unwrap_or(Cap::Imm), true)
+                                        .quote(cxt.size(), Some(&cxt.mcxt)),
+                                ),
                             )),
                             body: DefBody::Let(Box::new(Expr::Spanned(
                                 x.body().unwrap().span(),
@@ -348,7 +328,7 @@ impl ast::Def {
                     cxt,
                 );
 
-                let (body, ty) = x.body()?.expr()?.infer(cxt);
+                let (body, ty) = x.body()?.expr()?.infer(cxt, None);
                 match &ty {
                     Val::Neutral(n) if matches!(n.head(), Head::Var(Var::Def(_, d)) if cxt.db.def_type(d).and_then(|x| x.result).map_or(false, |x| x.is_trait)) => {
                         ()
@@ -410,7 +390,7 @@ impl ast::Def {
                     .imp()
                     .and_then(|x| x.pars.first().cloned())
                     .and_then(|x| x.ok())
-                    .and_then(|x| x.as_let_def_pat(cxt.db))
+                    .and_then(|x| x.as_simple_pat(cxt.db))
                     .and_then(|x| x.0)
                     .map_or(false, |(_, (n, _))| n == cxt.db.name("Self".into()));
                 let (_, ty) = infer_fun(
@@ -749,7 +729,7 @@ impl ast::Def {
             ast::Def::LetDef(x) => x
                 .pat()
                 .and_then(|x| x.expr())
-                .and_then(|x| x.as_let_def_pat(db))
+                .and_then(|x| x.as_simple_pat(db))
                 .and_then(|(n, _)| n)
                 .map(|(_, n)| n),
             ast::Def::FunDef(x) => x.name().map(|x| x.name(db)),
@@ -844,7 +824,7 @@ fn infer_fun(
         None => {
             cxt.pop();
             body.and_then(|x| x.expr())
-                .map(|x| x.infer(cxt))
+                .map(|x| x.infer(cxt, None))
                 .unwrap_or_else(|| {
                     // cxt.error(span, "Missing function body");
                     (Expr::Error, Val::Error)
@@ -1144,7 +1124,7 @@ fn check_params_deps(
                     .ok()
                     .and_then(|x| x.as_simple_pat(cxt.db))
                     .and_then(|x| x.0)
-                    .unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), span)));
+                    .unwrap_or_else(|| (None, (cxt.db.name("_".to_string()), span)));
                 cxt.error(
                     span,
                     Doc::start("Lambda contains extra parameter ")
@@ -1298,8 +1278,8 @@ fn check_par(
                         .unwrap_or_else(|| todo!("move non-trivial pats to rhs"))
                 })
                 .unwrap_or((None, None));
-            let (mutable, name) =
-                name.unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), x.span())));
+            let (cap, name) =
+                name.unwrap_or_else(|| (None, (cxt.db.name("_".to_string()), x.span())));
             if ty.is_some() {
                 cxt.error(
                     x.pat().unwrap().span(),
@@ -1335,9 +1315,16 @@ fn check_par(
                     );
                 }
             }
+            let mutable = cap.map_or(false, |x| x != Cap::Imm)
+                || matches!(ty.unspanned(), &Expr::Cap(c, _) if c != Cap::Imm);
             Par {
                 name,
-                ty,
+                ty: match cap {
+                    Some(cap) if !matches!(ty.unspanned(), Expr::Cap(_, _)) => {
+                        Expr::Cap(cap, Box::new(ty))
+                    }
+                    _ => ty,
+                },
                 mutable,
                 is_impl: false,
                 is_ref,
@@ -1350,8 +1337,8 @@ fn check_par(
                     ast::Pretty::pretty(&x).to_string(false)
                 )
             });
-            let (mutable, name) =
-                name.unwrap_or_else(|| (false, (cxt.db.name("_".to_string()), x.span())));
+            let (cap, name) =
+                name.unwrap_or_else(|| (None, (cxt.db.name("_".to_string()), x.span())));
             let (ty, is_ref) = match ty {
                 Some(ast::Expr::Ref(x)) => (x.expr(), true),
                 // If no given type we can also check the `ref` status against the expected type
@@ -1385,9 +1372,16 @@ fn check_par(
                     )
                 }),
             };
+            let mutable = cap.map_or(false, |x| x != Cap::Imm)
+                || matches!(ty.unspanned(), &Expr::Cap(c, _) if c != Cap::Imm);
             Par {
                 name,
-                ty,
+                ty: match cap {
+                    Some(cap) if !matches!(ty.unspanned(), Expr::Cap(_, _)) => {
+                        Expr::Cap(cap, Box::new(ty))
+                    }
+                    _ => ty,
+                },
                 mutable,
                 is_impl: false,
                 is_ref,
@@ -2003,7 +1997,12 @@ impl Place {
             Place::Var(v) => Ok(v.ty(cxt)),
             Place::Member(e, def, idx, _) => {
                 let lhs = e.clone().to_expr(cxt).eval(&mut cxt.env());
-                Ok(member_type(&lhs, *def, *idx, cxt))
+                let cap = e.ty(cxt).own_cap(cxt);
+                let mut ty = member_type(&lhs, *def, *idx, cxt);
+                if ty.own_cap(cxt) > cap {
+                    ty = ty.with_cap(cap, true);
+                }
+                Ok(ty)
             }
         }
     }
@@ -2128,8 +2127,10 @@ fn coerce(
     reason: CheckReason,
 ) -> Result<Expr, TypeError> {
     if cxt.unify(aty.clone(), expected_ty.clone(), reason).is_ok() {
-        let cap = aty.own_cap(cxt);
-        return Ok(a.finish_and_borrow(cap, if as_non_ref { Cap::Own } else { cap }, cxt));
+        let cap = expected_ty.own_cap(cxt);
+        let finish_and_borrow =
+            a.finish_and_borrow(cap, if as_non_ref { Cap::Own } else { cap }, cxt);
+        return Ok(finish_and_borrow);
     }
     let (ity, ty) = match (aty, expected_ty) {
         // Downgrade value capability
@@ -2143,7 +2144,7 @@ fn coerce(
                 reason,
             )
         }
-        (ity, Val::Cap(c, ty)) => {
+        (ity, Val::Cap(c, ty)) if !matches!(ity, Val::Cap(_, _)) => {
             let span = a.span();
             let c = c.min(ity.own_cap(cxt));
             let a = PlaceOrExpr::Expr(
@@ -2631,7 +2632,7 @@ impl ast::Expr {
             Some(place) => PlaceOrExpr::Place(place),
             None => {
                 cxt.record_deps();
-                let (e, ty) = self.infer(cxt);
+                let (e, ty) = self.infer(cxt, None);
                 let borrow = cxt.finish_deps(self.span());
                 PlaceOrExpr::Expr(e, ty, Some(borrow), self.span())
             }
@@ -2660,26 +2661,27 @@ impl ast::Expr {
         }
     }
 
-    fn as_simple_pat(
+    pub fn as_simple_pat(
         &self,
         db: &dyn Elaborator,
-    ) -> Option<(Option<(bool, SName)>, Option<ast::Expr>)> {
+    ) -> Option<(Option<(Option<Cap>, SName)>, Option<ast::Expr>)> {
         match self {
-            ast::Expr::Cap(x) if x.captok().map(|x| x.as_cap()) == Some(Cap::Mut) => {
-                match x.expr()?.as_simple_pat(db) {
-                    Some((Some((_, name)), t)) => Some((Some((true, name)), t)),
-                    _ => None,
+            ast::Expr::Cap(x) if x.captok().is_some() => match x.expr()?.as_simple_pat(db) {
+                Some((Some((_, name)), t)) => {
+                    Some((Some((x.captok().map(|x| x.as_cap()), name)), t))
                 }
-            }
-            ast::Expr::Var(x) => Some((Some((false, x.name(db))), None)),
+                _ => None,
+            },
+            ast::Expr::Var(x) => Some((Some((None, x.name(db))), None)),
             ast::Expr::Binder(x) => {
-                let (name, old_ty) = x.pat()?.expr()?.as_simple_pat(db)?;
-                if old_ty.is_some() {
-                    // ((x: A): B) is an error, let the actual pattern compilation code handle it
-                    None
-                } else {
-                    Some((name, x.ty().and_then(|x| x.expr())))
-                }
+                let ty = x.ty().and_then(|x| x.expr());
+                Some((
+                    x.pat()
+                        .and_then(|x| x.expr())
+                        .and_then(|x| x.as_simple_pat(db))
+                        .and_then(|x| x.0),
+                    ty,
+                ))
             }
             ast::Expr::GroupedExpr(x) => x
                 .expr()
@@ -2687,7 +2689,7 @@ impl ast::Expr {
                 // For (), we return this expression as the type, since it's identical syntactically
                 .unwrap_or_else(|| {
                     Some((
-                        Some((false, (db.name("_".to_string()), self.span()))),
+                        Some((None, (db.name("_".to_string()), self.span()))),
                         Some(self.clone()),
                     ))
                 }),
@@ -2695,7 +2697,7 @@ impl ast::Expr {
         }
     }
 
-    pub(super) fn infer(&self, cxt: &mut Cxt) -> (Expr, Val) {
+    pub(super) fn infer(&self, cxt: &mut Cxt, cap: Option<Cap>) -> (Expr, Val) {
         // TODO hopefully try {} blocks stabilize soon and this won't be necessary
         let mut result = || {
             Ok({
@@ -2719,7 +2721,7 @@ impl ast::Expr {
                             let access = Access {
                                 point: AccessPoint::Var(name.0),
                                 span: name.1,
-                                kind: ty.own_cap(cxt),
+                                kind: ty.own_cap(cxt).min(cap.unwrap_or(Cap::Own)),
                             };
                             if access.kind == Cap::Own {
                                 entry.try_move(
@@ -2813,7 +2815,15 @@ impl ast::Expr {
                         }
                         let mut lhs_ty = lhs.ty(cxt).inlined(cxt);
                         let mut lhs_span = lhs.span();
-                        let mut lhs = lhs.finish_and_borrow(lhs_ty.own_cap(cxt), Cap::Own, cxt);
+                        let cap =
+                            lhs_ty
+                                .own_cap(cxt)
+                                .min(if x.exp().is_none() && x.imp().is_none() {
+                                    cap.unwrap_or(Cap::Own)
+                                } else {
+                                    Cap::Own
+                                });
+                        let mut lhs = lhs.finish_and_borrow(cap, Cap::Own, cxt);
 
                         if x.exp().is_some() && self_arg.is_none() {
                             if let &Expr::Head(Head::Var(Var::Def(_, def))) = lhs.unspanned() {
@@ -2877,7 +2887,7 @@ impl ast::Expr {
                                 }
                                 Val::Error => {
                                     // Still try inferring the argument to catch errors
-                                    let (exp, _) = exp.infer(cxt);
+                                    let (exp, _) = exp.infer(cxt, None);
                                     (exp, Val::Error, None)
                                 }
                                 lhs_ty => {
@@ -2999,7 +3009,7 @@ impl ast::Expr {
                                                 .add(tok, Doc::COLOR1),
                                         )
                                     })?
-                                    .infer(cxt);
+                                    .infer(cxt, None);
                                 let b = x
                                     .b()
                                     .ok_or_else(|| {
@@ -3063,7 +3073,7 @@ impl ast::Expr {
                     ast::Expr::Box(_) => todo!("box"),
                     ast::Expr::Type(_) => (Expr::Type, Val::Type),
                     ast::Expr::GroupedExpr(e) => match e.expr() {
-                        Some(e) => e.infer(cxt),
+                        Some(e) => e.infer(cxt, cap),
                         // Assume () is the unit value by default, it's only the unit type if it's checked against Type
                         None => (
                             Expr::var(Var::Builtin(Builtin::Unit)),
@@ -3076,8 +3086,15 @@ impl ast::Expr {
                             return Ok((term, Val::Type));
                         }
                         // Infer a simple non-dependent pair type by default; inference is undecidable with sigma types
-                        let (a, aty) = x.lhs().ok_or("missing left value in pair")?.infer(cxt);
-                        let (b, bty) = x.rhs().ok_or("missing right value in pair")?.infer(cxt);
+                        // TODO should we propagate caps here?
+                        let (a, aty) = x
+                            .lhs()
+                            .ok_or("missing left value in pair")?
+                            .infer(cxt, None);
+                        let (b, bty) = x
+                            .rhs()
+                            .ok_or("missing right value in pair")?
+                            .infer(cxt, None);
                         let aty = aty.quote(cxt.size(), None);
                         // bty is quoted inside of the sigma scope
                         let bty = bty.quote(cxt.size().inc(), None);

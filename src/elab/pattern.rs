@@ -18,7 +18,7 @@ mod input {
         ),
         Pair(Box<SPattern>, Box<SPattern>, Size),
         Or(Vec<SPattern>),
-        Var(bool, SName),
+        Var(Cap, SName),
         Typed(Box<SPattern>, Box<Val>),
         Any,
     }
@@ -215,11 +215,11 @@ mod input {
                     Pattern::Or(_) => {
                         unreachable!("or patterns should have been removed before remove_column()")
                     }
-                    Pattern::Var(m, v) => {
+                    Pattern::Var(c, v) => {
                         // The variable can't be used in the rest of the pattern
                         // and we don't want to define "real" variables that aren't used in other patterns
                         // so we push it to the end of the row
-                        row.end_ipats.push_back((var, IPat::Var(*m, *v)));
+                        row.end_ipats.push_back((var, IPat::Var(*c, *v)));
                         row.columns.remove(i);
                         RemovedColumn::Nothing
                     }
@@ -254,21 +254,21 @@ mod input {
                         _ => (),
                     }
                     *size += 1;
-                    Pattern::Var(false, v.name(cxt.ecxt.db))
+                    Pattern::Var(Cap::Imm, v.name(cxt.ecxt.db))
                 }
-                ast::Expr::Cap(x) if x.captok().and_then(|x| x.mutkw()).is_some() => {
-                    match x.expr() {
-                        Some(ast::Expr::Var(v)) => {
-                            *size += 1;
-                            Pattern::Var(true, v.name(cxt.ecxt.db))
-                        }
-                        _ => {
-                            cxt.ecxt
-                                .error(self.span(), "`mut` only allowed for variables in patterns");
-                            Pattern::Any
-                        }
+                ast::Expr::Cap(x) if x.captok().is_some() => match x.expr() {
+                    Some(ast::Expr::Var(v)) => {
+                        *size += 1;
+                        Pattern::Var(x.captok().unwrap().as_cap(), v.name(cxt.ecxt.db))
                     }
-                }
+                    _ => {
+                        cxt.ecxt.error(
+                            self.span(),
+                            "capability annotation must be attached to a variable pattern",
+                        );
+                        Pattern::Any
+                    }
+                },
                 ast::Expr::App(x) => {
                     let (lhs, lhs_ty) = x
                         .lhs()
@@ -375,14 +375,19 @@ mod input {
                         .and_then(|x| x.expr())
                         .map(|x| x.to_pattern(cxt, size))
                         .unwrap_or((Pattern::Any, x.span()));
+                    let cap = match pat.0 {
+                        Pattern::Var(c, _) => c,
+                        _ => Cap::Own,
+                    };
                     match x
                         .ty()
                         .and_then(|x| x.expr())
                         .map(|x| x.check(Val::Type, cxt.ecxt, CheckReason::UsedAsType))
                     {
-                        Some(ty) => {
-                            Pattern::Typed(Box::new(pat), Box::new(ty.eval(&mut cxt.ecxt.env())))
-                        }
+                        Some(ty) => Pattern::Typed(
+                            Box::new(pat),
+                            Box::new(ty.eval(&mut cxt.ecxt.env()).with_cap(cap, false)),
+                        ),
                         None => pat.0,
                     }
                 }
@@ -454,7 +459,7 @@ mod input {
                                         (
                                             (
                                                 Pattern::Var(
-                                                    false,
+                                                    Cap::Imm,
                                                     (
                                                         cxt.ecxt.db.name("_".into()),
                                                         RelSpan::empty(),
@@ -508,7 +513,7 @@ mod input {
                                 (
                                     (
                                         Pattern::Var(
-                                            false,
+                                            Cap::Imm,
                                             (cxt.ecxt.db.name("_".into()), RelSpan::empty()),
                                         ),
                                         RelSpan::empty(),
@@ -582,7 +587,7 @@ mod input {
 
 // OUTPUT
 
-type PEnv = Vec<(SName, Val, bool)>;
+type PEnv = Vec<(SName, Val, Cap)>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct PVar(usize);
@@ -591,7 +596,7 @@ struct PVar(usize);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum IPat {
     Pair(PVar, PVar),
-    Var(bool, SName),
+    Var(Cap, SName),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -706,14 +711,14 @@ impl CaseElabCxt<'_, '_> {
                     let params = self.env_tys[&row.body]
                         .0
                         .iter()
-                        .map(|(n, ty, m)| Par {
+                        .map(|(n, ty, c)| Par {
                             name: *n,
                             ty: {
                                 let ty = ty.clone().quote(size, None);
                                 size += 1;
-                                ty
+                                Expr::Cap(*c, Box::new(ty))
                             },
-                            mutable: *m,
+                            mutable: *c != Cap::Imm,
                             is_impl: false,
                             is_ref: false,
                         })
@@ -794,10 +799,11 @@ impl CaseElabCxt<'_, '_> {
                 input::RemovedColumn::Yes(_cons, iargs2, eargs2, env) => {
                     if iargs.is_empty() && eargs.is_none() && yes_env.is_none() {
                         iargs.extend(iargs2.iter().map(|(_, ty)| {
-                            self.pvar(ty.clone().with_max_cap(scap), sreason.clone())
+                            self.pvar(ty.clone().with_cap(scap, true), sreason.clone())
                         }));
                         eargs2.as_deref().map(|(_, ty)| {
-                            eargs = Some(self.pvar(ty.clone().with_max_cap(scap), sreason.clone()))
+                            eargs =
+                                Some(self.pvar(ty.clone().with_cap(scap, true), sreason.clone()))
                         });
                         yes_env = env;
                     }
@@ -824,8 +830,8 @@ impl CaseElabCxt<'_, '_> {
                                 assert_eq!(clos.params.len(), 1);
                                 let ta = clos.par_ty();
                                 let tb = clos.clone().open(size);
-                                let va = self.pvar(ta.with_max_cap(scap), sreason.clone());
-                                let vb = self.pvar(tb.with_max_cap(scap), sreason.clone());
+                                let va = self.pvar(ta.with_cap(scap, true), sreason.clone());
+                                let vb = self.pvar(tb.with_cap(scap, true), sreason.clone());
                                 (va, vb)
                             }
                             Val::Error => (
@@ -859,7 +865,7 @@ impl CaseElabCxt<'_, '_> {
                     // we do this by adding a '_' var IPat to the pattern
                     row.end_ipats.push_back((
                         iargs[0],
-                        IPat::Var(false, (self.ecxt.db.name("_".into()), RelSpan::empty())),
+                        IPat::Var(Cap::Imm, (self.ecxt.db.name("_".into()), RelSpan::empty())),
                     ));
                     row.columns.push_front(input::Column {
                         var: iargs[1],
@@ -1151,12 +1157,12 @@ impl CaseOf<Expr> {
                 let va = pvar();
                 let vb = pvar();
                 vec.push((var, IPat::Pair(va, vb)));
-                vec.push((va, IPat::Var(false, *name)));
+                vec.push((va, IPat::Var(Cap::Imm, *name)));
                 (vec, vb)
             },
         );
         if let Some(Par { name, .. }) = body.params.last() {
-            ipats.push((vrest, IPat::Var(false, *name)));
+            ipats.push((vrest, IPat::Var(Cap::Imm, *name)));
         }
 
         CaseOf {
@@ -1206,11 +1212,12 @@ pub(super) fn elab_case(
                 let old_env = cxt.ecxt.env();
                 cxt.ecxt.push();
                 let mut params = Vec::new();
-                for (name, ty, m) in penv {
+                for (name, ty, c) in penv {
+                    let ty = ty.clone().with_cap(*c, true);
                     params.push(Par {
                         name: *name,
                         ty: ty.clone().quote(cxt.ecxt.size(), None),
-                        mutable: *m,
+                        mutable: *c != Cap::Imm,
                         is_impl: false,
                         is_ref: false,
                     });
@@ -1230,7 +1237,8 @@ pub(super) fn elab_case(
                         );
                         borrow
                     });
-                    cxt.ecxt.define_local(*name, ty.clone(), None, borrow, *m);
+                    cxt.ecxt
+                        .define_local(*name, ty, None, borrow, *c != Cap::Imm);
                 }
                 let mut env = env.clone();
                 while env.size < cxt.ecxt.size() {
@@ -1244,7 +1252,7 @@ pub(super) fn elab_case(
                     }),
                     None => match body {
                         Some(body) => {
-                            let (expr, ty) = body.infer(cxt.ecxt);
+                            let (expr, ty) = body.infer(cxt.ecxt, None);
                             let ty = ty
                                 .quote(cxt.ecxt.size(), Some(&cxt.ecxt.mcxt))
                                 .eval(&mut cxt.ecxt.env());
@@ -1398,14 +1406,14 @@ fn elab_block(
         ast::Stmt::Expr(e) if block.len() == 1 => match rty {
             Some((rty, reason)) => e.check(rty.clone(), ecxt, *reason),
             None => {
-                let (expr, ty) = e.infer(ecxt);
+                let (expr, ty) = e.infer(ecxt, None);
                 *rty = Some((ty, CheckReason::MustMatch(e.span())));
                 expr
             }
         },
         ast::Stmt::Expr(e) => {
             ecxt.record_deps();
-            let (s, sty) = e.infer(ecxt);
+            let (s, sty) = e.infer(ecxt, None);
             ecxt.finish_deps(e.span());
             let (case, cty) = elab_case(
                 sty,
@@ -1422,18 +1430,26 @@ fn elab_block(
             // only let is different in blocks
             ast::Def::LetDef(d) => {
                 // TODO better way of getting type from pattern here
-                let ty = match d.pat().and_then(|x| x.expr()).and_then(|x| match x {
-                    ast::Expr::GroupedExpr(x) => x.expr(),
-                    x => Some(x),
-                }) {
-                    Some(ast::Expr::Binder(x)) => x
-                        .ty()
-                        .and_then(|x| x.expr())
-                        .map(|x| (x.span(), x))
-                        .map(|(s, x)| (x.check(Val::Type, ecxt, CheckReason::UsedAsType), s))
-                        .map(|(x, s)| (x.eval(&mut ecxt.env()), s)),
-                    _ => None,
+                let (c, ty) = match d
+                    .pat()
+                    .and_then(|x| x.expr())
+                    .and_then(|x| x.as_simple_pat(ecxt.db))
+                {
+                    Some((Some((None, _)), ty)) => (Some(Cap::Imm), ty),
+                    Some((Some((c, _)), ty)) => (c, ty),
+                    Some((_, ty)) => (None, ty),
+                    _ => (None, None),
                 };
+                let ty = ty
+                    .map(|x| (x.span(), x))
+                    .map(|(s, x)| (x.check(Val::Type, ecxt, CheckReason::UsedAsType), s))
+                    .map(|(x, s)| {
+                        (
+                            x.eval(&mut ecxt.env())
+                                .with_cap(c.unwrap_or(Cap::Own), false),
+                            s,
+                        )
+                    });
                 ecxt.record_deps();
                 let (body, ty, reason) = match ty {
                     Some((ty, span)) => match d.body().and_then(|x| x.expr()) {
@@ -1447,7 +1463,7 @@ fn elab_block(
                         let (term, ty) = d
                             .body()
                             .and_then(|x| x.expr())
-                            .map(|x| x.infer(ecxt))
+                            .map(|x| x.infer(ecxt, c))
                             .unwrap_or((Expr::Error, Val::Error));
                         (
                             term,
@@ -1541,12 +1557,9 @@ impl IPat {
     pub(super) fn pretty<T: Elaborator + ?Sized>(&self, db: &T) -> Doc {
         match self {
             IPat::Pair(a, b) => Doc::start(a).add(',', ()).add(b, ()),
-            IPat::Var(m, v) => if *m {
-                Doc::start("mut").style(Doc::style_keyword()).space()
-            } else {
-                Doc::none()
-            }
-            .chain(v.pretty(db)),
+            IPat::Var(m, v) => Doc::start(m)
+                .style(Doc::style_keyword())
+                .chain(v.pretty(db)),
         }
     }
 }

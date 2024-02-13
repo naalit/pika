@@ -77,3 +77,8 @@ fn traits() {
 fn iterator() {
     test(&["Iterator.pk"]).succeeds();
 }
+
+#[test]
+fn capabilities() {
+    test(&["Capabilities.pk"]).succeeds();
+}

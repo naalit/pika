@@ -51,8 +51,8 @@ type Result[R, E] of
     Err(E)
 impl[E] Functor[[R] => Result[R, E]] struct
     fun map[A, B](self: own Result[A, E], f: own A mut-> B): Result[B, E] = self match
-        Result.Err(e) => Result.Err(e)
-        Result.Ok(a) => Result.Ok(f(a))
+        Result.Err(own e) => Result.Err(e)
+        Result.Ok(own a) => Result.Ok(f(a))
 
 fun doubleM[M, impl Functor[M]](x: own M[U32]): M[U32] = x.map(x => x*2)
 

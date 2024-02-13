@@ -29,9 +29,9 @@ where
 
 # verifying structs and methods with implicit parameters
 type MyStruct[a, b, c] struct
-    one: a
-    two: b
-    three: c
+    one: own a
+    two: own b
+    three: own c
 where
     fun get_one(own self): a = self.one
     fun get_two(own self): b = self.two
@@ -46,7 +46,7 @@ fun main() = do
     let n = data.length + data.len()
     let any = Any.new(data)
     let q = any.val # : any.ty
-    let p = MyStruct struct
+    own p = MyStruct struct
         one: "hi"
         two: q
         three: "bye"
