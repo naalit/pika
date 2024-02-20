@@ -429,11 +429,26 @@ impl<'a> Parser<'a> {
             // A line starting with a capability is a let definition
             Tok::LetKw | Tok::OwnKw | Tok::MutKw | Tok::ImmKw => {
                 self.push(Tok::LetDef);
-                self.maybe(Tok::LetKw);
+                // mut a, b
+                // ->
+                // Cap(mut, Pair(a, b))
+                if self.maybe(Tok::LetKw) {
+                    self.push(Tok::Pat);
+                    self.expr(Prec::Pat);
+                    self.pop();
+                } else {
+                    self.push(Tok::Pat);
+                    self.push(Tok::Cap);
+                    // capability token
+                    self.push(Tok::CapTok);
+                    self.advance();
+                    self.pop();
 
-                self.push(Tok::Pat);
-                self.expr(Prec::Pat);
-                self.pop();
+                    self.expr(Prec::Pat);
+
+                    self.pop();
+                    self.pop();
+                }
 
                 // Allow declarations like
                 //  let x : I32
@@ -524,6 +539,10 @@ impl<'a> Parser<'a> {
         if self.cur() == Tok::POpen
             || self.cur() == Tok::Indent
             || (allow_bare_expl && self.cur().starts_atom())
+            // distinguish `mut T ->` and `mut->`
+            || (allow_bare_expl
+                && matches!(self.cur(), Tok::MutKw | Tok::ImmKw | Tok::OwnKw)
+                && self.peek(1) != Tok::Arrow)
         {
             // Explicit parameters
             if !allow_expl {

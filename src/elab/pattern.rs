@@ -107,7 +107,7 @@ mod input {
             cxt: &mut CaseElabCxt,
         ) -> Row {
             let pat = pat.map_or((Pattern::Any, span), |x| {
-                x.to_pattern(cxt, &mut cxt.ecxt.size())
+                x.to_pattern(cxt, &mut cxt.ecxt.size(), Cap::Imm)
             });
             Row {
                 columns: VecDeque::from(vec![Column { var, pat }]),
@@ -234,7 +234,7 @@ mod input {
     }
 
     impl ast::Expr {
-        fn to_pattern(&self, cxt: &mut CaseElabCxt, size: &mut Size) -> SPattern {
+        fn to_pattern(&self, cxt: &mut CaseElabCxt, size: &mut Size, cap: Cap) -> SPattern {
             let pat = match self {
                 // TODO datatype constructors
                 ast::Expr::Var(v) => {
@@ -254,13 +254,10 @@ mod input {
                         _ => (),
                     }
                     *size += 1;
-                    Pattern::Var(Cap::Imm, v.name(cxt.ecxt.db))
+                    Pattern::Var(cap, v.name(cxt.ecxt.db))
                 }
                 ast::Expr::Cap(x) if x.captok().is_some() => match x.expr() {
-                    Some(ast::Expr::Var(v)) => {
-                        *size += 1;
-                        Pattern::Var(x.captok().unwrap().as_cap(), v.name(cxt.ecxt.db))
-                    }
+                    Some(e) => return e.to_pattern(cxt, size, x.captok().unwrap().as_cap()),
                     _ => {
                         cxt.ecxt.error(
                             self.span(),
@@ -325,19 +322,19 @@ mod input {
                             ),
                             self.span(),
                         ),
-                        |x| x.to_pattern(cxt, size),
+                        |x| x.to_pattern(cxt, size, cap),
                     )
                 }
                 ast::Expr::Pair(x) => {
                     let start_size = *size;
                     // We insert an extra variable so the type can depend on the lhs even if it's not bound in the pattern
                     *size += 1;
-                    let a = x
-                        .lhs()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
-                    let b = x
-                        .rhs()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
+                    let a = x.lhs().map_or((Pattern::Any, self.span()), |x| {
+                        x.to_pattern(cxt, size, cap)
+                    });
+                    let b = x.rhs().map_or((Pattern::Any, self.span()), |x| {
+                        x.to_pattern(cxt, size, cap)
+                    });
                     Pattern::Pair(Box::new(a), Box::new(b), start_size)
                 }
                 // TODO are any other binops valid patterns?
@@ -351,14 +348,14 @@ mod input {
                     }) =>
                 {
                     let old_size = *size;
-                    let a = x
-                        .a()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
+                    let a = x.a().map_or((Pattern::Any, self.span()), |x| {
+                        x.to_pattern(cxt, size, Cap::Imm)
+                    });
                     let new_size = *size;
                     *size = old_size;
-                    let b = x
-                        .b()
-                        .map_or((Pattern::Any, self.span()), |x| x.to_pattern(cxt, size));
+                    let b = x.b().map_or((Pattern::Any, self.span()), |x| {
+                        x.to_pattern(cxt, size, Cap::Imm)
+                    });
                     if *size != new_size {
                         // TODO actually check that the variables have the same names and types
                         cxt.ecxt.error(
@@ -373,7 +370,7 @@ mod input {
                     let pat = x
                         .pat()
                         .and_then(|x| x.expr())
-                        .map(|x| x.to_pattern(cxt, size))
+                        .map(|x| x.to_pattern(cxt, size, cap))
                         .unwrap_or((Pattern::Any, x.span()));
                     let cap = match pat.0 {
                         Pattern::Var(c, _) => c,
@@ -438,9 +435,10 @@ mod input {
                             .map(|(a, b)| {
                                 let mut env = Env::new(*size);
                                 match a {
-                                    Some(Ok(e)) => {
-                                        ((e.to_pattern(cxt, size)), (b.ty.clone().eval(&mut env)))
-                                    }
+                                    Some(Ok(e)) => (
+                                        (e.to_pattern(cxt, size, Cap::Imm)),
+                                        (b.ty.clone().eval(&mut env)),
+                                    ),
                                     Some(Err(span)) => {
                                         cxt.ecxt
                                             .unify(
@@ -532,7 +530,10 @@ mod input {
             let start_size = *size;
             let explicit = match (explicit, lhs_ty) {
                 (Some(args), Val::Fun(clos)) if matches!(clos.class, Pi(Expl, _)) => {
-                    let r = Some(Box::new((args.to_pattern(cxt, size), clos.par_ty())));
+                    let r = Some(Box::new((
+                        args.to_pattern(cxt, size, Cap::Imm),
+                        clos.par_ty(),
+                    )));
                     lhs_ty = clos.apply(
                         r.as_ref()
                             .unwrap()

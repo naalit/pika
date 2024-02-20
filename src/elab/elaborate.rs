@@ -2038,6 +2038,17 @@ impl Place {
             Place::Var(v) => match kind {
                 Cap::Mut | Cap::Imm => {
                     let mutable = kind == Cap::Mut;
+                    if mutable && index != BorrowIndex::ROOT {
+                        // They're trying to mutate through this variable, so it needs `mut` capability
+                        // (they can reassign something with `imm` capability if the variable is mutable,
+                        //  and if they try to mut borrow it it will end up as `imm` type, so we only need
+                        //  to check this if they're mutating a field)
+                        let ty = self.ty(cxt)?;
+                        if ty.own_cap(cxt) == Cap::Imm {
+                            Err(Doc::start("Cannot mutate value of type ")
+                                .chain(ty.quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db)))?
+                        }
+                    }
                     v.try_borrow(index, field, mutable, mutable, cxt)
                         .map_err(Into::into)
                 }

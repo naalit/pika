@@ -17,3 +17,13 @@ fun f(t: mut T) = do
     a(t.x)
     b(t.y)
     # c(t.z)
+    mut a: I32, b: I32 = 3, 4
+    a = 3
+    b = 4
+
+fun p(t: (mut T, mut T) mut-> ()) = ()
+
+fun q() = do
+    p do x, y => # TODO should these variables require `mut` annotation? it's currently optional
+        x.y = DoNotCopy.New(3)
+        y.x = DoNotCopy.New(3)
