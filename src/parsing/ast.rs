@@ -279,7 +279,7 @@ make_nodes! {
     LetDef = pat: Pat, body: Body;
     FunDef = name: Var, pars: FunPars, ret_ty: Ty, with: WithClause, body: Body;
     ConsDef = name: Var, pars: TypePars, ret_ty: Ty;
-    TypeDef = name: Var, pars: TypePars, body: TypeDefBody, block: BlockDef;
+    TypeDef = cap: CapTok, name: Var, pars: TypePars, body: TypeDefBody, block: BlockDef;
     ImplDef = pars: ImplPars, name: Var, body: Body;
     enum TypeDefBody = TypeDefStruct, TypeDefCtors;
     TypeDefCtors = cons: [ConsDef];

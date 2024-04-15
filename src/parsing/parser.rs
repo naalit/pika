@@ -341,6 +341,12 @@ impl<'a> Parser<'a> {
                 self.push(Tok::TypeDef);
                 self.advance();
 
+                if matches!(self.cur(), Tok::OwnKw | Tok::MutKw | Tok::ImmKw) {
+                    self.push(Tok::CapTok);
+                    self.advance();
+                    self.pop();
+                }
+
                 self.var();
 
                 if !matches!(

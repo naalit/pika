@@ -203,6 +203,7 @@ impl ast::Def {
                         .eval(&mut cxt.env()),
                     is_trait: def.is_trait,
                     is_impl: def.is_impl,
+                    type_cap: def.type_cap,
                     children: def.children.into_iter().map(|x| x.0).collect(),
                     type_def: match def.body {
                         DefBody::Type(b) => Some(TypeDefKind::Type(b)),
@@ -226,6 +227,7 @@ impl ast::Def {
                             name,
                             is_trait: false,
                             is_impl: false,
+                            type_cap: None,
                             ty: Box::new(
                                 ty.with_cap(c.unwrap_or(Cap::Imm), true)
                                     .quote(cxt.size(), Some(&cxt.mcxt)),
@@ -250,6 +252,7 @@ impl ast::Def {
                             name,
                             is_trait: false,
                             is_impl: false,
+                            type_cap: None,
                             ty: Box::new(Expr::Spanned(
                                 pty.span(),
                                 Box::new(
@@ -295,6 +298,7 @@ impl ast::Def {
                     name: x.name()?.name(cxt.db),
                     is_trait: false,
                     is_impl: false,
+                    type_cap: None,
                     ty: Box::new(ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))),
                     body: DefBody::Let(Box::new(term.eval_quote(
                         &mut cxt.env(),
@@ -368,6 +372,7 @@ impl ast::Def {
                     name,
                     is_trait: false,
                     is_impl: true,
+                    type_cap: None,
                     ty: Box::new(ty),
                     body: DefBody::Let(Box::new(Expr::Spanned(
                         x.body().unwrap().span(),
@@ -427,6 +432,14 @@ impl ast::Def {
                 } else {
                     (cxt.db.name("_".into()), RelSpan::empty())
                 };
+                let cap = x.cap().map(|x| x.as_cap());
+                if matches!(cap, Some(Cap::Mut | Cap::Own)) {
+                    cxt.error(
+                        x.cap().map_or(x.span(), |x| x.span()),
+                        "Currently `imm` is the only capability allowed on type definitions",
+                    );
+                }
+                let cap = cap.unwrap_or(if is_trait { Cap::Imm } else { Cap::Own });
 
                 let default_rty = Val::var(Var::Def(name, def_id));
                 let (ty_params, default_rty) = match &ty {
@@ -712,6 +725,7 @@ impl ast::Def {
                     name: x.name()?.name(cxt.db),
                     is_trait,
                     is_impl: false,
+                    type_cap: Some(cap),
                     // Inline metas in all types involved after elaborating the constructors
                     // since metas caused by inferred types of type arguments can be solved in ctors
                     ty: Box::new(ty.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))),

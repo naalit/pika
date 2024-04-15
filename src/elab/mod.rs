@@ -402,6 +402,7 @@ pub struct DefType {
     pub ty: Val,
     pub is_trait: bool,
     pub is_impl: bool,
+    pub type_cap: Option<Cap>,
     pub children: Vec<SplitId>,
     pub type_def: Option<TypeDefKind>,
 }
@@ -411,6 +412,7 @@ impl DefType {
             name,
             ty,
             is_trait: false,
+            type_cap: None,
             is_impl: false,
             children: Vec::new(),
             type_def: None,

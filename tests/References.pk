@@ -175,3 +175,9 @@ fun y_test(y: own Y) = do
     mutate(x.a)
     mutate(y.x.a) # `x` is no longer live
     mutate(y.t)
+
+type imm Data struct
+    q: I32
+fun dq(x: Data): Data = x
+# fun df(x: mut Data) = do
+#     x.q = 3

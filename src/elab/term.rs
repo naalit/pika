@@ -251,6 +251,7 @@ pub struct Definition {
     pub name: SName,
     pub is_trait: bool,
     pub is_impl: bool,
+    pub type_cap: Option<Cap>,
     pub ty: Box<Expr>,
     pub body: DefBody,
     pub children: Vec<(SplitId, DefNode)>,

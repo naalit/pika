@@ -55,7 +55,7 @@ fn references() {
 
 #[test]
 fn ref_errors() {
-    test(&["ReferencesErr.pk"]).num_errors(36);
+    test(&["ReferencesErr.pk"]).num_errors(37);
 }
 
 #[test]

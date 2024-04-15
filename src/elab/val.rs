@@ -622,13 +622,11 @@ impl Val {
                     s.own_cap_(mcxt, env, false)
                 }
                 Head::Var(Var::Meta(_)) => Cap::Own,
-                // Traits are immutable; we'll replace this with a notion of immutable datatypes later
                 Head::Var(Var::Def(_, d)) => mcxt
                     .db
                     .def_type(d)
                     .and_then(|x| x.result)
-                    .map_or(false, |x| x.is_trait)
-                    .then_some(Cap::Imm)
+                    .and_then(|x| x.type_cap)
                     .unwrap_or(Cap::Own),
                 _ => Cap::Own,
             },

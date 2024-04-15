@@ -160,3 +160,9 @@ fun p5_bad(x: own DoNotCopy): Type = () -> calc_type_own(x)
 fun escaping_via_closure(x: imm DoNotCopy): () imm-> imm DoNotCopy = do
     own f = () => x
     f
+
+type imm Data struct
+    q: I32
+fun dq(x: Data): Data = x
+fun df(x: mut Data) = do
+    x.q = 3
