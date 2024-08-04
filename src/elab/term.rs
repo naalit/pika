@@ -124,6 +124,8 @@ pub enum Builtin {
     BoolType,
     ArithOp(ArithOp),
     CompOp(CompOp),
+    /// The `as` argument in existentials
+    Existential,
 }
 impl std::fmt::Display for Builtin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -135,6 +137,7 @@ impl std::fmt::Display for Builtin {
             Builtin::BoolType => write!(f, "Bool"),
             Builtin::ArithOp(op) => write!(f, "{}", op),
             Builtin::CompOp(op) => write!(f, "{}", op),
+            Builtin::Existential => write!(f, "<existential>"),
         }
     }
 }
@@ -217,6 +220,7 @@ pub use self::Icit::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Par {
     pub name: SName,
+    /// This Expr lives at the size right before this parameter
     pub ty: Expr,
     pub mutable: bool,
     pub is_impl: bool,
@@ -379,6 +383,7 @@ impl Builtin {
             // TODO types for operators
             Builtin::ArithOp(_) => Val::Error,
             Builtin::CompOp(_) => Val::Error,
+            Builtin::Existential => Val::Type,
         }
     }
 
@@ -524,14 +529,25 @@ impl Pretty for Expr {
                 .chain(expr.pretty(db))
                 .prec(Prec::Term),
             Expr::Elim(a, b) => match &**b {
-                Elim::App(icit, b) => a
-                    .pretty(db)
-                    .nest(Prec::App)
-                    .chain(match icit {
-                        Impl => Doc::none().add('[', ()).chain(b.pretty(db)).add(']', ()),
-                        Expl => Doc::none().add('(', ()).chain(b.pretty(db)).add(')', ()),
-                    })
-                    .prec(Prec::App),
+                Elim::App(icit, b) => {
+                    match a.unspanned() {
+                        Expr::Head(Head::Var(Var::Def(_, d))) => if let Some(d) = db.def_type(*d).and_then(|x| x.result) {
+                            if d.is_trait {
+                                // find arguments
+                                // TODO `as`
+                            }
+                        }
+                        _ => (),
+                    }
+                    a
+                        .pretty(db)
+                        .nest(Prec::App)
+                        .chain(match icit {
+                            Impl => Doc::none().add('[', ()).chain(b.pretty(db)).add(']', ()),
+                            Expl => Doc::none().add('(', ()).chain(b.pretty(db)).add(')', ()),
+                        })
+                        .prec(Prec::App)
+                },
                 Elim::Member(_, _, m) => a
                     .pretty(db)
                     .add('.', ())

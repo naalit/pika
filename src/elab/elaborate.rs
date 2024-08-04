@@ -64,6 +64,7 @@ impl ast::Stmt {
             ast::Stmt::Def(ast::Def::FunDef(x)) => {
                 let (_, ty) = infer_fun(
                     x.pars(),
+                    Vec::new(),
                     x.ret_ty().and_then(|x| x.expr()),
                     None,
                     Some(Cap::Imm),
@@ -102,6 +103,7 @@ impl ast::Stmt {
             ast::Stmt::Def(ast::Def::FunDef(x)) => {
                 let (expr, ty) = infer_fun(
                     x.pars(),
+                    Vec::new(),
                     x.ret_ty().and_then(|x| x.expr()),
                     x.body(),
                     Some(Cap::Imm),
@@ -180,7 +182,15 @@ impl ast::Def {
                         span: x.name().map_or(self.span(), |x| x.span()),
                         expr: None,
                     }));
-                let (_, ty) = infer_fun(x.pars(), Some(rty), None, Some(Cap::Imm), x.span(), cxt);
+                let (_, ty) = infer_fun(
+                    x.pars(),
+                    Vec::new(),
+                    Some(rty),
+                    None,
+                    Some(Cap::Imm),
+                    x.span(),
+                    cxt,
+                );
                 let ty = ty
                     .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                     .eval(&mut cxt.env());
@@ -291,8 +301,15 @@ impl ast::Def {
                         expr: None,
                     }));
 
-                let (term, ty) =
-                    infer_fun(x.pars(), Some(rty), x.body(), Some(Cap::Imm), x.span(), cxt);
+                let (term, ty) = infer_fun(
+                    x.pars(),
+                    Vec::new(),
+                    Some(rty),
+                    x.body(),
+                    Some(Cap::Imm),
+                    x.span(),
+                    cxt,
+                );
 
                 Some(Definition {
                     name: x.name()?.name(cxt.db),
@@ -323,15 +340,6 @@ impl ast::Def {
                         .into(),
                 ));
 
-                cxt.push();
-                let pars = check_params(
-                    x.pars().imp(),
-                    ParamTys::Inferred(Impl),
-                    CheckReason::UsedAsType,
-                    None,
-                    cxt,
-                );
-
                 let (body, ty) = x.body()?.expr()?.infer(cxt, None);
                 match &ty {
                     Val::Neutral(n) if matches!(n.head(), Head::Var(Var::Def(_, d)) if cxt.db.def_type(d).and_then(|x| x.result).map_or(false, |x| x.is_trait)) => {
@@ -347,26 +355,6 @@ impl ast::Def {
                 // inline metas in the term
                 let body = body.eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt));
                 let ty = ty.quote(cxt.size(), Some(&cxt.mcxt));
-                cxt.pop();
-
-                let body = if pars.is_empty() {
-                    body
-                } else {
-                    Expr::Fun(EClos {
-                        class: Lam(Impl, Cap::Imm),
-                        params: pars.clone(),
-                        body: Box::new(body),
-                    })
-                };
-                let ty = if pars.is_empty() {
-                    ty
-                } else {
-                    Expr::Fun(EClos {
-                        class: Pi(Impl, Cap::Imm),
-                        params: pars,
-                        body: Box::new(ty),
-                    })
-                };
 
                 Some(Definition {
                     name,
@@ -388,19 +376,16 @@ impl ast::Def {
                     .children_with_tokens()
                     .any(|x| x.kind() == SyntaxKind::TraitKw);
                 let span = x.name().map_or(x.span(), |x| x.span());
+                if is_trait {
+                    // avoid cycles via `all_traits`
+                    // TODO is this necessary?
+                    cxt.set_ignore_def(def_id);
+                }
 
                 cxt.push();
-                let has_self = x
-                    .pars()
-                    .imp()
-                    .and_then(|x| x.pars.first().cloned())
-                    .and_then(|x| x.ok())
-                    .and_then(|x| x.as_simple_pat(cxt.db))
-                    .and_then(|x| x.0)
-                    .map_or(false, |(_, (n, _))| n == cxt.db.name("Self".into()));
                 let (_, ty) = infer_fun(
                     TraitPars(
-                        if is_trait && !has_self {
+                        if is_trait {
                             Some(Par::new(
                                 (cxt.db.name("Self".into()), span),
                                 Expr::Type,
@@ -411,6 +396,7 @@ impl ast::Def {
                         },
                         x.pars().imp(),
                     ),
+                    x.with().map_or(Vec::new(), |x| x.pars()),
                     Some(ast::Expr::Type(ast::Type::Val {
                         span: x.name().map_or_else(|| x.span(), |n| n.span()),
                         kw: None,
@@ -555,6 +541,7 @@ impl ast::Def {
                             let cty = if c.ret_ty().is_some() {
                                 let (_, cty) = infer_fun(
                                     c.pars(),
+                                    c.with().map_or(Vec::new(), |x| x.pars()),
                                     c.ret_ty().and_then(|x| x.expr()),
                                     None,
                                     Some(Cap::Imm),
@@ -755,6 +742,7 @@ impl ast::Def {
 
 fn infer_fun(
     pars: impl HasPars,
+    with_pars: Vec<ast::Expr>,
     ret_ty: Option<ast::Expr>,
     body: Option<ast::Body>,
     capability: Option<Cap>,
@@ -766,6 +754,75 @@ fn infer_fun(
     // [a, b, c, d] => ((e, f) => ...)
 
     cxt.push();
+    let mut with_pars2 = Vec::new();
+    // First do implicit parameters (shunting `is` constraints to `with_pars2` for now)
+    let (mut implicit, ideps) = check_params_deps(
+        pars.imp(),
+        ParamTys::Inferred(Impl),
+        CheckReason::UsedAsType,
+        None,
+        Some(&mut with_pars2),
+        cxt,
+    );
+    // Then type parameters implied by using `self` in an appropriate context
+    let self_size = cxt.size();
+    if pars.exp().map_or(false, |x| {
+        x.pars
+            .first()
+            .and_then(|x| x.as_ref().ok())
+            .map_or(false, |x| x.has_self_pat(cxt))
+    }) {
+        match cxt.resolve_self(span) {
+            // TODO better span here
+            Some(rty) => {
+                let ty = rty.ty(cxt);
+                let mut ty_params = match ty {
+                    Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
+                        for i in &clos.params {
+                            cxt.define_local(
+                                i.name,
+                                i.ty.clone().eval(&mut cxt.env()),
+                                None,
+                                None,
+                                false,
+                            );
+                        }
+                        clos.params.clone()
+                    }
+                    _ => Vec::new(),
+                };
+                implicit.append(&mut ty_params);
+            }
+            _ => (),
+        }
+    }
+    // Then `is` constraints
+    for (pty, span) in with_pars2 {
+        let name = (cxt.db.name("_".into()), span);
+        implicit.push(Par {
+            name,
+            ty: pty.clone().quote(cxt.size(), None),
+            mutable: false,
+            is_impl: true,
+            is_ref: false,
+        });
+        cxt.define_local(name, pty.clone(), None, None, false);
+    }
+    // Then the `with` clause
+    let (mut with_pars3, _) = check_params_deps(
+        Some(Pars {
+            pars: with_pars.into_iter().map(Ok).collect(),
+            pat: false,
+            default_cap: Cap::Imm,
+        }),
+        ParamTys::Inferred(Impl),
+        CheckReason::UsedAsType,
+        None,
+        None,
+        cxt,
+    );
+    implicit.append(&mut with_pars3);
+    // Then the trait `Self` parameter if applicable
     let mut extra_pars: Vec<_> = pars.extra_imp().into_iter().cloned().collect();
     for i in &extra_pars {
         cxt.define_local(
@@ -776,22 +833,17 @@ fn infer_fun(
             i.mutable,
         );
     }
-    let (mut implicit, ideps) = check_params_deps(
-        pars.imp(),
-        ParamTys::Inferred(Impl),
-        CheckReason::UsedAsType,
-        None,
-        cxt,
-    );
+    implicit.append(&mut extra_pars);
+
+    // Finally do the explicit parameters
     let (explicit, edeps) = check_params_deps(
         pars.exp(),
         ParamTys::Inferred(Expl),
         CheckReason::UsedAsType,
-        Some(&mut extra_pars),
+        Some(self_size),
+        None,
         cxt,
     );
-    extra_pars.append(&mut implicit);
-    let implicit = extra_pars;
 
     // Variable accesses in the parameter types don't count as captures,
     // but accesses to the parameters inside the body don't count either
@@ -868,6 +920,30 @@ fn infer_fun(
     } else {
         None
     };
+    let mut env = cxt.env();
+    // Treat mutable parameters as if they were returns, since they can allow other parameters to escape
+    for (i, p) in ideps
+        .iter()
+        .chain(&edeps)
+        .copied()
+        .zip(implicit.iter().chain(&explicit))
+    {
+        if let Some(i) = i {
+            if p.ty.clone().eval(&mut env).own_cap(cxt) == Cap::Mut {
+                cxt.add_dep(
+                    i,
+                    Access {
+                        kind: Cap::Own,
+                        point: AccessPoint::EscapingParamVia(p.name),
+                        span: p.name.1,
+                    },
+                    BorrowIndex::ROOT,
+                );
+            }
+        }
+        env.push(None);
+    }
+    // TODO check for soundness issues caused by `ideps` not containing deps for `with`-parameters, `is`-constraints, etc.
     let mut env = cxt.env();
     for (i, p) in ideps
         .iter()
@@ -1073,31 +1149,15 @@ impl HasPars for ast::PiPars {
             })
     }
 }
-impl HasPars for ast::ImplPars {
-    fn exp(&self) -> Option<Pars> {
-        None
-    }
-
-    fn imp(&self) -> Option<Pars> {
-        self.imp()
-            .and_then(|x| x.expr())
-            .map(|x| x.as_args())
-            .map(|pars| Pars {
-                pars,
-                pat: true,
-                default_cap: Cap::Imm,
-            })
-    }
-}
 
 fn check_params(
     pars: Option<Pars>,
     tys: ParamTys,
     reason: CheckReason,
-    extra_pars: Option<&mut Vec<Par>>,
+    with_pars: Option<&mut Vec<Spanned<Val>>>,
     cxt: &mut Cxt,
 ) -> Vec<Par> {
-    check_params_deps(pars, tys, reason, extra_pars, cxt).0
+    check_params_deps(pars, tys, reason, None, with_pars, cxt).0
 }
 
 /// Each value in the second returned Vec is Some iff the corresponding parameter is not allowed to escape
@@ -1106,7 +1166,8 @@ fn check_params_deps(
     pars: Option<Pars>,
     tys: ParamTys,
     reason: CheckReason,
-    mut extra_pars: Option<&mut Vec<Par>>,
+    self_size: Option<Size>,
+    mut with_pars: Option<&mut Vec<Spanned<Val>>>,
     cxt: &mut Cxt,
 ) -> (Vec<Par>, Vec<Option<Borrow>>) {
     let Pars {
@@ -1153,11 +1214,12 @@ fn check_params_deps(
                 ty.map(|(x, r)| (x, reason, r)),
                 if first {
                     first = false;
-                    // Rust should make this easier
-                    extra_pars.as_mut().map(|x| &mut **x)
+                    self_size
                 } else {
                     None
                 },
+                // Rust should make this easier
+                with_pars.as_mut().map(|x| &mut **x),
                 allow_impl,
                 cxt,
             )
@@ -1176,6 +1238,14 @@ impl ast::Expr {
                 .map_or(false, |x| x.is_self_pat(incl_cap, false, cxt)),
             ast::Expr::Var(x) => x.name(cxt.db).0 == cxt.db.name("self".into()),
             _ => false,
+        }
+    }
+
+    fn has_self_pat(&self, cxt: &Cxt) -> bool {
+        match self {
+            ast::Expr::GroupedExpr(x) => x.expr().map_or(false, |x| x.has_self_pat(cxt)),
+            ast::Expr::Pair(x) => x.lhs().map_or(false, |x| x.has_self_pat(cxt)),
+            x => x.is_self_pat(true, true, cxt),
         }
     }
 
@@ -1203,42 +1273,30 @@ fn check_par(
     default_cap: Cap,
     // (type, reason, is_ref)
     expected_ty: Option<(Expr, CheckReason, bool)>,
-    extra_pars: Option<&mut Vec<Par>>,
+    self_size: Option<Size>,
+    with_pars: Option<&mut Vec<Spanned<Val>>>,
     allow_impl: bool,
     cxt: &mut Cxt,
 ) -> (Par, Option<Borrow>) {
     let mut par = match x {
         Ok(x) if x.is_self_pat(true, true, cxt) => {
             let (m, is_ref, ty) = match cxt.resolve_self(x.span()) {
-                Some(rty) if extra_pars.is_some() => {
+                Some(rty) if self_size.is_some() => {
                     let ty = rty.ty(cxt);
-                    let (mut ty_params, rty) = match ty {
+                    let rty = match ty {
                         Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
-                            let before_size = cxt.size();
-                            for i in &clos.params {
-                                cxt.define_local(
-                                    i.name,
-                                    i.ty.clone().eval(&mut cxt.env()),
-                                    None,
-                                    None,
-                                    false,
-                                );
-                            }
+                            let before_size = self_size.unwrap();
                             let arg = clos
                                 .clone()
                                 .synthesize_args(before_size)
                                 .quote(cxt.size(), None);
-                            (
-                                clos.params.clone(),
-                                Expr::Elim(
-                                    Box::new(rty),
-                                    Box::new(Elim::App(clos.class.icit().unwrap(), arg)),
-                                ),
+                            Expr::Elim(
+                                Box::new(rty),
+                                Box::new(Elim::App(clos.class.icit().unwrap(), arg)),
                             )
                         }
-                        _ => (Vec::new(), rty),
+                        _ => rty,
                     };
-                    extra_pars.unwrap().append(&mut ty_params);
                     x.as_self_pat(rty)
                 }
                 _ => {
@@ -1254,32 +1312,102 @@ fn check_par(
                 is_ref,
             }
         }
-        Ok(ast::Expr::ImplPat(x)) => {
-            if !allow_impl {
-                cxt.error(x.span(), "`impl` is only allowed in implicit arguments");
+        Ok(ast::Expr::TraitIsPat(x)) => {
+            if !allow_impl || with_pars.is_none() {
+                cxt.error(x.span(), "`is` is only allowed in implicit arguments");
             }
-            let ty = x
-                .expr()
-                .map(|x| x.check(Val::Type, cxt, CheckReason::UsedAsType))
-                .unwrap_or(Expr::Error);
 
-            match ty.clone().eval(&mut cxt.env()) {
-                Val::Neutral(n) if matches!(n.head(), Head::Var(Var::Def(_, d)) if cxt.db.def_type(d).and_then(|x| x.result).map_or(false, |x| x.is_trait)) => {
+            // We know it has type Type
+            if let Some((expected_ty, reason, r)) = expected_ty {
+                let expected_ty = expected_ty.clone().eval(&mut cxt.env());
+                cxt.unify(Val::Type, expected_ty, reason)
+                    .unwrap_or_else(|e| cxt.error(x.span(), e));
+            }
+            let name = x.lhs().map(|x| x.name(cxt.db)).unwrap_or_else(|| {
+                cxt.error(x.span(), "Expected name in `is` pattern");
+                (cxt.db.name("_".into()), x.span())
+            });
+
+            let (rhs, imp_args) = x
+                .rhs()
+                .and_then(|x| x.expr())
+                .map(|x| match x {
+                    ast::Expr::App(x)
+                        if x.imp().is_some() && x.exp().is_none() && x.do_expr().is_none() =>
+                    {
+                        match x.member() {
+                            None => (x.lhs(), x.imp()),
+                            Some(member) => (
+                                Some(ast::Expr::App(ast::App::Val {
+                                    span: x.span(),
+                                    lhs: x.lhs().map(Box::new),
+                                    member: Some(Box::new(member)),
+                                    imp: None,
+                                    exp: None,
+                                    do_expr: None,
+                                })),
+                                x.imp(),
+                            ),
+                        }
+                    }
+                    x => (Some(x), None),
+                })
+                .unwrap_or((None, None));
+
+            let (rhs, rhs_ty) = rhs
+                .map(|x| x.infer(cxt, None))
+                .unwrap_or((Expr::Error, Val::Error));
+            match rhs.unspanned() {
+                Expr::Head(Head::Var(Var::Def(_, d)))
+                    if cxt
+                        .db
+                        .def_type(*d)
+                        .and_then(|x| x.result)
+                        .map_or(false, |x| x.is_trait) =>
+                {
                     ()
                 }
-                ty => cxt.error(
-                    x.span(),
-                    Doc::start("`impl` used with non-trait '")
-                        .chain(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db))
+                Expr::Error => (),
+                // TODO this catches e.g. `let MyTr = Iterator[Item]; fun f[A is MyTr]` or similar. need to evaluate+unfold and take the head
+                rhs => cxt.error(
+                    x.rhs().unwrap().span(),
+                    Doc::start("`is` used with non-trait '")
+                        .chain(
+                            rhs.clone()
+                                .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
+                                .pretty(cxt.db),
+                        )
                         .add("'", ()),
                 ),
             }
 
+            if rhs != Expr::Error {
+                // I *think* all the sizes and indices work out here but no promises
+                let as_arg = Expr::var(Var::Local(name, Idx::zero()));
+                let mut env = cxt.env();
+                // needed for `insert_metas` to have the right scopes for using `as_arg`
+                cxt.push();
+                cxt.define_local(name, Val::Type, None, None, false);
+                let (tr, tr_ty) = rhs.eval_quote(&mut env, cxt.size(), None).insert_metas(
+                    rhs_ty,
+                    imp_args,
+                    Some(as_arg),
+                    x.rhs().unwrap().span(),
+                    cxt,
+                );
+                cxt.unify(Val::Type, tr_ty, CheckReason::UsedAsType)
+                    .unwrap_or_else(|e| cxt.error(x.span(), e));
+                env.push(None);
+                let tr = tr.eval(&mut env);
+                with_pars.unwrap().push((tr, x.rhs().unwrap().span()));
+                cxt.pop();
+            }
+
             Par {
-                name: (cxt.db.name("_".to_string()), x.span()),
-                ty,
+                name,
+                ty: Expr::Type,
                 mutable: false,
-                is_impl: true,
+                is_impl: false,
                 is_ref: false,
             }
         }
@@ -1465,6 +1593,7 @@ impl ast::Pair {
         {
             let (_, ty) = infer_fun(
                 SigmaPars(self.lhs()),
+                Vec::new(),
                 self.rhs(),
                 None,
                 None, // TODO copy classes for sigma
@@ -1556,11 +1685,12 @@ impl ParamTys<'_, '_> {
 }
 
 impl Expr {
-    /// If `term` of type `ty` takes implicit parameters, insert metas to apply them.
+    /// If `self` of type `ty` takes implicit parameters, insert metas to apply them.
     pub(super) fn insert_metas(
         self,
         ty: Val,
         imp_args: Option<ast::ImpArgs>,
+        mut as_arg: Option<Expr>,
         span: RelSpan,
         cxt: &mut Cxt,
     ) -> (Expr, Val) {
@@ -1574,6 +1704,7 @@ impl Expr {
                     .collect();
                 let mut targs: Vec<Expr> = Vec::new();
                 let par_ty = clos.par_ty();
+                let mut done_existential = false;
                 let rty = clos.elab_with(|name, aty, is_impl| match args.pop_front() {
                     Some(arg) => match arg {
                         Ok(arg) => {
@@ -1596,7 +1727,27 @@ impl Expr {
                             }
                         }
                     },
+                    None if as_arg.is_some() => {
+                        let arg = as_arg.take().unwrap();
+                        let arg_ty = arg.ty(cxt);
+                        cxt.unify(arg_ty, aty, CheckReason::ArgOf(span))
+                            .unwrap_or_else(|e| cxt.error(span, e));
+                        targs.push(arg.clone());
+                        arg.eval(&mut cxt.env())
+                    }
                     None => {
+                        if !done_existential
+                            && aty == Val::Type
+                            && cxt.db.name("Self".into()) == name.0
+                        {
+                            let vself = self.clone().eval(&mut cxt.env()).inlined(cxt);
+                            if vself.is_trait(cxt) {
+                                // Make an existential
+                                done_existential = true;
+                                targs.push(Expr::var(Var::Builtin(Builtin::Existential)));
+                                return Val::var(Var::Builtin(Builtin::Existential));
+                            }
+                        }
                         // Apply a new metavariable
                         let e = cxt.new_meta(
                             MetaBounds::new(aty).with_impl(is_impl),
@@ -1607,6 +1758,16 @@ impl Expr {
                         e.eval(&mut cxt.env())
                     }
                 });
+                if !args.is_empty() || as_arg.is_some() {
+                    cxt.error(
+                        span,
+                        Doc::start(
+                            "Too many implicit parameters or `as` applied to value of type '",
+                        )
+                        .chain(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db))
+                        .add("'", ()),
+                    );
+                }
                 let ty = par_ty.quote(cxt.size(), None);
 
                 fn make_arg(
@@ -1643,6 +1804,15 @@ impl Expr {
                     Doc::start("Value of type '")
                         .chain(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db))
                         .add("' does not take implicit parameters", ()),
+                );
+                (self, ty)
+            }
+            _ if as_arg.is_some() => {
+                cxt.error(
+                    span,
+                    Doc::start("Value of type '")
+                        .chain(ty.clone().quote(cxt.size(), Some(&cxt.mcxt)).pretty(cxt.db))
+                        .add("' cannot be used with `as`", ()),
                 );
                 (self, ty)
             }
@@ -1738,12 +1908,23 @@ pub(super) fn resolve_member_method(
                                 .enumerate()
                                 .find(|(_, ((n, _), _))| *n == name.0)
                             {
-                                return Ok(PlaceOrExpr::Place(Place::Member(
-                                    Box::new(lhs),
-                                    def,
-                                    idx as u64,
-                                    name,
-                                )));
+                                // Check if this is an existential
+                                if edef
+                                    .as_ref()
+                                    .and_then(|x| x.result.as_ref())
+                                    .map_or(false, |x| x.is_trait)
+                                    && n.spine().len() == 1
+                                    && matches!(&n.spine()[0], Elim::App(Impl, v) if v.as_tuple().last() == Some(&Val::var(Var::Builtin(Builtin::Existential))))
+                                {
+                                    // Let this go to the trait method handling
+                                } else {
+                                    return Ok(PlaceOrExpr::Place(Place::Member(
+                                        Box::new(lhs),
+                                        def,
+                                        idx as u64,
+                                        name,
+                                    )));
+                                }
                             }
                         }
                         _ => (),
@@ -1794,8 +1975,36 @@ pub(super) fn resolve_member_method(
                                                 .enumerate()
                                                 .find(|(_, ((n, _), _))| *n == name.0)
                                             {
-                                                let (lhs, _) =
-                                                    lhs.insert_metas(lhs_ty, None, span, cxt);
+                                                // Okay so here, lhs is a trait implementation (has type e.g. Iterator or A as Iterator)
+                                                // if it was an `as` expression, then we've already inserted the metas, since the `as` argument is the last one
+                                                // and otherwise... ig this is an existential? where is that handled? should that not even get here maybe?
+                                                // okaaaay so that should be interpreted as `BuiltinExistential as T` => `T[BuiltinExistential]`
+                                                // TODO: so maybe this code should handle both separately? (since there's an extra argument with a real `as`...)
+                                                // theoretically, this code is for the existential case, i.e. `Iterator.next(it)`
+                                                // and this is coming from `infer` for `App`... so it should have already inserted metas?
+                                                // okay no it does not it just calls `elab_unborrowed()`
+                                                // so the `insert_metas` here makes sense
+                                                // TODO check for non-existential and handle that
+                                                // we make a meta for the `as` argument, since otherwise the method would only work on existentials
+                                                // TODO figure out what the correct way to do this is
+                                                let as_meta = cxt.new_meta(
+                                                    MetaBounds::new(Val::Type),
+                                                    span,
+                                                    MetaSource::ArgOf(
+                                                        edef.name
+                                                            .pretty(cxt.db)
+                                                            .add('.', ())
+                                                            .chain(name.pretty(cxt.db)),
+                                                        None,
+                                                    ),
+                                                );
+                                                let (lhs, _) = lhs.insert_metas(
+                                                    lhs_ty,
+                                                    None,
+                                                    Some(as_meta),
+                                                    span,
+                                                    cxt,
+                                                );
                                                 let lhs_val = lhs.eval(&mut cxt.env());
                                                 let meta = cxt.new_meta(
                                                     MetaBounds::new(lhs_val.clone())
@@ -1879,7 +2088,9 @@ pub(super) fn resolve_member_method(
                 let (tname, (def, idx)) = trait_results.pop().unwrap();
                 let tr = Expr::var(Var::Def(tname, def));
                 let tr_ty = tr.ty(cxt);
-                let (tr, _) = tr.insert_metas(tr_ty, None, span, cxt);
+                // need to give it as `as` arg or it will default to existential
+                let (tr, _) =
+                    tr.insert_metas(tr_ty, None, Some(lhs_ty.quote(cxt.size(), None)), span, cxt);
                 let tr = tr.eval(&mut cxt.env());
                 let meta = cxt.new_meta(
                     MetaBounds::new(tr.clone()).with_impl(true),
@@ -2195,7 +2406,7 @@ fn coerce(
     let a = a.finish_and_borrow(cap, if as_non_ref { Cap::Own } else { cap }, cxt);
     let (a, ity) = match &ty {
         Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => (a, ity),
-        _ => a.insert_metas(ity, None, span, cxt),
+        _ => a.insert_metas(ity, None, None, span, cxt),
     };
 
     cxt.unify(ity, ty, reason)?;
@@ -2433,6 +2644,7 @@ impl ast::Expr {
                     ParamTys::Impl(&mut implicit_tys),
                     reason,
                     None,
+                    None, // TODO allow `is` in lambda if there's a matching `impl` parameter in the Fun ??
                     cxt,
                 );
                 // Add any implicit parameters in the type but not the lambda to the lambda
@@ -2485,6 +2697,7 @@ impl ast::Expr {
                             x.pars().exp(),
                             ParamTys::Expl(clos.par_ty().quote(cxt.size(), None), &clos.params),
                             reason,
+                            None,
                             None,
                             cxt,
                         ),
@@ -2773,7 +2986,15 @@ impl ast::Expr {
                         }
                     }
                     ast::Expr::Lam(x) => {
-                        let (term, ty) = infer_fun(x.pars(), None, x.body(), None, x.span(), cxt);
+                        let (term, ty) = infer_fun(
+                            x.pars(),
+                            x.with().map(|x| x.pars()).unwrap_or_default(),
+                            None,
+                            x.body(),
+                            None,
+                            x.span(),
+                            cxt,
+                        );
                         (term, ty.eval(&mut cxt.env()))
                     }
                     ast::Expr::Pi(x) => {
@@ -2784,6 +3005,7 @@ impl ast::Expr {
                             .unwrap_or(Cap::Own);
                         let (_, pi) = infer_fun(
                             x.pars(),
+                            x.with().map(|x| x.pars()).unwrap_or_default(),
                             x.body().and_then(|x| x.expr()),
                             None,
                             Some(capability),
@@ -2808,14 +3030,34 @@ impl ast::Expr {
                             .elab_place(cxt)
                             .ok_or("Cannot assign to expression")?;
                         let ty = place.ty(cxt)?;
+                        let ty_cap = ty.own_cap(cxt);
                         let expr = x
                             .rhs()
                             .ok_or("Missing right-hand side of assignment")?
                             .check(ty, cxt, CheckReason::MustMatch(x.lhs().unwrap().span()));
                         // Don't borrow the lhs until after the rhs - this is important for e.g. `self.x = self.calc_x()`
                         place.try_access(Cap::Mut, cxt)?;
-                        // TODO the lhs should now depend on any borrows in the rhs
-                        cxt.finish_deps(x.lhs().map_or(x.span(), |x| x.span()));
+                        // the lhs should now depend on any borrows in the rhs
+                        let deps = cxt.finish_deps(x.lhs().map_or(x.span(), |x| x.span()));
+                        if let Some(borrow) = place.get_borrow(cxt) {
+                            // TODO proper handling of fields
+                            deps.add_borrow(
+                                borrow,
+                                Access {
+                                    kind: ty_cap,
+                                    point: AccessPoint::Expr,
+                                    span: x.rhs().unwrap().span(),
+                                },
+                                BorrowIndex::ROOT,
+                                cxt,
+                            );
+                        } else {
+                            // I think this should never happen?
+                            cxt.warning(
+                                x.span(),
+                                "compiler: no borrow available, dependencies might be messed up",
+                            );
+                        }
                         (
                             Expr::Assign(Box::new(place.to_expr(cxt)), Box::new(expr)),
                             Val::var(Var::Builtin(Builtin::UnitType)),
@@ -2876,7 +3118,7 @@ impl ast::Expr {
                         }
 
                         // First handle implicit arguments, then curry and apply explicits
-                        let (lhs, lhs_ty) = lhs.insert_metas(lhs_ty, x.imp(), lhs_span, cxt);
+                        let (lhs, lhs_ty) = lhs.insert_metas(lhs_ty, x.imp(), None, lhs_span, cxt);
                         lhs_span.end = x.imp().map(|x| x.span()).unwrap_or(lhs_span).end;
 
                         // Apply explicit arguments
@@ -3145,10 +3387,53 @@ impl ast::Expr {
                             "Binder '_: _' not allowed in this context",
                         )))
                     }
-                    ast::Expr::ImplPat(_) => {
+                    ast::Expr::TraitIsPat(_) => {
                         return Err(TypeError::Other(Doc::start(
-                            "'impl' not allowed in this context",
+                            "'is' not allowed in this context",
                         )))
+                    }
+                    ast::Expr::TraitAs(x) => {
+                        // LHS is always type Type
+                        let lhs = x.lhs().ok_or("missing lhs in `as`")?.check(
+                            Val::Type,
+                            cxt,
+                            CheckReason::ArgOf(x.rhs().map_or(x.span(), |x| x.span())),
+                        );
+                        // hmm question is what happens to the imp args?
+                        // i.e. if we do `X as Trait[A,B]`, the [A,B] gets handled in `infer()`, and it gets auto-existentialed
+                        // which is not super ideal...
+                        // so we kinda need to handle implicit arguments here? either that or go in and replace the existential
+                        // yeah let's try to handle them here...
+                        let (rhs, rhs_imp) = match x.rhs().ok_or("missing rhs in `as`")? {
+                            ast::Expr::App(rhs)
+                                if rhs.imp().is_some()
+                                    && rhs.exp().is_none()
+                                    && rhs.do_expr().is_none() =>
+                            {
+                                (
+                                    ast::Expr::App(ast::App::Val {
+                                        span: rhs.span(),
+                                        lhs: rhs.lhs().map(Box::new),
+                                        member: rhs.member().map(Box::new),
+                                        imp: None,
+                                        exp: None,
+                                        do_expr: None,
+                                    }),
+                                    rhs.imp(),
+                                )
+                            }
+                            rhs => (rhs, None),
+                        };
+                        let (rhs, rhs_ty) = rhs.infer(cxt, None);
+                        let (rhs, rhs_ty) = rhs.insert_metas(
+                            rhs_ty,
+                            rhs_imp,
+                            Some(lhs),
+                            x.rhs().unwrap().span(),
+                            cxt,
+                        );
+
+                        (rhs, rhs_ty)
                     }
                     ast::Expr::Ref(_) => {
                         return Err(TypeError::Other(Doc::start(

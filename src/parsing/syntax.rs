@@ -31,6 +31,8 @@ pub enum SyntaxKind {
     OwnKw,
     RefKw,
     TraitKw,
+    AsKw,
+    IsKw,
 
     // Symbols the lexer recognizes as a "binary operator"
     Colon,     // :
@@ -98,7 +100,6 @@ pub enum SyntaxKind {
     FunPars,
     PiPars,
     TypePars,
-    ImplPars,
 
     Cap,
     CapTok,
@@ -106,8 +107,9 @@ pub enum SyntaxKind {
     Assign,
     FunClass,
     AppDo,
-    ImplPat,
     ImplDef,
+    TraitIsPat,
+    TraitAs,
 
     StructInit,
     Var,

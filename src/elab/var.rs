@@ -85,6 +85,16 @@ impl std::ops::Add<usize> for Size {
         Size(self.0 + rhs as u32)
     }
 }
+impl std::ops::Sub<usize> for Size {
+    type Output = Self;
+
+    fn sub(self, rhs: usize) -> Self::Output {
+        if rhs > self.0 as usize {
+            panic!("size {} - {}", self.0, rhs)
+        }
+        Size(self.0 - rhs as u32)
+    }
+}
 impl std::ops::AddAssign<usize> for Size {
     fn add_assign(&mut self, rhs: usize) {
         *self = *self + rhs;

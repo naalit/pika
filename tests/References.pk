@@ -181,3 +181,16 @@ type imm Data struct
 fun dq(x: Data): Data = x
 # fun df(x: mut Data) = do
 #     x.q = 3
+
+type Q struct
+    data: DoNotCopy
+fun sneaky(x: ref DoNotCopy, y: mut Q) = do
+    y.data = x
+fun problem(x: mut DoNotCopy, y: DoNotCopy) = do
+    mut q = Q struct
+        data: y
+    mutate(x)
+    sneaky(x, q)
+    #mutate(x)
+    borrow(q.data)
+    ()

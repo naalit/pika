@@ -322,13 +322,9 @@ impl<'a> Parser<'a> {
                 self.push(Tok::ImplDef);
                 self.advance();
 
-                if self.cur() == Tok::SOpen {
-                    self.params(Tok::ImplPars, false);
-                }
-
-                if matches!((self.cur(), self.peek(1)), (Tok::Name, Tok::Colon)) {
+                if matches!((self.cur(), self.peek(1)), (Tok::Name, Tok::Equals)) {
                     self.var();
-                    self.expect(Tok::Colon);
+                    self.expect(Tok::Equals);
                 }
 
                 self.push(Tok::Body);
@@ -351,10 +347,12 @@ impl<'a> Parser<'a> {
 
                 if !matches!(
                     self.cur(),
-                    Tok::Equals | Tok::OfKw | Tok::StructKw | Tok::Newline
+                    Tok::Equals | Tok::OfKw | Tok::StructKw | Tok::Newline | Tok::WithKw
                 ) {
                     self.params(Tok::TypePars, false);
                 }
+
+                self.maybe_with();
 
                 if self.maybe(Tok::StructKw) {
                     // Struct form type definition
@@ -401,6 +399,8 @@ impl<'a> Parser<'a> {
                                 self.expr(());
                                 self.pop();
                             }
+
+                            self.maybe_with();
 
                             self.pop();
 
@@ -516,10 +516,11 @@ impl<'a> Parser<'a> {
         if self.maybe(Tok::WithKw) {
             self.push(Tok::WithClause);
 
-            self.expr(Prec::Bitwise);
+            // TODO allow binders in `with`
+            self.expr(Prec::Binder);
 
             while self.maybe(Tok::Comma) {
-                self.expr(Prec::Bitwise);
+                self.expr(Prec::Binder);
             }
 
             self.pop();
@@ -574,7 +575,7 @@ impl<'a> Parser<'a> {
     fn params(&mut self, ty: Tok, allow_bare_expl: bool) {
         self.push(ty);
 
-        self.params_inner(ty != Tok::ImplPars, allow_bare_expl);
+        self.params_inner(true, allow_bare_expl);
 
         self.pop();
     }
@@ -644,7 +645,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses an expression where all operators have at least the given precedence
-    /// If `lhs` is `Some`, will only parse the operator and right hand side and add it to the provides lhs
+    /// If `lhs` is `Some`, will only parse the operator and right hand side and add it to the provided lhs
     fn expr(&mut self, params: impl Into<ExprParams>) {
         let ExprParams {
             min_prec,
@@ -662,12 +663,6 @@ impl<'a> Parser<'a> {
                         self.advance();
                         self.expr(Prec::Indented);
                         self.expect(Tok::Dedent);
-                        self.pop();
-                    }
-                    Tok::ImplKw => {
-                        self.push(Tok::ImplPat);
-                        self.advance();
-                        self.expr(Prec::App);
                         self.pop();
                     }
                     Tok::MutKw | Tok::OwnKw | Tok::ImmKw => {
@@ -737,6 +732,8 @@ impl<'a> Parser<'a> {
                             self.advance();
 
                             self.params(Tok::FunPars, true);
+
+                            self.maybe_with();
 
                             self.expect(Tok::WideArrow);
 
@@ -941,6 +938,25 @@ impl<'a> Parser<'a> {
 
                     self.pop();
                 }
+                // same with `as` and `is`
+                Tok::AsKw if Prec::As > min_prec => {
+                    self.push_at(lhs, Tok::TraitAs);
+
+                    self.advance();
+                    self.expr(Prec::As);
+
+                    self.pop();
+                }
+                Tok::IsKw if Prec::As > min_prec => {
+                    self.push_at(lhs, Tok::TraitIsPat);
+
+                    self.advance();
+                    self.push(Tok::Ty);
+                    self.expr(Prec::As);
+                    self.pop();
+
+                    self.pop();
+                }
                 Tok::StructKw => {
                     self.push_at(lhs, Tok::StructInit);
 
@@ -995,6 +1011,25 @@ impl<'a> Parser<'a> {
                     self.pop();
 
                     self.advance();
+
+                    self.push(Tok::Body);
+                    self.expr(());
+                    self.pop();
+
+                    self.pop();
+                }
+                // If we see a `with` here, it needs to be a lambda - for pi it's after the arrow
+                Tok::WithKw if allow_lambda && Prec::Pat > min_prec => {
+                    self.push_at(lhs, Tok::Lam);
+
+                    self.push_at(lhs, Tok::FunPars);
+                    self.push_at(lhs, Tok::ExpPar);
+                    self.pop();
+                    self.pop();
+
+                    self.maybe_with();
+
+                    self.expect(Tok::WideArrow);
 
                     self.push(Tok::Body);
                     self.expr(());
@@ -1225,6 +1260,8 @@ enum Prec {
     Logic,
     /// ->
     Arrow,
+    /// as, is
+    As,
     /// +, -
     AddSub,
     /// *, /, %

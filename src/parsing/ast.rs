@@ -201,13 +201,12 @@ make_nodes! {
     FunPars = imp: ImpPar, exp: ExpPar;
     PiPars = imp: ImpPar, exp: ExpPar;
     TypePars = imp: ImpPar, exp: ExpPar;
-    ImplPars = imp: ImpPar;
 
     ImpArg = expr: Expr;
     ImpArgs = args: [ImpArg];
 
-    WithClause = effs: [Expr];
-    Lam = pars: FunPars, body: Body;
+    WithClause = pars: [Expr];
+    Lam = pars: FunPars, with: WithClause, body: Body;
     Pi = pars: PiPars, class: FunClass, body: Body, with: WithClause;
     CapTok = mutkw: (!MutKw), immkw: (!ImmKw), ownkw: (!OwnKw);
     FunClass = cap: CapTok;
@@ -240,7 +239,9 @@ make_nodes! {
     Cap = captok: CapTok, expr: Expr;
     Ref = expr: Expr;
     Assign = lhs: Expr, rhs: (1 Expr);
-    ImplPat = expr: Expr;
+
+    TraitAs = lhs: Expr, rhs: (1 Expr);
+    TraitIsPat = lhs: Var, rhs: Ty;
 
     GroupedExpr = expr: Expr;
 
@@ -265,7 +266,8 @@ make_nodes! {
         Cap,
         Ref,
         Assign,
-        ImplPat
+        TraitAs,
+        TraitIsPat
         ;
 
     // synonyms for Expr to use in certain contexts
@@ -278,9 +280,9 @@ make_nodes! {
     // Definitions
     LetDef = pat: Pat, body: Body;
     FunDef = name: Var, pars: FunPars, ret_ty: Ty, with: WithClause, body: Body;
-    ConsDef = name: Var, pars: TypePars, ret_ty: Ty;
-    TypeDef = cap: CapTok, name: Var, pars: TypePars, body: TypeDefBody, block: BlockDef;
-    ImplDef = pars: ImplPars, name: Var, body: Body;
+    ConsDef = name: Var, pars: TypePars, ret_ty: Ty, with: WithClause;
+    TypeDef = cap: CapTok, name: Var, pars: TypePars, with: WithClause, body: TypeDefBody, block: BlockDef;
+    ImplDef = name: Var, body: Body;
     enum TypeDefBody = TypeDefStruct, TypeDefCtors;
     TypeDefCtors = cons: [ConsDef];
     TypeDefStruct = fields: StructFields;
@@ -405,11 +407,6 @@ impl Pretty for TypePars {
         self.imp().pretty().chain(self.exp().pretty())
     }
 }
-impl Pretty for ImplPars {
-    fn pretty(&self) -> Doc {
-        self.imp().pretty()
-    }
-}
 
 impl Pretty for ConsDef {
     fn pretty(&self) -> Doc {
@@ -491,10 +488,9 @@ impl Pretty for Def {
                 }),
             Def::ImplDef(x) => Doc::none()
                 .add("impl", Doc::style_keyword())
-                .chain(x.pars().pretty())
                 .space()
                 .chain(x.name().pretty())
-                .add(": ", ())
+                .add(" = ", ())
                 .chain(x.body().pretty()),
         }
     }
@@ -665,14 +661,14 @@ impl Pretty for Expr {
                 .chain(x.a().pretty())
                 .space()
                 .chain(x.b().pretty()),
-            Expr::ImplPat(r) => Doc::start("impl ")
-                .style(Doc::style_keyword())
-                .chain(r.expr().pretty()),
             Expr::Cap(r) => Doc::start("<cap> ").chain(r.expr().pretty()),
             Expr::Ref(x) => Doc::start("ref ")
                 .style(Doc::style_keyword())
                 .chain(x.expr().pretty()),
             Expr::Assign(x) => x.lhs().pretty().add(" = ", ()).chain(x.rhs().pretty()),
+            Expr::TraitAs(x) => x.lhs().pretty().add(" as ", Doc::style_keyword()).chain(x.rhs().pretty()),
+            Expr::TraitIsPat(x) => x.lhs().pretty().add(" is ", Doc::style_keyword()).chain(x.rhs().pretty()),
+            
         };
         Doc::start('{').chain(p).add('}', ())
     }

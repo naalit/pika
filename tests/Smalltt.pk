@@ -96,12 +96,12 @@ let n200M  = mul (n2)    (n100M)
 # --------------------------------------------------------------------------------
 let List  : Type imm -> Type = a => (l : Type) -> (own a imm -> own l -> l) -> own l -> l
 let lnil  : [a:_] imm -> List(a) = l => c => n => n
-let lcons : [a:_] imm -> own a -> own List(a) -> List(a) = a => as => l => c => n => c (a) (as (l) (c) (n))
+let lcons : [a:_] imm -> own a -> own List(a) -> List(a) = a => a_s => l => c => n => c (a) (a_s (l) (c) (n))
 
 let list1 = lcons (true) (lcons (false) (lcons (false) (lnil)))
 
 let map : [a:_, b:_] imm -> (a imm -> b) imm -> own List (a) imm -> List (b) =
-    f => as => l => c => as (l) (a => c (f (a)))
+    f => a_s => l => c => a_s (l) (a => c (f (a)))
 
 # Church vectors
 # --------------------------------------------------------------------------------
@@ -112,7 +112,7 @@ let vnil : [a:_] imm -> Vec (a) (zero) =
     V => n => c => n
 
 let vcons : [a:_, n:_] imm -> own a -> own Vec (a) (n) -> Vec (a) (suc (n)) =
-    a => as => V => n => c => c (a) (as (V) (n) (c))
+    a => a_s => V => n => c => c (a) (a_s (V) (n) (c))
 
 let vec1 = vcons (true) (vcons (false) (vcons (true) (vnil)))
 

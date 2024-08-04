@@ -182,6 +182,8 @@ impl<'i> Lexer<'i> {
             "own" => Tok::OwnKw,
             "ref" => Tok::RefKw,
             "trait" => Tok::TraitKw,
+            "as" => Tok::AsKw,
+            "is" => Tok::IsKw,
             _ => Tok::Name,
         };
         self.tok_in_place(tok)
@@ -474,6 +476,8 @@ impl<'i> fmt::Display for Tok {
             Tok::OwnKw => "'own'",
             Tok::RefKw => "'ref'",
             Tok::TraitKw => "'trait'",
+            Tok::AsKw => "'as'",
+            Tok::IsKw => "'is'",
             Tok::Colon => "':'",
             Tok::Equals => "'='",
             Tok::Arrow => "'->'",

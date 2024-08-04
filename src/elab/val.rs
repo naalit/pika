@@ -644,6 +644,38 @@ impl Val {
         }
     }
 
+    pub fn is_trait(&self, cxt: &Cxt) -> bool {
+        match self {
+            Val::Neutral(n) => match n.head() {
+                Head::Var(Var::Def(_, d)) => cxt
+                    .db
+                    .def_type(d)
+                    .and_then(|x| x.result)
+                    .map_or(false, |x| x.is_trait),
+                _ => false,
+            },
+            Val::Cap(_, x) => x.is_trait(cxt),
+            _ => false,
+        }
+    }
+
+    pub fn as_tuple(&self) -> impl Iterator<Item = &Val> {
+        struct L<'a>(Option<&'a Val>);
+        impl<'a> Iterator for L<'a> {
+            type Item = &'a Val;
+            fn next(&mut self) -> Option<Self::Item> {
+                match self.0.take()?.uncap_ty() {
+                    Val::Pair(a, b, _) => {
+                        self.0 = Some(b);
+                        Some(a)
+                    }
+                    x => Some(x),
+                }
+            }
+        }
+        L(Some(self))
+    }
+
     pub fn check_scope(&self, size: Size) -> Result<(), Name> {
         match self {
             Val::Type => Ok(()),

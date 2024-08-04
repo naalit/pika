@@ -426,6 +426,7 @@ pub enum AccessPoint {
     Expr,
     ClosureEnv(RelSpan, Option<Name>),
     EscapingParam(SName),
+    EscapingParamVia(SName),
     Var(Name),
     // TODO make this not Copy so we can display nested fields
     Field(Name, bool, Name),
@@ -448,11 +449,13 @@ impl AccessPoint {
                 "captured variable "
             })
             .chain(name.pretty(db).style(col)),
-            AccessPoint::EscapingParam((name, _)) => Doc::start(if initial { "N" } else { "n" })
-                .add("on-", ())
-                .add("ref", Doc::style_keyword())
-                .add(" parameter ", ())
-                .chain(name.pretty(db).style(col)),
+            AccessPoint::EscapingParam((name, _)) | AccessPoint::EscapingParamVia((name, _)) => {
+                Doc::start(if initial { "N" } else { "n" })
+                    .add("on-", ())
+                    .add("ref", Doc::style_keyword())
+                    .add(" parameter ", ())
+                    .chain(name.pretty(db).style(col))
+            }
             AccessPoint::ClosureEnv(_, None) => {
                 Doc::start(if initial { "T" } else { "t" }).add("his closure's environment", ())
             }
@@ -526,8 +529,36 @@ impl AccessError {
                 ),
                 false,
             ),
+            _ if matches!(
+                self.dep_chain_end,
+                Some(Access {
+                    point: AccessPoint::EscapingParamVia(_),
+                    ..
+                })
+            ) =>
+            {
+                let via_param = match self.dep_chain_end {
+                    Some(Access {
+                        point: AccessPoint::EscapingParamVia(p),
+                        ..
+                    }) => p,
+                    _ => unreachable!(),
+                };
+                (
+                    Doc::start("Cannot let externally-mutable ")
+                        .chain(name0(false, false))
+                        .add(" escape via mutable parameter ", ())
+                        .chain(via_param.pretty(db).style(Doc::COLOR4)),
+                    name0(true, false)
+                        .add(" is mutable and must be annotated with ", ())
+                        .add("ref", Doc::style_keyword())
+                        .add(" in order to escape the function", ()),
+                    false,
+                )
+            }
             _ if matches!(self.dep_access.point, AccessPoint::EscapingParam(_)) => (
-                Doc::start("Cannot return value that borrows mutable ").chain(name0(false, false)),
+                Doc::start("Cannot return value that borrows externally-mutable ")
+                    .chain(name0(false, false)),
                 name0(true, false)
                     .add(" is mutable and must be annotated with ", ())
                     .add("ref", Doc::style_keyword())
@@ -1189,7 +1220,7 @@ impl Cxt<'_> {
                         // bc if unification fails we could get random metas lying around that will go unsolved
                         let cp = self.mcxt.checkpoint();
                         let (lval, lty) = Expr::var(Var::Local((*n, mspan), l.idx(self.size())))
-                            .insert_metas(lty.clone(), None, mspan, self);
+                            .insert_metas(lty.clone(), None, None, mspan, self);
                         match lty.uncap_ty() {
                             Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d ==  trait_def) => {
                                 match self.mcxt.unify(
@@ -1241,7 +1272,7 @@ impl Cxt<'_> {
                             let ity = self.db.def_type(idef).unwrap().result.unwrap().ty;
                             let (ival, ity) =
                                 Expr::var(Var::Def((self.db.name("_".into()), mspan), idef))
-                                    .insert_metas(ity, None, mspan, self);
+                                    .insert_metas(ity, None, None, mspan, self);
                             match ity.uncap_ty() {
                                 Val::Neutral(n2) if matches!(n2.head(), Head::Var(Var::Def(_, d)) if d == trait_def) => {
                                     match self.mcxt.unify(
