@@ -1969,65 +1969,6 @@ pub(super) fn resolve_member_method(
                                                 ));
                                             }
                                         }
-                                        Some(TypeDefKind::Struct(fields)) if edef.is_trait => {
-                                            if let Some((idx, (_, _))) = fields
-                                                .iter()
-                                                .enumerate()
-                                                .find(|(_, ((n, _), _))| *n == name.0)
-                                            {
-                                                // Okay so here, lhs is a trait implementation (has type e.g. Iterator or A as Iterator)
-                                                // if it was an `as` expression, then we've already inserted the metas, since the `as` argument is the last one
-                                                // and otherwise... ig this is an existential? where is that handled? should that not even get here maybe?
-                                                // okaaaay so that should be interpreted as `BuiltinExistential as T` => `T[BuiltinExistential]`
-                                                // TODO: so maybe this code should handle both separately? (since there's an extra argument with a real `as`...)
-                                                // theoretically, this code is for the existential case, i.e. `Iterator.next(it)`
-                                                // and this is coming from `infer` for `App`... so it should have already inserted metas?
-                                                // okay no it does not it just calls `elab_unborrowed()`
-                                                // so the `insert_metas` here makes sense
-                                                // TODO check for non-existential and handle that
-                                                // we make a meta for the `as` argument, since otherwise the method would only work on existentials
-                                                // TODO figure out what the correct way to do this is
-                                                let as_meta = cxt.new_meta(
-                                                    MetaBounds::new(Val::Type),
-                                                    span,
-                                                    MetaSource::ArgOf(
-                                                        edef.name
-                                                            .pretty(cxt.db)
-                                                            .add('.', ())
-                                                            .chain(name.pretty(cxt.db)),
-                                                        None,
-                                                    ),
-                                                );
-                                                let (lhs, _) = lhs.insert_metas(
-                                                    lhs_ty,
-                                                    None,
-                                                    Some(as_meta),
-                                                    span,
-                                                    cxt,
-                                                );
-                                                let lhs_val = lhs.eval(&mut cxt.env());
-                                                let meta = cxt.new_meta(
-                                                    MetaBounds::new(lhs_val.clone())
-                                                        .with_impl(true),
-                                                    span,
-                                                    MetaSource::ArgOf(
-                                                        edef.name
-                                                            .pretty(cxt.db)
-                                                            .add('.', ())
-                                                            .chain(name.pretty(cxt.db)),
-                                                        None,
-                                                    ),
-                                                );
-                                                return Ok(PlaceOrExpr::Place(Place::Member(
-                                                    Box::new(PlaceOrExpr::Expr(
-                                                        meta, lhs_val, None, span,
-                                                    )),
-                                                    def,
-                                                    idx as u64,
-                                                    name,
-                                                )));
-                                            }
-                                        }
                                         _ => (),
                                     }
                                     if let Some(split) =
@@ -2064,60 +2005,7 @@ pub(super) fn resolve_member_method(
             }
         }
 
-        // Look for trait methods in scope
-        let mut trait_results = Vec::new();
-        for trait_def in cxt.all_traits() {
-            let edef = cxt.db.def_type(trait_def).unwrap().result.unwrap();
-
-            match &edef.type_def {
-                Some(TypeDefKind::Struct(fields)) => {
-                    if let Some((idx, (_, _))) = fields
-                        .iter()
-                        .enumerate()
-                        .find(|(_, ((n, _), _))| *n == name.0)
-                    {
-                        trait_results.push((edef.name, (trait_def, idx)));
-                    }
-                }
-                _ => (),
-            }
-        }
-        match trait_results.len() {
-            0 => (),
-            1 => {
-                let (tname, (def, idx)) = trait_results.pop().unwrap();
-                let tr = Expr::var(Var::Def(tname, def));
-                let tr_ty = tr.ty(cxt);
-                // need to give it as `as` arg or it will default to existential
-                let (tr, _) =
-                    tr.insert_metas(tr_ty, None, Some(lhs_ty.quote(cxt.size(), None)), span, cxt);
-                let tr = tr.eval(&mut cxt.env());
-                let meta = cxt.new_meta(
-                    MetaBounds::new(tr.clone()).with_impl(true),
-                    span,
-                    MetaSource::ArgOf(
-                        tname.pretty(cxt.db).add('.', ()).chain(name.pretty(cxt.db)),
-                        None,
-                    ),
-                );
-                let method = Expr::Elim(
-                    Box::new(meta),
-                    Box::new(Elim::Member(def, idx as u64, name)),
-                );
-                return Err((lhs, method));
-            }
-            _ => {
-                error = Some(
-                    Doc::start("Ambiguous trait method call '")
-                        .chain(name.pretty(cxt.db))
-                        .add("()': candidate traits include '", ())
-                        .chain(trait_results[0].0.pretty(cxt.db))
-                        .add("' and '", ())
-                        .chain(trait_results[1].0.pretty(cxt.db))
-                        .add("'", ()),
-                );
-            }
-        }
+        // TODO trait methods
     }
 
     cxt.error(
@@ -3183,8 +3071,7 @@ impl ast::Expr {
                             (lhs, lhs_ty, None)
                         };
 
-                        // Now that all arguments have been applied, resolve any implicits lying around
-                        cxt.resolve_impls(cxt.size());
+                        // TODO impls
 
                         if let Some(extra_borrow) = extra_borrow {
                             cxt.check_deps(

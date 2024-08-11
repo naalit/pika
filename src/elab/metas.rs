@@ -345,9 +345,6 @@ impl PartialRename {
 }
 
 #[derive(Clone)]
-pub struct MetaCheckpoint(usize);
-
-#[derive(Clone)]
 pub struct MetaCxt<'a> {
     pub db: &'a dyn Elaborator,
     metas: Vec<MetaEntry>,
@@ -358,14 +355,6 @@ impl MetaCxt<'_> {
             db,
             metas: Vec::new(),
         }
-    }
-
-    pub fn checkpoint(&self) -> MetaCheckpoint {
-        MetaCheckpoint(self.metas.len())
-    }
-
-    pub fn reset_to(&mut self, MetaCheckpoint(len): MetaCheckpoint) {
-        self.metas.truncate(len);
     }
 
     /// Creates a new meta which can't use any free variables; mostly for e.g. int types
