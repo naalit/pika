@@ -794,10 +794,11 @@ impl VarEntry {
                     let entry = &mut l.names[*var];
                     let lvl = entry.var.as_var().unwrap().as_local();
                     let access = self.access(field, Cap::Own);
-                    let borrow = entry.borrow.unwrap();
-                    borrow.invalidate_self(&index, access, Rc::new(ty), cxt);
-                    if let Some(lvl) = lvl {
-                        cxt.record_access(lvl, access, borrow, index);
+                    if let Some(borrow) = entry.borrow { // If the borrow is None, this isn't a local
+                        borrow.invalidate_self(&index, access, Rc::new(ty), cxt);
+                        if let Some(lvl) = lvl {
+                            cxt.record_access(lvl, access, borrow, index);
+                        }
                     }
                     Ok(())
                 }

@@ -185,7 +185,7 @@ impl IntType {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, Hash)]
 pub enum Literal {
     /// Stores the u64 representation of the int and its type
     /// If the type is signed, then the actual value is obtained by a cast to i64
@@ -196,6 +196,24 @@ pub enum Literal {
     /// Stores a u32 representation of the bits of the f32
     F32(u32),
     String(Name),
+}
+
+impl PartialEq for Literal {
+    fn eq(&self, other: &Self) -> bool {
+        fn signed(x: &Result<IntType, (bool, Meta)>) -> bool {
+            match x {
+                Ok(i) => i.signed(),
+                Err((i, _)) => *i,
+            }
+        }
+        match (self, other) {
+            (Self::Int(l0, l1), Self::Int(r0, r1)) => l0 == r0 && signed(l1) == signed(r1),
+            (Self::F64(l0), Self::F64(r0)) => l0 == r0,
+            (Self::F32(l0), Self::F32(r0)) => l0 == r0,
+            (Self::String(l0), Self::String(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
 }
 impl Literal {
     pub fn pretty<T: crate::parsing::Parser + ?Sized>(&self, db: &T) -> Doc {

@@ -232,7 +232,7 @@ impl MetaCxt<'_> {
             kind,
             inferred: a.quote(size, Some(self)),
             expected: b.quote(size, Some(self)),
-            reason: reason,
+            reason,
         })
     }
 
@@ -392,6 +392,7 @@ impl UnifyCxt<'_, '_> {
                 let b = b.open(size);
                 self.unify(a, b, new_size, state)
             }
+            (Val::Lit(l1), Val::Lit(l2)) if l1 == l2 => Ok(()),
             (Val::Pair(a1, a2, _), Val::Pair(b1, b2, _)) => {
                 self.unify(*a1, *b1, size, state)?;
                 self.unify(*a2, *b2, size, state)
@@ -407,21 +408,21 @@ impl UnifyCxt<'_, '_> {
             }
             // For immutable types, `imm T = mut T = own T`
             (Val::Cap(_, a), b) | (b, Val::Cap(_, a))
-                if a.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Imm
+                if a.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true) == Cap::Imm
                     // Allow solving e.g. `imm ?2 = Type`
                     || (state.can_solve_metas()
                         && matches!(&*a, Val::Neutral(n) if self.can_solve(n.head()))
-                        && b.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true)
+                        && b.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true)
                             == Cap::Imm) =>
             {
                 self.unify(*a, b, size, state)
             }
             // For specific `mut` types (currently only `mut` functions), `mut T = own T`
             (Val::Cap(Cap::Mut, a), b) | (b, Val::Cap(Cap::Mut, a))
-                if a.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true) == Cap::Mut
+                if a.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true) == Cap::Mut
                     || (state.can_solve_metas()
                         && matches!(&*a, Val::Neutral(n) if self.can_solve(n.head()))
-                        && b.own_cap_(&self.meta_cxt, &self.env.copy_at(size), true)
+                        && b.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true)
                             == Cap::Mut) =>
             {
                 self.unify(*a, b, size, state)

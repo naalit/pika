@@ -1193,7 +1193,7 @@ pub(super) fn elab_case(
         bodies: Vec::new(),
     };
     let outer_size = cxt.ecxt.size();
-    let svar = cxt.pvar(sty, sreason);
+    let svar = cxt.pvar(sty.inlined(&cxt.ecxt), sreason);
     let rows = branches
         .into_iter()
         .map(|(pat, span, body)| input::Row::new(svar, pat, span, body, &mut cxt))
@@ -1507,6 +1507,20 @@ impl Dec<Val> {
             Dec::Failure => None,
             // TODO evaluate guards?
             Dec::Guard(_, _, _) => None,
+            Dec::Switch(v, branches, fallback) => {
+                for i in branches {
+                    match (env.get(v), i.cons) {
+                        (Some(Val::Lit(l1)), PCons::Lit(l2)) if *l1 == l2 => if let Some(x) = i.then.try_eval(env, params) {
+                            return Some(x)
+                        },
+                        // non-equal literals can never match!
+                        // TODO sometimes this triggers anyway though for e.g. 1i32 compared with 1 : unsigned meta
+                        (Some(Val::Lit(_)), PCons::Lit(_)) => (),
+                        _ => return None,
+                    }
+                }
+                fallback.as_ref()?.try_eval(env, params)
+            }
             // TODO constructors
             Dec::Switch(_, _, _) => None,
         }

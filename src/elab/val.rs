@@ -51,7 +51,7 @@ impl Neutral {
         (self.head, self.spine)
     }
 
-    pub fn resolve(self, env: &Env, mcxt: &MetaCxt) -> Result<Val, Self> {
+    pub fn resolve(mut self, env: &Env, mcxt: &MetaCxt) -> Result<Val, Self> {
         let guard = self.unfolded.read().unwrap();
         if let Some(v) = &*guard {
             Ok(v.clone())
@@ -64,6 +64,31 @@ impl Neutral {
                     None => return Err(self),
                 },
                 // TODO resolve applicable builtins
+                Head::Var(Var::Builtin(Builtin::ArithOp(op))) if self.spine.len() == 1 => match self.spine.last().unwrap() {
+                    Elim::App(_, x) => match { let mut x = x.clone(); x.inline_head(&mut env.clone(), mcxt); x } {
+                        Val::Pair(a, b, _) => match (&*a, &*b) {
+                            (&Val::Lit(Literal::Int(i, ti)), &Val::Lit(Literal::Int(j, _))) => {
+                                self.spine.pop().unwrap(); // get rid of the argument so we dont apply it twice
+                                (Val::Lit(Literal::Int(match op {
+                                    ArithOp::Add => i + j,
+                                    ArithOp::Sub => i - j,
+                                    ArithOp::Mul => i * j,
+                                    _ => return Err(self),
+                                    // ArithOp::Div => todo!(), // uhh division depends on whether it's signed right
+                                    // ArithOp::Mod => todo!(),
+                                    // ArithOp::Ior => todo!(),
+                                    // ArithOp::Xor => todo!(),
+                                    // ArithOp::And => todo!(),
+                                    // ArithOp::Shl => todo!(),
+                                    // ArithOp::Shr => todo!(),
+                                }, ti)), false)
+                            },
+                            _ => return Err(self)
+                        },
+                        _ => return Err(self)
+                    },
+                    _ => return Err(self)
+                }
                 Head::Var(Var::Builtin(_)) => return Err(self),
                 Head::Var(Var::Cons(_, _)) => return Err(self),
                 Head::Var(Var::Meta(m)) => match mcxt.lookup(m) {
@@ -561,7 +586,12 @@ impl Val {
                     res
                 }
             }
-            Val::Cap(m, x) => Expr::Cap(m, Box::new(x.quote(size, inline_metas))),
+            Val::Cap(m, x) => {
+                if m >= x.own_cap_(inline_metas, &Env::new(size), true) {
+                    return x.quote(size, inline_metas);
+                }
+                Expr::Cap(m, Box::new(x.quote(size, inline_metas)))
+            }
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
             Val::Lit(l) => Expr::Lit(l),
             Val::Pair(a, b, t) => Expr::Pair(
@@ -607,24 +637,24 @@ impl Val {
     }
 
     pub fn own_cap(&self, cxt: &Cxt) -> Cap {
-        self.own_cap_(&cxt.mcxt, &cxt.env(), true)
+        self.own_cap_(Some(&cxt.mcxt), &cxt.env(), true)
     }
 
-    pub fn own_cap_(&self, mcxt: &MetaCxt, env: &Env, inline: bool) -> Cap {
+    pub fn own_cap_<'a>(&self, mcxt: impl Into<Option<&'a MetaCxt<'a>>>, env: &Env, inline: bool) -> Cap {
+        let mcxt = mcxt.into();
         match self {
             Val::Type => Cap::Imm,
             Val::Neutral(n) => match n.head() {
                 // Currently all builtin types are immutable
                 Head::Var(Var::Builtin(_)) => Cap::Imm,
-                _ if inline => {
+                _ if inline && mcxt.is_some() => {
                     let mut s = self.clone();
-                    s.inline_head(&mut env.clone(), &mcxt);
+                    s.inline_head(&mut env.clone(), mcxt.unwrap());
                     s.own_cap_(mcxt, env, false)
                 }
                 Head::Var(Var::Meta(_)) => Cap::Own,
                 Head::Var(Var::Def(_, d)) => mcxt
-                    .db
-                    .def_type(d)
+                    .and_then(|m| m.db.def_type(d))
                     .and_then(|x| x.result)
                     .and_then(|x| x.type_cap)
                     .unwrap_or(Cap::Own),

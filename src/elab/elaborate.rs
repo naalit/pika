@@ -929,7 +929,7 @@ fn infer_fun(
         .zip(implicit.iter().chain(&explicit))
     {
         if let Some(i) = i {
-            if p.ty.clone().eval(&mut env).own_cap(cxt) == Cap::Mut {
+            if p.ty.clone().eval(&mut env).own_cap_(&cxt.mcxt, &env, true) == Cap::Mut {
                 cxt.add_dep(
                     i,
                     Access {
@@ -2535,7 +2535,7 @@ fn elab_args(
         args.push(val);
     }
     let mut arg = None;
-    for val in args {
+    for val in args.into_iter().rev() {
         arg = match arg {
             Some(arg) => Some(Expr::Pair(
                 Box::new(val),
