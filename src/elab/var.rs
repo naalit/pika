@@ -163,6 +163,7 @@ impl<L: PartialEq> PartialEq for Var<L> {
             (Self::Meta(l0), Self::Meta(r0)) => l0 == r0,
             (Self::Builtin(l0), Self::Builtin(r0)) => l0 == r0,
             (Self::Def(_, l0), Self::Def(_, r0)) => l0 == r0,
+            (Self::Cons(_, c1), Self::Cons(_, c2)) => c1 == c2,
             _ => false,
         }
     }

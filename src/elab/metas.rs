@@ -65,7 +65,7 @@ impl MetaBounds {
                 .into_iter()
                 .skip(spine_len)
                 .fold(val.clone(), |head, elim| {
-                    head.app(elim, &mut Env::new(size))
+                    head.app(elim, &mut Env::new(size), &*mcxt)
                 });
             match mcxt.unify(
                 val.clone(),

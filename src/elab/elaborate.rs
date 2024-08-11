@@ -446,8 +446,8 @@ impl ast::Def {
                                     clos.params.iter().chain(&clos2.params).cloned().collect(),
                                     // TODO these envs are slightly wrong
                                     default_rty
-                                        .app(Elim::App(Impl, arg), &mut cxt.env())
-                                        .app(Elim::App(Expl, arg2), &mut env),
+                                        .app(Elim::App(Impl, arg), &mut cxt.env(), &cxt.mcxt)
+                                        .app(Elim::App(Expl, arg2), &mut env, &cxt.mcxt),
                                 )
                             }
                             _ => (
@@ -455,6 +455,7 @@ impl ast::Def {
                                 default_rty.app(
                                     Elim::App(clos.class.icit().unwrap(), arg),
                                     &mut cxt.env(),
+                                    &cxt.mcxt,
                                 ),
                             ),
                         }
@@ -1860,7 +1861,7 @@ pub(super) fn member_type(lhs: &Val, def: Def, idx: u64, cxt: &mut Cxt) -> Val {
             }
             let val = lhs
                 .clone()
-                .app(Elim::Member(def, i as u64, *fname), &mut env);
+                .app(Elim::Member(def, i as u64, *fname), &mut env, &cxt.mcxt);
             env.push(Some(Ok(val)));
         }
         Val::Error

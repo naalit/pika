@@ -64,30 +64,42 @@ impl Neutral {
                     None => return Err(self),
                 },
                 // TODO resolve applicable builtins
-                Head::Var(Var::Builtin(Builtin::ArithOp(op))) if self.spine.len() == 1 => match self.spine.last().unwrap() {
-                    Elim::App(_, x) => match { let mut x = x.clone(); x.inline_head(&mut env.clone(), mcxt); x } {
-                        Val::Pair(a, b, _) => match (&*a, &*b) {
-                            (&Val::Lit(Literal::Int(i, ti)), &Val::Lit(Literal::Int(j, _))) => {
-                                self.spine.pop().unwrap(); // get rid of the argument so we dont apply it twice
-                                (Val::Lit(Literal::Int(match op {
-                                    ArithOp::Add => i + j,
-                                    ArithOp::Sub => i - j,
-                                    ArithOp::Mul => i * j,
-                                    _ => return Err(self),
-                                    // ArithOp::Div => todo!(), // uhh division depends on whether it's signed right
-                                    // ArithOp::Mod => todo!(),
-                                    // ArithOp::Ior => todo!(),
-                                    // ArithOp::Xor => todo!(),
-                                    // ArithOp::And => todo!(),
-                                    // ArithOp::Shl => todo!(),
-                                    // ArithOp::Shr => todo!(),
-                                }, ti)), false)
+                Head::Var(Var::Builtin(Builtin::ArithOp(op))) if self.spine.len() == 1 => {
+                    match self.spine.last().unwrap() {
+                        Elim::App(_, x) => match {
+                            let mut x = x.clone();
+                            x.inline_head(&mut env.clone(), mcxt);
+                            x
+                        } {
+                            Val::Pair(a, b, _) => match (&*a, &*b) {
+                                (&Val::Lit(Literal::Int(i, ti)), &Val::Lit(Literal::Int(j, _))) => {
+                                    self.spine.pop().unwrap(); // get rid of the argument so we dont apply it twice
+                                    (
+                                        Val::Lit(Literal::Int(
+                                            match op {
+                                                ArithOp::Add => i + j,
+                                                ArithOp::Sub => i - j,
+                                                ArithOp::Mul => i * j,
+                                                _ => return Err(self),
+                                                // ArithOp::Div => todo!(), // uhh division depends on whether it's signed right
+                                                // ArithOp::Mod => todo!(),
+                                                // ArithOp::Ior => todo!(),
+                                                // ArithOp::Xor => todo!(),
+                                                // ArithOp::And => todo!(),
+                                                // ArithOp::Shl => todo!(),
+                                                // ArithOp::Shr => todo!(),
+                                            },
+                                            ti,
+                                        )),
+                                        false,
+                                    )
+                                }
+                                _ => return Err(self),
                             },
-                            _ => return Err(self)
+                            _ => return Err(self),
                         },
-                        _ => return Err(self)
-                    },
-                    _ => return Err(self)
+                        _ => return Err(self),
+                    }
                 }
                 Head::Var(Var::Builtin(_)) => return Err(self),
                 Head::Var(Var::Cons(_, _)) => return Err(self),
@@ -111,7 +123,7 @@ impl Neutral {
             let mut val = self
                 .spine
                 .into_iter()
-                .fold(head, |head, elim| head.app(elim, &mut env));
+                .fold(head, |head, elim| head.app(elim, &mut env, mcxt));
             val.inline_head(&mut env, mcxt);
             if cache {
                 let mut guard = self.unfolded.write().unwrap();
@@ -201,6 +213,7 @@ impl VClos {
                         Val::Error,
                     ),
                     &mut env,
+                    None,
                 );
             }
         }
@@ -341,7 +354,12 @@ impl Val {
         Ok(v)
     }
 
-    pub fn app(mut self, x: Elim<Val>, env: &mut Env) -> Val {
+    pub fn app<'a>(
+        mut self,
+        x: Elim<Val>,
+        env: &mut Env,
+        mcxt: impl Into<Option<&'a MetaCxt<'a>>>,
+    ) -> Val {
         match x {
             Elim::App(icit, arg) => match self {
                 Val::Fun(clos) => {
@@ -369,17 +387,22 @@ impl Val {
                 Val::Error => Val::Error,
                 _ => unreachable!("Cannot resolve member of non-struct {:?}", self),
             },
-            Elim::Case(ref case, _) => match case.try_eval(&self) {
-                Some(v) => v,
-                None => match self {
-                    Val::Neutral(ref mut neutral) => {
-                        neutral.app(x);
-                        self
-                    }
-                    Val::Error => Val::Error,
-                    x => todo!("couldn't eval case of {:?}", x),
-                },
-            },
+            Elim::Case(ref case, _) => {
+                if let Some(mcxt) = mcxt.into() {
+                    self.inline_head(env, mcxt);
+                }
+                match case.try_eval(&self) {
+                    Some(v) => v,
+                    None => match self {
+                        Val::Neutral(ref mut neutral) => {
+                            neutral.app(x);
+                            self
+                        }
+                        Val::Error => Val::Error,
+                        x => todo!("couldn't eval case of {:?}", x),
+                    },
+                }
+            }
         }
     }
 
@@ -451,7 +474,7 @@ impl Expr {
                 Head::Var(Var::Local(n, i)) => env.val(n, i),
                 Head::Var(v) => Val::var(v.cvt(Size::zero())),
             },
-            Expr::Elim(x, e) => x.eval(env).app(e.eval(env), env),
+            Expr::Elim(x, e) => x.eval(env).app(e.eval(env), env, None),
             Expr::Fun(clos) => Val::Fun(Box::new(clos.eval(env))),
             Expr::Lit(l) => Val::Lit(l),
             Expr::Pair(a, b, t) => Val::Pair(
@@ -587,9 +610,9 @@ impl Val {
                 }
             }
             Val::Cap(m, x) => {
-                if m >= x.own_cap_(inline_metas, &Env::new(size), true) {
-                    return x.quote(size, inline_metas);
-                }
+                // if m >= x.own_cap_(inline_metas, &Env::new(size), true) {
+                //     return x.quote(size, inline_metas);
+                // }
                 Expr::Cap(m, Box::new(x.quote(size, inline_metas)))
             }
             Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
@@ -640,7 +663,12 @@ impl Val {
         self.own_cap_(Some(&cxt.mcxt), &cxt.env(), true)
     }
 
-    pub fn own_cap_<'a>(&self, mcxt: impl Into<Option<&'a MetaCxt<'a>>>, env: &Env, inline: bool) -> Cap {
+    pub fn own_cap_<'a>(
+        &self,
+        mcxt: impl Into<Option<&'a MetaCxt<'a>>>,
+        env: &Env,
+        inline: bool,
+    ) -> Cap {
         let mcxt = mcxt.into();
         match self {
             Val::Type => Cap::Imm,

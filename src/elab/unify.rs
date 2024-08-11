@@ -6,7 +6,7 @@ use super::*;
 enum UnfoldState {
     /// Rigid in smalltt
     /// Something to try in the future is Maybe(n_tries)
-    Maybe,
+    Maybe(u32),
     /// Flex in smalltt
     Never,
     /// Full in smalltt
@@ -14,13 +14,13 @@ enum UnfoldState {
 }
 impl Default for UnfoldState {
     fn default() -> Self {
-        UnfoldState::Maybe
+        UnfoldState::Maybe(3)
     }
 }
 impl UnfoldState {
     fn try_approx(self) -> bool {
         match self {
-            UnfoldState::Maybe => true,
+            UnfoldState::Maybe(_) => true,
             UnfoldState::Never => true,
             UnfoldState::Always => false,
         }
@@ -30,7 +30,8 @@ impl UnfoldState {
     /// Must not return the same mode, or an infinite loop would occur.
     fn approx_fail_mode(self) -> Option<UnfoldState> {
         match self {
-            UnfoldState::Maybe => Some(UnfoldState::Always),
+            UnfoldState::Maybe(0) => Some(UnfoldState::Always),
+            UnfoldState::Maybe(n) => Some(UnfoldState::Maybe(n - 1)),
             UnfoldState::Never => None,
             UnfoldState::Always => unreachable!(),
         }
@@ -38,7 +39,7 @@ impl UnfoldState {
 
     fn can_unfold(self) -> bool {
         match self {
-            UnfoldState::Maybe => true,
+            UnfoldState::Maybe(_) => true,
             UnfoldState::Never => false,
             UnfoldState::Always => true,
         }
@@ -46,7 +47,9 @@ impl UnfoldState {
 
     fn spine_mode(self) -> UnfoldState {
         match self {
-            UnfoldState::Maybe => UnfoldState::Never,
+            //UnfoldState::Maybe(_) => UnfoldState::Never,
+            UnfoldState::Maybe(0) => UnfoldState::Never,
+            UnfoldState::Maybe(n) => UnfoldState::Maybe(n - 1),
             UnfoldState::Never => UnfoldState::Never,
             UnfoldState::Always => UnfoldState::Always,
         }
@@ -54,7 +57,7 @@ impl UnfoldState {
 
     fn can_solve_metas(self) -> bool {
         match self {
-            UnfoldState::Maybe => true,
+            UnfoldState::Maybe(_) => true,
             // TODO setting this to true enables approximate solutions; do we want that?
             UnfoldState::Never => false,
             UnfoldState::Always => true,
@@ -341,6 +344,7 @@ impl UnifyCxt<'_, '_> {
         env
     }
 
+    #[inline(always)]
     fn unify_spines(
         &mut self,
         a: &[Elim<Val>],
@@ -357,7 +361,7 @@ impl UnifyCxt<'_, '_> {
                     self.unify(a.clone(), b.clone(), size, state)?;
                 }
                 (Elim::Member(d1, i1, _), Elim::Member(d2, i2, _)) if d1 == d2 && i1 == i2 => (),
-                (Elim::Case(_, _), Elim::Case(_, _)) => todo!(),
+                //(Elim::Case(_, _), Elim::Case(_, _)) => todo!(),
 
                 _ => return Ok(false),
             }
@@ -367,189 +371,213 @@ impl UnifyCxt<'_, '_> {
 
     fn unify(
         &mut self,
-        a: Val,
-        b: Val,
-        size: Size,
-        state: UnfoldState,
+        mut ra: Val,
+        mut rb: Val,
+        mut size: Size,
+        mut state: UnfoldState,
     ) -> Result<(), UnifyErrorKind> {
-        match (a, b) {
-            (Val::Type, Val::Type) => Ok(()),
-            (Val::Error, _) | (_, Val::Error) => Ok(()),
-            (Val::Fun(a), Val::Fun(b))
-                if a.class == b.class
-                    && a.params.len() == b.params.len()
-                    && a.params
-                        .iter()
-                        .zip(&b.params)
-                        .all(|(a, b)| a.is_ref == b.is_ref) =>
-            {
-                // First unify parameters
-                self.unify(a.par_ty(), b.par_ty(), size, state)?;
+        loop {
+            macro_rules! unify {
+                ($a:expr, $b:expr, $size:expr, $state:expr) => {
+                    ra = $a;
+                    rb = $b;
+                    size = $size;
+                    state = $state;
+                    continue;
+                };
+            }
+            break match (ra, rb) {
+                (Val::Type, Val::Type) => Ok(()),
+                (Val::Error, _) | (_, Val::Error) => Ok(()),
+                (Val::Fun(a), Val::Fun(b))
+                    if a.class == b.class
+                        && a.params.len() == b.params.len()
+                        && a.params
+                            .iter()
+                            .zip(&b.params)
+                            .all(|(a, b)| a.is_ref == b.is_ref) =>
+                {
+                    // First unify parameters
+                    self.unify(a.par_ty(), b.par_ty(), size, state)?;
 
-                // Unify bodies
-                let new_size = size + a.params.len().max(b.params.len());
-                let a = a.open(size);
-                let b = b.open(size);
-                self.unify(a, b, new_size, state)
-            }
-            (Val::Lit(l1), Val::Lit(l2)) if l1 == l2 => Ok(()),
-            (Val::Pair(a1, a2, _), Val::Pair(b1, b2, _)) => {
-                self.unify(*a1, *b1, size, state)?;
-                self.unify(*a2, *b2, size, state)
-            }
-            // Get rid of nested capabilities
-            (Val::Cap(c, a), b) | (b, Val::Cap(c, a)) if matches!(*a, Val::Cap(_, _)) => match *a {
-                Val::Cap(c2, a) => self.unify(Val::Cap(c.min(c2), a), b, size, state),
-                _ => unreachable!(),
-            },
-            (Val::Cap(m1, a), Val::Cap(m2, b)) if m1 == m2 => self.unify(*a, *b, size, state),
-            (Val::Cap(Cap::Own, a), b) | (b, Val::Cap(Cap::Own, a)) => {
-                self.unify(*a, b, size, state)
-            }
-            // For immutable types, `imm T = mut T = own T`
-            (Val::Cap(_, a), b) | (b, Val::Cap(_, a))
-                if a.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true) == Cap::Imm
+                    // Unify bodies
+                    let new_size = size + a.params.len().max(b.params.len());
+                    let a = a.open(size);
+                    let b = b.open(size);
+                    unify!(a, b, new_size, state);
+                }
+                (Val::Lit(l1), Val::Lit(l2)) if l1 == l2 => Ok(()),
+                (Val::Pair(a1, a2, _), Val::Pair(b1, b2, _)) => {
+                    self.unify(*a1, *b1, size, state)?;
+                    unify!(*a2, *b2, size, state);
+                }
+                // Get rid of nested capabilities
+                (Val::Cap(c, a), b) | (b, Val::Cap(c, a)) if matches!(*a, Val::Cap(_, _)) => {
+                    match *a {
+                        Val::Cap(c2, a) => self.unify(Val::Cap(c.min(c2), a), b, size, state),
+                        _ => unreachable!(),
+                    }
+                }
+                (Val::Cap(m1, a), Val::Cap(m2, b)) if m1 == m2 => self.unify(*a, *b, size, state),
+                (Val::Cap(Cap::Own, a), b) | (b, Val::Cap(Cap::Own, a)) => {
+                    unify!(*a, b, size, state);
+                }
+                // For immutable types, `imm T = mut T = own T`
+                (Val::Cap(_, a), b) | (b, Val::Cap(_, a))
+                    if a.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true) == Cap::Imm
                     // Allow solving e.g. `imm ?2 = Type`
                     || (state.can_solve_metas()
                         && matches!(&*a, Val::Neutral(n) if self.can_solve(n.head()))
                         && b.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true)
                             == Cap::Imm) =>
-            {
-                self.unify(*a, b, size, state)
-            }
-            // For specific `mut` types (currently only `mut` functions), `mut T = own T`
-            (Val::Cap(Cap::Mut, a), b) | (b, Val::Cap(Cap::Mut, a))
-                if a.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true) == Cap::Mut
-                    || (state.can_solve_metas()
-                        && matches!(&*a, Val::Neutral(n) if self.can_solve(n.head()))
-                        && b.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true)
-                            == Cap::Mut) =>
-            {
-                self.unify(*a, b, size, state)
-            }
-
-            // Now handle neutrals as directed by the unfolding state
-            // If possible, try approximate conversion checking, unfolding if it fails (and if that's allowed)
-            (Val::Neutral(a), Val::Neutral(b)) if state.try_approx() && a.head() == b.head() => {
-                let err = match self.unify_spines(a.spine(), b.spine(), size, state.spine_mode()) {
-                    Ok(true) => return Ok(()),
-                    e => e,
-                };
-                let a = Val::Neutral(a);
-                let b = Val::Neutral(b);
-                match state.approx_fail_mode() {
-                    Some(state) => self.unify(a, b, size, state),
-                    // don't try unfolded
-                    None => Err(match err {
-                        Ok(_) => UnifyErrorKind::Conversion,
-                        Err(e) => e,
-                    }),
+                {
+                    unify!(*a, b, size, state);
                 }
-            }
+                // For specific `mut` types (currently only `mut` functions), `mut T = own T`
+                (Val::Cap(Cap::Mut, a), b) | (b, Val::Cap(Cap::Mut, a))
+                    if a.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true) == Cap::Mut
+                        || (state.can_solve_metas()
+                            && matches!(&*a, Val::Neutral(n) if self.can_solve(n.head()))
+                            && b.own_cap_(&*self.meta_cxt, &self.env.copy_at(size), true)
+                                == Cap::Mut) =>
+                {
+                    unify!(*a, b, size, state);
+                }
 
-            // We want to prioritize solving the later meta first so it depends on the earlier meta
-            (Val::Neutral(a), Val::Neutral(b))
-                if state.can_solve_metas()
-                    && matches!((a.head(), b.head()), (Head::Var(Var::Meta(a)), Head::Var(Var::Meta(b)))
-                        if a < b && !self.meta_cxt.is_solved(a) && !self.meta_cxt.is_solved(b)) =>
-            {
-                self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
-            }
-            // Similar for solving locals
-            (Val::Neutral(a), Val::Neutral(b))
-                if state.can_solve_metas()
-                    && self.solve_locals
-                    && matches!((a.head(), b.head()), (Head::Var(Var::Local(_, a)), Head::Var(Var::Local(_, b)))
-                        if a < b) =>
-            {
-                self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
-            }
-            // If we could solve a meta *or* a local, solve the meta
-            (Val::Neutral(a), Val::Neutral(b))
-                if state.can_solve_metas()
-                    && self.solve_locals
-                    && matches!((a.head(), b.head()), (Head::Var(Var::Local(_, _)), Head::Var(Var::Meta(m)))
-                        if !self.meta_cxt.is_solved(m)) =>
-            {
-                self.unify(Val::Neutral(b), Val::Neutral(a), size, state)
-            }
-
-            // There are multiple cases for two neutrals which need to be handled in sequence
-            // basically we need to try one after another and they're not simple enough to disambiguate with guards
-            (Val::Neutral(mut a), Val::Neutral(mut b)) => {
-                // Try solving metas; if both are metas, solve whichever is possible
-                if state.can_solve_metas() && a.head() != b.head() {
-                    if self.can_solve(a.head()) {
-                        let bc = if self.can_solve(b.head()) {
-                            Some((b.head(), b.spine().clone(), a.clone()))
-                        } else {
-                            None
+                // Now handle neutrals as directed by the unfolding state
+                // If possible, try approximate conversion checking, unfolding if it fails (and if that's allowed)
+                (Val::Neutral(a), Val::Neutral(b))
+                    if state.try_approx() && a.head() == b.head() =>
+                {
+                    let err =
+                        match self.unify_spines(a.spine(), b.spine(), size, state.spine_mode()) {
+                            Ok(true) => return Ok(()),
+                            e => e,
                         };
-                        match self.solve(size, a.head(), a.into_parts().1, Val::Neutral(b)) {
-                            Ok(()) => return Ok(()),
-                            Err(e) => match bc {
-                                Some((b, bsp, a)) => {
-                                    match self.solve(size, b, bsp, Val::Neutral(a)) {
-                                        Ok(()) => return Ok(()),
-                                        Err(_) => return Err(e),
+                    let a = Val::Neutral(a);
+                    let b = Val::Neutral(b);
+                    match state.approx_fail_mode() {
+                        Some(state) => {
+                            unify!(a, b, size, state);
+                        }
+                        // don't try unfolded
+                        None => Err(match err {
+                            Ok(_) => UnifyErrorKind::Conversion,
+                            Err(e) => e,
+                        }),
+                    }
+                }
+
+                // We want to prioritize solving the later meta first so it depends on the earlier meta
+                (Val::Neutral(a), Val::Neutral(b))
+                    if state.can_solve_metas()
+                        && matches!((a.head(), b.head()), (Head::Var(Var::Meta(a)), Head::Var(Var::Meta(b)))
+                        if a < b && !self.meta_cxt.is_solved(a) && !self.meta_cxt.is_solved(b)) =>
+                {
+                    unify!(Val::Neutral(b), Val::Neutral(a), size, state);
+                }
+                // Similar for solving locals
+                (Val::Neutral(a), Val::Neutral(b))
+                    if state.can_solve_metas()
+                        && self.solve_locals
+                        && matches!((a.head(), b.head()), (Head::Var(Var::Local(_, a)), Head::Var(Var::Local(_, b)))
+                        if a < b) =>
+                {
+                    unify!(Val::Neutral(b), Val::Neutral(a), size, state);
+                }
+                // If we could solve a meta *or* a local, solve the meta
+                (Val::Neutral(a), Val::Neutral(b))
+                    if state.can_solve_metas()
+                        && self.solve_locals
+                        && matches!((a.head(), b.head()), (Head::Var(Var::Local(_, _)), Head::Var(Var::Meta(m)))
+                        if !self.meta_cxt.is_solved(m)) =>
+                {
+                    unify!(Val::Neutral(b), Val::Neutral(a), size, state);
+                }
+
+                // There are multiple cases for two neutrals which need to be handled in sequence
+                // basically we need to try one after another and they're not simple enough to disambiguate with guards
+                (Val::Neutral(mut a), Val::Neutral(mut b)) => {
+                    // Try solving metas; if both are metas, solve whichever is possible
+                    if state.can_solve_metas() && a.head() != b.head() {
+                        if self.can_solve(a.head()) {
+                            let bc = if self.can_solve(b.head()) {
+                                Some((b.head(), b.spine().clone(), a.clone()))
+                            } else {
+                                None
+                            };
+                            match self.solve(size, a.head(), a.into_parts().1, Val::Neutral(b)) {
+                                Ok(()) => return Ok(()),
+                                Err(e) => match bc {
+                                    Some((b, bsp, a)) => {
+                                        match self.solve(size, b, bsp, Val::Neutral(a)) {
+                                            Ok(()) => return Ok(()),
+                                            Err(_) => return Err(e),
+                                        }
                                     }
-                                }
-                                _ => return Err(e),
-                            },
+                                    _ => return Err(e),
+                                },
+                            }
+                        }
+                        if self.can_solve(b.head()) {
+                            return self.solve(size, b.head(), b.into_parts().1, Val::Neutral(a));
                         }
                     }
-                    if self.can_solve(b.head()) {
-                        return self.solve(size, b.head(), b.into_parts().1, Val::Neutral(a));
+
+                    // Unfold as much as possible first
+                    if state.can_unfold() {
+                        // TODO allow inlining local definitions
+                        match a.resolve(&self.env(size), self.meta_cxt) {
+                            Ok(a) => {
+                                unify!(a, Val::Neutral(b), size, state);
+                            }
+                            Err(a2) => a = a2,
+                        }
+                        match b.resolve(&self.env(size), self.meta_cxt) {
+                            Ok(b) => {
+                                unify!(Val::Neutral(a), b, size, state);
+                            }
+                            Err(b2) => b = b2,
+                        }
+                    }
+
+                    // Unfolding isn't possible, so match heads and spines
+                    if a.head() == b.head()
+                        && self.unify_spines(a.spine(), b.spine(), size, state.spine_mode())?
+                    {
+                        Ok(())
+                    } else {
+                        Err(UnifyErrorKind::Conversion)
                     }
                 }
 
-                // Unfold as much as possible first
-                if state.can_unfold() {
-                    // TODO allow inlining local definitions
-                    match a.resolve(&self.env(size), self.meta_cxt) {
-                        Ok(a) => return self.unify(a, Val::Neutral(b), size, state),
-                        Err(a2) => a = a2,
-                    }
-                    match b.resolve(&self.env(size), self.meta_cxt) {
-                        Ok(b) => return self.unify(Val::Neutral(a), b, size, state),
-                        Err(b2) => b = b2,
-                    }
-                }
-
-                // Unfolding isn't possible, so match heads and spines
-                if a.head() == b.head()
-                    && self.unify_spines(a.spine(), b.spine(), size, state.spine_mode())?
+                // If only one side is a solvable meta, solve without unfolding the other side
+                (Val::Neutral(n), x) | (x, Val::Neutral(n))
+                    if state.can_solve_metas() && self.can_solve(n.head()) =>
                 {
-                    Ok(())
-                } else {
-                    Err(UnifyErrorKind::Conversion)
+                    self.solve(size, n.head(), n.into_parts().1, x)
                 }
-            }
 
-            // If only one side is a solvable meta, solve without unfolding the other side
-            (Val::Neutral(n), x) | (x, Val::Neutral(n))
-                if state.can_solve_metas() && self.can_solve(n.head()) =>
-            {
-                self.solve(size, n.head(), n.into_parts().1, x)
-            }
-
-            // Eta-expand if there's a lambda on one side
-            (Val::Fun(clos), x) | (x, Val::Fun(clos)) if matches!(clos.class, Lam(_, _)) => {
-                let new_size = size + clos.params.len();
-                let elim = Elim::App(clos.class.icit().unwrap(), clos.synthesize_args(size));
-                let a = clos.open(size);
-                self.unify(a, x.app(elim, &mut Env::new(new_size)), new_size, state)
-            }
-
-            // If a neutral still hasn't unified with anything, try unfolding it if possible
-            (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
-                match n.resolve(&self.env(size), self.meta_cxt) {
-                    Ok(n) => self.unify(n, x, size, state),
-                    Err(_) => Err(UnifyErrorKind::Conversion),
+                // Eta-expand if there's a lambda on one side
+                (Val::Fun(clos), x) | (x, Val::Fun(clos)) if matches!(clos.class, Lam(_, _)) => {
+                    let new_size = size + clos.params.len();
+                    let elim = Elim::App(clos.class.icit().unwrap(), clos.synthesize_args(size));
+                    let a = clos.open(size);
+                    unify!(a, x.app(elim, &mut Env::new(new_size), &*self.meta_cxt), new_size, state);
                 }
-            }
 
-            _ => Err(UnifyErrorKind::Conversion),
+                // If a neutral still hasn't unified with anything, try unfolding it if possible
+                (Val::Neutral(n), x) | (x, Val::Neutral(n)) if state.can_unfold() => {
+                    match n.resolve(&self.env(size), self.meta_cxt) {
+                        Ok(n) => {
+                            unify!(n, x, size, state);
+                        }
+                        Err(_) => Err(UnifyErrorKind::Conversion),
+                    }
+                }
+
+                _ => Err(UnifyErrorKind::Conversion),
+            };
         }
     }
 }

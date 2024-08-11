@@ -1,5 +1,7 @@
 use super::*;
 
+mod eval;
+
 mod input {
     use crate::elab::elaborate::resolve_member;
 
@@ -43,12 +45,13 @@ mod input {
                                 }
                             });
                     if let Some(iarg) = iarg {
-                        term = term.app(Elim::App(Impl, iarg), &mut Env::new(*size));
+                        term = term.app(Elim::App(Impl, iarg), &mut Env::new(*size), None);
                     }
                     if let Some(earg) = eargs {
                         term = term.app(
                             Elim::App(Expl, earg.0 .0.to_term(db, size)),
                             &mut Env::new(*size),
+                            None,
                         );
                     }
                     term
@@ -1509,13 +1512,38 @@ impl Dec<Val> {
             Dec::Guard(_, _, _) => None,
             Dec::Switch(v, branches, fallback) => {
                 for i in branches {
+                    //eprintln!("{:?}\n::: {:?}", env.get(v), i.cons);
                     match (env.get(v), i.cons) {
-                        (Some(Val::Lit(l1)), PCons::Lit(l2)) if *l1 == l2 => if let Some(x) = i.then.try_eval(env, params) {
-                            return Some(x)
-                        },
+                        (Some(Val::Lit(l1)), PCons::Lit(l2)) if *l1 == l2 => {
+                            if let Some(x) = i.then.try_eval(env, params) {
+                                return Some(x);
+                            } else {
+                                return None;
+                            }
+                        }
                         // non-equal literals can never match!
                         // TODO sometimes this triggers anyway though for e.g. 1i32 compared with 1 : unsigned meta
                         (Some(Val::Lit(_)), PCons::Lit(_)) => (),
+                        (Some(Val::Neutral(n1)), PCons::Cons(c1)) if matches!(n1.head(), Head::Var(Var::Cons(_, c2)) if c1 == c2) => {
+                            // match spines
+                            // if !i.iargs.is_empty() {
+                            //     if let Some(Elim::App(Impl, b)) = n1.spine().first() {
+                            //         if let Ok(it) = b.clone().zip_pair(&i.iargs) {
+                            //             for (a, v) in it {
+                            //                 // TODO inline_head() ?
+                            //                 env.insert(*v, &a);
+                            //             }
+                            //         }
+                            //     }
+                            // }
+                            if let Some(x) = i.then.try_eval(env, params) {
+                                return Some(x);
+                            } else {
+                                return None;
+                           }
+                        }
+                        // Wrong cons is also guaranteed no match
+                        (Some(Val::Neutral(n1)), PCons::Cons(_)) if matches!(n1.head(), Head::Var(Var::Cons(_, _))) => (),
                         _ => return None,
                     }
                 }

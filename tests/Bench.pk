@@ -1,0 +1,50 @@
+type imm Nat of
+    Z
+    S(Nat)
+where
+    fun plus(self, other: Nat): Nat = self match
+        Z => other
+        S(n) => S(n.plus(other))
+
+    fun mul(self, other: Nat): Nat = self match
+        Z => Z
+        S(n) => n.mul(other).plus(other)
+
+type imm Eq[T, A: T, B: T] of
+    Refl[T, A: ref T] : Eq[T, A, A]
+
+let n1 = Nat.S(Nat.Z)
+let n2 = Nat.S(n1)
+let n5 = n1.plus(n2).plus(n2)
+let n10 = n5.plus(n5)
+let n10b = n5.mul(n2)
+
+#let b10 : Eq[Nat, n10, n10b] = Eq.Refl
+
+
+let FNat: Type = [T: Type]((x: ref T) imm -> imm T, T) -> imm T # fucked up that this requires `x: `
+let zero : FNat = f, x => x
+fun suc(n: ref FNat): imm FNat = f, x => f(n(f, x))
+let one = suc(zero)
+fun add(n: ref FNat, m: ref FNat): imm FNat = f, x => n(f, m(f, x))
+fun mul(n: ref FNat, m: ref FNat): imm FNat = n[FNat]((x: ref FNat => add(m, x)), zero)
+
+let m2 = suc(one)
+let m5 = add(one, add(m2, m2))
+let m10 = add(m5, m5)
+let m10b = mul(m5, m2)
+let m100 = mul(m10, m10)
+let m100b = mul(m10b, m10b)
+let m1k = mul(m100, m10)
+let m1kb = mul(m100b, m10b)
+let m5k = mul(m1k, m5)
+let m5kb = mul(m1kb, m5)
+let m2k = mul(m2, m1k)
+let m2kb = add(m1kb, m1kb)
+let m6k = add(m5k, m1k)
+let m6kb = add(m5k, m1k)
+
+let c10 : Eq[FNat, m10, m10b] = Eq.Refl
+let c100 : Eq[FNat, m100, m100b] = Eq.Refl
+let c5k : Eq[FNat, m5k, m5kb] = Eq.Refl
+let c6k : Eq[FNat, m6k, m6kb] = Eq.Refl
