@@ -1,3 +1,6 @@
+# BEFORE (stt): 1400-1500ms generally, goes up to 1600ms
+# stt + Rc: ~230ms
+
 type imm Nat of
     Z
     S(Nat)
@@ -37,14 +40,16 @@ let m100 = mul(m10, m10)
 let m100b = mul(m10b, m10b)
 let m1k = mul(m100, m10)
 let m1kb = mul(m100b, m10b)
-let m5k = mul(m1k, m5)
-let m5kb = mul(m1kb, m5)
 let m2k = mul(m2, m1k)
 let m2kb = add(m1kb, m1kb)
+let m5k = mul(m1k, m5)
+let m5kb = mul(m1kb, m5)
+let m5kc = add(m1k, mul(m2k, m2))
 let m6k = add(m5k, m1k)
 let m6kb = add(m5k, m1k)
 
 let c10 : Eq[FNat, m10, m10b] = Eq.Refl
 let c100 : Eq[FNat, m100, m100b] = Eq.Refl
 let c5k : Eq[FNat, m5k, m5kb] = Eq.Refl
+#let c5b : Eq[FNat, m5k, m5kc] = Eq.Refl
 let c6k : Eq[FNat, m6k, m6kb] = Eq.Refl

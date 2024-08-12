@@ -16,7 +16,7 @@ impl DefCxt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VarDef {
-    Var(Var<Lvl>, Val),
+    Var(Var<Lvl>, IVal),
     Def(Def),
 }
 impl VarDef {
@@ -65,7 +65,7 @@ impl Namespace {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Scope {
     Prelude,
-    Trait(Val),
+    Trait(IVal),
     Namespace(Namespace),
     Local(LocalScope),
 }
@@ -95,7 +95,7 @@ pub fn prelude_defs(db: &dyn Elaborator) -> std::sync::Arc<HashMap<Name, VarDef>
         .map(|(k, v, t)| {
             (
                 db.name(k.to_string()),
-                VarDef::Var(Var::Builtin(*v), t.clone()),
+                VarDef::Var(Var::Builtin(*v), Rc::new(t.clone())),
             )
         }),
     ))
@@ -129,7 +129,7 @@ impl LocalScope {
         &mut self,
         name: SName,
         var: Var<Lvl>,
-        ty: Val,
+        ty: IVal,
         borrow: Option<Borrow>,
         mutable: bool,
     ) {
@@ -142,7 +142,7 @@ impl LocalScope {
         ));
     }
 
-    fn define_local(&mut self, name: SName, ty: Val, borrow: Borrow, mutable: bool) {
+    fn define_local(&mut self, name: SName, ty: IVal, borrow: Borrow, mutable: bool) {
         self.define(
             name,
             Var::Local(name, self.size.next_lvl()),
@@ -724,7 +724,7 @@ impl VarEntry {
         }
     }
 
-    pub fn ty(&self, cxt: &Cxt) -> Val {
+    pub fn ty(&self, cxt: &Cxt) -> IVal {
         let def = match self {
             VarEntry::Local { scope, var, .. } => match &cxt.scopes[*scope] {
                 Scope::Local(l) => &l.names[*var].var,
@@ -738,7 +738,7 @@ impl VarEntry {
                 .db
                 .def_type(*d)
                 .and_then(|x| x.result)
-                .map_or(Val::Error, |x| x.ty),
+                .map_or(Rc::new(Val::Error), |x| x.ty),
         }
     }
 
@@ -794,7 +794,8 @@ impl VarEntry {
                     let entry = &mut l.names[*var];
                     let lvl = entry.var.as_var().unwrap().as_local();
                     let access = self.access(field, Cap::Own);
-                    if let Some(borrow) = entry.borrow { // If the borrow is None, this isn't a local
+                    if let Some(borrow) = entry.borrow {
+                        // If the borrow is None, this isn't a local
                         borrow.invalidate_self(&index, access, Rc::new(ty), cxt);
                         if let Some(lvl) = lvl {
                             cxt.record_access(lvl, access, borrow, index);
@@ -1024,8 +1025,8 @@ impl Cxt<'_> {
 
     pub fn unify(
         &mut self,
-        inferred: Val,
-        expected: Val,
+        inferred: IVal,
+        expected: IVal,
         reason: CheckReason,
     ) -> Result<(), super::unify::UnifyError> {
         self.mcxt
@@ -1051,8 +1052,8 @@ impl Cxt<'_> {
     pub fn define_local(
         &mut self,
         name: SName,
-        ty: Val,
-        value: Option<Val>,
+        ty: IVal,
+        value: Option<IVal>,
         borrow: Option<Borrow>,
         mutable: bool,
     ) {
@@ -1063,7 +1064,7 @@ impl Cxt<'_> {
         self.env.push(value.map(Ok));
     }
 
-    pub fn define(&mut self, name: SName, var: Var<Lvl>, ty: Val) {
+    pub fn define(&mut self, name: SName, var: Var<Lvl>, ty: IVal) {
         if matches!(var, Var::Local(_, _)) {
             panic!("Call define_local() for local variables!");
         }
@@ -1100,7 +1101,7 @@ impl Cxt<'_> {
                 (self.db.name("Self".into()), span),
                 *def,
             ))),
-            Scope::Trait(val) => Some(val.clone().quote(self.size(), None)),
+            Scope::Trait(val) => Some(val.quote(self.size(), None)),
             _ => None,
         })
     }
@@ -1173,13 +1174,13 @@ impl Cxt<'_> {
     }
 
     pub fn push_trait_scope(&mut self) {
-        self.scopes.push(Scope::Trait(Val::var(Var::Local(
+        self.scopes.push(Scope::Trait(Rc::new(Val::var(Var::Local(
             (self.db.name("Self".into()), RelSpan::empty()),
             Size::zero().next_lvl(),
-        ))));
+        )))));
     }
 
-    pub fn push_trait_impl_scope(&mut self, self_arg: Val) {
+    pub fn push_trait_impl_scope(&mut self, self_arg: IVal) {
         self.scopes.push(Scope::Trait(self_arg));
     }
 
@@ -1220,7 +1221,7 @@ impl Cxt<'_> {
         }
     }
 
-    pub fn local_ty(&self, lvl: Lvl) -> Val {
+    pub fn local_ty(&self, lvl: Lvl) -> IVal {
         self.scopes
             .iter()
             .find_map(|x| match x {

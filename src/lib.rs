@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
+use elab::AuxQuote;
 use lsp_types::Url;
 use ropey::Rope;
 

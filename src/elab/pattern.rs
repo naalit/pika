@@ -1,8 +1,12 @@
+use std::rc::Rc;
+
 use super::*;
 
 mod eval;
 
 mod input {
+    use std::rc::Rc;
+
     use crate::elab::elaborate::resolve_member;
 
     use super::*;
@@ -13,42 +17,44 @@ mod input {
         /// (constructor, implicit args, explicit arg, return type, size at return type)
         Cons(
             PCons,
-            Vec<(SPattern, Val)>,
-            Option<Box<(SPattern, Val)>>,
-            Val,
+            Vec<(SPattern, IVal)>,
+            Option<(Box<SPattern>, IVal)>,
+            IVal,
             Size,
         ),
         Pair(Box<SPattern>, Box<SPattern>, Size),
         Or(Vec<SPattern>),
         Var(Cap, SName),
-        Typed(Box<SPattern>, Box<Val>),
+        Typed(Box<SPattern>, IVal),
         Any,
     }
     impl Pattern {
-        pub(super) fn to_term(&self, db: &(impl Elaborator + ?Sized), size: &mut Size) -> Val {
+        pub(super) fn to_term(&self, db: &(impl Elaborator + ?Sized), size: &mut Size) -> IVal {
             match self {
                 Pattern::Cons(cons, iargs, eargs, _, _) => {
-                    let mut term = match cons {
+                    let mut term = Rc::new(match cons {
                         PCons::Lit(l) => Val::Lit(*l),
                         PCons::Cons(cons) => {
                             Val::var(Var::Cons((db.name("_".into()), RelSpan::empty()), *cons))
                         }
-                    };
+                    });
                     let iarg =
                         iargs
                             .iter()
                             .map(|x| x.0 .0.to_term(db, size))
                             .rfold(None, |acc, x| match acc {
                                 None => Some(x),
-                                Some(y) => {
-                                    Some(Val::Pair(Box::new(x), Box::new(y), Box::new(Val::Error)))
-                                }
+                                Some(y) => Some(Rc::new(Val::Pair(x, y, Rc::new(Val::Error)))),
                             });
                     if let Some(iarg) = iarg {
-                        term = term.app(Elim::App(Impl, iarg), &mut Env::new(*size), None);
+                        term = Rc::unwrap_or_clone(term).app(
+                            Elim::App(Impl, iarg),
+                            &mut Env::new(*size),
+                            None,
+                        );
                     }
                     if let Some(earg) = eargs {
-                        term = term.app(
+                        term = Rc::unwrap_or_clone(term).app(
                             Elim::App(Expl, earg.0 .0.to_term(db, size)),
                             &mut Env::new(*size),
                             None,
@@ -58,19 +64,19 @@ mod input {
                 }
                 Pattern::Pair(a, b, _) => {
                     *size += 1;
-                    Val::Pair(
-                        Box::new(a.0.to_term(db, size)),
-                        Box::new(b.0.to_term(db, size)),
-                        Box::new(Val::Error),
-                    )
+                    Rc::new(Val::Pair(
+                        a.0.to_term(db, size),
+                        b.0.to_term(db, size),
+                        Rc::new(Val::Error),
+                    ))
                 }
-                Pattern::Or(_) => Val::Error,
+                Pattern::Or(_) => Rc::new(Val::Error),
                 Pattern::Var(_m, n) => {
                     *size += 1;
-                    Val::var(Var::Local(*n, size.dec().next_lvl()))
+                    Rc::new(Val::var(Var::Local(*n, size.dec().next_lvl())))
                 }
                 Pattern::Typed(a, _) => a.0.to_term(db, size),
-                Pattern::Any => Val::Error,
+                Pattern::Any => Rc::new(Val::Error),
             }
         }
     }
@@ -87,8 +93,8 @@ mod input {
         // TODO is this cons necessary?
         Yes(
             PCons,
-            Vec<(SPattern, Val)>,
-            Option<Box<(SPattern, Val)>>,
+            Vec<(SPattern, IVal)>,
+            Option<(Box<SPattern>, IVal)>,
             Option<Env>,
         ),
         No,
@@ -140,7 +146,7 @@ mod input {
             &mut self,
             row: &mut Row,
             var: PVar,
-            ty: &Val,
+            ty: &IVal,
             reason: CheckReason,
             target_cons: &mut Option<PCons>,
             env: &Env,
@@ -164,7 +170,7 @@ mod input {
                                     while env.size < rsize {
                                         env.push(None);
                                     }
-                                    match (&rty, ty.uncap_ty()) {
+                                    match (&*rty, ty.uncap_ty()) {
                                         (Val::Neutral(a), Val::Neutral(b))
                                             if a.head() == b.head() =>
                                         {
@@ -172,7 +178,7 @@ mod input {
                                                 .mcxt
                                                 .local_unify(
                                                     rty,
-                                                    ty.uncap_ty().clone(),
+                                                    Rc::new(ty.uncap_ty().clone()),
                                                     rsize,
                                                     &mut env,
                                                     reason,
@@ -184,7 +190,7 @@ mod input {
                                             .mcxt
                                             .unify(
                                                 rty.clone(),
-                                                ty.uncap_ty().clone(),
+                                                Rc::new(ty.uncap_ty().clone()),
                                                 rsize,
                                                 env.clone(),
                                                 reason,
@@ -202,7 +208,7 @@ mod input {
                     Pattern::Typed(pat, pty) => {
                         self.ecxt
                             .mcxt
-                            .unify((**pty).clone(), ty.clone(), env.size, env.clone(), reason)
+                            .unify(pty.clone(), ty.clone(), env.size, env.clone(), reason)
                             .unwrap_or_else(|e| self.ecxt.error(row.columns[i].pat.1, e));
                         let pat = (**pat).clone();
                         row.columns[i].pat = pat;
@@ -280,7 +286,7 @@ mod input {
                             let ty = lhs.ty(cxt.ecxt);
                             (lhs.finish(ty.own_cap(&cxt.ecxt), cxt.ecxt), ty)
                         })
-                        .unwrap_or((Expr::Error, Val::Error));
+                        .unwrap_or((Expr::Error, Rc::new(Val::Error)));
                     let cons = match lhs.unspanned() {
                         Expr::Head(Head::Var(Var::Cons(_, cons))) => *cons,
                         Expr::Error => return (Pattern::Any, self.span()),
@@ -321,7 +327,7 @@ mod input {
                         (
                             Pattern::Typed(
                                 Box::new((Pattern::Any, self.span())),
-                                Box::new(Val::var(Var::Builtin(Builtin::UnitType))),
+                                Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                             ),
                             self.span(),
                         ),
@@ -382,11 +388,11 @@ mod input {
                     match x
                         .ty()
                         .and_then(|x| x.expr())
-                        .map(|x| x.check(Val::Type, cxt.ecxt, CheckReason::UsedAsType))
+                        .map(|x| x.check(Rc::new(Val::Type), cxt.ecxt, CheckReason::UsedAsType))
                     {
                         Some(ty) => Pattern::Typed(
                             Box::new(pat),
-                            Box::new(ty.eval(&mut cxt.ecxt.env()).with_cap(cap, false)),
+                            ty.eval(&mut cxt.ecxt.env()).with_cap(cap, false),
                         ),
                         None => pat.0,
                     }
@@ -408,13 +414,13 @@ mod input {
             implicit: Option<ast::ImpArgs>,
             explicit: Option<ast::Expr>,
             lhs_span: RelSpan,
-            mut lhs_ty: Val,
+            mut lhs_ty: IVal,
             cxt: &mut CaseElabCxt<'_, '_>,
             cons: Cons,
         ) -> Pattern {
             let start_size = *size;
             let implicit = if let Some(args) = implicit {
-                match lhs_ty {
+                match &*lhs_ty {
                     Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
                         let args: Vec<_> = args
                             .args()
@@ -445,14 +451,14 @@ mod input {
                                     Some(Err(span)) => {
                                         cxt.ecxt
                                             .unify(
-                                                Val::var(Var::Builtin(Builtin::UnitType)),
+                                                Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                                                 b.ty.clone().eval(&mut env),
                                                 CheckReason::ArgOf(lhs_span),
                                             )
                                             .unwrap_or_else(|e| cxt.ecxt.error(span, e));
                                         (
                                             (Pattern::Any, span),
-                                            (Val::var(Var::Builtin(Builtin::UnitType))),
+                                            Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                                         )
                                     }
                                     None => {
@@ -482,29 +488,26 @@ mod input {
                             .into_iter()
                             .rfold(None, |acc, x| match acc {
                                 None => Some(x),
-                                Some(y) => {
-                                    Some(Val::Pair(Box::new(x), Box::new(y), Box::new(Val::Error)))
-                                }
+                                Some(y) => Some(Rc::new(Val::Pair(x, y, Rc::new(Val::Error)))),
                             })
                             .unwrap();
-                        lhs_ty = clos.apply(arg);
+                        lhs_ty = (**clos).clone().apply(arg);
                         args
                     }
                     Val::Error => {
-                        lhs_ty = Val::Error;
+                        lhs_ty = Rc::new(Val::Error);
                         Vec::new()
                     }
-                    lty => {
+                    _lty => {
                         cxt.ecxt.error(
                             args.span(),
                             "Extra implicit arguments to constructor in pattern",
                         );
-                        lhs_ty = lty;
                         Vec::new()
                     }
                 }
             } else {
-                match lhs_ty {
+                match &*lhs_ty {
                     Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
                         let args: Vec<_> = clos
                             .params
@@ -524,20 +527,20 @@ mod input {
                             })
                             .collect();
                         // This is correct since they're all var patterns
-                        lhs_ty = clos.open(start_size);
+                        lhs_ty = (**clos).clone().open(start_size);
                         args
                     }
                     _ => Vec::new(),
                 }
             };
             let start_size = *size;
-            let explicit = match (explicit, lhs_ty) {
+            let explicit = match (explicit, &*lhs_ty) {
                 (Some(args), Val::Fun(clos)) if matches!(clos.class, Pi(Expl, _)) => {
-                    let r = Some(Box::new((
-                        args.to_pattern(cxt, size, Cap::Imm),
+                    let r = Some((
+                        Box::new(args.to_pattern(cxt, size, Cap::Imm)),
                         clos.par_ty(),
-                    )));
-                    lhs_ty = clos.apply(
+                    ));
+                    lhs_ty = (**clos).clone().apply(
                         r.as_ref()
                             .unwrap()
                             .0
@@ -551,22 +554,18 @@ mod input {
                         self.span(),
                         "Expected explicit arguments to constructor in pattern",
                     );
-                    let r = Some(Box::new(((Pattern::Any, self.span()), clos.par_ty())));
-                    lhs_ty = clos.apply(Val::Error);
+                    let r = Some((Box::new((Pattern::Any, self.span())), clos.par_ty()));
+                    lhs_ty = (**clos).clone().apply(Rc::new(Val::Error));
                     r
                 }
-                (Some(_), lty) => {
+                (Some(_), _) => {
                     cxt.ecxt.error(
                         self.span(),
                         "Extra explicit arguments to constructor in pattern",
                     );
-                    lhs_ty = lty;
                     None
                 }
-                (_, lty) => {
-                    lhs_ty = lty;
-                    None
-                }
+                (_, _) => None,
             };
             lhs_ty = lhs_ty.quote(*size, None).eval(&mut Env::new(*size));
             Pattern::Cons(PCons::Cons(cons), implicit, explicit, lhs_ty, *size)
@@ -591,7 +590,7 @@ mod input {
 
 // OUTPUT
 
-type PEnv = Vec<(SName, Val, Cap)>;
+type PEnv = Vec<(SName, IVal, Cap)>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct PVar(usize);
@@ -637,12 +636,12 @@ struct DecNode<T: IsTerm> {
 struct CaseElabCxt<'a, 'b> {
     ecxt: &'a mut Cxt<'b>,
     env_tys: HashMap<Body, (PEnv, bool, Env)>,
-    var_tys: Vec<(Val, CheckReason)>,
+    var_tys: Vec<(IVal, CheckReason)>,
     bodies: Vec<(Option<ast::Expr>, RelSpan)>,
 }
 
 impl CaseElabCxt<'_, '_> {
-    fn pvar(&mut self, ty: Val, reason: CheckReason) -> PVar {
+    fn pvar(&mut self, ty: IVal, reason: CheckReason) -> PVar {
         let l = self.var_tys.len();
         self.var_tys.push((ty, reason));
         PVar(l)
@@ -707,7 +706,7 @@ impl CaseElabCxt<'_, '_> {
                 Some(guard) => {
                     // Add all extra rows to the guard fallback
                     let guard = guard.check(
-                        Val::var(Var::Builtin(Builtin::BoolType)),
+                        Rc::new(Val::var(Var::Builtin(Builtin::BoolType))),
                         &mut self.ecxt,
                         CheckReason::Condition,
                     );
@@ -805,7 +804,7 @@ impl CaseElabCxt<'_, '_> {
                         iargs.extend(iargs2.iter().map(|(_, ty)| {
                             self.pvar(ty.clone().with_cap(scap, true), sreason.clone())
                         }));
-                        eargs2.as_deref().map(|(_, ty)| {
+                        eargs2.clone().map(|(_, ty)| {
                             eargs =
                                 Some(self.pvar(ty.clone().with_cap(scap, true), sreason.clone()))
                         });
@@ -819,7 +818,7 @@ impl CaseElabCxt<'_, '_> {
                     );
                     eargs2.map(|b| {
                         row.columns.push_back(input::Column {
-                            pat: b.0,
+                            pat: *b.0,
                             var: eargs.unwrap(),
                         })
                     });
@@ -833,14 +832,14 @@ impl CaseElabCxt<'_, '_> {
                             Val::Fun(clos) if clos.class == Sigma => {
                                 assert_eq!(clos.params.len(), 1);
                                 let ta = clos.par_ty();
-                                let tb = clos.clone().open(size);
+                                let tb = (**clos).clone().open(size);
                                 let va = self.pvar(ta.with_cap(scap, true), sreason.clone());
                                 let vb = self.pvar(tb.with_cap(scap, true), sreason.clone());
                                 (va, vb)
                             }
                             Val::Error => (
-                                self.pvar(Val::Error, sreason.clone()),
-                                self.pvar(Val::Error, sreason.clone()),
+                                self.pvar(Rc::new(Val::Error), sreason.clone()),
+                                self.pvar(Rc::new(Val::Error), sreason.clone()),
                             ),
                             ty => {
                                 // TODO include reason
@@ -848,12 +847,12 @@ impl CaseElabCxt<'_, '_> {
                                     span,
                                     TypeError::InvalidPattern(
                                         "Tuple pattern invalid for type ".to_string(),
-                                        ty.clone().quote(size, Some(&self.ecxt.mcxt)),
+                                        Rc::new(ty.clone()).quote(size, Some(&self.ecxt.mcxt)),
                                     ),
                                 );
                                 (
-                                    self.pvar(Val::Error, sreason.clone()),
-                                    self.pvar(Val::Error, sreason.clone()),
+                                    self.pvar(Rc::new(Val::Error), sreason.clone()),
+                                    self.pvar(Rc::new(Val::Error), sreason.clone()),
                                 )
                             }
                         };
@@ -1049,21 +1048,21 @@ mod coverage {
                                     .into_iter()
                                     .filter_map(|(s, _, ty)| {
                                         let mut size = size;
-                                        let (rty, has_args) = match ty {
+                                        let (rty, has_args) = match &*ty {
                                             Val::Fun(x) if matches!(x.class, Pi(_, _)) => {
                                                 let class = x.class;
                                                 let new_size = size + x.params.len();
-                                                let rty = x.open(size);
+                                                let rty = (**x).clone().open(size);
                                                 size = new_size;
-                                                match rty {
+                                                match &*rty {
                                                     Val::Fun(e) if matches!(class, Pi(Expl, _)) => {
                                                         size += e.params.len();
-                                                        (e.open(new_size), true)
+                                                        ((**e).clone().open(new_size), true)
                                                     }
-                                                    rty => (rty, matches!(class, Pi(Expl, _))),
+                                                    _ => (rty, matches!(class, Pi(Expl, _))),
                                                 }
                                             }
-                                            ty => (ty, false),
+                                            _ => (ty, false),
                                         };
                                         if cxt
                                             .ecxt
@@ -1181,12 +1180,12 @@ impl CaseOf<Expr> {
 }
 
 pub(super) fn elab_case(
-    sty: Val,
+    mut sty: IVal,
     s_span: RelSpan,
     sreason: CheckReason,
     s_borrow: Option<Borrow>,
     branches: impl IntoIterator<Item = (Option<ast::Expr>, RelSpan, Option<ast::Expr>)>,
-    rty: &mut Option<(Val, CheckReason)>,
+    rty: &mut Option<(IVal, CheckReason)>,
     ecxt: &mut Cxt,
 ) -> (CaseOf<Expr>, Expr) {
     let mut cxt = CaseElabCxt {
@@ -1196,7 +1195,8 @@ pub(super) fn elab_case(
         bodies: Vec::new(),
     };
     let outer_size = cxt.ecxt.size();
-    let svar = cxt.pvar(sty.inlined(&cxt.ecxt), sreason);
+    Rc::make_mut(&mut sty).inline_head(&mut cxt.ecxt.env(), &cxt.ecxt.mcxt);
+    let svar = cxt.pvar(sty, sreason);
     let rows = branches
         .into_iter()
         .map(|(pat, span, body)| input::Row::new(svar, pat, span, body, &mut cxt))
@@ -1265,7 +1265,7 @@ pub(super) fn elab_case(
                                 cxt.ecxt.error(body.span(), Doc::start("Type of case branch result contains variable ")
                                     .add(cxt.ecxt.db.lookup_name(n), Doc::COLOR1)
                                     .add(", which isn't allowed to escape the case branch where it was bound", ()));
-                                Val::Error
+                                Rc::new(Val::Error)
                             } else {
                                 ty
                             };
@@ -1327,7 +1327,7 @@ pub(super) fn elab_case(
 impl ast::Match {
     pub(super) fn elaborate(
         &self,
-        rty: &mut Option<(Val, CheckReason)>,
+        rty: &mut Option<(IVal, CheckReason)>,
         ecxt: &mut Cxt,
     ) -> (Expr, CaseOf<Expr>, Expr) {
         let (scrutinee, sty, borrow) = if let Some(scrutinee) = self.scrutinee() {
@@ -1341,7 +1341,7 @@ impl ast::Match {
             ecxt.finish_deps(self.span());
             (scrutinee, sty, borrow)
         } else {
-            (Expr::Error, Val::Error, None)
+            (Expr::Error, Rc::new(Val::Error), None)
         };
         let (case_of, ty) = elab_case(
             sty,
@@ -1370,14 +1370,14 @@ impl ast::Match {
 fn elab_block(
     block: &[ast::Stmt],
     span: RelSpan,
-    rty: &mut Option<(Val, CheckReason)>,
+    rty: &mut Option<(IVal, CheckReason)>,
     ecxt: &mut Cxt,
 ) -> Expr {
     if block.is_empty() {
         match rty {
             Some((rty, reason)) => {
                 if let Err(e) = ecxt.unify(
-                    Val::var(Var::Builtin(Builtin::UnitType)),
+                    Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                     rty.clone(),
                     *reason,
                 ) {
@@ -1386,7 +1386,7 @@ fn elab_block(
             }
             None => {
                 *rty = Some((
-                    Val::var(Var::Builtin(Builtin::UnitType)),
+                    Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                     CheckReason::MustMatch(span),
                 ));
             }
@@ -1446,7 +1446,12 @@ fn elab_block(
                 };
                 let ty = ty
                     .map(|x| (x.span(), x))
-                    .map(|(s, x)| (x.check(Val::Type, ecxt, CheckReason::UsedAsType), s))
+                    .map(|(s, x)| {
+                        (
+                            x.check(Rc::new(Val::Type), ecxt, CheckReason::UsedAsType),
+                            s,
+                        )
+                    })
                     .map(|(x, s)| {
                         (
                             x.eval(&mut ecxt.env())
@@ -1468,7 +1473,7 @@ fn elab_block(
                             .body()
                             .and_then(|x| x.expr())
                             .map(|x| x.infer(ecxt, c))
-                            .unwrap_or((Expr::Error, Val::Error));
+                            .unwrap_or((Expr::Error, Rc::new(Val::Error)));
                         (
                             term,
                             ty,
@@ -1494,16 +1499,16 @@ fn elab_block(
 }
 
 impl ast::Do {
-    pub(super) fn elaborate(&self, rty: &mut Option<(Val, CheckReason)>, ecxt: &mut Cxt) -> Expr {
+    pub(super) fn elaborate(&self, rty: &mut Option<(IVal, CheckReason)>, ecxt: &mut Cxt) -> Expr {
         elab_block(&self.block(), self.span(), rty, ecxt)
     }
 }
 
-impl Dec<Val> {
+impl Dec<IVal> {
     fn try_eval(
         &self,
-        env: &mut HashMap<PVar, &Val>,
-        params: &mut Vec<Option<Val>>,
+        env: &mut HashMap<PVar, IVal>,
+        params: &mut Vec<Option<IVal>>,
     ) -> Option<Body> {
         match self {
             Dec::Success(b) => Some(*b),
@@ -1513,7 +1518,7 @@ impl Dec<Val> {
             Dec::Switch(v, branches, fallback) => {
                 for i in branches {
                     //eprintln!("{:?}\n::: {:?}", env.get(v), i.cons);
-                    match (env.get(v), i.cons) {
+                    match (env.get(v).map(|x| &**x), i.cons) {
                         (Some(Val::Lit(l1)), PCons::Lit(l2)) if *l1 == l2 => {
                             if let Some(x) = i.then.try_eval(env, params) {
                                 return Some(x);
@@ -1524,7 +1529,8 @@ impl Dec<Val> {
                         // non-equal literals can never match!
                         // TODO sometimes this triggers anyway though for e.g. 1i32 compared with 1 : unsigned meta
                         (Some(Val::Lit(_)), PCons::Lit(_)) => (),
-                        (Some(Val::Neutral(n1)), PCons::Cons(c1)) if matches!(n1.head(), Head::Var(Var::Cons(_, c2)) if c1 == c2) => {
+                        (Some(Val::Neutral(n1)), PCons::Cons(c1)) if matches!(n1.head(), Head::Var(Var::Cons(_, c2)) if c1 == c2) =>
+                        {
                             // match spines
                             // if !i.iargs.is_empty() {
                             //     if let Some(Elim::App(Impl, b)) = n1.spine().first() {
@@ -1540,10 +1546,14 @@ impl Dec<Val> {
                                 return Some(x);
                             } else {
                                 return None;
-                           }
+                            }
                         }
                         // Wrong cons is also guaranteed no match
-                        (Some(Val::Neutral(n1)), PCons::Cons(_)) if matches!(n1.head(), Head::Var(Var::Cons(_, _))) => (),
+                        (Some(Val::Neutral(n1)), PCons::Cons(_))
+                            if matches!(n1.head(), Head::Var(Var::Cons(_, _))) =>
+                        {
+                            ()
+                        }
                         _ => return None,
                     }
                 }
@@ -1554,32 +1564,33 @@ impl Dec<Val> {
         }
     }
 }
-impl DecNode<Val> {
+impl DecNode<IVal> {
     fn try_eval(
         &self,
-        env: &mut HashMap<PVar, &Val>,
-        params: &mut Vec<Option<Val>>,
+        env: &mut HashMap<PVar, IVal>,
+        params: &mut Vec<Option<IVal>>,
     ) -> Option<Body> {
         for (var, pat) in &self.ipats {
             match pat {
-                IPat::Pair(a, b) => match env.get(var) {
+                IPat::Pair(a, b) => match env.get(var).map(|x| &**x) {
                     Some(Val::Pair(va, vb, _)) => {
+                        let (va, vb) = (va.clone(), vb.clone());
                         env.insert(*a, va);
                         env.insert(*b, vb);
                     }
                     // Leave a and b unset, the body we pick might not use them
                     _ => (),
                 },
-                IPat::Var(_, _) => params.push(env.get(var).copied().cloned()),
+                IPat::Var(_, _) => params.push(env.get(var).cloned()),
             }
         }
         self.dec.try_eval(env, params)
     }
 }
-impl CaseOf<Val> {
-    pub fn try_eval(&self, x: &Val) -> Option<Val> {
+impl CaseOf<IVal> {
+    pub fn try_eval(&self, x: &IVal) -> Option<IVal> {
         let mut env = HashMap::new();
-        env.insert(self.svar, x);
+        env.insert(self.svar, x.clone());
         let mut params = Vec::new();
         let body = self.dec.try_eval(&mut env, &mut params)?;
         let val = self.rhs[body.0].clone().apply_exact(params);

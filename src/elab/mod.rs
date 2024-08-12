@@ -13,7 +13,7 @@ mod var;
 use cxt::*;
 use metas::*;
 pub use term::*;
-use val::*;
+pub use val::*;
 pub use var::*;
 
 use self::unify::CheckReason;
@@ -399,7 +399,7 @@ pub struct DefElabResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefType {
     pub name: SName,
-    pub ty: Val,
+    pub ty: IVal,
     pub is_trait: bool,
     pub is_impl: bool,
     pub type_cap: Option<Cap>,
@@ -407,7 +407,7 @@ pub struct DefType {
     pub type_def: Option<TypeDefKind>,
 }
 impl DefType {
-    pub fn new(name: SName, ty: Val) -> Self {
+    pub fn new(name: SName, ty: IVal) -> Self {
         DefType {
             name,
             ty,

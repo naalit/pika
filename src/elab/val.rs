@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    rc::Rc,
     sync::{Arc, RwLock},
 };
 
@@ -8,8 +9,8 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct Neutral {
     head: Head<Lvl>,
-    spine: Vec<Elim<Val>>,
-    unfolded: Arc<RwLock<Option<Val>>>,
+    spine: Vec<Elim<IVal>>,
+    unfolded: Arc<RwLock<Option<IVal>>>,
 }
 // Manual impls that ignore the glued unfolded value
 impl PartialEq for Neutral {
@@ -25,7 +26,7 @@ impl std::hash::Hash for Neutral {
     }
 }
 impl Neutral {
-    pub fn new(head: Head<Lvl>, spine: Vec<Elim<Val>>) -> Neutral {
+    pub fn new(head: Head<Lvl>, spine: Vec<Elim<IVal>>) -> Neutral {
         Neutral {
             head,
             spine,
@@ -37,21 +38,21 @@ impl Neutral {
         self.head
     }
 
-    pub fn spine(&self) -> &Vec<Elim<Val>> {
+    pub fn spine(&self) -> &Vec<Elim<IVal>> {
         &self.spine
     }
 
-    pub fn app(&mut self, x: Elim<Val>) {
+    pub fn app(&mut self, x: Elim<IVal>) {
         // The glued storage from before no longer applies, create a new one
         self.unfolded = Default::default();
         self.spine.push(x);
     }
 
-    pub fn into_parts(self) -> (Head<Lvl>, Vec<Elim<Val>>) {
+    pub fn into_parts(self) -> (Head<Lvl>, Vec<Elim<IVal>>) {
         (self.head, self.spine)
     }
 
-    pub fn resolve(mut self, env: &Env, mcxt: &MetaCxt) -> Result<Val, Self> {
+    pub fn resolve(mut self, env: &Env, mcxt: &MetaCxt) -> Result<IVal, Self> {
         let guard = self.unfolded.read().unwrap();
         if let Some(v) = &*guard {
             Ok(v.clone())
@@ -67,7 +68,7 @@ impl Neutral {
                 Head::Var(Var::Builtin(Builtin::ArithOp(op))) if self.spine.len() == 1 => {
                     match self.spine.last().unwrap() {
                         Elim::App(_, x) => match {
-                            let mut x = x.clone();
+                            let mut x = (**x).clone();
                             x.inline_head(&mut env.clone(), mcxt);
                             x
                         } {
@@ -75,7 +76,7 @@ impl Neutral {
                                 (&Val::Lit(Literal::Int(i, ti)), &Val::Lit(Literal::Int(j, _))) => {
                                     self.spine.pop().unwrap(); // get rid of the argument so we dont apply it twice
                                     (
-                                        Val::Lit(Literal::Int(
+                                        Rc::new(Val::Lit(Literal::Int(
                                             match op {
                                                 ArithOp::Add => i + j,
                                                 ArithOp::Sub => i - j,
@@ -90,7 +91,7 @@ impl Neutral {
                                                 // ArithOp::Shr => todo!(),
                                             },
                                             ti,
-                                        )),
+                                        ))),
                                         false,
                                     )
                                 }
@@ -120,11 +121,13 @@ impl Neutral {
                 // If we're caching it, it can't depend on context at all
                 Env::new(env.size)
             };
-            let mut val = self
+            let mut val = (*self
                 .spine
                 .into_iter()
-                .fold(head, |head, elim| head.app(elim, &mut env, mcxt));
+                .fold(head, |head, elim| (*head).clone().app(elim, &mut env, mcxt)))
+            .clone();
             val.inline_head(&mut env, mcxt);
+            let val = Rc::new(val);
             if cache {
                 let mut guard = self.unfolded.write().unwrap();
                 *guard = Some(val.clone());
@@ -143,7 +146,7 @@ pub struct VClos {
 }
 impl VClos {
     /// arg: (arg name, arg type, is impl) -> argument value
-    pub fn elab_with(self, mut arg: impl FnMut(SName, Val, bool) -> Val) -> Val {
+    pub fn elab_with(self, mut arg: impl FnMut(SName, IVal, bool) -> IVal) -> IVal {
         let VClos {
             class: _,
             params,
@@ -157,7 +160,7 @@ impl VClos {
         body.eval(&mut env)
     }
 
-    pub fn par_ty(&self) -> Val {
+    pub fn par_ty(&self) -> IVal {
         let mut env = self.env.clone();
         self.params
             .iter()
@@ -176,7 +179,7 @@ impl VClos {
             .eval(&mut env)
     }
 
-    pub fn apply_exact(self, args: Vec<Option<Val>>) -> Val {
+    pub fn apply_exact(self, args: Vec<Option<IVal>>) -> IVal {
         let VClos {
             class: _,
             params,
@@ -188,7 +191,7 @@ impl VClos {
         body.eval(&mut env)
     }
 
-    pub fn apply(self, arg: Val) -> Val {
+    pub fn apply(self, arg: IVal) -> IVal {
         // deal with argument number mismatch when passing values that aren't syntactically tuples:
         //
         // ((x, y) => ...) p where p : (A, B) -->
@@ -197,7 +200,7 @@ impl VClos {
         // ([a, b] (x, y) => ...) [t, u] p -->
         // (case p of (x, y) => ...) [t/a, u/b]
         let VClos { mut env, body, .. } = self;
-        match arg.zip_pair(&self.params) {
+        match (*arg).clone().zip_pair(&self.params) {
             Ok(x) => env.extend(x.into_iter().map(|(x, _)| Some(x))),
             Err(arg) => {
                 // let pars: Vec<_> = self.params.iter().map(|x| x.name).collect();
@@ -210,7 +213,7 @@ impl VClos {
                         })
                         .map(|x| x.eval(&mut env)),
                         // TODO how do we find this return type?
-                        Val::Error,
+                        Rc::new(Val::Error),
                     ),
                     &mut env,
                     None,
@@ -251,7 +254,7 @@ impl VClos {
     /// Add the parameters to the environment and then evaluate the closure body, "opening" or "entering" the closure.
     /// `size` is the size before adding any parameters.
     /// The size after calling `open` is `size + self.params.len()`.
-    pub fn open(self, mut size: Size) -> Val {
+    pub fn open(self, mut size: Size) -> IVal {
         let VClos {
             class: _,
             params,
@@ -265,21 +268,21 @@ impl VClos {
         body.eval(&mut env)
     }
 
-    pub fn synthesize_args(&self, size: Size) -> Val {
+    pub fn synthesize_args(&self, size: Size) -> IVal {
         let (arg, _size) = self.params.iter().rfold(
             (None, size + self.params.len()),
             |(term, size), Par { name, .. }| {
                 let size = size.dec();
-                let var = Box::new(Val::var(Var::Local(*name, size.next_lvl())));
+                let var = Rc::new(Val::var(Var::Local(*name, size.next_lvl())));
                 let term = match term {
                     // TODO get the actual type
-                    Some(term) => Box::new(Val::Pair(var, term, Box::new(Val::Error))),
+                    Some(term) => Rc::new(Val::Pair(var, term, Rc::new(Val::Error))),
                     None => var,
                 };
                 (Some(term), size)
             },
         );
-        *arg.unwrap()
+        arg.unwrap()
     }
 }
 
@@ -287,29 +290,26 @@ impl VClos {
 pub enum Val {
     Type,
     Neutral(Neutral),
-    Fun(Box<VClos>),
+    Fun(Rc<VClos>),
     // Do(Vec<Stmt>),
     Lit(Literal),
-    Pair(Box<Val>, Box<Val>, Box<Val>),
-    Struct(Def, Vec<Val>, Box<Val>),
-    Cap(Cap, Box<Val>),
+    Pair(IVal, IVal, IVal),
+    Struct(Def, Vec<IVal>, IVal),
+    Cap(Cap, IVal),
     Error,
 }
+pub type IVal = Rc<Val>;
+
 impl IsTerm for Val {
+    type Clos = VClos;
+    type Loc = Lvl;
+}
+impl IsTerm for IVal {
     type Clos = VClos;
     type Loc = Lvl;
 }
 
 impl Val {
-    pub fn with_cap(self, cap: Cap, replace: bool) -> Val {
-        match (cap, self) {
-            (Cap::Own, s) => s,
-            (c, Val::Cap(c2, s)) if replace => Val::Cap(c.min(c2), s),
-            (_, Val::Cap(c2, s)) => Val::Cap(c2, s),
-            (c, s) => Val::Cap(c, Box::new(s)),
-        }
-    }
-
     pub fn uncap_ty(&self) -> &Val {
         match self {
             Val::Cap(_, t) => t.uncap_ty(),
@@ -318,12 +318,12 @@ impl Val {
     }
     pub fn uncap_ty_own(self) -> Val {
         match self {
-            Val::Cap(_, t) => t.uncap_ty_own(),
+            Val::Cap(_, t) => (*t).clone().uncap_ty_own(),
             _ => self,
         }
     }
 
-    pub fn zip_pair<T>(self, with: &[T]) -> Result<Vec<(Val, &T)>, Val> {
+    pub fn zip_pair<T>(self, with: &[T]) -> Result<Vec<(IVal, &T)>, Val> {
         // ((x, y) => ...) p where p : (A, B) shouldn't panic
         // so first check that we have enough of the pair inlined
         let mut term = &self;
@@ -341,36 +341,36 @@ impl Val {
         for x in &with[..with.len() - 1] {
             match term {
                 Val::Pair(a, rest, _) => {
-                    v.push((*a, x));
-                    term = *rest;
+                    v.push((a, x));
+                    term = (*rest).clone();
                 }
-                Val::Error => v.push((Val::Error, x)),
+                Val::Error => v.push((Rc::new(Val::Error), x)),
                 _ => unreachable!(),
             }
         }
         if let Some(x) = with.last() {
-            v.push((term, x));
+            v.push((Rc::new(term), x));
         }
         Ok(v)
     }
 
     pub fn app<'a>(
         mut self,
-        x: Elim<Val>,
+        x: Elim<IVal>,
         env: &mut Env,
         mcxt: impl Into<Option<&'a MetaCxt<'a>>>,
-    ) -> Val {
+    ) -> IVal {
         match x {
             Elim::App(icit, arg) => match self {
                 Val::Fun(clos) => {
                     assert_eq!(clos.class.icit(), Some(icit));
-                    clos.apply(arg)
+                    (*clos).clone().apply(arg)
                 }
                 Val::Neutral(ref mut neutral) => {
                     neutral.app(Elim::App(icit, arg));
-                    self
+                    Rc::new(self)
                 }
-                Val::Error => Val::Error,
+                Val::Error => Rc::new(Val::Error),
                 _ => unreachable!("Cannot resolve application to non-Lam"),
             },
             Elim::Member(def, idx, name) => match self {
@@ -382,23 +382,23 @@ impl Val {
                 }
                 Val::Neutral(ref mut neutral) => {
                     neutral.app(Elim::Member(def, idx, name));
-                    self
+                    Rc::new(self)
                 }
-                Val::Error => Val::Error,
+                Val::Error => Rc::new(Val::Error),
                 _ => unreachable!("Cannot resolve member of non-struct {:?}", self),
             },
             Elim::Case(ref case, _) => {
                 if let Some(mcxt) = mcxt.into() {
                     self.inline_head(env, mcxt);
                 }
-                match case.try_eval(&self) {
+                match case.try_eval(&Rc::new(self.clone())) {
                     Some(v) => v,
                     None => match self {
                         Val::Neutral(ref mut neutral) => {
                             neutral.app(x);
-                            self
+                            Rc::new(self)
                         }
-                        Val::Error => Val::Error,
+                        Val::Error => Rc::new(Val::Error),
                         x => todo!("couldn't eval case of {:?}", x),
                     },
                 }
@@ -412,7 +412,7 @@ impl Val {
 }
 
 impl Elim<Expr> {
-    pub fn eval(self, env: &mut Env) -> Elim<Val> {
+    pub fn eval(self, env: &mut Env) -> Elim<IVal> {
         match self {
             Elim::App(icit, arg) => Elim::App(icit, arg.eval(env)),
             Elim::Member(def, idx, name) => Elim::Member(def, idx, name),
@@ -420,7 +420,7 @@ impl Elim<Expr> {
         }
     }
 }
-impl Elim<Val> {
+impl Elim<IVal> {
     pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Elim<Expr> {
         match self {
             Elim::App(icit, arg) => Elim::App(icit, arg.quote(size, inline_metas)),
@@ -466,32 +466,28 @@ impl EClos {
 }
 
 impl Expr {
-    pub fn eval(self, env: &mut Env) -> Val {
+    pub fn eval(self, env: &mut Env) -> IVal {
         // TODO is there some way to be able to reuse Boxes? Expr and Val should be the same size
-        match self {
+        Rc::new(match self {
             Expr::Type => Val::Type,
             Expr::Head(h) => match h {
-                Head::Var(Var::Local(n, i)) => env.val(n, i),
+                Head::Var(Var::Local(n, i)) => return env.val(n, i),
                 Head::Var(v) => Val::var(v.cvt(Size::zero())),
             },
-            Expr::Elim(x, e) => x.eval(env).app(e.eval(env), env, None),
-            Expr::Fun(clos) => Val::Fun(Box::new(clos.eval(env))),
+            Expr::Elim(x, e) => return (*x.eval(env)).clone().app(e.eval(env), env, None),
+            Expr::Fun(clos) => Val::Fun(Rc::new(clos.eval(env))),
             Expr::Lit(l) => Val::Lit(l),
-            Expr::Pair(a, b, t) => Val::Pair(
-                Box::new(a.eval(env)),
-                Box::new(b.eval(env)),
-                Box::new(t.eval(env)),
-            ),
+            Expr::Pair(a, b, t) => Val::Pair(a.eval(env), b.eval(env), t.eval(env)),
             Expr::Struct(def, fields, ty) => Val::Struct(
                 def,
                 fields.into_iter().map(|x| x.eval(env)).collect(),
-                Box::new(ty.eval(env)),
+                ty.eval(env),
             ),
             Expr::Assign(_, _) => todo!("handle partial evaluation failing"),
-            Expr::Cap(m, x) => Val::Cap(m, Box::new(x.eval(env))),
+            Expr::Cap(m, x) => Val::Cap(m, x.eval(env)),
             Expr::Error => Val::Error,
-            Expr::Spanned(_, x) => x.eval(env),
-        }
+            Expr::Spanned(_, x) => return x.eval(env),
+        })
     }
 
     pub fn eval_quote_in_place(
@@ -581,12 +577,16 @@ impl Expr {
     }
 }
 
-impl Val {
-    pub fn quote(self, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
-        match self {
+pub trait AuxQuote {
+    fn quote(&self, size: Size, inline_metas: Option<&MetaCxt>) -> Expr;
+    fn with_cap(self, cap: Cap, replace: bool) -> Self;
+}
+impl AuxQuote for IVal {
+    fn quote(&self, size: Size, inline_metas: Option<&MetaCxt>) -> Expr {
+        match &**self {
             Val::Type => Expr::Type,
             Val::Neutral(neutral) => {
-                let (head, spine) = neutral.into_parts();
+                let (head, spine) = neutral.clone().into_parts();
                 let mut inlined_meta = false;
                 let head = match head {
                     // Don't resolve the neutral, we want the smallest term when quoting
@@ -613,17 +613,17 @@ impl Val {
                 // if m >= x.own_cap_(inline_metas, &Env::new(size), true) {
                 //     return x.quote(size, inline_metas);
                 // }
-                Expr::Cap(m, Box::new(x.quote(size, inline_metas)))
+                Expr::Cap(*m, Box::new(x.quote(size, inline_metas)))
             }
-            Val::Fun(clos) => Expr::Fun(clos.quote(size, inline_metas)),
-            Val::Lit(l) => Expr::Lit(l),
+            Val::Fun(clos) => Expr::Fun(VClos::clone(clos).quote(size, inline_metas)),
+            Val::Lit(l) => Expr::Lit(*l),
             Val::Pair(a, b, t) => Expr::Pair(
                 Box::new(a.quote(size, inline_metas)),
                 Box::new(b.quote(size, inline_metas)),
                 Box::new(t.quote(size, inline_metas)),
             ),
             Val::Struct(def, fields, ty) => Expr::Struct(
-                def,
+                *def,
                 fields
                     .into_iter()
                     .map(|x| x.quote(size, inline_metas))
@@ -634,6 +634,16 @@ impl Val {
         }
     }
 
+    fn with_cap(self, cap: Cap, replace: bool) -> IVal {
+        match (cap, &*self) {
+            (Cap::Own, _) => self,
+            (c, Val::Cap(c2, s)) if replace => Rc::new(Val::Cap(c.min(*c2), s.clone())),
+            (_, Val::Cap(c2, s)) => Rc::new(Val::Cap(*c2, s.clone())),
+            (c, _) => Rc::new(Val::Cap(c, self)),
+        }
+    }
+}
+impl Val {
     /// Unfolds the head of this value as much as possible, applying eliminators along the way.
     /// Does not recurse over anything - it doesn't affect spines, pairs, etc.
     pub fn inline_head(&mut self, env: &mut Env, mcxt: &MetaCxt) {
@@ -643,13 +653,13 @@ impl Val {
                 std::mem::swap(n, &mut n2);
                 match n2.resolve(env, &mcxt) {
                     Ok(x) => {
-                        *self = x;
+                        *self = Rc::unwrap_or_clone(x);
                         self.inline_head(env, mcxt);
                     }
                     Err(n2) => *n = n2,
                 }
             }
-            Val::Cap(_, x) => x.inline_head(env, mcxt),
+            Val::Cap(_, x) => Rc::make_mut(x).inline_head(env, mcxt),
             _ => (),
         }
     }

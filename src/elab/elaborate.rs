@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::parsing::SyntaxKind;
 
 use super::*;
@@ -18,7 +20,7 @@ impl ast::CapTok {
 }
 
 impl ast::Stmt {
-    pub(super) fn elab_dec(&self, cxt: &mut Cxt) -> Option<(SName, Val)> {
+    pub(super) fn elab_dec(&self, cxt: &mut Cxt) -> Option<(SName, IVal)> {
         match self {
             ast::Stmt::Def(ast::Def::LetDef(l)) if l.body().is_some() => {
                 cxt.error(l.span(), "Only declarations are allowed in this context");
@@ -38,7 +40,7 @@ impl ast::Stmt {
                 }
                 Some((Some((None, name)), Some(ty))) => Some((
                     name,
-                    ty.check(Val::Type, cxt, CheckReason::UsedAsType)
+                    ty.check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut cxt.env())
                         .with_cap(Cap::Imm, false),
@@ -51,7 +53,7 @@ impl ast::Stmt {
             ast::Stmt::Expr(e @ ast::Expr::Binder(_)) => match e.as_simple_pat(cxt.db) {
                 Some((Some((c, name)), Some(ty))) => Some((
                     name,
-                    ty.check(Val::Type, cxt, CheckReason::UsedAsType)
+                    ty.check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut cxt.env())
                         .with_cap(c.unwrap_or(Cap::Imm), false),
@@ -94,7 +96,7 @@ impl ast::Stmt {
     pub(super) fn elab_field(
         &self,
         cxt: &mut Cxt,
-    ) -> Option<(SName, Result<(Expr, Val), ast::Expr>)> {
+    ) -> Option<(SName, Result<(Expr, IVal), ast::Expr>)> {
         match self {
             ast::Stmt::Def(ast::Def::LetDef(l)) => match l.pat()?.expr()?.as_simple_pat(cxt.db) {
                 Some((Some((None, name)), _)) => Some((name, Err(l.body()?.expr()?))),
@@ -147,7 +149,7 @@ impl ast::Def {
                         (cxt.db.name("_".into()), l.pat()?.expr()?.span()),
                         |(_, n)| n,
                     ),
-                    ty.check(Val::Type, cxt, CheckReason::UsedAsType)
+                    ty.check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType)
                         .eval_quote(&mut cxt.env(), cxt.size(), Some(&cxt.mcxt))
                         .eval(&mut cxt.env())
                         .with_cap(n.and_then(|(c, _)| c).unwrap_or(Cap::Imm), false),
@@ -341,7 +343,7 @@ impl ast::Def {
                 ));
 
                 let (body, ty) = x.body()?.expr()?.infer(cxt, None);
-                match &ty {
+                match &*ty {
                     Val::Neutral(n) if matches!(n.head(), Head::Var(Var::Def(_, d)) if cxt.db.def_type(d).and_then(|x| x.result).map_or(false, |x| x.is_trait)) => {
                         ()
                     }
@@ -445,9 +447,16 @@ impl ast::Def {
                                 (
                                     clos.params.iter().chain(&clos2.params).cloned().collect(),
                                     // TODO these envs are slightly wrong
-                                    default_rty
-                                        .app(Elim::App(Impl, arg), &mut cxt.env(), &cxt.mcxt)
-                                        .app(Elim::App(Expl, arg2), &mut env, &cxt.mcxt),
+                                    Rc::unwrap_or_clone(default_rty.app(
+                                        Elim::App(Impl, arg),
+                                        &mut cxt.env(),
+                                        &cxt.mcxt,
+                                    ))
+                                    .app(
+                                        Elim::App(Expl, arg2),
+                                        &mut env,
+                                        &cxt.mcxt,
+                                    ),
                                 )
                             }
                             _ => (
@@ -460,7 +469,7 @@ impl ast::Def {
                             ),
                         }
                     }
-                    _ => (Vec::new(), default_rty),
+                    _ => (Vec::new(), Rc::new(default_rty)),
                 };
 
                 let body = match x.body() {
@@ -777,7 +786,7 @@ fn infer_fun(
             // TODO better span here
             Some(rty) => {
                 let ty = rty.ty(cxt);
-                let mut ty_params = match ty {
+                let mut ty_params = match &*ty {
                     Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                         for i in &clos.params {
                             cxt.define_local(
@@ -860,7 +869,7 @@ fn infer_fun(
     let (body, bty) = match ret_ty {
         Some(bty) => {
             let span = bty.span();
-            let bty = bty.check(Val::Type, cxt, CheckReason::UsedAsType);
+            let bty = bty.check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType);
 
             let captures = cxt.pop();
             let (captures_class, max_a) = captures.as_ref().map_or((Cap::Imm, None), |(_, x)| {
@@ -894,7 +903,7 @@ fn infer_fun(
                 .map(|x| x.infer(cxt, None))
                 .unwrap_or_else(|| {
                     // cxt.error(span, "Missing function body");
-                    (Expr::Error, Val::Error)
+                    (Expr::Error, Rc::new(Val::Error))
                 })
         }
     };
@@ -1155,7 +1164,7 @@ fn check_params(
     pars: Option<Pars>,
     tys: ParamTys,
     reason: CheckReason,
-    with_pars: Option<&mut Vec<Spanned<Val>>>,
+    with_pars: Option<&mut Vec<Spanned<IVal>>>,
     cxt: &mut Cxt,
 ) -> Vec<Par> {
     check_params_deps(pars, tys, reason, None, with_pars, cxt).0
@@ -1168,7 +1177,7 @@ fn check_params_deps(
     tys: ParamTys,
     reason: CheckReason,
     self_size: Option<Size>,
-    mut with_pars: Option<&mut Vec<Spanned<Val>>>,
+    mut with_pars: Option<&mut Vec<Spanned<IVal>>>,
     cxt: &mut Cxt,
 ) -> (Vec<Par>, Vec<Option<Borrow>>) {
     let Pars {
@@ -1275,7 +1284,7 @@ fn check_par(
     // (type, reason, is_ref)
     expected_ty: Option<(Expr, CheckReason, bool)>,
     self_size: Option<Size>,
-    with_pars: Option<&mut Vec<Spanned<Val>>>,
+    with_pars: Option<&mut Vec<Spanned<IVal>>>,
     allow_impl: bool,
     cxt: &mut Cxt,
 ) -> (Par, Option<Borrow>) {
@@ -1284,7 +1293,7 @@ fn check_par(
             let (m, is_ref, ty) = match cxt.resolve_self(x.span()) {
                 Some(rty) if self_size.is_some() => {
                     let ty = rty.ty(cxt);
-                    let rty = match ty {
+                    let rty = match &*ty {
                         Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
                             let before_size = self_size.unwrap();
                             let arg = clos
@@ -1321,7 +1330,7 @@ fn check_par(
             // We know it has type Type
             if let Some((expected_ty, reason, r)) = expected_ty {
                 let expected_ty = expected_ty.clone().eval(&mut cxt.env());
-                cxt.unify(Val::Type, expected_ty, reason)
+                cxt.unify(Rc::new(Val::Type), expected_ty, reason)
                     .unwrap_or_else(|e| cxt.error(x.span(), e));
             }
             let name = x.lhs().map(|x| x.name(cxt.db)).unwrap_or_else(|| {
@@ -1357,7 +1366,7 @@ fn check_par(
 
             let (rhs, rhs_ty) = rhs
                 .map(|x| x.infer(cxt, None))
-                .unwrap_or((Expr::Error, Val::Error));
+                .unwrap_or((Expr::Error, Rc::new(Val::Error)));
             match rhs.unspanned() {
                 Expr::Head(Head::Var(Var::Def(_, d)))
                     if cxt
@@ -1388,7 +1397,7 @@ fn check_par(
                 let mut env = cxt.env();
                 // needed for `insert_metas` to have the right scopes for using `as_arg`
                 cxt.push();
-                cxt.define_local(name, Val::Type, None, None, false);
+                cxt.define_local(name, Rc::new(Val::Type), None, None, false);
                 let (tr, tr_ty) = rhs.eval_quote(&mut env, cxt.size(), None).insert_metas(
                     rhs_ty,
                     imp_args,
@@ -1396,7 +1405,7 @@ fn check_par(
                     x.rhs().unwrap().span(),
                     cxt,
                 );
-                cxt.unify(Val::Type, tr_ty, CheckReason::UsedAsType)
+                cxt.unify(Rc::new(Val::Type), tr_ty, CheckReason::UsedAsType)
                     .unwrap_or_else(|e| cxt.error(x.span(), e));
                 env.push(None);
                 let tr = tr.eval(&mut env);
@@ -1434,7 +1443,7 @@ fn check_par(
                 ty => (ty, false),
             };
             let ty = ty
-                .map(|x| x.check(Val::Type, cxt, CheckReason::UsedAsType))
+                .map(|x| x.check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType))
                 .unwrap_or_else(|| {
                     cxt.error(
                         x.span(),
@@ -1487,7 +1496,7 @@ fn check_par(
                 // If no given type we can also check the `ref` status against the expected type
                 ty => (ty, expected_ty.as_ref().map_or(false, |(_, _, b)| *b)),
             };
-            let ty = match ty.map(|x| x.check(Val::Type, cxt, CheckReason::UsedAsType)) {
+            let ty = match ty.map(|x| x.check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType)) {
                 Some(ty) => {
                     if let Some((expected_ty, reason, r)) = expected_ty {
                         let ty = ty.clone().eval(&mut cxt.env());
@@ -1509,7 +1518,7 @@ fn check_par(
                 }
                 None => expected_ty.map(|(x, _, _)| x).unwrap_or_else(|| {
                     cxt.new_meta(
-                        MetaBounds::new(Val::Type),
+                        MetaBounds::new(Rc::new(Val::Type)),
                         x.span(),
                         MetaSource::TypeOf(name.0),
                     )
@@ -1536,7 +1545,7 @@ fn check_par(
                 ty => (Some(ty.clone()), false),
             };
             let ty = ty.map_or(Expr::Error, |x| {
-                x.check(Val::Type, cxt, CheckReason::UsedAsType)
+                x.check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType)
             });
 
             Par::new((cxt.db.name("_".to_string()), x.span()), ty, is_ref)
@@ -1544,8 +1553,12 @@ fn check_par(
         Err(span) => {
             if let Some((ty, reason, _)) = expected_ty {
                 let ty = ty.eval(&mut cxt.env());
-                cxt.unify(Val::var(Var::Builtin(Builtin::UnitType)), ty, reason)
-                    .unwrap_or_else(|e| cxt.error(span, e));
+                cxt.unify(
+                    Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
+                    ty,
+                    reason,
+                )
+                .unwrap_or_else(|e| cxt.error(span, e));
             }
             Par::new(
                 (cxt.db.name("_".to_string()), span),
@@ -1689,15 +1702,15 @@ impl Expr {
     /// If `self` of type `ty` takes implicit parameters, insert metas to apply them.
     pub(super) fn insert_metas(
         self,
-        ty: Val,
+        ty: IVal,
         imp_args: Option<ast::ImpArgs>,
         mut as_arg: Option<Expr>,
         span: RelSpan,
         cxt: &mut Cxt,
-    ) -> (Expr, Val) {
+    ) -> (Expr, IVal) {
         match ty.uncap_ty() {
             Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
-                let clos = clos.clone();
+                let clos = (**clos).clone();
                 let mut args: VecDeque<_> = imp_args
                     .into_iter()
                     .flat_map(|x| x.args())
@@ -1715,16 +1728,16 @@ impl Expr {
                         }
                         Err(span) => {
                             if let Err(e) = cxt.unify(
-                                Val::var(Var::Builtin(Builtin::UnitType)),
+                                Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                                 aty,
                                 CheckReason::ArgOf(span),
                             ) {
                                 cxt.error(span, e);
                                 targs.push(Expr::Error);
-                                Val::Error
+                                Rc::new(Val::Error)
                             } else {
                                 targs.push(Expr::var(Var::Builtin(Builtin::Unit)));
-                                Val::var(Var::Builtin(Builtin::Unit))
+                                Rc::new(Val::var(Var::Builtin(Builtin::Unit)))
                             }
                         }
                     },
@@ -1738,15 +1751,16 @@ impl Expr {
                     }
                     None => {
                         if !done_existential
-                            && aty == Val::Type
+                            && *aty == Val::Type
                             && cxt.db.name("Self".into()) == name.0
                         {
-                            let vself = self.clone().eval(&mut cxt.env()).inlined(cxt);
+                            let vself =
+                                Rc::unwrap_or_clone(self.clone().eval(&mut cxt.env())).inlined(cxt);
                             if vself.is_trait(cxt) {
                                 // Make an existential
                                 done_existential = true;
                                 targs.push(Expr::var(Var::Builtin(Builtin::Existential)));
-                                return Val::var(Var::Builtin(Builtin::Existential));
+                                return Rc::new(Val::var(Var::Builtin(Builtin::Existential)));
                             }
                         }
                         // Apply a new metavariable
@@ -1822,7 +1836,7 @@ impl Expr {
     }
 }
 
-pub(super) fn member_type(lhs: &Val, def: Def, idx: u64, cxt: &mut Cxt) -> Val {
+pub(super) fn member_type(lhs: &IVal, def: Def, idx: u64, cxt: &mut Cxt) -> IVal {
     if let Some(TypeDefKind::Struct(fields)) = cxt
         .db
         .def_type(def)
@@ -1831,42 +1845,44 @@ pub(super) fn member_type(lhs: &Val, def: Def, idx: u64, cxt: &mut Cxt) -> Val {
     {
         let mut env = cxt.env();
         let lhs_ty = lhs.clone().quote(cxt.size(), Some(&cxt.mcxt)).ty(cxt);
-        match cxt.db.def_type(def).and_then(|x| x.result).unwrap().ty {
-            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => match lhs_ty.uncap_ty_own() {
-                Val::Neutral(n) => {
-                    assert!(matches!(n.head(), Head::Var(Var::Def(_, d)) if d == def));
-                    for i in n.spine() {
-                        match i {
-                            Elim::App(Impl, x) => {
-                                for (val, _) in x
-                                    .clone()
-                                    .zip_pair(&clos.params)
-                                    .expect("TODO switch to using case or something")
-                                {
-                                    env.push(Some(Ok(val)));
+        match &*cxt.db.def_type(def).and_then(|x| x.result).unwrap().ty {
+            Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => {
+                match Rc::unwrap_or_clone(lhs_ty).uncap_ty_own() {
+                    Val::Neutral(n) => {
+                        assert!(matches!(n.head(), Head::Var(Var::Def(_, d)) if d == def));
+                        for i in n.spine() {
+                            match i {
+                                Elim::App(Impl, x) => {
+                                    for (val, _) in (**x)
+                                        .clone()
+                                        .zip_pair(&clos.params)
+                                        .expect("TODO switch to using case or something")
+                                    {
+                                        env.push(Some(Ok(val)));
+                                    }
                                 }
+                                _ => unreachable!(),
                             }
-                            _ => unreachable!(),
                         }
                     }
+                    Val::Error => return Rc::new(Val::Error),
+                    _ => unreachable!(),
                 }
-                Val::Error => return Val::Error,
-                _ => unreachable!(),
-            },
+            }
             _ => (),
         }
         for (i, (fname, fty)) in fields.iter().enumerate() {
             if i as u64 == idx {
                 return fty.clone().eval(&mut env);
             }
-            let val = lhs
+            let val = (**lhs)
                 .clone()
                 .app(Elim::Member(def, i as u64, *fname), &mut env, &cxt.mcxt);
             env.push(Some(Ok(val)));
         }
-        Val::Error
+        Rc::new(Val::Error)
     } else {
-        Val::Error
+        Rc::new(Val::Error)
     }
 }
 
@@ -1875,7 +1891,7 @@ pub(super) fn resolve_member(lhs: PlaceOrExpr, member: ast::Member, cxt: &mut Cx
         Ok(x) => x,
         Err((l, _)) => {
             cxt.error(l.span(), "Method call not allowed here");
-            PlaceOrExpr::Expr(Expr::Error, Val::Error, None, l.span())
+            PlaceOrExpr::Expr(Expr::Error, Rc::new(Val::Error), None, l.span())
         }
     }
 }
@@ -1891,7 +1907,7 @@ pub(super) fn resolve_member_method(
     let mut error = None;
 
     if let Some(name) = member.var().map(|x| x.name(cxt.db)) {
-        lhs_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
+        Rc::make_mut(&mut lhs_ty).inline_head(&mut cxt.env(), &cxt.mcxt);
         match &lhs_ty.uncap_ty() {
             Val::Error => (),
             Val::Neutral(n) => match n.head() {
@@ -1946,8 +1962,8 @@ pub(super) fn resolve_member_method(
             _ => {
                 let lhs = lhs.clone().finish(Cap::Imm, cxt);
                 let mut lhs_val = lhs.clone().eval(&mut cxt.env());
-                lhs_val.inline_head(&mut cxt.env(), &cxt.mcxt);
-                match &lhs_val {
+                Rc::make_mut(&mut lhs_val).inline_head(&mut cxt.env(), &cxt.mcxt);
+                match &*lhs_val {
                     Val::Neutral(n) => match n.head() {
                         Head::Var(Var::Def(def_name, def)) => {
                             let edef = cxt.db.def_type(def);
@@ -1980,7 +1996,7 @@ pub(super) fn resolve_member_method(
                                             .db
                                             .def_type(def)
                                             .and_then(|x| x.result)
-                                            .map_or(Val::Error, |x| x.ty);
+                                            .map_or(Rc::new(Val::Error), |x| x.ty);
                                         return Ok(PlaceOrExpr::Expr(
                                             Expr::var(Var::Def(name, def)),
                                             ty,
@@ -2022,13 +2038,18 @@ pub(super) fn resolve_member_method(
                 .add("' does not have members", ())
         }),
     );
-    Ok(PlaceOrExpr::Expr(Expr::Error, Val::Error, None, span))
+    Ok(PlaceOrExpr::Expr(
+        Expr::Error,
+        Rc::new(Val::Error),
+        None,
+        span,
+    ))
 }
 
 #[derive(Debug, Clone)]
 pub enum PlaceOrExpr {
     Place(Place),
-    Expr(Expr, Val, Option<Borrow>, RelSpan),
+    Expr(Expr, IVal, Option<Borrow>, RelSpan),
 }
 impl PlaceOrExpr {
     pub fn finish(self, kind: Cap, cxt: &mut Cxt) -> Expr {
@@ -2068,11 +2089,11 @@ impl PlaceOrExpr {
         }
     }
 
-    pub fn ty(&self, cxt: &mut Cxt) -> Val {
+    pub fn ty(&self, cxt: &mut Cxt) -> IVal {
         match self {
             PlaceOrExpr::Place(place) => place.ty(cxt).unwrap_or_else(|e| {
                 cxt.error(place.span(), e);
-                Val::Error
+                Rc::new(Val::Error)
             }),
             PlaceOrExpr::Expr(_, ty, _, _) => ty.clone(),
         }
@@ -2106,7 +2127,7 @@ impl Place {
         }
     }
 
-    fn ty(&self, cxt: &mut Cxt) -> Result<Val, TypeError> {
+    fn ty(&self, cxt: &mut Cxt) -> Result<IVal, TypeError> {
         match self {
             Place::Var(v) => Ok(v.ty(cxt)),
             Place::Member(e, def, idx, _) => {
@@ -2201,7 +2222,7 @@ impl Place {
             }
             // Just forward on the access
             Place::Member(e, _, i, f) => {
-                let lhs_kind = match self.ty(cxt).unwrap_or(Val::Error).own_cap(cxt) {
+                let lhs_kind = match self.ty(cxt).unwrap_or(Rc::new(Val::Error)).own_cap(cxt) {
                     // If the member is immutable through the lhs, then the lhs can be mutated/moved
                     // without affecting the member, so it's not borrowed
                     Cap::Imm => Cap::Own,
@@ -2245,8 +2266,8 @@ impl Place {
 
 fn coerce(
     a: PlaceOrExpr,
-    aty: Val,
-    expected_ty: Val,
+    mut aty: IVal,
+    expected_ty: IVal,
     as_non_ref: bool,
     cxt: &mut Cxt,
     reason: CheckReason,
@@ -2257,43 +2278,52 @@ fn coerce(
             a.finish_and_borrow(cap, if as_non_ref { Cap::Own } else { cap }, cxt);
         return Ok(finish_and_borrow);
     }
-    let (ity, ty) = match (aty, expected_ty) {
+    let (ity, ty) = match (Rc::make_mut(&mut aty), &*expected_ty) {
         // Downgrade value capability
-        (Val::Cap(c1, ity), Val::Cap(c2, ty)) if c1 > c2 => {
+        (Val::Cap(c1, ity), Val::Cap(c2, ty)) if *c1 > *c2 => {
             return coerce(
                 a,
-                Val::Cap(c2, ity),
-                Val::Cap(c2, ty),
+                Rc::new(Val::Cap(*c2, ity.clone())),
+                Rc::new(Val::Cap(*c2, ty.clone())),
                 as_non_ref,
                 cxt,
                 reason,
             )
         }
-        (ity, Val::Cap(c, ty)) if !matches!(ity, Val::Cap(_, _)) => {
+        (_aty, Val::Cap(c, ty)) if !matches!(_aty, Val::Cap(_, _)) => {
             let span = a.span();
-            let c = c.min(ity.own_cap(cxt));
+            let c = (*c).min(aty.own_cap(cxt));
             let a = PlaceOrExpr::Expr(
                 a.finish_and_borrow(c, if as_non_ref { Cap::Own } else { c }, cxt),
-                ity.clone(),
+                aty.clone(),
                 None,
                 span,
             );
-            return coerce(a, ity, *ty, as_non_ref, cxt, reason);
+            return coerce(a, aty, ty.clone(), as_non_ref, cxt, reason);
         }
         // Upgrade closure capability
-        (Val::Fun(mut clos1), Val::Fun(clos2)) => match (&mut clos1.class, &clos2.class) {
-            (Pi(_, c1), Pi(_, c2)) if *c1 < *c2 => {
-                *c1 = *c2;
-                return coerce(a, Val::Fun(clos1), Val::Fun(clos2), as_non_ref, cxt, reason);
+        (Val::Fun(ref mut clos1), Val::Fun(clos2)) => {
+            match (&mut Rc::make_mut(clos1).class, &clos2.class) {
+                (Pi(_, c1), Pi(_, c2)) if *c1 < *c2 => {
+                    *c1 = *c2;
+                    return coerce(
+                        a,
+                        Rc::new(Val::Fun(clos1.clone())),
+                        expected_ty,
+                        as_non_ref,
+                        cxt,
+                        reason,
+                    );
+                }
+                _ => (aty, expected_ty),
             }
-            _ => (Val::Fun(clos1), Val::Fun(clos2)),
-        },
-        (ity, ty) => (ity, ty),
+        }
+        _ => (aty, expected_ty),
     };
     let span = a.span();
     let cap = ity.own_cap(cxt);
     let a = a.finish_and_borrow(cap, if as_non_ref { Cap::Own } else { cap }, cxt);
-    let (a, ity) = match &ty {
+    let (a, ity) = match &*ty {
         Val::Fun(clos) if matches!(clos.class, Pi(Impl, _)) => (a, ity),
         _ => a.insert_metas(ity, None, None, span, cxt),
     };
@@ -2308,7 +2338,7 @@ fn elab_args(
     self_arg: Option<PlaceOrExpr>,
     args: ast::Expr,
     cxt: &mut Cxt,
-) -> (Expr, Val, Borrow) {
+) -> (Expr, IVal, Borrow) {
     let par_tys = ParamTys::Expl(clos.par_ty().quote(cxt.size(), None), &clos.params);
     let args = match args {
         ast::Expr::GroupedExpr(x) if x.expr().is_none() && self_arg.is_some() => None,
@@ -2323,7 +2353,7 @@ fn elab_args(
                     Ok(x) => Err(x),
                     Err(span) => Ok(PlaceOrExpr::Expr(
                         Expr::var(Var::Builtin(Builtin::Unit)),
-                        Val::var(Var::Builtin(Builtin::UnitType)),
+                        Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                         None,
                         span,
                     )),
@@ -2358,7 +2388,7 @@ fn elab_args(
                         let x = x.finish(xty.own_cap(cxt), cxt);
                         Some(Ok(PlaceOrExpr::Expr(
                             Expr::Pair(Box::new(x), Box::new(acc), Box::new(Expr::Error)),
-                            Val::Fun(Box::new(VClos {
+                            Rc::new(Val::Fun(Rc::new(VClos {
                                 class: FunClass::Sigma,
                                 params: vec![Par::new(
                                     (cxt.db.name("_".into()), xspan),
@@ -2367,7 +2397,7 @@ fn elab_args(
                                 )],
                                 env: cxt.env(),
                                 body: aty.quote(cxt.size().inc(), None),
-                            })),
+                            }))),
                             None,
                             span,
                         )))
@@ -2377,7 +2407,7 @@ fn elab_args(
                 .unwrap(),
         };
         let mut expected_ty = ty.eval(&mut env);
-        expected_ty.inline_head(&mut cxt.env(), &cxt.mcxt);
+        Rc::make_mut(&mut expected_ty).inline_head(&mut cxt.env(), &cxt.mcxt);
         let cap = expected_ty.own_cap(cxt);
         let as_non_ref =
             !is_ref && cap != Cap::Own && expected_ty.uncap_ty().own_cap(cxt) != Cap::Imm;
@@ -2387,7 +2417,7 @@ fn elab_args(
                 .check_direct(&expected_ty, cxt, CheckReason::ArgOf(fspan))
                 .unwrap_or_else(|e| {
                     cxt.error(val.span(), e);
-                    PlaceOrExpr::Expr(Expr::Error, Val::Error, None, val.span())
+                    PlaceOrExpr::Expr(Expr::Error, Rc::new(Val::Error), None, val.span())
                 }),
             Ok(val) => val,
         };
@@ -2440,7 +2470,7 @@ fn elab_args(
 }
 
 impl ast::Expr {
-    pub(super) fn check(&self, mut ty: Val, cxt: &mut Cxt, reason: CheckReason) -> Expr {
+    pub(super) fn check(&self, mut ty: IVal, cxt: &mut Cxt, reason: CheckReason) -> Expr {
         match self {
             // Propagate through case/do/etc.
             ast::Expr::Match(case) => {
@@ -2458,7 +2488,7 @@ impl ast::Expr {
             _ => (),
         }
 
-        ty.inline_head(&mut cxt.env(), &cxt.mcxt);
+        Rc::make_mut(&mut ty).inline_head(&mut cxt.env(), &cxt.mcxt);
         let x = self.check_direct(&ty, cxt, reason);
         match x.and_then(|x| {
             let xty = x.ty(cxt);
@@ -2474,7 +2504,7 @@ impl ast::Expr {
 
     fn check_direct(
         &self,
-        ty: &Val,
+        ty: &IVal,
         cxt: &mut Cxt,
         reason: CheckReason,
     ) -> Result<PlaceOrExpr, TypeError> {
@@ -2482,18 +2512,18 @@ impl ast::Expr {
             // Infer assumes (a, b) is a pair, so elaborate as sigma if checking against Type
             (ast::Expr::Pair(x), Val::Type) => x
                 .elab_sigma(cxt)
-                .map(|x| PlaceOrExpr::Expr(x, Val::Type, None, self.span())),
+                .map(|x| PlaceOrExpr::Expr(x, Rc::new(Val::Type), None, self.span())),
             // Same for ()
             (ast::Expr::GroupedExpr(x), Val::Type) if x.expr().is_none() => Ok(PlaceOrExpr::Expr(
                 Expr::var(Var::Builtin(Builtin::UnitType)),
-                Val::Type,
+                Rc::new(Val::Type),
                 None,
                 self.span(),
             )),
 
             // Check pair against sigma and lambda against pi
             (ast::Expr::Pair(x), Val::Fun(clos)) if clos.class == Sigma => {
-                let clos = clos.clone();
+                let clos = (**clos).clone();
                 assert_eq!(clos.params.len(), 1);
                 let ety = clos.clone().quote(cxt.size(), None);
                 let a = x.lhs().ok_or("Missing pair left-hand side value")?.check(
@@ -2517,9 +2547,9 @@ impl ast::Expr {
             }
             (ast::Expr::Lam(x), Val::Fun(clos)) if matches!(clos.class, Pi(_, _)) => {
                 let clos = clos.clone();
-                let ty = Val::Fun(clos.clone());
+                let ty = Rc::new(Val::Fun(clos.clone()));
 
-                let mut clos = clos.move_env(&mut cxt.env());
+                let mut clos = Rc::unwrap_or_clone(clos).move_env(&mut cxt.env());
                 let capability = clos.class.cap();
 
                 cxt.push();
@@ -2551,11 +2581,11 @@ impl ast::Expr {
                 if !implicit.is_empty() {
                     // This is all fine since we keep cxt.size() at the level that the parameters expect
                     assert_eq!(cxt.size(), clos.env.size + clos.params.len());
-                    let mut body = clos.body.eval(&mut cxt.env());
+                    let mut body = Rc::unwrap_or_clone(clos.body.eval(&mut cxt.env()));
                     body.inline_head(&mut cxt.env(), &cxt.mcxt);
                     match body {
                         Val::Fun(c) if matches!(c.class, Pi(Expl, _)) => {
-                            clos = *c;
+                            clos = Rc::unwrap_or_clone(c);
                             if clos.env.size != cxt.size() {
                                 clos = clos.move_env(&mut cxt.env());
                             }
@@ -2569,7 +2599,7 @@ impl ast::Expr {
                                     class: Pi(Expl, capability),
                                     params: Vec::new(),
                                     env: cxt.env(),
-                                    body: body.quote(cxt.size(), None),
+                                    body: Rc::new(body).quote(cxt.size(), None),
                                 }
                             }
                         }
@@ -2598,7 +2628,7 @@ impl ast::Expr {
                         match clos.params.len() {
                             0 => clos.body.eval(&mut cxt.env()),
                             // Try to curry the explicit parameters onto the body
-                            _ => Val::Fun(Box::new(clos)),
+                            _ => Rc::new(Val::Fun(Rc::new(clos))),
                         },
                     )
                 };
@@ -2824,16 +2854,20 @@ impl ast::Expr {
         }
     }
 
-    pub(super) fn infer(&self, cxt: &mut Cxt, cap: Option<Cap>) -> (Expr, Val) {
+    pub(super) fn infer(&self, cxt: &mut Cxt, cap: Option<Cap>) -> (Expr, IVal) {
         // TODO hopefully try {} blocks stabilize soon and this won't be necessary
-        let mut result = || {
+        let mut result = || -> Result<(Expr, IVal), _> {
             Ok({
                 match self {
                     ast::Expr::Var(name) => {
                         let name = name.name(cxt.db);
                         if name.0 == cxt.db.name("_".to_string()) {
                             let mty = cxt
-                                .new_meta(MetaBounds::new(Val::Type), self.span(), MetaSource::Hole)
+                                .new_meta(
+                                    MetaBounds::new(Rc::new(Val::Type)),
+                                    self.span(),
+                                    MetaSource::Hole,
+                                )
                                 .eval(&mut cxt.env());
                             let meta = cxt.new_meta(
                                 MetaBounds::new(mty.clone()),
@@ -2901,15 +2935,15 @@ impl ast::Expr {
                             x.span(),
                             cxt,
                         );
-                        (pi, Val::Type)
+                        (pi, Rc::new(Val::Type))
                     }
                     ast::Expr::Cap(x) => {
                         let cap = x.captok().map(|x| x.as_cap()).unwrap_or(Cap::Imm);
                         let x = x
                             .expr()
                             .ok_or(&format!("Expected type after '{}'", cap))?
-                            .check(Val::Type, cxt, CheckReason::UsedAsType);
-                        (Expr::Cap(cap, Box::new(x)), Val::Type)
+                            .check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType);
+                        (Expr::Cap(cap, Box::new(x)), Rc::new(Val::Type))
                     }
                     ast::Expr::Assign(x) => {
                         cxt.record_deps();
@@ -2949,7 +2983,7 @@ impl ast::Expr {
                         }
                         (
                             Expr::Assign(Box::new(place.to_expr(cxt)), Box::new(expr)),
-                            Val::var(Var::Builtin(Builtin::UnitType)),
+                            Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                         )
                     }
                     ast::Expr::App(x) => {
@@ -2969,7 +3003,8 @@ impl ast::Expr {
                                 }
                             }
                         }
-                        let mut lhs_ty = lhs.ty(cxt).inlined(cxt);
+                        let mut lhs_ty = lhs.ty(cxt);
+                        Rc::make_mut(&mut lhs_ty).inline_head(&mut cxt.env(), &cxt.mcxt);
                         let mut lhs_span = lhs.span();
                         let cap =
                             lhs_ty
@@ -3036,20 +3071,22 @@ impl ast::Expr {
                                     },
                                 );
                             }
-                            let (exp, rty, extra_borrow) = match lhs_ty.uncap_ty_own() {
+                            let (exp, rty, extra_borrow) = match Rc::unwrap_or_clone(lhs_ty)
+                                .uncap_ty_own()
+                            {
                                 Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
-                                    let (a, b, c) = elab_args(lhs_span, *clos, self_arg, exp, cxt);
+                                    let (a, b, c) = elab_args(lhs_span, Rc::unwrap_or_clone(clos), self_arg, exp, cxt);
                                     (a, b, Some(c))
                                 }
                                 Val::Error => {
                                     // Still try inferring the argument to catch errors
                                     let (exp, _) = exp.infer(cxt, None);
-                                    (exp, Val::Error, None)
+                                    (exp, Rc::new(Val::Error), None)
                                 }
                                 lhs_ty => {
                                     cxt.finish_deps(x.span());
                                     return Err(TypeError::NotFunction(
-                                        lhs_ty.quote(cxt.size(), Some(&cxt.mcxt)),
+                                        Rc::new(lhs_ty).quote(cxt.size(), Some(&cxt.mcxt)),
                                         lhs_span,
                                     ));
                                 }
@@ -3113,13 +3150,13 @@ impl ast::Expr {
                     ast::Expr::Do(d) => {
                         let mut rty = None;
                         let expr = d.elaborate(&mut rty, cxt);
-                        let rty = rty.map(|(x, _)| x).unwrap_or(Val::Error);
+                        let rty = rty.map(|(x, _)| x).unwrap_or(Rc::new(Val::Error));
                         (expr, rty)
                     }
                     ast::Expr::Match(case) => {
                         let mut rty = None;
                         let (scrutinee, case, cty) = case.elaborate(&mut rty, cxt);
-                        let rty = rty.map(|(x, _)| x).unwrap_or(Val::Error);
+                        let rty = rty.map(|(x, _)| x).unwrap_or(Rc::new(Val::Error));
                         (
                             Expr::Elim(Box::new(scrutinee), Box::new(Elim::Case(case, cty))),
                             rty,
@@ -3128,7 +3165,7 @@ impl ast::Expr {
                     ast::Expr::Lit(l) => match l.to_literal(cxt) {
                         Ok(l) => (
                             Expr::Lit(l),
-                            match l {
+                            Rc::new(match l {
                                 Literal::Int(_, ty) => match ty {
                                     Ok(t) => Val::var(Var::Builtin(Builtin::IntType(t))),
                                     Err((_, m)) => Val::var(Var::Meta(m)),
@@ -3136,11 +3173,11 @@ impl ast::Expr {
                                 Literal::F64(_) => todo!("floats"),
                                 Literal::F32(_) => todo!("floats"),
                                 Literal::String(_) => Val::var(Var::Builtin(Builtin::StringType)),
-                            },
+                            }),
                         ),
                         Err(e) => {
                             cxt.error(self.span(), &e);
-                            (Expr::Error, Val::Error)
+                            (Expr::Error, Rc::new(Val::Error))
                         }
                     },
                     ast::Expr::BinOp(x) => {
@@ -3184,7 +3221,7 @@ impl ast::Expr {
                                         CompOp::from_tok(tok).map(|x| {
                                             (
                                                 Builtin::CompOp(x),
-                                                Val::var(Var::Builtin(Builtin::BoolType)),
+                                                Rc::new(Val::var(Var::Builtin(Builtin::BoolType))),
                                             )
                                         })
                                     })
@@ -3226,19 +3263,19 @@ impl ast::Expr {
                     }
                     ast::Expr::If(_) => todo!("if"),
                     ast::Expr::Box(_) => todo!("box"),
-                    ast::Expr::Type(_) => (Expr::Type, Val::Type),
+                    ast::Expr::Type(_) => (Expr::Type, Rc::new(Val::Type)),
                     ast::Expr::GroupedExpr(e) => match e.expr() {
                         Some(e) => e.infer(cxt, cap),
                         // Assume () is the unit value by default, it's only the unit type if it's checked against Type
                         None => (
                             Expr::var(Var::Builtin(Builtin::Unit)),
-                            Val::var(Var::Builtin(Builtin::UnitType)),
+                            Rc::new(Val::var(Var::Builtin(Builtin::UnitType))),
                         ),
                     },
                     ast::Expr::Pair(x) => {
                         if let Some(ast::Expr::Binder(_)) = x.lhs() {
                             let term = x.elab_sigma(cxt)?;
-                            return Ok((term, Val::Type));
+                            return Ok((term, Rc::new(Val::Type)));
                         }
                         // Infer a simple non-dependent pair type by default; inference is undecidable with sigma types
                         // TODO should we propagate caps here?
@@ -3283,7 +3320,7 @@ impl ast::Expr {
                     ast::Expr::TraitAs(x) => {
                         // LHS is always type Type
                         let lhs = x.lhs().ok_or("missing lhs in `as`")?.check(
-                            Val::Type,
+                            Rc::new(Val::Type),
                             cxt,
                             CheckReason::ArgOf(x.rhs().map_or(x.span(), |x| x.span())),
                         );
@@ -3332,9 +3369,9 @@ impl ast::Expr {
                         let lhs = x
                             .lhs()
                             .ok_or("missing struct name")?
-                            .check(Val::Type, cxt, CheckReason::UsedAsType)
+                            .check(Rc::new(Val::Type), cxt, CheckReason::UsedAsType)
                             .eval(&mut cxt.env());
-                        match &lhs {
+                        match &*lhs {
                             Val::Neutral(n) => match n.head() {
                                 Head::Var(Var::Def(def_name, def)) => {
                                     if let Some(DefType {
@@ -3346,11 +3383,11 @@ impl ast::Expr {
                                     {
                                         if is_trait {
                                             let self_arg = match n.spine().first() {
-                                                Some(Elim::App(Impl, x)) => match ty {
+                                                Some(Elim::App(Impl, x)) => match &*ty {
                                                     Val::Fun(clos)
                                                         if matches!(clos.class, Pi(Impl, _)) =>
                                                     {
-                                                        x.clone()
+                                                        (**x).clone()
                                                             .zip_pair(&clos.params)
                                                             .unwrap()
                                                             .into_iter()
@@ -3367,10 +3404,10 @@ impl ast::Expr {
 
                                         let body = x.fields().ok_or("missing struct fields")?;
                                         let mut named = Vec::new();
-                                        let mut vals: Vec<(usize, Val)> = Vec::new();
+                                        let mut vals: Vec<(usize, IVal)> = Vec::new();
                                         let env = {
                                             let mut env = cxt.env();
-                                            match cxt
+                                            match &*cxt
                                                 .db
                                                 .def_type(def)
                                                 .and_then(|x| x.result)
@@ -3386,7 +3423,7 @@ impl ast::Expr {
                                                     for i in n.spine() {
                                                         match i {
                                                                     Elim::App(Impl, x) => {
-                                                                        for (val, _) in x
+                                                                        for (val, _) in (**x)
                                                                             .clone()
                                                                             .zip_pair(&clos.params)
                                                                             .expect("TODO switch to using case or something")
@@ -3479,7 +3516,7 @@ impl ast::Expr {
                             x.lhs().unwrap().span(),
                             "Expected struct type before 'struct'",
                         );
-                        (Expr::Error, Val::Error)
+                        (Expr::Error, Rc::new(Val::Error))
                     }
                 }
             })
@@ -3488,7 +3525,7 @@ impl ast::Expr {
             Ok((x, t)) => (Expr::Spanned(self.span(), Box::new(x)), t),
             Err(e) => {
                 cxt.error(self.span(), e);
-                (Expr::Error, Val::Error)
+                (Expr::Error, Rc::new(Val::Error))
             }
         }
     }

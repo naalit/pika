@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::{rc::Rc, sync::{Arc, RwLock}};
 
 use super::{unify::UnifyError, *};
 
@@ -17,13 +17,13 @@ pub enum SpecialBound {
 
 #[derive(Clone, Debug)]
 pub struct MetaBounds {
-    ty: Val,
+    ty: IVal,
     special: Option<SpecialBound>,
     is_impl: bool,
-    stored: Vec<(Size, Vec<Elim<Val>>, Val)>,
+    stored: Vec<(Size, Vec<Elim<IVal>>, IVal)>,
 }
 impl MetaBounds {
-    pub fn new(ty: Val) -> Self {
+    pub fn new(ty: IVal) -> Self {
         MetaBounds {
             ty,
             special: None,
@@ -33,7 +33,7 @@ impl MetaBounds {
     }
     pub fn int_type(signed: bool, val: u64) -> Self {
         MetaBounds {
-            ty: Val::Type,
+            ty: Rc::new(Val::Type),
             special: Some(SpecialBound::IntType {
                 must_fit: if signed {
                     val as i64 as i128
@@ -52,7 +52,7 @@ impl MetaBounds {
 
     pub fn check(
         self,
-        val: &Val,
+        val: &IVal,
         spine_len: usize,
         size: Size,
         mcxt: &mut MetaCxt,
@@ -65,7 +65,7 @@ impl MetaBounds {
                 .into_iter()
                 .skip(spine_len)
                 .fold(val.clone(), |head, elim| {
-                    head.app(elim, &mut Env::new(size), &*mcxt)
+                    Rc::unwrap_or_clone(head).app(elim, &mut Env::new(size), &*mcxt)
                 });
             match mcxt.unify(
                 val.clone(),
@@ -86,7 +86,7 @@ impl MetaBounds {
 
         match self.special {
             Some(SpecialBound::IntType { must_fit }) => {
-                let mut val = val.clone();
+                let mut val = (**val).clone();
                 val.inline_head(&mut Env::new(size), mcxt);
                 match val {
                     Val::Neutral(ref n)
@@ -116,13 +116,13 @@ impl MetaBounds {
                                     }
                                     MetaEntry::Solved { .. } => (),
                                 }
-                                Err(MetaSolveError::BoundsNotInt(val.quote(size, None)))
+                                Err(MetaSolveError::BoundsNotInt(Rc::new(val).quote(size, None)))
                             }
                             _ => unreachable!(),
                         }
                     }
                     Val::Error => Ok(()),
-                    val => Err(MetaSolveError::BoundsNotInt(val.quote(size, None))),
+                    val => Err(MetaSolveError::BoundsNotInt(Rc::new(val).quote(size, None))),
                 }
             }
             None => Ok(()),
@@ -275,7 +275,7 @@ struct PartialRename {
 impl PartialRename {
     fn add_arg(
         &mut self,
-        arg: Val,
+        arg: &Val,
         inner_size: Size,
         mcxt: &MetaCxt,
     ) -> Result<Vec<Name>, MetaSolveError> {
@@ -303,12 +303,12 @@ impl PartialRename {
             // TODO when box patterns are stabilized switch to that instead of nested matches!()
             Val::Pair(a, b, _)
                 if matches!(
-                        &*a,
+                        &**a,
                         Val::Neutral(n)
                             if matches!(n.head(), Head::Var(Var::Local(_, _))) && n.spine().is_empty()
                 ) =>
             {
-                let h = match &*a {
+                let h = match &**a {
                     Val::Neutral(n) => n.head(),
                     _ => unreachable!(),
                 };
@@ -321,12 +321,12 @@ impl PartialRename {
                 //     return Err(MetaSolveError::SpineDuplicate(n.0));
                 // }
 
-                let mut rhs = self.add_arg(*b, inner_size.inc(), mcxt)?;
+                let mut rhs = self.add_arg(&b, inner_size.inc(), mcxt)?;
                 rhs.insert(0, n.0);
                 Ok(rhs)
             }
             Val::Pair(_, b, _) => {
-                let mut rhs = self.add_arg(*b, inner_size.inc(), mcxt)?;
+                let mut rhs = self.add_arg(&b, inner_size.inc(), mcxt)?;
                 rhs.insert(0, mcxt.db.name("_".into()));
                 Ok(rhs)
             }
@@ -422,7 +422,7 @@ impl MetaCxt<'_> {
             .unwrap_or(true)
     }
 
-    pub fn meta_ty(&self, meta: Meta) -> Option<Val> {
+    pub fn meta_ty(&self, meta: Meta) -> Option<IVal> {
         self.metas.get(meta.0 as usize).and_then(|x| match x {
             // TODO maybe store type of solved metas?
             MetaEntry::Solved { .. } => None,
@@ -453,8 +453,8 @@ impl MetaCxt<'_> {
         &mut self,
         start_size: Size,
         meta: Meta,
-        spine: Vec<Elim<Val>>,
-        solution: Val,
+        spine: Vec<Elim<IVal>>,
+        solution: IVal,
         allow_impl: bool,
     ) -> Result<(), MetaSolveError> {
         // TODO smalltt does eta-contraction here
@@ -493,7 +493,7 @@ impl MetaCxt<'_> {
                 .into_iter()
                 .map(|elim| match elim {
                     Elim::App(icit, arg) => {
-                        let names = rename.add_arg(arg, size_to, self)?;
+                        let names = rename.add_arg(&arg, size_to, self)?;
                         size_to += names.len();
                         Ok((
                             names

@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::pretty::Prec;
 
 use super::*;
@@ -282,13 +284,13 @@ pub struct Definition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefBody {
     Let(Box<Expr>),
-    Type(Vec<(SplitId, RelSpan, Val)>),
+    Type(Vec<(SplitId, RelSpan, IVal)>),
     Struct(Vec<(SName, Expr)>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeDefKind {
-    Type(Vec<(SplitId, RelSpan, Val)>),
+    Type(Vec<(SplitId, RelSpan, IVal)>),
     Struct(Vec<(SName, Expr)>),
 }
 
@@ -414,17 +416,17 @@ impl Expr {
         Self::Head(Head::Var(var))
     }
 
-    pub fn ty(&self, cxt: &mut Cxt) -> Val {
-        match self {
+    pub fn ty(&self, cxt: &mut Cxt) -> IVal {
+        Rc::new(match self {
             Expr::Type | Expr::Cap(_, _) => Val::Type,
             Expr::Assign(_, _) => Val::var(Var::Builtin(Builtin::UnitType)),
             Expr::Head(h) => match h {
                 Head::Var(v) => match v {
-                    Var::Local(_, i) => cxt.local_ty(i.lvl(cxt.size())),
+                    Var::Local(_, i) => return cxt.local_ty(i.lvl(cxt.size())),
                     Var::Meta(m) => match cxt.mcxt.meta_ty(*m) {
-                        Some(t) => t,
+                        Some(t) => return t,
                         None => match cxt.mcxt.lookup(*m) {
-                            Some(e) => e.ty(cxt),
+                            Some(e) => return e.ty(cxt),
                             None => {
                                 eprintln!("WARNING: could not get meta type!");
                                 Val::Error
@@ -432,14 +434,16 @@ impl Expr {
                         },
                     },
                     Var::Builtin(b) => b.ty(),
-                    Var::Def(_, d) => cxt
-                        .db
-                        .def_type(*d)
-                        .and_then(|x| x.result)
-                        .map_or(Val::Error, |x| x.ty),
+                    Var::Def(_, d) => {
+                        return cxt
+                            .db
+                            .def_type(*d)
+                            .and_then(|x| x.result)
+                            .map_or(Rc::new(Val::Error), |x| x.ty)
+                    }
                     Var::Cons(_, c) => {
                         let (d, split) = cxt.db.lookup_cons_id(*c);
-                        cxt.db
+                        return cxt.db
                             .def_type(d)
                             .and_then(|x| match x.result?.type_def? {
                                 TypeDefKind::Type(v) => v
@@ -448,24 +452,27 @@ impl Expr {
                                     .map(|(_, _, ty)| ty),
                                 _ => None,
                             })
-                            .unwrap_or(Val::Error)
+                            .unwrap_or(Rc::new(Val::Error))
                     }
                 },
             },
             Expr::Elim(head, elim) => match &**elim {
-                Elim::App(_, x) => match head.ty(cxt).inlined(cxt).uncap_ty_own() {
+                Elim::App(_, x) => match Rc::unwrap_or_clone(head.ty(cxt))
+                    .inlined(cxt)
+                    .uncap_ty_own()
+                {
                     ty if matches!(&**head, Expr::Head(Head::Var(Var::Meta(_)))) => ty,
                     Val::Fun(clos) if matches!(clos.class, Pi(_, _)) => {
-                        clos.apply(x.clone().eval(&mut cxt.env()))
+                        return Rc::unwrap_or_clone(clos).apply(x.clone().eval(&mut cxt.env()))
                     }
                     Val::Error => Val::Error,
                     ty => unreachable!("{:?}", ty),
                 },
                 Elim::Member(def, idx, _) => {
                     let lhs = (**head).clone().eval(&mut cxt.env());
-                    super::elaborate::member_type(&lhs, *def, *idx, cxt)
+                    return super::elaborate::member_type(&lhs, *def, *idx, cxt);
                 }
-                Elim::Case(_, ty) => ty.clone().eval(&mut cxt.env()),
+                Elim::Case(_, ty) => return ty.clone().eval(&mut cxt.env()),
             },
             Expr::Fun(EClos {
                 class,
@@ -494,7 +501,7 @@ impl Expr {
                         body: Box::new(body.ty(cxt).quote(cxt.size(), None)),
                     });
                     cxt.pop();
-                    ty.eval(&mut cxt.env())
+                    return ty.eval(&mut cxt.env());
                 }
             },
             Expr::Lit(l) => match l {
@@ -506,10 +513,12 @@ impl Expr {
                 Literal::F32(_) => todo!(),
                 Literal::String(_) => Val::var(Var::Builtin(Builtin::StringType)),
             },
-            Expr::Pair(_, _, ty) | Expr::Struct(_, _, ty) => ty.clone().eval(&mut cxt.env()),
-            Expr::Spanned(_, x) => x.ty(cxt),
+            Expr::Pair(_, _, ty) | Expr::Struct(_, _, ty) => {
+                return ty.clone().eval(&mut cxt.env())
+            }
+            Expr::Spanned(_, x) => return x.ty(cxt),
             Expr::Error => Val::Error,
-        }
+        })
     }
 }
 impl std::fmt::Display for Cap {
@@ -549,23 +558,24 @@ impl Pretty for Expr {
             Expr::Elim(a, b) => match &**b {
                 Elim::App(icit, b) => {
                     match a.unspanned() {
-                        Expr::Head(Head::Var(Var::Def(_, d))) => if let Some(d) = db.def_type(*d).and_then(|x| x.result) {
-                            if d.is_trait {
-                                // find arguments
-                                // TODO `as`
+                        Expr::Head(Head::Var(Var::Def(_, d))) => {
+                            if let Some(d) = db.def_type(*d).and_then(|x| x.result) {
+                                if d.is_trait {
+                                    // find arguments
+                                    // TODO `as`
+                                }
                             }
                         }
                         _ => (),
                     }
-                    a
-                        .pretty(db)
+                    a.pretty(db)
                         .nest(Prec::App)
                         .chain(match icit {
                             Impl => Doc::none().add('[', ()).chain(b.pretty(db)).add(']', ()),
                             Expl => Doc::none().add('(', ()).chain(b.pretty(db)).add(')', ()),
                         })
                         .prec(Prec::App)
-                },
+                }
                 Elim::Member(_, _, m) => a
                     .pretty(db)
                     .add('.', ())
